@@ -1,0 +1,49 @@
+---
+title: Dead Letter Queue
+description: Failed delivery management, replay, and bulk operations.
+---
+
+The dead letter queue (DLQ) captures deliveries that have permanently failed after exhausting all retry attempts.
+
+## How entries are created
+
+When the retrier decides a delivery is beyond recovery (all attempts exhausted, or a non-retryable HTTP status), the engine pushes a DLQ entry with full context:
+
+- Original event payload
+- Endpoint URL at the time of failure
+- Error message and HTTP status from the final attempt
+- Total attempt count
+
+## Listing DLQ entries
+
+```go
+entries, err := r.Store().ListDLQ(ctx, dlq.ListOpts{
+    TenantID:   "tenant-acme",
+    EndpointID: &epID,
+    Limit:      50,
+})
+```
+
+## Replay
+
+Replay re-enqueues a failed delivery for another round of attempts:
+
+```go
+err := r.DLQ().Replay(ctx, dlqEntryID)
+```
+
+The DLQ entry is marked with `ReplayedAt` timestamp. A new delivery is created in `pending` state.
+
+## Bulk replay
+
+The admin API supports bulk replay via `POST /dlq/replay`.
+
+## DLQ service
+
+```go
+type Service struct { ... }
+
+func (s *Service) Get(ctx context.Context, id id.ID) (*Entry, error)
+func (s *Service) Replay(ctx context.Context, id id.ID) error
+func (s *Service) PushFailed(ctx context.Context, d *delivery.Delivery, ep *endpoint.Endpoint, evt *event.Event, lastError string, lastStatusCode int) error
+```

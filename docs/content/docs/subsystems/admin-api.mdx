@@ -1,0 +1,83 @@
+---
+title: Admin API
+description: HTTP admin API for managing webhooks.
+---
+
+The `api` package provides a RESTful HTTP API for managing all Relay entities. It uses Go 1.22+ `http.ServeMux` pattern routing.
+
+## Setup
+
+```go
+import "github.com/xraph/relay/api"
+
+handler := api.NewHandler(r.Store(), r.Catalog(), r.Endpoints(), r.DLQ(), logger)
+
+mux := http.NewServeMux()
+mux.Handle("/webhooks/", http.StripPrefix("/webhooks", handler))
+```
+
+## Routes
+
+### Event Types
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `POST` | `/event-types` | Register event type |
+| `GET` | `/event-types` | List event types |
+| `GET` | `/event-types/{name}` | Get event type by name |
+| `DELETE` | `/event-types/{name}` | Deprecate event type |
+
+### Endpoints
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `POST` | `/endpoints` | Create endpoint |
+| `GET` | `/endpoints` | List endpoints |
+| `GET` | `/endpoints/{id}` | Get endpoint |
+| `PUT` | `/endpoints/{id}` | Update endpoint |
+| `DELETE` | `/endpoints/{id}` | Delete endpoint |
+| `PATCH` | `/endpoints/{id}/enable` | Enable endpoint |
+| `PATCH` | `/endpoints/{id}/disable` | Disable endpoint |
+| `POST` | `/endpoints/{id}/rotate-secret` | Rotate signing secret |
+
+### Events
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `POST` | `/events` | Send event |
+| `GET` | `/events` | List events |
+| `GET` | `/events/{id}` | Get event |
+
+### Deliveries
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET` | `/endpoints/{id}/deliveries` | List deliveries for endpoint |
+
+### DLQ
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET` | `/dlq` | List DLQ entries |
+| `POST` | `/dlq/{id}/replay` | Replay single entry |
+| `POST` | `/dlq/replay` | Bulk replay |
+
+### Stats
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET` | `/stats` | System statistics |
+
+## Middleware
+
+The handler includes built-in middleware:
+- **Logging** -- Logs method, path, status, and duration for every request.
+- **Panic recovery** -- Catches panics and returns 500 with a JSON error.
+
+## Error responses
+
+All errors return JSON:
+
+```json
+{"error": "endpoint not found"}
+```

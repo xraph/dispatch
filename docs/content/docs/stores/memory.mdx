@@ -1,0 +1,41 @@
+---
+title: Memory Store
+description: In-memory store for development, testing, and prototyping.
+---
+
+The memory store keeps all data in Go maps protected by a `sync.RWMutex`. It requires zero configuration and is the default store for unit tests.
+
+## When to use
+
+- **Unit tests** -- Fast, deterministic, no external dependencies.
+- **Local development** -- Get started without setting up a database.
+- **Prototyping** -- Validate business logic before choosing a persistence layer.
+
+Data is lost when the process exits.
+
+## Usage
+
+```go
+import "github.com/xraph/relay/store/memory"
+
+s := memory.New()
+
+r, err := relay.New(relay.WithStore(s))
+```
+
+## Internals
+
+| Aspect | Detail |
+|--------|--------|
+| Concurrency | `sync.RWMutex` -- reads run concurrently, writes are exclusive |
+| Indexing | Map keys by ID string; linear scan for list/filter |
+| Migrate | No-op |
+| Ping | No-op (always succeeds) |
+| Close | No-op |
+
+## Limitations
+
+- No persistence -- all data lost on restart.
+- List operations are O(n) scans.
+- Single process only.
+- No multi-operation transactions.

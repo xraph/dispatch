@@ -1,0 +1,62 @@
+---
+title: Signatures
+description: HMAC-SHA256 webhook signing and verification.
+---
+
+Every webhook delivery is signed with HMAC-SHA256 using the endpoint's signing secret.
+
+## Signing format
+
+The signed content is `"{timestamp}.{payload}"`. The signature is returned in the format `v1=<hex>`.
+
+### Headers sent with each delivery
+
+| Header | Example |
+|--------|---------|
+| `X-Relay-Signature` | `v1=5257a869...` |
+| `X-Relay-Timestamp` | `1704067200` |
+
+## Signing
+
+```go
+import "github.com/xraph/relay/signature"
+
+sig := signature.Sign(payload, secret, timestamp)
+// "v1=5257a869e4c5a2b5..."
+```
+
+## Verification
+
+```go
+ok := signature.Verify(payload, secret, timestamp, receivedSignature)
+```
+
+## Secret format
+
+Secrets are generated with `signature.GenerateSecret()`:
+
+```
+whsec_<64 hex characters>
+```
+
+Format: `whsec_` prefix + 32 random bytes encoded as hex (70 characters total).
+
+## Receiver-side verification example
+
+```go
+func webhookHandler(w http.ResponseWriter, r *http.Request) {
+    body, _ := io.ReadAll(r.Body)
+    sig := r.Header.Get("X-Relay-Signature")
+    ts := r.Header.Get("X-Relay-Timestamp")
+
+    timestamp, _ := strconv.ParseInt(ts, 10, 64)
+
+    if !signature.Verify(body, mySecret, timestamp, sig) {
+        http.Error(w, "invalid signature", http.StatusUnauthorized)
+        return
+    }
+
+    // Process the webhook...
+    w.WriteHeader(http.StatusOK)
+}
+```

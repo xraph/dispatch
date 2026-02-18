@@ -1,0 +1,50 @@
+---
+title: Observability
+description: Prometheus metrics and OpenTelemetry tracing.
+---
+
+The `observability` package provides Prometheus metrics and OpenTelemetry tracing for monitoring Relay in production.
+
+## Prometheus metrics
+
+```go
+import "github.com/xraph/relay/observability"
+
+metrics := observability.NewMetrics(prometheus.DefaultRegisterer)
+```
+
+### Available metrics
+
+| Metric | Type | Description |
+|--------|------|-------------|
+| `relay_events_sent_total` | Counter | Total events submitted |
+| `relay_deliveries_total` | CounterVec | Delivery attempts by status (`delivered`, `failed`, `retried`) |
+| `relay_delivery_latency_seconds` | Histogram | HTTP request latency per delivery |
+| `relay_dlq_size` | Gauge | Current DLQ entries |
+| `relay_pending_deliveries` | Gauge | Current pending deliveries |
+
+### Recording deliveries
+
+```go
+metrics.RecordDelivery("delivered", 0.245)
+metrics.RecordDelivery("failed", 1.023)
+```
+
+## OpenTelemetry tracing
+
+```go
+import "github.com/xraph/relay/observability"
+
+tracer := observability.NewTracer()
+
+ctx, span := tracer.StartDeliverySpan(ctx, deliveryID, eventID, endpointID)
+defer tracer.EndDeliverySpan(span, statusCode, latencyMs, errMsg)
+```
+
+Each delivery span includes attributes:
+- `relay.delivery_id`
+- `relay.event_id`
+- `relay.endpoint_id`
+- `http.status_code`
+- `relay.latency_ms`
+- `relay.error` (if present)

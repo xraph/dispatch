@@ -1,0 +1,9 @@
+{
+  "title": "Guides",
+  "pages": [
+    "full-example",
+    "forge-extension",
+    "webhook-verification",
+    "custom-store"
+  ]
+}

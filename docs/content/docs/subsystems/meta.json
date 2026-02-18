@@ -1,0 +1,14 @@
+{
+  "title": "Subsystems",
+  "pages": [
+    "catalog",
+    "endpoints",
+    "events",
+    "delivery",
+    "dlq",
+    "signatures",
+    "rate-limiting",
+    "observability",
+    "admin-api"
+  ]
+}

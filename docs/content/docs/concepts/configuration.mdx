@@ -1,0 +1,73 @@
+---
+title: Configuration
+description: Functional options, the Config struct, and how to customize Relay behavior.
+---
+
+Relay uses functional options for wiring dependencies and a `Config` struct for tuning runtime behavior.
+
+## Functional options
+
+The `Relay` struct is configured with functional options passed to `relay.New()`:
+
+```go
+r, err := relay.New(
+    relay.WithStore(postgresStore),
+    relay.WithLogger(slog.Default()),
+    relay.WithConcurrency(20),
+    relay.WithPollInterval(2 * time.Second),
+    relay.WithBatchSize(100),
+    relay.WithRequestTimeout(15 * time.Second),
+    relay.WithMaxRetries(8),
+    relay.WithRetrySchedule(customSchedule),
+    relay.WithShutdownTimeout(60 * time.Second),
+    relay.WithCacheTTL(time.Minute),
+)
+```
+
+### Available options
+
+| Option | Purpose | Default |
+|--------|---------|---------|
+| `WithStore(s)` | Set the persistence backend (required) | -- |
+| `WithLogger(l)` | Set the structured logger | `slog.Default()` |
+| `WithConcurrency(n)` | Number of delivery worker goroutines | `10` |
+| `WithPollInterval(d)` | How often the engine checks for pending deliveries | `1s` |
+| `WithBatchSize(n)` | Max deliveries dequeued per poll cycle | `50` |
+| `WithRequestTimeout(d)` | HTTP timeout per delivery attempt | `30s` |
+| `WithMaxRetries(n)` | Maximum delivery attempts before DLQ | `5` |
+| `WithRetrySchedule(s)` | Backoff intervals between retries | `[5s, 30s, 2m, 15m, 2h]` |
+| `WithShutdownTimeout(d)` | Max wait for in-flight deliveries on shutdown | `30s` |
+| `WithCacheTTL(d)` | TTL for the catalog's in-memory cache (0 = no cache) | `30s` |
+
+## Config struct
+
+```go
+type Config struct {
+    Concurrency     int
+    PollInterval    time.Duration
+    BatchSize       int
+    RequestTimeout  time.Duration
+    MaxRetries      int
+    RetrySchedule   []time.Duration
+    ShutdownTimeout time.Duration
+    CacheTTL        time.Duration
+}
+```
+
+## Default retry schedule
+
+```go
+var DefaultRetrySchedule = []time.Duration{
+    5 * time.Second,
+    30 * time.Second,
+    2 * time.Minute,
+    15 * time.Minute,
+    2 * time.Hour,
+}
+```
+
+After all retries are exhausted, the delivery moves to the DLQ.
+
+## Required options
+
+The only required option is `WithStore()`. Without a store, `relay.New()` returns `ErrNoStore`.

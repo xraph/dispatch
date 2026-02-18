@@ -1,0 +1,60 @@
+---
+title: Events
+description: Event submission, idempotency, and the validation pipeline.
+---
+
+Events are webhook payloads submitted for delivery. The `Send()` method validates, persists, and fans out each event.
+
+## Sending an event
+
+```go
+err := r.Send(ctx, &event.Event{
+    Type:           "order.created",
+    TenantID:       "tenant-acme",
+    Data:           json.RawMessage(`{"order_id":"ORD-001"}`),
+    IdempotencyKey: "order-ORD-001",
+})
+```
+
+## Validation pipeline
+
+`Send()` executes these checks in order:
+
+1. **Type lookup** -- Verify the event type exists in the catalog.
+2. **Deprecation check** -- Reject deprecated event types.
+3. **Schema validation** -- If the event type has a JSON Schema, validate `Data` against it.
+
+## Idempotency
+
+The `IdempotencyKey` field prevents duplicate event processing. If a key has already been used, `Send()` returns `nil` (no-op success). This allows safe retries from the caller.
+
+## Fan-out
+
+After validation, `Send()` resolves matching endpoints and creates one `Delivery` record per endpoint in `pending` state:
+
+1. Resolve endpoints for the tenant whose subscription patterns match the event type.
+2. Create a `Delivery` per matched endpoint.
+3. The delivery engine picks up pending deliveries on its next poll cycle.
+
+## Event entity
+
+```go
+type Event struct {
+    entity.Entity
+    ID             id.ID  `json:"id"`
+    Type           string `json:"type"`
+    TenantID       string `json:"tenant_id"`
+    Data           any    `json:"data"`
+    IdempotencyKey string `json:"idempotency_key,omitempty"`
+}
+```
+
+## Store interface
+
+```go
+type Store interface {
+    CreateEvent(ctx context.Context, evt *Event) error
+    GetEvent(ctx context.Context, evtID id.ID) (*Event, error)
+    ListEvents(ctx context.Context, opts ListOpts) ([]*Event, error)
+}
+```

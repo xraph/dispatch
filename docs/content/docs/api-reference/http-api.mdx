@@ -1,0 +1,212 @@
+---
+title: HTTP Admin API
+description: Complete reference for the Relay admin API endpoints.
+---
+
+The admin API is served by `api.NewHandler()`. Mount it under a prefix of your choice. All requests and responses use JSON.
+
+## Setup
+
+```go
+handler := api.NewHandler(r.Store(), r.Catalog(), r.Endpoints(), r.DLQ(), logger)
+mux.Handle("/webhooks/", http.StripPrefix("/webhooks", handler))
+```
+
+## Event Types
+
+### Register event type
+
+```http
+POST /event-types
+Content-Type: application/json
+
+{
+  "name": "invoice.created",
+  "description": "Fired when a new invoice is generated",
+  "group": "billing",
+  "version": "2025-01-01",
+  "schema": {"type": "object"},
+  "example": {"invoice_id": "INV-001"}
+}
+```
+
+**Response:** `201 Created`
+
+### List event types
+
+```http
+GET /event-types?group=billing&limit=20&offset=0
+```
+
+**Response:** `200 OK` with array of event types.
+
+### Get event type
+
+```http
+GET /event-types/{name}
+```
+
+### Deprecate event type
+
+```http
+DELETE /event-types/{name}
+```
+
+Soft-deletes the event type. Sending events with this type will fail.
+
+## Endpoints
+
+### Create endpoint
+
+```http
+POST /endpoints
+Content-Type: application/json
+
+{
+  "tenant_id": "tenant-acme",
+  "url": "https://acme.example.com/webhook",
+  "description": "Production webhook",
+  "event_types": ["order.*", "invoice.created"],
+  "headers": {"X-Custom": "value"},
+  "rate_limit": 100,
+  "metadata": {"env": "production"}
+}
+```
+
+**Response:** `201 Created` with endpoint including generated `id` and `secret`.
+
+### List endpoints
+
+```http
+GET /endpoints?tenant_id=tenant-acme&limit=20&offset=0
+```
+
+### Get endpoint
+
+```http
+GET /endpoints/{id}
+```
+
+### Update endpoint
+
+```http
+PUT /endpoints/{id}
+Content-Type: application/json
+
+{
+  "url": "https://new-url.example.com/webhook",
+  "event_types": ["order.*"],
+  "rate_limit": 200
+}
+```
+
+### Delete endpoint
+
+```http
+DELETE /endpoints/{id}
+```
+
+### Enable / Disable
+
+```http
+PATCH /endpoints/{id}/enable
+PATCH /endpoints/{id}/disable
+```
+
+### Rotate secret
+
+```http
+POST /endpoints/{id}/rotate-secret
+```
+
+**Response:** `200 OK` with `{"secret": "whsec_..."}`.
+
+## Events
+
+### Send event
+
+```http
+POST /events
+Content-Type: application/json
+
+{
+  "type": "order.created",
+  "tenant_id": "tenant-acme",
+  "data": {"order_id": "ORD-001", "amount": 99.99},
+  "idempotency_key": "order-ORD-001"
+}
+```
+
+**Response:** `201 Created`
+
+### List events
+
+```http
+GET /events?type=order.created&limit=20&offset=0
+```
+
+### Get event
+
+```http
+GET /events/{id}
+```
+
+## Deliveries
+
+### List deliveries for endpoint
+
+```http
+GET /endpoints/{id}/deliveries?state=pending&limit=20&offset=0
+```
+
+## Dead Letter Queue
+
+### List DLQ entries
+
+```http
+GET /dlq?tenant_id=tenant-acme&limit=20&offset=0
+```
+
+### Replay single entry
+
+```http
+POST /dlq/{id}/replay
+```
+
+### Bulk replay
+
+```http
+POST /dlq/replay
+Content-Type: application/json
+
+{
+  "ids": ["dlq_01h455vb...", "dlq_01h456ab..."]
+}
+```
+
+## Stats
+
+### System statistics
+
+```http
+GET /stats
+```
+
+Returns counts of events, deliveries, DLQ entries, and endpoints.
+
+## Error responses
+
+All errors return a JSON object with an `error` field:
+
+```json
+{
+  "error": "endpoint not found"
+}
+```
+
+| Scenario | Status Code |
+|----------|-------------|
+| Resource not found | 404 |
+| Invalid input / validation | 400 |
+| Duplicate idempotency key | 200 (no-op) |
+| Internal error | 500 |

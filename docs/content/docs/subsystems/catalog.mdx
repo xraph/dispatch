@@ -1,0 +1,72 @@
+---
+title: Catalog
+description: Event type registration, glob matching, and JSON Schema validation.
+---
+
+The catalog manages webhook event type definitions. It provides an in-memory cache backed by the store, and validates event payloads against JSON Schema.
+
+## Registering event types
+
+```go
+et, err := r.RegisterEventType(ctx, catalog.WebhookDefinition{
+    Name:        "invoice.created",
+    Description: "Fired when a new invoice is generated",
+    Group:       "billing",
+    Version:     "2025-01-01",
+    Schema:      json.RawMessage(`{"type":"object","properties":{"invoice_id":{"type":"string"}}}`),
+    Example:     json.RawMessage(`{"invoice_id":"INV-001","amount":99.99}`),
+})
+```
+
+Fields:
+- **Name** -- Dot-separated event type name (e.g., `invoice.created`).
+- **Description** -- Human-readable explanation.
+- **Group** -- Optional category for organization.
+- **Schema** -- Optional JSON Schema (draft-07) for payload validation.
+- **SchemaVersion** -- Tracks schema changes.
+- **Version** -- API version (date-based convention: `2025-01-01`).
+- **Example** -- Optional example payload for documentation.
+
+## Caching
+
+The catalog caches event types in memory with a configurable TTL (default: 30s). Cache operations:
+
+```go
+r.Catalog().WarmCache(ctx)       // preload all types into cache
+r.Catalog().InvalidateCache()    // force fresh reads from store
+```
+
+## Glob matching
+
+Endpoint subscriptions use glob patterns to match event types:
+
+| Pattern | Matches |
+|---------|---------|
+| `invoice.created` | Exact match only |
+| `invoice.*` | `invoice.created`, `invoice.paid`, etc. |
+| `*` | Everything |
+
+The `catalog.Match(pattern, eventType)` function handles the matching logic.
+
+## Deprecation
+
+Event types are soft-deleted (deprecated) rather than hard-deleted:
+
+```go
+r.Catalog().DeleteType(ctx, "invoice.created")
+```
+
+Sending events with a deprecated type returns `ErrEventTypeDeprecated`.
+
+## Store interface
+
+```go
+type Store interface {
+    RegisterType(ctx context.Context, et *EventType) error
+    GetType(ctx context.Context, name string) (*EventType, error)
+    GetTypeByID(ctx context.Context, etID id.ID) (*EventType, error)
+    ListTypes(ctx context.Context, opts ListOpts) ([]*EventType, error)
+    MatchTypes(ctx context.Context, eventType string) ([]*EventType, error)
+    DeleteType(ctx context.Context, name string) error
+}
+```

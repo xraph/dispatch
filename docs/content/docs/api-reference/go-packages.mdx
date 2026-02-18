@@ -1,0 +1,190 @@
+---
+title: Go Packages
+description: Quick reference for all Relay Go packages and their public APIs.
+---
+
+This is a reference map of every package in the module, what it exports, and when you'd use it.
+
+## Root package
+
+**Import:** `github.com/xraph/relay`
+
+| Export | Type | Purpose |
+|--------|------|---------|
+| `Relay` | struct | Root webhook delivery engine |
+| `New(opts...)` | func | Constructor (requires `WithStore`) |
+| `Option` | type | Functional option type |
+| `Config` | struct | Runtime configuration |
+| `DefaultConfig()` | func | Returns sensible defaults |
+| `DefaultRetrySchedule` | var | `[5s, 30s, 2m, 15m, 2h]` |
+| `WithStore`, `WithLogger`, `WithConcurrency`, etc. | funcs | Configuration options |
+| `ErrNoStore`, `ErrEventTypeNotFound`, `ErrEndpointNotFound`, etc. | errors | Sentinel errors |
+
+## id
+
+**Import:** `github.com/xraph/relay/id`
+
+TypeID-based identifiers. See [Identity](/docs/concepts/identity).
+
+| Export | Purpose |
+|--------|---------|
+| `ID` | The identifier type (single struct) |
+| `Prefix` | Prefix type for entity classification |
+| `New(prefix)` | Generate a new ID |
+| `Parse(s)` | Parse a TypeID string |
+| `ParseWithPrefix(s, prefix)` | Parse with prefix validation |
+| `MustParse(s)` | Parse or panic |
+| `Nil` | Zero-value ID |
+| `PrefixEventType`, `PrefixEndpoint`, `PrefixEvent`, `PrefixDelivery`, `PrefixDLQ`, `PrefixSecret` | Prefix constants |
+| `NewEventTypeID()`, `NewEndpointID()`, etc. | Convenience constructors |
+| `ParseEventTypeID(s)`, `ParseEndpointID(s)`, etc. | Convenience parsers |
+
+## catalog
+
+**Import:** `github.com/xraph/relay/catalog`
+
+| Export | Purpose |
+|--------|---------|
+| `Catalog` | In-memory cached service |
+| `NewCatalog(store, cfg, logger)` | Constructor |
+| `WebhookDefinition` | Event type descriptor |
+| `EventType` | Database entity |
+| `Store` | Persistence interface |
+| `Validator` | JSON Schema validator |
+| `Match(pattern, eventType)` | Glob pattern matcher |
+| `ListOpts` | Pagination options |
+| `RegisterOption`, `WithScopeAppID`, `WithMetadata` | Registration options |
+
+## endpoint
+
+**Import:** `github.com/xraph/relay/endpoint`
+
+| Export | Purpose |
+|--------|---------|
+| `Service` | Endpoint management |
+| `NewService(store, logger)` | Constructor |
+| `Endpoint` | Domain entity |
+| `Store` | Persistence interface |
+| `Input` | Create/update DTO |
+| `ListOpts` | Pagination options |
+| `ValidationError` | Input validation error |
+
+## event
+
+**Import:** `github.com/xraph/relay/event`
+
+| Export | Purpose |
+|--------|---------|
+| `Event` | Domain entity |
+| `Store` | Persistence interface |
+| `ListOpts` | Pagination/filter options |
+
+## delivery
+
+**Import:** `github.com/xraph/relay/delivery`
+
+| Export | Purpose |
+|--------|---------|
+| `Engine` | Delivery worker pool |
+| `NewEngine(store, dlq, cfg, logger)` | Constructor |
+| `EngineConfig` | Engine configuration |
+| `EngineStore` | Interface the engine needs |
+| `Delivery` | Domain entity |
+| `Store` | Persistence interface |
+| `Sender` | HTTP webhook sender |
+| `Retrier` | Retry decision logic |
+| `Result` | Delivery attempt result |
+| `Decision` | Outcome enum (`Delivered`, `Retry`, `DLQ`, `DisableEndpoint`) |
+| `State` | Delivery state (`pending`, `delivered`, `failed`) |
+| `ListOpts` | Pagination options |
+
+## dlq
+
+**Import:** `github.com/xraph/relay/dlq`
+
+| Export | Purpose |
+|--------|---------|
+| `Service` | DLQ management |
+| `NewService(store, logger)` | Constructor |
+| `Entry` | DLQ entry entity |
+| `Store` | Persistence interface |
+| `ListOpts` | Pagination/filter options |
+
+## signature
+
+**Import:** `github.com/xraph/relay/signature`
+
+| Export | Purpose |
+|--------|---------|
+| `Sign(payload, secret, timestamp)` | Compute HMAC-SHA256 signature |
+| `Verify(payload, secret, timestamp, sig)` | Verify signature |
+| `GenerateSecret()` | Generate `whsec_` signing secret |
+| `Signer` | Stateless signer struct |
+
+## ratelimit
+
+**Import:** `github.com/xraph/relay/ratelimit`
+
+| Export | Purpose |
+|--------|---------|
+| `Limiter` | Token bucket rate limiter |
+| `New()` | Constructor |
+| `Allow(endpointID, rateLimit)` | Non-blocking check |
+| `Wait(ctx, endpointID, rateLimit)` | Blocking wait |
+| `Reset(endpointID)` | Clear endpoint state |
+
+## observability
+
+**Import:** `github.com/xraph/relay/observability`
+
+| Export | Purpose |
+|--------|---------|
+| `Metrics` | Prometheus metrics holder |
+| `NewMetrics(registerer)` | Register metrics |
+| `RecordDelivery(status, latency)` | Record a delivery attempt |
+| `Tracer` | OpenTelemetry tracer |
+| `NewTracer()` | Constructor |
+| `StartDeliverySpan(...)` | Start a delivery span |
+| `EndDeliverySpan(...)` | End a delivery span |
+
+## api
+
+**Import:** `github.com/xraph/relay/api`
+
+| Export | Purpose |
+|--------|---------|
+| `Handler` | HTTP admin API handler |
+| `NewHandler(store, catalog, epSvc, dlqSvc, logger)` | Constructor |
+| `ServeHTTP(w, r)` | Implements `http.Handler` |
+
+## store
+
+**Import:** `github.com/xraph/relay/store`
+
+| Export | Purpose |
+|--------|---------|
+| `Store` | Aggregate interface composing all subsystem stores |
+
+Implementations: `store/memory`, `store/postgres`, `store/bunstore`.
+
+## extension
+
+**Import:** `github.com/xraph/relay/extension`
+
+| Export | Purpose |
+|--------|---------|
+| `Extension` | Forge extension adapter |
+| `NewExtension(opts...)` | Constructor |
+| `Option` | Extension option type |
+| `WithPrefix(path)` | Set URL prefix (default: `/webhooks`) |
+| `Handler(store, catalog, epSvc, dlqSvc)` | Create admin API handler |
+| `Prefix()` | Get configured prefix |
+
+## scope
+
+**Import:** `github.com/xraph/relay/scope`
+
+| Export | Purpose |
+|--------|---------|
+| `Capture(ctx)` | Extract app/org IDs from context |
+| `Restore(ctx, appID, orgID)` | Inject scope into context |

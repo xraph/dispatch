@@ -1,0 +1,50 @@
+---
+title: Rate Limiting
+description: Per-endpoint token bucket rate limiting.
+---
+
+The `ratelimit` package provides a token bucket rate limiter that throttles deliveries per endpoint.
+
+## How it works
+
+Each endpoint has an optional `RateLimit` field (deliveries per second). When set to a positive value, the rate limiter controls delivery throughput.
+
+The limiter uses a token bucket algorithm:
+- Bucket starts full at the rate limit value.
+- Each delivery consumes one token.
+- Tokens refill continuously at the configured rate.
+- When empty, deliveries are delayed until tokens become available.
+
+## Usage
+
+```go
+import "github.com/xraph/relay/ratelimit"
+
+limiter := ratelimit.New()
+
+// Check if allowed (non-blocking)
+if limiter.Allow("ep_01h455vb...", 100) {
+    // proceed with delivery
+}
+
+// Block until allowed (context-aware)
+err := limiter.Wait(ctx, "ep_01h455vb...", 100)
+
+// Reset state for an endpoint
+limiter.Reset("ep_01h455vb...")
+```
+
+## Configuration
+
+Set the rate limit when creating an endpoint:
+
+```go
+ep, err := r.Endpoints().Create(ctx, endpoint.Input{
+    TenantID:   "tenant-acme",
+    URL:        "https://example.com/webhook",
+    EventTypes: []string{"*"},
+    RateLimit:  100,  // 100 deliveries per second
+})
+```
+
+A `RateLimit` of `0` means unlimited (no throttling).

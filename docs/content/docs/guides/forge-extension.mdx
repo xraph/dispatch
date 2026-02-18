@@ -1,0 +1,45 @@
+---
+title: Forge Extension
+description: Mount Relay into a Forge application.
+---
+
+Relay includes an extension adapter for the [Forge](https://github.com/xraph/forge) framework.
+
+## Setup
+
+```go
+import (
+    "github.com/xraph/relay/extension"
+    "github.com/xraph/relay/store/memory"
+)
+
+ext := extension.NewExtension(
+    extension.WithPrefix("/webhooks"),
+)
+
+// Create the admin API handler
+handler := ext.Handler(store, catalog, endpointSvc, dlqSvc)
+```
+
+## Extension options
+
+| Option | Purpose | Default |
+|--------|---------|---------|
+| `WithPrefix(path)` | URL prefix for admin API routes | `/webhooks` |
+
+## How it works
+
+The extension provides:
+- A configurable URL prefix for all admin API routes.
+- A `Handler()` method that creates the admin API handler from your services.
+- Integration point for Forge's dependency injection and lifecycle.
+
+## Standalone usage
+
+The extension's `Handler()` method works without Forge:
+
+```go
+ext := extension.NewExtension()
+h := ext.Handler(store, catalog, epSvc, dlqSvc)
+http.Handle(ext.Prefix()+"/", http.StripPrefix(ext.Prefix(), h))
+```

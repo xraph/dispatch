@@ -1,0 +1,57 @@
+---
+title: Error Handling
+description: Sentinel errors and how Relay surfaces problems.
+---
+
+Relay defines a set of sentinel errors in the root package. Use `errors.Is` to check for specific conditions.
+
+## Sentinel errors
+
+```go
+var (
+    ErrNoStore                 = errors.New("relay: store is required")
+    ErrEndpointNotFound        = errors.New("relay: endpoint not found")
+    ErrEventTypeNotFound       = errors.New("relay: event type not found")
+    ErrEventTypeDeprecated     = errors.New("relay: event type is deprecated")
+    ErrPayloadValidationFailed = errors.New("relay: payload validation failed")
+    ErrDuplicateIdempotencyKey = errors.New("relay: duplicate idempotency key")
+    ErrEndpointDisabled        = errors.New("relay: endpoint is disabled")
+    ErrStoreClosed             = errors.New("relay: store is closed")
+    ErrMigrationFailed         = errors.New("relay: migration failed")
+    ErrDLQNotFound             = errors.New("relay: dlq entry not found")
+    ErrDeliveryNotFound        = errors.New("relay: delivery not found")
+    ErrEventNotFound           = errors.New("relay: event not found")
+)
+```
+
+## Checking errors
+
+```go
+err := r.Send(ctx, evt)
+if errors.Is(err, relay.ErrEventTypeNotFound) {
+    // event type not registered in the catalog
+}
+```
+
+## Wrapping convention
+
+Subsystems wrap the sentinel with `fmt.Errorf` and `%w`:
+
+```go
+return fmt.Errorf("%w: %s", ErrEventTypeNotFound, evt.Type)
+```
+
+## Validation errors
+
+The endpoint service returns `*endpoint.ValidationError` for invalid input:
+
+```go
+var valErr *endpoint.ValidationError
+if errors.As(err, &valErr) {
+    log.Printf("invalid %s: %s", valErr.Field, valErr.Message)
+}
+```
+
+## Idempotency
+
+Duplicate idempotency keys are not treated as errors. When `Send()` encounters a duplicate, it returns `nil` (no-op success).

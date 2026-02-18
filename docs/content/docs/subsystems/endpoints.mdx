@@ -1,0 +1,51 @@
+---
+title: Endpoints
+description: Webhook endpoint management, subscriptions, and secret rotation.
+---
+
+The endpoint service manages webhook delivery targets. Each endpoint belongs to a tenant and subscribes to event types via glob patterns.
+
+## Creating an endpoint
+
+```go
+ep, err := r.Endpoints().Create(ctx, endpoint.Input{
+    TenantID:    "tenant-acme",
+    URL:         "https://acme.example.com/webhook",
+    Description: "Acme production webhook",
+    EventTypes:  []string{"order.*", "invoice.created"},
+    Headers:     map[string]string{"X-Custom": "value"},
+    RateLimit:   100,
+    Metadata:    map[string]string{"env": "production"},
+})
+```
+
+A signing secret is auto-generated (format: `whsec_` + 32 bytes hex) unless provided in the input.
+
+## Operations
+
+| Method | Description |
+|--------|-------------|
+| `Create(ctx, input)` | Register a new endpoint |
+| `Get(ctx, id)` | Get endpoint by ID |
+| `Update(ctx, id, input)` | Partial update |
+| `Delete(ctx, id)` | Remove endpoint |
+| `List(ctx, tenantID, opts)` | List endpoints for a tenant |
+| `SetEnabled(ctx, id, bool)` | Enable or disable |
+| `RotateSecret(ctx, id)` | Generate a new signing secret |
+
+## Secret rotation
+
+```go
+newSecret, err := r.Endpoints().RotateSecret(ctx, endpointID)
+```
+
+The old secret is immediately replaced. Deliver the new secret to the endpoint owner through a secure channel.
+
+## Disabling endpoints
+
+Endpoints can be disabled manually or automatically:
+
+- **Manual**: `r.Endpoints().SetEnabled(ctx, id, false)`
+- **Automatic**: When a delivery receives HTTP 410 Gone, the engine disables the endpoint.
+
+Disabled endpoints are excluded from delivery resolution.

@@ -1,0 +1,71 @@
+---
+title: Webhook Verification
+description: How to verify webhook signatures on the receiving end.
+---
+
+Every webhook delivery from Relay includes an HMAC-SHA256 signature. This guide shows how to verify it.
+
+## Headers
+
+Each delivery includes:
+
+| Header | Description |
+|--------|-------------|
+| `X-Relay-Signature` | `v1=<hex>` HMAC-SHA256 signature |
+| `X-Relay-Timestamp` | Unix timestamp (seconds) |
+
+## Verification in Go
+
+```go
+import (
+    "io"
+    "net/http"
+    "strconv"
+
+    "github.com/xraph/relay/signature"
+)
+
+func webhookHandler(w http.ResponseWriter, r *http.Request) {
+    body, err := io.ReadAll(r.Body)
+    if err != nil {
+        http.Error(w, "bad request", http.StatusBadRequest)
+        return
+    }
+
+    sig := r.Header.Get("X-Relay-Signature")
+    ts, err := strconv.ParseInt(r.Header.Get("X-Relay-Timestamp"), 10, 64)
+    if err != nil {
+        http.Error(w, "missing timestamp", http.StatusBadRequest)
+        return
+    }
+
+    if !signature.Verify(body, myEndpointSecret, ts, sig) {
+        http.Error(w, "invalid signature", http.StatusUnauthorized)
+        return
+    }
+
+    // Signature valid -- process the webhook
+    w.WriteHeader(http.StatusOK)
+}
+```
+
+## Manual verification
+
+If you're not using Go, the algorithm is:
+
+1. Extract `X-Relay-Timestamp` and `X-Relay-Signature` from headers.
+2. Construct the signed content: `"{timestamp}.{raw_body}"`.
+3. Compute HMAC-SHA256 of the content using the endpoint secret as the key.
+4. Format as `"v1=" + hex(hmac_result)`.
+5. Compare with the received signature using constant-time comparison.
+
+## Replay protection
+
+Check that the timestamp is within an acceptable window (e.g., 5 minutes) to prevent replay attacks:
+
+```go
+if time.Now().Unix()-ts > 300 {
+    http.Error(w, "timestamp too old", http.StatusUnauthorized)
+    return
+}
+```

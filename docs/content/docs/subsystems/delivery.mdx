@@ -1,0 +1,71 @@
+---
+title: Delivery
+description: The delivery engine, workers, retry schedule, and decision matrix.
+---
+
+The delivery engine is a poll-based worker pool that dequeues pending deliveries, performs HTTP requests, and decides what to do next.
+
+## Engine lifecycle
+
+```go
+r.Start(ctx)        // start the poll loop and workers
+defer r.Stop(ctx)   // wait for in-flight deliveries, then stop
+```
+
+## How it works
+
+1. A ticker fires every `PollInterval` (default: 1s).
+2. Each tick dequeues up to `BatchSize` (default: 50) pending deliveries.
+3. Deliveries are dispatched to `Concurrency` (default: 10) goroutine workers.
+4. Each worker fetches the endpoint and event, performs the HTTP POST, evaluates the result.
+
+## HTTP request
+
+Each delivery sends an HTTP POST with these headers:
+
+| Header | Value |
+|--------|-------|
+| `Content-Type` | `application/json` |
+| `User-Agent` | `Relay/1.0` |
+| `X-Relay-Event-ID` | Event TypeID |
+| `X-Relay-Event-Type` | Event type name |
+| `X-Relay-Delivery-ID` | Delivery TypeID |
+| `X-Relay-Signature` | `v1=<hex>` HMAC-SHA256 |
+| `X-Relay-Timestamp` | Unix timestamp |
+| Custom headers | From endpoint configuration |
+
+## Decision matrix
+
+After each attempt, the retrier decides the next action:
+
+| HTTP Response | Decision |
+|--------------|----------|
+| 2xx | **Delivered** -- mark complete |
+| 410 Gone | **Disable endpoint** -- disable endpoint, push to DLQ |
+| 400--499 (except 410, 429) | **DLQ** -- client error won't self-correct |
+| 429 Too Many Requests | **Retry** -- if attempts remain, else DLQ |
+| 500--599 | **Retry** -- if attempts remain, else DLQ |
+| 0 (network/timeout) | **Retry** -- if attempts remain, else DLQ |
+
+## Default retry schedule
+
+```go
+var DefaultRetrySchedule = []time.Duration{
+    5 * time.Second,   // retry 1
+    30 * time.Second,  // retry 2
+    2 * time.Minute,   // retry 3
+    15 * time.Minute,  // retry 4
+    2 * time.Hour,     // retry 5
+}
+```
+
+## Configuration
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `WithConcurrency(n)` | `10` | Worker goroutines |
+| `WithPollInterval(d)` | `1s` | Poll frequency |
+| `WithBatchSize(n)` | `50` | Deliveries per tick |
+| `WithRequestTimeout(d)` | `30s` | HTTP timeout per attempt |
+| `WithMaxRetries(n)` | `5` | Max attempts before DLQ |
+| `WithRetrySchedule(s)` | See above | Backoff intervals |

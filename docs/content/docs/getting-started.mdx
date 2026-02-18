@@ -1,0 +1,122 @@
+---
+title: Getting Started
+description: Install Relay and send your first webhook in under five minutes.
+---
+
+## Prerequisites
+
+- Go 1.22 or later
+- A Go module (`go mod init`)
+
+## Install
+
+```bash
+go get github.com/xraph/relay
+```
+
+## Step 1: Create a Relay instance
+
+Every Relay instance requires a store backend. For development and testing, use the in-memory store:
+
+```go
+package main
+
+import (
+    "context"
+    "log"
+
+    "github.com/xraph/relay"
+    "github.com/xraph/relay/store/memory"
+)
+
+func main() {
+    ctx := context.Background()
+
+    r, err := relay.New(
+        relay.WithStore(memory.New()),
+    )
+    if err != nil {
+        log.Fatal(err)
+    }
+
+    _ = r
+}
+```
+
+## Step 2: Register an event type
+
+Event types live in the catalog. Register them at boot or at runtime through the admin API:
+
+```go
+import "github.com/xraph/relay/catalog"
+
+r.RegisterEventType(ctx, catalog.WebhookDefinition{
+    Name:        "order.created",
+    Description: "Fired when a new order is placed",
+    Version:     "2025-01-01",
+})
+```
+
+## Step 3: Create a webhook endpoint
+
+Endpoints belong to tenants and subscribe to event types using glob patterns:
+
+```go
+import "github.com/xraph/relay/endpoint"
+
+ep, err := r.Endpoints().Create(ctx, endpoint.Input{
+    TenantID:   "tenant-acme",
+    URL:        "https://acme.example.com/webhook",
+    EventTypes: []string{"order.*"},
+})
+```
+
+A signing secret is auto-generated when `Secret` is not provided. The secret is used to compute HMAC-SHA256 signatures for every delivery.
+
+## Step 4: Send an event
+
+```go
+import (
+    "encoding/json"
+    "github.com/xraph/relay/event"
+)
+
+err = r.Send(ctx, &event.Event{
+    Type:     "order.created",
+    TenantID: "tenant-acme",
+    Data:     json.RawMessage(`{"order_id":"ORD-001","amount":99.99}`),
+})
+```
+
+`Send()` validates the event type, persists the event, resolves all matching endpoints, and enqueues one delivery per endpoint.
+
+## Step 5: Start the delivery engine
+
+```go
+r.Start(ctx)
+defer r.Stop(ctx)
+```
+
+The engine polls for pending deliveries, dispatches them to worker goroutines, and handles retries with exponential backoff.
+
+## Step 6: Mount the admin API (optional)
+
+```go
+import (
+    "net/http"
+    "github.com/xraph/relay/api"
+)
+
+handler := api.NewHandler(r.Store(), r.Catalog(), r.Endpoints(), r.DLQ(), nil)
+mux := http.NewServeMux()
+mux.Handle("/webhooks/", http.StripPrefix("/webhooks", handler))
+
+log.Fatal(http.ListenAndServe(":8080", mux))
+```
+
+## Next steps
+
+- [Architecture](/docs/architecture) -- Understand the package structure
+- [Catalog](/docs/subsystems/catalog) -- Configure event types with JSON Schema
+- [Delivery](/docs/subsystems/delivery) -- Tune retry schedules and concurrency
+- [Stores](/docs/stores/postgres) -- Connect to PostgreSQL for production

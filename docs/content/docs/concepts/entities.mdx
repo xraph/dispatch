@@ -1,0 +1,139 @@
+---
+title: Entities
+description: The base entity type and how domain objects are structured in Relay.
+---
+
+Every domain object in Relay -- event types, endpoints, events, deliveries, DLQ entries -- embeds a common base type that provides creation and update timestamps.
+
+## The base entity
+
+The `internal/entity` package defines `Entity`:
+
+```go
+type Entity struct {
+    CreatedAt time.Time `json:"created_at"`
+    UpdatedAt time.Time `json:"updated_at"`
+}
+```
+
+Create a new entity with `entity.New()`, which sets both timestamps to the current UTC time. IDs are assigned separately using the `id` package.
+
+## Domain entities
+
+### EventType
+
+Defined in `catalog/event_type.go`. Wraps a `WebhookDefinition` with identity and state:
+
+```go
+type EventType struct {
+    entity.Entity
+    ID           id.ID              `json:"id"`
+    Definition   WebhookDefinition  `json:"definition"`
+    IsDeprecated bool               `json:"deprecated"`
+    DeprecatedAt *time.Time         `json:"deprecated_at,omitempty"`
+    ScopeAppID   string             `json:"scope_app_id,omitempty"`
+    Metadata     map[string]string  `json:"metadata,omitempty"`
+}
+```
+
+### Endpoint
+
+Defined in `endpoint/endpoint.go`. A webhook delivery target registered by a tenant:
+
+```go
+type Endpoint struct {
+    entity.Entity
+    ID          id.ID             `json:"id"`
+    TenantID    string            `json:"tenant_id"`
+    URL         string            `json:"url"`
+    Description string            `json:"description"`
+    Secret      string            `json:"-"`
+    EventTypes  []string          `json:"event_types"`
+    Headers     map[string]string `json:"headers,omitempty"`
+    Enabled     bool              `json:"enabled"`
+    RateLimit   int               `json:"rate_limit"`
+    Metadata    map[string]string `json:"metadata,omitempty"`
+}
+```
+
+The `Secret` field is never serialized to JSON (tagged `json:"-"`).
+
+### Event
+
+Defined in `event/event.go`. A webhook event submitted for delivery:
+
+```go
+type Event struct {
+    entity.Entity
+    ID             id.ID  `json:"id"`
+    Type           string `json:"type"`
+    TenantID       string `json:"tenant_id"`
+    Data           any    `json:"data"`
+    IdempotencyKey string `json:"idempotency_key,omitempty"`
+}
+```
+
+### Delivery
+
+Defined in `delivery/delivery.go`. A single webhook delivery attempt:
+
+```go
+type Delivery struct {
+    entity.Entity
+    ID             id.ID      `json:"id"`
+    EventID        id.ID      `json:"event_id"`
+    EndpointID     id.ID      `json:"endpoint_id"`
+    State          State      `json:"state"`
+    AttemptCount   int        `json:"attempt_count"`
+    MaxAttempts    int        `json:"max_attempts"`
+    NextAttemptAt  time.Time  `json:"next_attempt_at"`
+    LastError      string     `json:"last_error,omitempty"`
+    LastStatusCode int        `json:"last_status_code,omitempty"`
+    LastResponse   string     `json:"last_response,omitempty"`
+    LastLatencyMs  int        `json:"last_latency_ms,omitempty"`
+    CompletedAt    *time.Time `json:"completed_at,omitempty"`
+}
+```
+
+Delivery states: `pending`, `delivered`, `failed`.
+
+### DLQ Entry
+
+Defined in `dlq/entry.go`. A permanently failed delivery:
+
+```go
+type Entry struct {
+    entity.Entity
+    ID             id.ID      `json:"id"`
+    DeliveryID     id.ID      `json:"delivery_id"`
+    EventID        id.ID      `json:"event_id"`
+    EndpointID     id.ID      `json:"endpoint_id"`
+    EventType      string     `json:"event_type"`
+    TenantID       string     `json:"tenant_id"`
+    URL            string     `json:"url"`
+    Payload        any        `json:"payload"`
+    Error          string     `json:"error"`
+    AttemptCount   int        `json:"attempt_count"`
+    LastStatusCode int        `json:"last_status_code,omitempty"`
+    ReplayedAt     *time.Time `json:"replayed_at,omitempty"`
+    FailedAt       time.Time  `json:"failed_at"`
+}
+```
+
+## WebhookDefinition
+
+The canonical description of a webhook event type, defined in `catalog/definition.go`:
+
+```go
+type WebhookDefinition struct {
+    Name          string          `json:"name"`
+    Description   string          `json:"description"`
+    Group         string          `json:"group,omitempty"`
+    Schema        json.RawMessage `json:"schema,omitempty"`
+    SchemaVersion string          `json:"schema_version,omitempty"`
+    Version       string          `json:"version"`
+    Example       json.RawMessage `json:"example,omitempty"`
+}
+```
+
+The `Name` follows dot-separated convention: `"invoice.created"`, `"deployment.completed"`.

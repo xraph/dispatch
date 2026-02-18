@@ -1,0 +1,100 @@
+---
+title: Architecture
+description: How Relay's packages fit together.
+---
+
+Relay is organized as a set of focused Go packages. The root `relay` package ties everything together through the `Relay` struct.
+
+## Package diagram
+
+```
+┌─────────────────────────────────────────────┐
+│                  relay.Relay                 │
+│  Send() → validate → persist → fan-out      │
+│  Start() / Stop()                           │
+├────────────┬────────────┬───────────────────┤
+│  Catalog   │  Endpoint  │  Delivery Engine  │
+│  (cache +  │  Service   │  (workers + poll  │
+│  validate) │  (CRUD)    │   + retry + DLQ)  │
+├────────────┴────────────┴───────────────────┤
+│              store.Store                     │
+│  (catalog + endpoint + event + delivery +   │
+│   dlq interfaces composed)                  │
+├──────────┬──────────┬───────────────────────┤
+│ Postgres │   Bun    │       Memory          │
+│ (pgx/v5) │  (ORM)   │   (testing only)      │
+└──────────┴──────────┴───────────────────────┘
+```
+
+## The `Send()` critical path
+
+When you call `r.Send(ctx, event)`, Relay executes these steps in order:
+
+1. **Catalog lookup** -- Look up the event type from the catalog. Unknown types are rejected with `ErrEventTypeNotFound`.
+2. **Deprecation check** -- Reject deprecated event types with `ErrEventTypeDeprecated`.
+3. **Schema validation** -- If the event type has a JSON Schema, validate the payload against it.
+4. **Persist event** -- Store the event. Duplicate idempotency keys are silently accepted.
+5. **Resolve endpoints** -- Find all enabled endpoints for this tenant whose subscription patterns match the event type.
+6. **Fan out** -- Create one `Delivery` record per matched endpoint in `pending` state.
+
+## Delivery engine
+
+The delivery engine is a poll-based worker pool:
+
+1. A ticker fires every `PollInterval` (default: 1s).
+2. Each tick dequeues up to `BatchSize` (default: 50) pending deliveries.
+3. Deliveries are dispatched to `Concurrency` (default: 10) goroutine workers.
+4. Each worker: fetches the endpoint and event, performs the HTTP POST, evaluates the result, and updates the delivery record.
+
+### Decision matrix
+
+| HTTP Response | Decision |
+|--------------|----------|
+| 2xx | **Delivered** -- mark complete |
+| 410 Gone | **Disable endpoint** -- disable endpoint, push to DLQ |
+| 400--499 (except 410, 429) | **DLQ** -- client error won't self-correct |
+| 429 Too Many Requests | **Retry** -- if attempts remain, else DLQ |
+| 500--599 | **Retry** -- if attempts remain, else DLQ |
+| 0 (network/timeout) | **Retry** -- if attempts remain, else DLQ |
+
+## Store composition
+
+The `store.Store` interface composes five subsystem store interfaces:
+
+```go
+type Store interface {
+    catalog.Store
+    endpoint.Store
+    event.Store
+    delivery.Store
+    dlq.Store
+
+    Migrate(ctx context.Context) error
+    Ping(ctx context.Context) error
+    Close() error
+}
+```
+
+Each subsystem defines its own store interface. A backend only needs to implement the aggregate to satisfy the contract. The memory, PostgreSQL, and Bun backends all implement this interface.
+
+## Package index
+
+| Package | Description |
+|---------|-------------|
+| `relay` | Root -- `Relay` engine, `Send()`, `Start()`/`Stop()`, functional options |
+| `catalog` | Event type registry with in-memory cache and JSON Schema validation |
+| `endpoint` | Webhook endpoint CRUD service with secret rotation |
+| `event` | Event entity and store interface |
+| `delivery` | Delivery engine, HTTP sender, retry logic with exponential backoff |
+| `dlq` | Dead letter queue with replay and bulk operations |
+| `id` | TypeID-based identity -- single `ID` struct with prefix constants |
+| `signature` | HMAC-SHA256 signing and verification |
+| `ratelimit` | Token bucket rate limiter per endpoint |
+| `observability` | Prometheus metrics and OpenTelemetry tracing |
+| `api` | HTTP admin API handlers (Go 1.22+ ServeMux) |
+| `store` | Composite `Store` interface |
+| `store/memory` | In-memory store for testing |
+| `store/postgres` | PostgreSQL backend with pgx/v5 |
+| `store/bunstore` | Bun ORM backend |
+| `extension` | Forge framework integration |
+| `scope` | Multi-tenant context helpers |

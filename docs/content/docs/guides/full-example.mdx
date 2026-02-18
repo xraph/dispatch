@@ -1,0 +1,112 @@
+---
+title: Full Example
+description: Build a complete webhook server with Relay.
+---
+
+This guide walks through building a complete webhook server with event types, endpoints, and the admin API.
+
+## Complete server
+
+```go
+package main
+
+import (
+    "context"
+    "encoding/json"
+    "log"
+    "log/slog"
+    "net/http"
+    "os"
+    "os/signal"
+
+    "github.com/xraph/relay"
+    "github.com/xraph/relay/api"
+    "github.com/xraph/relay/catalog"
+    "github.com/xraph/relay/endpoint"
+    "github.com/xraph/relay/event"
+    "github.com/xraph/relay/store/memory"
+)
+
+func main() {
+    ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
+    defer stop()
+
+    logger := slog.Default()
+
+    // Create relay with in-memory store.
+    r, err := relay.New(
+        relay.WithStore(memory.New()),
+        relay.WithLogger(logger),
+    )
+    if err != nil {
+        log.Fatal(err)
+    }
+
+    // Register event types.
+    r.RegisterEventType(ctx, catalog.WebhookDefinition{
+        Name:        "order.created",
+        Description: "Fired when a new order is placed",
+        Version:     "2025-01-01",
+    })
+    r.RegisterEventType(ctx, catalog.WebhookDefinition{
+        Name:        "order.shipped",
+        Description: "Fired when an order is shipped",
+        Version:     "2025-01-01",
+    })
+
+    // Create a webhook endpoint.
+    ep, _ := r.Endpoints().Create(ctx, endpoint.Input{
+        TenantID:   "tenant-acme",
+        URL:        "https://acme.example.com/webhook",
+        EventTypes: []string{"order.*"},
+    })
+    logger.Info("endpoint created", "id", ep.ID, "secret", ep.Secret)
+
+    // Start the delivery engine.
+    r.Start(ctx)
+    defer r.Stop(ctx)
+
+    // Mount the admin API.
+    handler := api.NewHandler(r.Store(), r.Catalog(), r.Endpoints(), r.DLQ(), logger)
+    mux := http.NewServeMux()
+    mux.Handle("/webhooks/", http.StripPrefix("/webhooks", handler))
+
+    // Send a test event.
+    r.Send(ctx, &event.Event{
+        Type:     "order.created",
+        TenantID: "tenant-acme",
+        Data:     json.RawMessage(`{"order_id":"ORD-001","amount":99.99}`),
+    })
+
+    log.Println("listening on :8080")
+    srv := &http.Server{Addr: ":8080", Handler: mux}
+    go func() {
+        <-ctx.Done()
+        srv.Shutdown(context.Background())
+    }()
+    if err := srv.ListenAndServe(); err != http.ErrServerClosed {
+        log.Fatal(err)
+    }
+}
+```
+
+## Testing it
+
+```bash
+# List event types
+curl -s http://localhost:8080/webhooks/event-types | jq
+
+# List endpoints
+curl -s http://localhost:8080/webhooks/endpoints?tenant_id=tenant-acme | jq
+
+# Send an event via API
+curl -s -X POST http://localhost:8080/webhooks/events \
+  -H "Content-Type: application/json" \
+  -d '{"type":"order.shipped","tenant_id":"tenant-acme","data":{"order_id":"ORD-001"}}' | jq
+
+# Check DLQ
+curl -s http://localhost:8080/webhooks/dlq | jq
+
+# View stats
+curl -s http://localhost:8080/webhooks/stats | jq
+```

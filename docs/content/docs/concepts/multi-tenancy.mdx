@@ -1,0 +1,55 @@
+---
+title: Multi-Tenancy
+description: How Relay isolates tenants and scopes every operation.
+---
+
+Multi-tenancy is built into Relay at the data model level. Every endpoint and event carries a `TenantID` field that determines ownership and routing.
+
+## Tenant scoping
+
+### Endpoints
+
+Each endpoint belongs to exactly one tenant:
+
+```go
+ep, err := r.Endpoints().Create(ctx, endpoint.Input{
+    TenantID:   "tenant-acme",
+    URL:        "https://acme.example.com/webhook",
+    EventTypes: []string{"order.*"},
+})
+```
+
+### Events
+
+Events are scoped to a tenant. When `Send()` resolves matching endpoints, it only considers endpoints belonging to the same tenant:
+
+```go
+r.Send(ctx, &event.Event{
+    Type:     "order.created",
+    TenantID: "tenant-acme",
+    Data:     orderPayload,
+})
+```
+
+## The scope package
+
+The `scope` package provides context-level scoping for app and organization IDs. In standalone mode, scope is a no-op:
+
+```go
+import "github.com/xraph/relay/scope"
+
+appID, orgID := scope.Capture(ctx)   // returns empty strings in standalone mode
+ctx = scope.Restore(ctx, appID, orgID)
+```
+
+When used with the Forge framework, the scope package reads app and organization IDs from the Forge context.
+
+## Scope fields on entities
+
+| Entity | Fields |
+|--------|--------|
+| `EventType` | `ScopeAppID` |
+| `Endpoint` | `ScopeAppID`, `ScopeOrgID` |
+| `Event` | `ScopeAppID`, `ScopeOrgID` |
+
+These fields are populated automatically by `Send()` using `scope.Capture(ctx)`.
