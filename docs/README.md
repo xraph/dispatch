@@ -1,6 +1,6 @@
 # Dispatch Documentation
 
-Documentation site for [RDispatchy](https://github.com/xraph/dispatch) — a composable webhook delivery engine for Go.
+Documentation site for [Dispatchy](https://github.com/xraph/dispatch) — a composable webhook delivery engine for Go.
 
 Built with [Fumadocs](https://fumadocs.dev) and Next.js.
 
