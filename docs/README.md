@@ -1,6 +1,6 @@
-# Relay Documentation
+# Dispatch Documentation
 
-Documentation site for [Relay](https://github.com/xraph/relay) — a composable webhook delivery engine for Go.
+Documentation site for [RDispatchy](https://github.com/xraph/dispatch) — a composable webhook delivery engine for Go.
 
 Built with [Fumadocs](https://fumadocs.dev) and Next.js.
 
