@@ -1,26 +1,20 @@
 ---
 title: Configuration
-description: Functional options, the Config struct, and how to customize Relay behavior.
+description: Functional options, the Config struct, and how to customize Dispatch behavior.
 ---
 
-Relay uses functional options for wiring dependencies and a `Config` struct for tuning runtime behavior.
+Dispatch uses functional options for wiring dependencies and a `Config` struct for tuning runtime behavior.
 
-## Functional options
+## Dispatcher options
 
-The `Relay` struct is configured with functional options passed to `relay.New()`:
+The `Dispatcher` is configured with functional options passed to `dispatch.New()`:
 
 ```go
-r, err := relay.New(
-    relay.WithStore(postgresStore),
-    relay.WithLogger(slog.Default()),
-    relay.WithConcurrency(20),
-    relay.WithPollInterval(2 * time.Second),
-    relay.WithBatchSize(100),
-    relay.WithRequestTimeout(15 * time.Second),
-    relay.WithMaxRetries(8),
-    relay.WithRetrySchedule(customSchedule),
-    relay.WithShutdownTimeout(60 * time.Second),
-    relay.WithCacheTTL(time.Minute),
+d, err := dispatch.New(
+    dispatch.WithStore(postgresStore),
+    dispatch.WithLogger(slog.Default()),
+    dispatch.WithConcurrency(20),
+    dispatch.WithQueues([]string{"default", "critical", "bulk"}),
 )
 ```
 
@@ -28,46 +22,72 @@ r, err := relay.New(
 
 | Option | Purpose | Default |
 |--------|---------|---------|
-| `WithStore(s)` | Set the persistence backend (required) | -- |
+| `WithStore(s)` | Set the persistence backend (required) | — |
 | `WithLogger(l)` | Set the structured logger | `slog.Default()` |
-| `WithConcurrency(n)` | Number of delivery worker goroutines | `10` |
-| `WithPollInterval(d)` | How often the engine checks for pending deliveries | `1s` |
-| `WithBatchSize(n)` | Max deliveries dequeued per poll cycle | `50` |
-| `WithRequestTimeout(d)` | HTTP timeout per delivery attempt | `30s` |
-| `WithMaxRetries(n)` | Maximum delivery attempts before DLQ | `5` |
-| `WithRetrySchedule(s)` | Backoff intervals between retries | `[5s, 30s, 2m, 15m, 2h]` |
-| `WithShutdownTimeout(d)` | Max wait for in-flight deliveries on shutdown | `30s` |
-| `WithCacheTTL(d)` | TTL for the catalog's in-memory cache (0 = no cache) | `30s` |
+| `WithConcurrency(n)` | Max concurrent jobs processed | `10` |
+| `WithQueues(q)` | Queues to poll | `["default"]` |
 
 ## Config struct
 
 ```go
 type Config struct {
-    Concurrency     int
-    PollInterval    time.Duration
-    BatchSize       int
-    RequestTimeout  time.Duration
-    MaxRetries      int
-    RetrySchedule   []time.Duration
-    ShutdownTimeout time.Duration
-    CacheTTL        time.Duration
+    Concurrency       int           // default: 10
+    Queues            []string      // default: ["default"]
+    PollInterval      time.Duration // default: 1s
+    ShutdownTimeout   time.Duration // default: 30s
+    HeartbeatInterval time.Duration // default: 10s
+    StaleJobThreshold time.Duration // default: 30s
 }
 ```
 
-## Default retry schedule
+`DefaultConfig()` returns a Config with these defaults.
+
+## Engine options
+
+Additional options are passed to `engine.Build()`:
 
 ```go
-var DefaultRetrySchedule = []time.Duration{
-    5 * time.Second,
-    30 * time.Second,
-    2 * time.Minute,
-    15 * time.Minute,
-    2 * time.Hour,
-}
+eng := engine.Build(d,
+    engine.WithExtension(metricsExt),
+    engine.WithMiddleware(middleware.Logging(logger)),
+    engine.WithBackoff(backoff.Exponential(
+        backoff.WithBase(5*time.Second),
+        backoff.WithMax(2*time.Hour),
+    )),
+    engine.WithQueueConfig(queue.Config{
+        Name:           "critical",
+        MaxConcurrency: 20,
+        RateLimit:      50,
+    }),
+    engine.WithTracerProvider(tracerProvider),
+    engine.WithMetricFactory(metricFactory),
+)
 ```
 
-After all retries are exhausted, the delivery moves to the DLQ.
+## Forge extension config
+
+When using the Forge framework integration:
+
+```go
+ext := extension.New(
+    extension.WithStore(pgStore),
+    extension.WithConcurrency(20),
+    extension.WithQueues([]string{"default", "bulk"}),
+    extension.WithBasePath("/api/dispatch"),
+    extension.WithDisableRoutes(),
+    extension.WithDisableMigrate(),
+)
+```
+
+| Option | Purpose | Default |
+|--------|---------|---------|
+| `WithStore(s)` | Persistence backend | — |
+| `WithConcurrency(n)` | Max concurrent jobs | `10` |
+| `WithQueues(q)` | Queues to poll | `["default"]` |
+| `WithBasePath(p)` | HTTP API prefix | `"/api/dispatch"` |
+| `WithDisableRoutes()` | Skip HTTP route registration | `false` |
+| `WithDisableMigrate()` | Skip auto-migration at startup | `false` |
 
 ## Required options
 
-The only required option is `WithStore()`. Without a store, `relay.New()` returns `ErrNoStore`.
+The only required option is `WithStore()`. Without a store, `dispatch.New()` returns `ErrNoStore`.

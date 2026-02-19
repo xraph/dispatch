@@ -1,73 +1,66 @@
 ---
 title: Architecture
-description: How Relay's packages fit together.
+description: How Dispatch's packages fit together.
 ---
 
-Relay is organized as a set of focused Go packages. The root `relay` package ties everything together through the `Relay` struct.
+Dispatch is organized as a set of focused Go packages. The root `dispatch` package defines the core `Dispatcher` and configuration. The `engine` package wires everything together. Application code interacts primarily with `engine`.
 
 ## Package diagram
 
 ```
-┌─────────────────────────────────────────────┐
-│                  relay.Relay                 │
-│  Send() → validate → persist → fan-out      │
-│  Start() / Stop()                           │
-├────────────┬────────────┬───────────────────┤
-│  Catalog   │  Endpoint  │  Delivery Engine  │
-│  (cache +  │  Service   │  (workers + poll  │
-│  validate) │  (CRUD)    │   + retry + DLQ)  │
-├────────────┴────────────┴───────────────────┤
-│              store.Store                     │
-│  (catalog + endpoint + event + delivery +   │
-│   dlq interfaces composed)                  │
-├──────────┬──────────┬───────────────────────┤
-│ Postgres │   Bun    │       Memory          │
-│ (pgx/v5) │  (ORM)   │   (testing only)      │
-└──────────┴──────────┴───────────────────────┘
+┌──────────────────────────────────────────────────────────┐
+│                     engine.Engine                         │
+│  Register / Enqueue / RegisterWorkflow / RegisterCron     │
+│  Build(dispatcher, ...options)                            │
+├───────────┬───────────┬──────────────┬────────────────────┤
+│  job      │ workflow  │   cron       │   cluster          │
+│ Registry  │ Registry  │  Scheduler   │ (leader election,  │
+│ Executor  │  Runner   │ (leader only)│  heartbeats,       │
+│           │           │              │  work stealing)    │
+├───────────┴───────────┴──────────────┴────────────────────┤
+│                    middleware chain                        │
+│   Logging → Recover → Timeout → Tracing → Metrics → Scope │
+├───────────────────────────────────────────────────────────┤
+│                    ext.Registry                            │
+│   OnJobCompleted, OnWorkflowFailed, OnCronFired, ...      │
+├──────────────────────────────────────────────────────────┤
+│                      store.Store                          │
+│   (job + workflow + cron + dlq + event + cluster stores) │
+├──────────┬──────────┬──────────┬──────────────────────────┤
+│ Postgres │   Bun    │  SQLite  │  Memory (testing only)   │
+│ (pgx/v5) │  (ORM)   │          │                          │
+└──────────┴──────────┴──────────┴──────────────────────────┘
 ```
 
-## The `Send()` critical path
+## The import-cycle problem and the engine layer
 
-When you call `r.Send(ctx, event)`, Relay executes these steps in order:
+The root `dispatch` package defines `Entity`, `Config`, and error sentinels. It is imported by every subsystem package (`job`, `workflow`, `cron`, etc.). This means the root package **cannot** import any subsystem package without creating a cycle.
 
-1. **Catalog lookup** -- Look up the event type from the catalog. Unknown types are rejected with `ErrEventTypeNotFound`.
-2. **Deprecation check** -- Reject deprecated event types with `ErrEventTypeDeprecated`.
-3. **Schema validation** -- If the event type has a JSON Schema, validate the payload against it.
-4. **Persist event** -- Store the event. Duplicate idempotency keys are silently accepted.
-5. **Resolve endpoints** -- Find all enabled endpoints for this tenant whose subscription patterns match the event type.
-6. **Fan out** -- Create one `Delivery` record per matched endpoint in `pending` state.
+The `engine` package solves this: it sits above all subsystem packages and wires them together. Application code calls `engine.Build`, `engine.Register`, and `engine.Enqueue` rather than constructing subsystems manually.
 
-## Delivery engine
+## Job execution critical path
 
-The delivery engine is a poll-based worker pool:
+When you call `engine.Enqueue(ctx, eng, SendEmail, input)`:
 
-1. A ticker fires every `PollInterval` (default: 1s).
-2. Each tick dequeues up to `BatchSize` (default: 50) pending deliveries.
-3. Deliveries are dispatched to `Concurrency` (default: 10) goroutine workers.
-4. Each worker: fetches the endpoint and event, performs the HTTP POST, evaluates the result, and updates the delivery record.
-
-### Decision matrix
-
-| HTTP Response | Decision |
-|--------------|----------|
-| 2xx | **Delivered** -- mark complete |
-| 410 Gone | **Disable endpoint** -- disable endpoint, push to DLQ |
-| 400--499 (except 410, 429) | **DLQ** -- client error won't self-correct |
-| 429 Too Many Requests | **Retry** -- if attempts remain, else DLQ |
-| 500--599 | **Retry** -- if attempts remain, else DLQ |
-| 0 (network/timeout) | **Retry** -- if attempts remain, else DLQ |
+1. **Serialize** — The typed input is JSON-marshaled to `[]byte`.
+2. **Persist** — A `job.Job` record is created in `pending` state with `RunAt = now`.
+3. **Poll** — On the next `PollInterval` tick (default: 1s), the worker pool dequeues the job.
+4. **Middleware** — The job passes through the configured middleware chain.
+5. **Execute** — The `HandlerFunc` for the job name is called with the deserialized payload.
+6. **Outcome** — The job is marked `completed`, or transitions to `retrying` / `failed` / `dlq`.
 
 ## Store composition
 
-The `store.Store` interface composes five subsystem store interfaces:
+The `store.Store` interface composes six subsystem store interfaces:
 
 ```go
 type Store interface {
-    catalog.Store
-    endpoint.Store
-    event.Store
-    delivery.Store
+    job.Store
+    workflow.Store
+    cron.Store
     dlq.Store
+    event.Store
+    cluster.Store
 
     Migrate(ctx context.Context) error
     Ping(ctx context.Context) error
@@ -75,26 +68,41 @@ type Store interface {
 }
 ```
 
-Each subsystem defines its own store interface. A backend only needs to implement the aggregate to satisfy the contract. The memory, PostgreSQL, and Bun backends all implement this interface.
+Each subsystem defines its own store interface independently. A single backend implementation satisfies all of them. The memory, PostgreSQL, Bun, SQLite, and Redis backends all implement this interface.
+
+## Extension and middleware composition
+
+Extensions and middleware are independent composition axes:
+
+- **Middleware** executes synchronously in-band with each job. It can short-circuit, add context, or measure latency.
+- **Extensions** are called out-of-band after state transitions (job completed, workflow failed, etc.). They are fire-and-forget.
 
 ## Package index
 
 | Package | Description |
 |---------|-------------|
-| `relay` | Root -- `Relay` engine, `Send()`, `Start()`/`Stop()`, functional options |
-| `catalog` | Event type registry with in-memory cache and JSON Schema validation |
-| `endpoint` | Webhook endpoint CRUD service with secret rotation |
-| `event` | Event entity and store interface |
-| `delivery` | Delivery engine, HTTP sender, retry logic with exponential backoff |
-| `dlq` | Dead letter queue with replay and bulk operations |
-| `id` | TypeID-based identity -- single `ID` struct with prefix constants |
-| `signature` | HMAC-SHA256 signing and verification |
-| `ratelimit` | Token bucket rate limiter per endpoint |
-| `observability` | Prometheus metrics and OpenTelemetry tracing |
-| `api` | HTTP admin API handlers (Go 1.22+ ServeMux) |
+| `dispatch` | Root — `Dispatcher`, `Config`, `Storer`, options, errors, `Entity` |
+| `engine` | Wires subsystems; `Build`, `Register`, `Enqueue`, `RegisterWorkflow`, `RegisterCron` |
+| `job` | `Job` entity, `State` machine, `Definition[T]`, `Registry` |
+| `workflow` | `Definition[T]`, `Run`, `RunState`, step checkpointing |
+| `cron` | `Entry`, `Scheduler`, distributed leader-elected cron |
+| `dlq` | `Entry`, `Service` — list, replay, purge |
+| `event` | `Event` entity and store interface |
+| `cluster` | `Worker`, leader election, heartbeats, work stealing |
+| `queue` | `Config`, `Manager` — per-queue rate limiting and concurrency |
+| `middleware` | `Middleware`, `Chain`, built-ins (Logging, Recover, Timeout, Tracing, Metrics, Scope) |
+| `ext` | Extension interface, lifecycle hook interfaces, `Registry` |
+| `backoff` | Retry backoff strategies |
+| `observability` | OpenTelemetry `MetricsExtension` for system-wide counters |
+| `id` | TypeID-based identifiers (`JobID`, `RunID`, `CronID`, `DLQID`, `WorkerID`, …) |
+| `api` | Forge-style HTTP admin API handlers |
+| `scope` | Forge scope helpers — tenant ID extraction from context |
+| `relay_hook` | Relay webhook delivery extension |
+| `extension` | Forge framework integration adapter |
 | `store` | Composite `Store` interface |
-| `store/memory` | In-memory store for testing |
-| `store/postgres` | PostgreSQL backend with pgx/v5 |
-| `store/bunstore` | Bun ORM backend |
-| `extension` | Forge framework integration |
-| `scope` | Multi-tenant context helpers |
+| `store/memory` | In-memory backend (development and testing) |
+| `store/postgres` | PostgreSQL backend (pgx/v5) |
+| `store/bun` | Bun ORM backend |
+| `store/sqlite` | SQLite backend |
+| `store/redis` | Redis backend |
+| `cluster/k8s` | Kubernetes consensus for leader election |

@@ -1,83 +1,72 @@
 ---
 title: Admin API
-description: HTTP admin API for managing webhooks.
+description: HTTP admin API for managing Dispatch jobs, workflows, crons, and the DLQ.
 ---
 
-The `api` package provides a RESTful HTTP API for managing all Relay entities. It uses Go 1.22+ `http.ServeMux` pattern routing.
+The `api` package provides a Forge-style RESTful HTTP API for managing all Dispatch entities. Routes are prefixed at `/v1` by default.
 
 ## Setup
 
 ```go
-import "github.com/xraph/relay/api"
-
-handler := api.NewHandler(r.Store(), r.Catalog(), r.Endpoints(), r.DLQ(), logger)
+import "github.com/xraph/dispatch/api"
 
 mux := http.NewServeMux()
-mux.Handle("/webhooks/", http.StripPrefix("/webhooks", handler))
+api.RegisterRoutes(mux, eng)
+
+log.Fatal(http.ListenAndServe(":8080", mux))
 ```
+
+When using the Forge extension, routes are registered automatically under the configured `BasePath` (default: `/api/dispatch`).
 
 ## Routes
 
-### Event Types
+### Jobs
 
 | Method | Path | Description |
 |--------|------|-------------|
-| `POST` | `/event-types` | Register event type |
-| `GET` | `/event-types` | List event types |
-| `GET` | `/event-types/{name}` | Get event type by name |
-| `DELETE` | `/event-types/{name}` | Deprecate event type |
+| `GET` | `/v1/jobs` | List jobs |
+| `GET` | `/v1/jobs/:jobId` | Get job by ID |
+| `POST` | `/v1/jobs/:jobId/cancel` | Cancel a pending job |
+| `GET` | `/v1/jobs/counts` | Job counts by state |
 
-### Endpoints
-
-| Method | Path | Description |
-|--------|------|-------------|
-| `POST` | `/endpoints` | Create endpoint |
-| `GET` | `/endpoints` | List endpoints |
-| `GET` | `/endpoints/{id}` | Get endpoint |
-| `PUT` | `/endpoints/{id}` | Update endpoint |
-| `DELETE` | `/endpoints/{id}` | Delete endpoint |
-| `PATCH` | `/endpoints/{id}/enable` | Enable endpoint |
-| `PATCH` | `/endpoints/{id}/disable` | Disable endpoint |
-| `POST` | `/endpoints/{id}/rotate-secret` | Rotate signing secret |
-
-### Events
+### Workflows
 
 | Method | Path | Description |
 |--------|------|-------------|
-| `POST` | `/events` | Send event |
-| `GET` | `/events` | List events |
-| `GET` | `/events/{id}` | Get event |
+| `GET` | `/v1/workflows` | List workflow definitions |
+| `GET` | `/v1/workflows/runs` | List workflow runs |
+| `GET` | `/v1/workflows/runs/:runId` | Get a workflow run |
 
-### Deliveries
+### Crons
 
 | Method | Path | Description |
 |--------|------|-------------|
-| `GET` | `/endpoints/{id}/deliveries` | List deliveries for endpoint |
+| `GET` | `/v1/crons` | List cron entries |
+| `GET` | `/v1/crons/:cronId` | Get cron entry |
+| `POST` | `/v1/crons/:cronId/enable` | Enable a cron entry |
+| `POST` | `/v1/crons/:cronId/disable` | Disable a cron entry |
+| `DELETE` | `/v1/crons/:cronId` | Delete a cron entry |
 
 ### DLQ
 
 | Method | Path | Description |
 |--------|------|-------------|
-| `GET` | `/dlq` | List DLQ entries |
-| `POST` | `/dlq/{id}/replay` | Replay single entry |
-| `POST` | `/dlq/replay` | Bulk replay |
+| `GET` | `/v1/dlq` | List DLQ entries |
+| `GET` | `/v1/dlq/:entryId` | Get a DLQ entry |
+| `POST` | `/v1/dlq/:entryId/replay` | Replay a single entry |
+| `POST` | `/v1/dlq/purge` | Purge all DLQ entries |
+| `GET` | `/v1/dlq/count` | DLQ entry count |
 
 ### Stats
 
 | Method | Path | Description |
 |--------|------|-------------|
-| `GET` | `/stats` | System statistics |
-
-## Middleware
-
-The handler includes built-in middleware:
-- **Logging** -- Logs method, path, status, and duration for every request.
-- **Panic recovery** -- Catches panics and returns 500 with a JSON error.
+| `GET` | `/v1/stats` | System-wide statistics |
 
 ## Error responses
 
 All errors return JSON:
 
 ```json
-{"error": "endpoint not found"}
+{"error": "job not found"}
 ```

@@ -1,57 +1,70 @@
 ---
 title: Error Handling
-description: Sentinel errors and how Relay surfaces problems.
+description: Sentinel errors and how Dispatch surfaces problems.
 ---
 
-Relay defines a set of sentinel errors in the root package. Use `errors.Is` to check for specific conditions.
+Dispatch defines a set of sentinel errors in the root package. Use `errors.Is` to check for specific conditions.
 
 ## Sentinel errors
 
 ```go
+import "github.com/xraph/dispatch"
+
 var (
-    ErrNoStore                 = errors.New("relay: store is required")
-    ErrEndpointNotFound        = errors.New("relay: endpoint not found")
-    ErrEventTypeNotFound       = errors.New("relay: event type not found")
-    ErrEventTypeDeprecated     = errors.New("relay: event type is deprecated")
-    ErrPayloadValidationFailed = errors.New("relay: payload validation failed")
-    ErrDuplicateIdempotencyKey = errors.New("relay: duplicate idempotency key")
-    ErrEndpointDisabled        = errors.New("relay: endpoint is disabled")
-    ErrStoreClosed             = errors.New("relay: store is closed")
-    ErrMigrationFailed         = errors.New("relay: migration failed")
-    ErrDLQNotFound             = errors.New("relay: dlq entry not found")
-    ErrDeliveryNotFound        = errors.New("relay: delivery not found")
-    ErrEventNotFound           = errors.New("relay: event not found")
+    // Store errors
+    ErrNoStore         = errors.New("dispatch: no store configured")
+    ErrStoreClosed     = errors.New("dispatch: store closed")
+    ErrMigrationFailed = errors.New("dispatch: migration failed")
+
+    // Not found errors
+    ErrJobNotFound      = errors.New("dispatch: job not found")
+    ErrWorkflowNotFound = errors.New("dispatch: workflow not found")
+    ErrRunNotFound      = errors.New("dispatch: run not found")
+    ErrCronNotFound     = errors.New("dispatch: cron entry not found")
+    ErrDLQNotFound      = errors.New("dispatch: dlq entry not found")
+    ErrEventNotFound    = errors.New("dispatch: event not found")
+    ErrWorkerNotFound   = errors.New("dispatch: worker not found")
+
+    // Conflict errors
+    ErrJobAlreadyExists = errors.New("dispatch: job already exists")
+    ErrDuplicateCron    = errors.New("dispatch: duplicate cron entry")
+
+    // State errors
+    ErrInvalidState       = errors.New("dispatch: invalid state transition")
+    ErrMaxRetriesExceeded = errors.New("dispatch: max retries exceeded")
+
+    // Cluster errors
+    ErrLeadershipLost = errors.New("dispatch: leadership lost")
+    ErrNotLeader      = errors.New("dispatch: not the leader")
 )
 ```
 
 ## Checking errors
 
 ```go
-err := r.Send(ctx, evt)
-if errors.Is(err, relay.ErrEventTypeNotFound) {
-    // event type not registered in the catalog
+err := engine.Enqueue(ctx, eng, SendEmail, input)
+if errors.Is(err, dispatch.ErrNoStore) {
+    // dispatcher has no store configured
 }
 ```
 
 ## Wrapping convention
 
-Subsystems wrap the sentinel with `fmt.Errorf` and `%w`:
+Subsystems wrap sentinels with `fmt.Errorf` and `%w`:
 
 ```go
-return fmt.Errorf("%w: %s", ErrEventTypeNotFound, evt.Type)
+return fmt.Errorf("%w: job %s", dispatch.ErrJobNotFound, jobID)
 ```
 
-## Validation errors
+## Cluster errors
 
-The endpoint service returns `*endpoint.ValidationError` for invalid input:
+When running distributed workers, leadership-related errors may surface during cron scheduling or stale-job recovery:
 
 ```go
-var valErr *endpoint.ValidationError
-if errors.As(err, &valErr) {
-    log.Printf("invalid %s: %s", valErr.Field, valErr.Message)
+if errors.Is(err, dispatch.ErrLeadershipLost) {
+    // another worker took leadership mid-operation; safe to ignore
+}
+if errors.Is(err, dispatch.ErrNotLeader) {
+    // this worker is not the leader; skip leader-only operations
 }
 ```
-
-## Idempotency
-
-Duplicate idempotency keys are not treated as errors. When `Send()` encounters a duplicate, it returns `nil` (no-op success).

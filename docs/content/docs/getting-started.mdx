@@ -1,22 +1,22 @@
 ---
 title: Getting Started
-description: Install Relay and send your first webhook in under five minutes.
+description: Install Dispatch and process your first job in under five minutes.
 ---
 
 ## Prerequisites
 
-- Go 1.22 or later
+- Go 1.25 or later
 - A Go module (`go mod init`)
 
 ## Install
 
 ```bash
-go get github.com/xraph/relay
+go get github.com/xraph/dispatch
 ```
 
-## Step 1: Create a Relay instance
+## Step 1: Create a Dispatcher
 
-Every Relay instance requires a store backend. For development and testing, use the in-memory store:
+Every Dispatcher requires a store backend. For development and testing, use the in-memory store:
 
 ```go
 package main
@@ -25,98 +25,100 @@ import (
     "context"
     "log"
 
-    "github.com/xraph/relay"
-    "github.com/xraph/relay/store/memory"
+    "github.com/xraph/dispatch"
+    "github.com/xraph/dispatch/store/memory"
 )
 
 func main() {
     ctx := context.Background()
 
-    r, err := relay.New(
-        relay.WithStore(memory.New()),
+    d, err := dispatch.New(
+        dispatch.WithStore(memory.New()),
     )
     if err != nil {
         log.Fatal(err)
     }
 
-    _ = r
+    _ = d
 }
 ```
 
-## Step 2: Register an event type
+## Step 2: Define a job
 
-Event types live in the catalog. Register them at boot or at runtime through the admin API:
-
-```go
-import "github.com/xraph/relay/catalog"
-
-r.RegisterEventType(ctx, catalog.WebhookDefinition{
-    Name:        "order.created",
-    Description: "Fired when a new order is placed",
-    Version:     "2025-01-01",
-})
-```
-
-## Step 3: Create a webhook endpoint
-
-Endpoints belong to tenants and subscribe to event types using glob patterns:
-
-```go
-import "github.com/xraph/relay/endpoint"
-
-ep, err := r.Endpoints().Create(ctx, endpoint.Input{
-    TenantID:   "tenant-acme",
-    URL:        "https://acme.example.com/webhook",
-    EventTypes: []string{"order.*"},
-})
-```
-
-A signing secret is auto-generated when `Secret` is not provided. The secret is used to compute HMAC-SHA256 signatures for every delivery.
-
-## Step 4: Send an event
+A job definition is a typed Go function. The input struct is JSON-serialized at enqueue time and deserialized before execution:
 
 ```go
 import (
-    "encoding/json"
-    "github.com/xraph/relay/event"
+    "github.com/xraph/dispatch/job"
 )
 
-err = r.Send(ctx, &event.Event{
-    Type:     "order.created",
-    TenantID: "tenant-acme",
-    Data:     json.RawMessage(`{"order_id":"ORD-001","amount":99.99}`),
+type EmailInput struct {
+    To      string `json:"to"`
+    Subject string `json:"subject"`
+    Body    string `json:"body"`
+}
+
+var SendEmail = job.NewDefinition("send_email",
+    func(ctx context.Context, input EmailInput) error {
+        log.Printf("sending email to %s: %s", input.To, input.Subject)
+        return nil
+    },
+)
+```
+
+## Step 3: Build the engine and register jobs
+
+The `engine` package wires all subsystems. Register job definitions at startup:
+
+```go
+import "github.com/xraph/dispatch/engine"
+
+eng := engine.Build(d)
+engine.Register(eng, SendEmail)
+```
+
+## Step 4: Start the dispatcher
+
+```go
+if err := d.Start(ctx); err != nil {
+    log.Fatal(err)
+}
+defer d.Stop(ctx)
+```
+
+The engine starts polling for pending jobs and dispatching them to workers.
+
+## Step 5: Enqueue a job
+
+```go
+engine.Enqueue(ctx, eng, SendEmail, EmailInput{
+    To:      "user@example.com",
+    Subject: "Welcome to Acme",
+    Body:    "Thanks for signing up!",
 })
 ```
 
-`Send()` validates the event type, persists the event, resolves all matching endpoints, and enqueues one delivery per endpoint.
-
-## Step 5: Start the delivery engine
-
-```go
-r.Start(ctx)
-defer r.Stop(ctx)
-```
-
-The engine polls for pending deliveries, dispatches them to worker goroutines, and handles retries with exponential backoff.
+`Enqueue` serializes the input to JSON and persists the job in `pending` state. A worker picks it up on the next poll cycle.
 
 ## Step 6: Mount the admin API (optional)
 
 ```go
 import (
     "net/http"
-    "github.com/xraph/relay/api"
+    "github.com/xraph/dispatch/api"
 )
 
-handler := api.NewHandler(r.Store(), r.Catalog(), r.Endpoints(), r.DLQ(), nil)
 mux := http.NewServeMux()
-mux.Handle("/webhooks/", http.StripPrefix("/webhooks", handler))
+api.RegisterRoutes(mux, eng)
 
 log.Fatal(http.ListenAndServe(":8080", mux))
 ```
 
+The admin API exposes HTTP endpoints for inspecting jobs, workflows, crons, DLQ entries, and stats.
+
 ## Next steps
 
-- [Architecture](/docs/architecture) -- Understand the package structure
-- [Catalog](/docs/subsystems/catalog) -- Configure event types with JSON Schema
-- [Delivery](/docs/subsystems/delivery) -- Tune retry schedules and concurrency
-- [Stores](/docs/stores/postgres) -- Connect to PostgreSQL for production
+- [Architecture](/docs/architecture) — Understand how the packages fit together
+- [Jobs](/docs/subsystems/jobs) — Typed definitions, priorities, retries, and backoff
+- [Workflows](/docs/subsystems/workflows) — Durable multi-step functions with checkpointing
+- [Stores](/docs/stores/postgres) — Connect to PostgreSQL for production

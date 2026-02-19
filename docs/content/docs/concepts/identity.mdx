@@ -1,66 +1,70 @@
 ---
 title: Identity (TypeID)
-description: How Relay uses prefix-qualified, globally unique identifiers for every entity.
+description: How Dispatch uses type-safe, prefix-qualified identifiers for every entity.
 ---
 
-Every entity in Relay has a TypeID. TypeIDs are globally unique, sortable, URL-safe identifiers built on UUIDv7 with a human-readable prefix that tells you what kind of entity you're looking at.
+Every entity in Dispatch has a TypeID. TypeIDs are globally unique, K-sortable, URL-safe identifiers built on UUIDv7 with a human-readable prefix that tells you what kind of entity you're looking at.
 
 A TypeID looks like this:
 
 ```
-evt_01h455vb4pex5vsknk084sn02q
+job_01h2xcejqtf2nbrexx3vqjhp41
+wfrun_01h455vb4pex5vsknk084sn02q
 ```
 
-The `evt` prefix identifies this as an event. The suffix is a base32-encoded UUIDv7 that encodes creation time, so IDs sort chronologically.
+The prefix identifies the entity type. The suffix is a base32-encoded UUIDv7 that encodes creation time, so IDs sort chronologically.
+
+## Compile-time safety
+
+Dispatch uses **separate typed aliases** for each entity. Passing a `CronID` where a `JobID` is expected is a compile error:
+
+```go
+var cronID id.CronID = id.NewCronID()
+var jobID  id.JobID  = cronID  // compile error: cannot use CronID as JobID
+```
 
 ## The `id` package
 
-The `id` package wraps the [TypeID Go library](https://github.com/jetify-com/typeid-go) (v2) with a single `ID` struct. All entity types share the same struct -- the prefix distinguishes them.
+The `id` package wraps [go.jetify.com/typeid](https://github.com/jetify-com/typeid-go) with typed aliases for each entity.
 
 ### Creating IDs
 
 ```go
-import "github.com/xraph/relay/id"
+import "github.com/xraph/dispatch/id"
 
-eventTypeID := id.New(id.PrefixEventType)  // evtype_01h455vb...
-endpointID  := id.New(id.PrefixEndpoint)   // ep_01h455vb...
-eventID     := id.New(id.PrefixEvent)      // evt_01h455vb...
+jobID  := id.NewJobID()   // job_01h455vb...
+runID  := id.NewRunID()   // wfrun_01h455vb...
+cronID := id.NewCronID()  // cron_01h455vb...
+dlqID  := id.NewDLQID()   // dlq_01h455vb...
 ```
-
-Convenience constructors: `id.NewEventTypeID()`, `id.NewEndpointID()`, `id.NewEventID()`, `id.NewDeliveryID()`, `id.NewDLQID()`, `id.NewSecretID()`.
 
 ### Parsing IDs
 
 ```go
-parsed, err := id.Parse("evt_01h455vb4pex5vsknk084sn02q")
-parsed, err := id.ParseWithPrefix("evt_01h455vb...", id.PrefixEvent)  // validates prefix
-parsed, err := id.ParseEventID("evt_01h455vb...")                     // convenience
+jobID, err  := id.ParseJobID("job_01h455vb4pex5vsknk084sn02q")
+runID, err  := id.ParseRunID("wfrun_01h455vb4pex5vsknk084sn02q")
+cronID, err := id.ParseCronID("cron_01h455vb4pex5vsknk084sn02q")
+
+// Accept any valid prefix (when type is dynamic):
+anyID, err := id.ParseAny("wkr_01h455vb4pex5vsknk084sn02q")
 ```
 
-### Nil ID
+Parsing rejects IDs with the wrong prefix:
 
 ```go
-var empty id.ID
-empty.IsNil()  // true
-empty.String() // ""
-id.Nil.IsNil() // true
+_, err := id.ParseJobID("cron_01h455...")
+// err: prefix mismatch
 ```
-
-### Database storage
-
-`id.ID` implements `Scanner` and `driver.Valuer`. Stores as a string, returns `NULL` for nil IDs.
-
-### JSON serialization
-
-`id.ID` implements `TextMarshaler` and `TextUnmarshaler`. Nil IDs serialize as empty strings.
 
 ## Prefix reference
 
-| Constant | Prefix | Entity |
-|----------|--------|--------|
-| `id.PrefixEventType` | `evtype` | Event type |
-| `id.PrefixEndpoint` | `ep` | Webhook endpoint |
-| `id.PrefixEvent` | `evt` | Event |
-| `id.PrefixDelivery` | `del` | Delivery attempt |
-| `id.PrefixDLQ` | `dlq` | Dead letter queue entry |
-| `id.PrefixSecret` | `whsec` | Signing secret |
+| Type | Prefix | Example |
+|------|--------|---------|
+| `id.JobID` | `job` | `job_01h2xcejqtf2nbrexx3vqjhp41` |
+| `id.WorkflowID` | `wf` | `wf_01h455vb4pex5vsknk084sn02q` |
+| `id.RunID` | `wfrun` | `wfrun_01h455vb4pex5vsknk084sn02q` |
+| `id.CheckpointID` | `ckpt` | `ckpt_01h455vb4pex5vsknk084sn02q` |
+| `id.CronID` | `cron` | `cron_01h455vb4pex5vsknk084sn02q` |
+| `id.DLQID` | `dlq` | `dlq_01h455vb4pex5vsknk084sn02q` |
+| `id.EventID` | `evt` | `evt_01h455vb4pex5vsknk084sn02q` |
+| `id.WorkerID` | `wkr` | `wkr_01h455vb4pex5vsknk084sn02q` |

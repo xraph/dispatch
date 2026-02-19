@@ -3,7 +3,7 @@
   "pages": [
     "full-example",
     "forge-extension",
-    "webhook-verification",
-    "custom-store"
+    "custom-store",
+    "webhook-verification"
   ]
 }

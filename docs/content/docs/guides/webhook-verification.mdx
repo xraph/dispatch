@@ -1,71 +1,81 @@
 ---
-title: Webhook Verification
-description: How to verify webhook signatures on the receiving end.
+title: Relay Hook
+description: Emit typed webhook events at every Dispatch lifecycle point using relay_hook.
 ---
 
-Every webhook delivery from Relay includes an HMAC-SHA256 signature. This guide shows how to verify it.
+The `relay_hook` package bridges Dispatch lifecycle events to [Relay](https://github.com/xraph/relay) for webhook delivery. When registered as a Dispatch extension, it emits a typed webhook event at every job, workflow, cron, and shutdown lifecycle point.
 
-## Headers
-
-Each delivery includes:
-
-| Header | Description |
-|--------|-------------|
-| `X-Relay-Signature` | `v1=<hex>` HMAC-SHA256 signature |
-| `X-Relay-Timestamp` | Unix timestamp (seconds) |
-
-## Verification in Go
+## Setup
 
 ```go
 import (
-    "io"
-    "net/http"
-    "strconv"
-
-    "github.com/xraph/relay/signature"
+    "github.com/xraph/relay"
+    "github.com/xraph/dispatch/relay_hook"
+    "github.com/xraph/relay/store/memory"
 )
 
-func webhookHandler(w http.ResponseWriter, r *http.Request) {
-    body, err := io.ReadAll(r.Body)
-    if err != nil {
-        http.Error(w, "bad request", http.StatusBadRequest)
-        return
-    }
+// Create a Relay instance.
+r, _ := relay.New(relay.WithStore(memory.New()))
 
-    sig := r.Header.Get("X-Relay-Signature")
-    ts, err := strconv.ParseInt(r.Header.Get("X-Relay-Timestamp"), 10, 64)
-    if err != nil {
-        http.Error(w, "missing timestamp", http.StatusBadRequest)
-        return
-    }
+// Register the event types Dispatch will emit.
+relay_hook.RegisterAll(ctx, r)
 
-    if !signature.Verify(body, myEndpointSecret, ts, sig) {
-        http.Error(w, "invalid signature", http.StatusUnauthorized)
-        return
-    }
+// Create the hook extension.
+hook := relay_hook.New(r)
 
-    // Signature valid -- process the webhook
-    w.WriteHeader(http.StatusOK)
-}
+// Register with the engine.
+eng := engine.Build(d,
+    engine.WithExtension(hook),
+)
 ```
 
-## Manual verification
+## Emitted event types
 
-If you're not using Go, the algorithm is:
+| Event type | Lifecycle point |
+|-----------|----------------|
+| `dispatch.job.enqueued` | Job accepted into queue |
+| `dispatch.job.started` | Worker begins execution |
+| `dispatch.job.completed` | Job finishes successfully |
+| `dispatch.job.failed` | Job fails terminally |
+| `dispatch.job.retrying` | Job fails, scheduled for retry |
+| `dispatch.job.dlq` | Job moved to DLQ |
+| `dispatch.workflow.started` | Workflow run begins |
+| `dispatch.workflow.step.completed` | Workflow step completes |
+| `dispatch.workflow.step.failed` | Workflow step fails |
+| `dispatch.workflow.completed` | Workflow run completes |
+| `dispatch.workflow.failed` | Workflow run fails |
+| `dispatch.cron.fired` | Cron entry fires |
+| `dispatch.shutdown` | Dispatcher shuts down |
 
-1. Extract `X-Relay-Timestamp` and `X-Relay-Signature` from headers.
-2. Construct the signed content: `"{timestamp}.{raw_body}"`.
-3. Compute HMAC-SHA256 of the content using the endpoint secret as the key.
-4. Format as `"v1=" + hex(hmac_result)`.
-5. Compare with the received signature using constant-time comparison.
+## Filtering events
 
-## Replay protection
-
-Check that the timestamp is within an acceptable window (e.g., 5 minutes) to prevent replay attacks:
+Restrict which events are emitted:
 
 ```go
-if time.Now().Unix()-ts > 300 {
-    http.Error(w, "timestamp too old", http.StatusUnauthorized)
-    return
+hook := relay_hook.New(r,
+    relay_hook.WithEvents(
+        relay_hook.EventJobCompleted,
+        relay_hook.EventJobFailed,
+        relay_hook.EventJobDLQ,
+        relay_hook.EventWorkflowFailed,
+    ),
+)
+```
+
+## Event payload
+
+Each webhook event carries a JSON payload with the full entity at the time of the lifecycle event. For example, `dispatch.job.completed` includes:
+
+```json
+{
+  "job_id": "job_01h2xcejqtf2nbrexx3vqjhp41",
+  "name": "send_email",
+  "queue": "default",
+  "elapsed_ms": 142,
+  "completed_at": "2025-01-15T09:00:00Z"
 }
 ```
+
+## Tenant routing
+
+Webhook events are routed to Relay endpoints matching the job's `ScopeOrgID` as the `TenantID`. If `ScopeOrgID` is empty, events are routed to a global tenant.

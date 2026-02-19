@@ -1,9 +1,9 @@
 ---
 title: Full Example
-description: Build a complete webhook server with Relay.
+description: Build a complete background job processor with Dispatch.
 ---
 
-This guide walks through building a complete webhook server with event types, endpoints, and the admin API.
+This guide walks through building a complete Dispatch server with jobs, workflows, crons, a PostgreSQL store, and the admin API.
 
 ## Complete server
 
@@ -12,19 +12,56 @@ package main
 
 import (
     "context"
-    "encoding/json"
     "log"
     "log/slog"
     "net/http"
     "os"
     "os/signal"
+    "time"
 
-    "github.com/xraph/relay"
-    "github.com/xraph/relay/api"
-    "github.com/xraph/relay/catalog"
-    "github.com/xraph/relay/endpoint"
-    "github.com/xraph/relay/event"
-    "github.com/xraph/relay/store/memory"
+    "github.com/xraph/dispatch"
+    "github.com/xraph/dispatch/api"
+    "github.com/xraph/dispatch/backoff"
+    "github.com/xraph/dispatch/engine"
+    "github.com/xraph/dispatch/job"
+    "github.com/xraph/dispatch/middleware"
+    "github.com/xraph/dispatch/queue"
+    "github.com/xraph/dispatch/store/postgres"
+    "github.com/xraph/dispatch/workflow"
+)
+
+// Job definition.
+type EmailInput struct {
+    To      string `json:"to"`
+    Subject string `json:"subject"`
+}
+
+var SendEmail = job.NewDefinition("send_email",
+    func(ctx context.Context, input EmailInput) error {
+        log.Printf("sending email to %s: %s", input.To, input.Subject)
+        return nil
+    },
+)
+
+// Workflow definition.
+type OnboardInput struct {
+    UserID string `json:"user_id"`
+    Email  string `json:"email"`
+}
+
+var OnboardUser = workflow.NewWorkflow("onboard_user",
+    func(wf *workflow.Workflow, input OnboardInput) error {
+        if err := wf.Step("send-welcome", func() error {
+            log.Printf("sending welcome to %s", input.Email)
+            return nil
+        }); err != nil {
+            return err
+        }
+        return wf.Step("setup-account", func() error {
+            log.Printf("setting up account for user %s", input.UserID)
+            return nil
+        })
+    },
 )
 
 func main() {
@@ -33,49 +70,67 @@ func main() {
 
     logger := slog.Default()
 
-    // Create relay with in-memory store.
-    r, err := relay.New(
-        relay.WithStore(memory.New()),
-        relay.WithLogger(logger),
+    // Connect to PostgreSQL.
+    store, err := postgres.New(ctx, os.Getenv("DATABASE_URL"))
+    if err != nil {
+        log.Fatal(err)
+    }
+    if err := store.Migrate(ctx); err != nil {
+        log.Fatal(err)
+    }
+
+    // Create dispatcher.
+    d, err := dispatch.New(
+        dispatch.WithStore(store),
+        dispatch.WithLogger(logger),
+        dispatch.WithConcurrency(20),
+        dispatch.WithQueues([]string{"default", "critical", "bulk"}),
     )
     if err != nil {
         log.Fatal(err)
     }
 
-    // Register event types.
-    r.RegisterEventType(ctx, catalog.WebhookDefinition{
-        Name:        "order.created",
-        Description: "Fired when a new order is placed",
-        Version:     "2025-01-01",
-    })
-    r.RegisterEventType(ctx, catalog.WebhookDefinition{
-        Name:        "order.shipped",
-        Description: "Fired when an order is shipped",
-        Version:     "2025-01-01",
-    })
+    // Build engine with middleware and queue configs.
+    eng := engine.Build(d,
+        engine.WithMiddleware(middleware.Logging(logger)),
+        engine.WithMiddleware(middleware.Recover()),
+        engine.WithMiddleware(middleware.Tracing()),
+        engine.WithBackoff(backoff.Exponential(
+            backoff.WithBase(5*time.Second),
+            backoff.WithMax(2*time.Hour),
+        )),
+        engine.WithQueueConfig(
+            queue.Config{Name: "critical", MaxConcurrency: 20},
+            queue.Config{Name: "bulk", RateLimit: 10, RateBurst: 20},
+        ),
+    )
 
-    // Create a webhook endpoint.
-    ep, _ := r.Endpoints().Create(ctx, endpoint.Input{
-        TenantID:   "tenant-acme",
-        URL:        "https://acme.example.com/webhook",
-        EventTypes: []string{"order.*"},
-    })
-    logger.Info("endpoint created", "id", ep.ID, "secret", ep.Secret)
+    // Register jobs and workflows.
+    engine.Register(eng, SendEmail)
+    engine.RegisterWorkflow(eng, OnboardUser)
 
-    // Start the delivery engine.
-    r.Start(ctx)
-    defer r.Stop(ctx)
+    // Register a cron.
+    engine.RegisterCron(ctx, eng, "daily-cleanup", "0 3 * * *",
+        SendEmail, EmailInput{To: "admin@example.com", Subject: "Daily cleanup report"})
+
+    // Start processing.
+    if err := d.Start(ctx); err != nil {
+        log.Fatal(err)
+    }
+    defer d.Stop(ctx)
 
     // Mount the admin API.
-    handler := api.NewHandler(r.Store(), r.Catalog(), r.Endpoints(), r.DLQ(), logger)
     mux := http.NewServeMux()
-    mux.Handle("/webhooks/", http.StripPrefix("/webhooks", handler))
+    api.RegisterRoutes(mux, eng)
 
-    // Send a test event.
-    r.Send(ctx, &event.Event{
-        Type:     "order.created",
-        TenantID: "tenant-acme",
-        Data:     json.RawMessage(`{"order_id":"ORD-001","amount":99.99}`),
+    // Enqueue some test jobs.
+    engine.Enqueue(ctx, eng, SendEmail, EmailInput{
+        To:      "user@example.com",
+        Subject: "Welcome to Acme",
+    })
+    engine.StartWorkflow(ctx, eng, OnboardUser, OnboardInput{
+        UserID: "usr_01h455vb4pex5vsknk084sn02q",
+        Email:  "newuser@example.com",
     })
 
     log.Println("listening on :8080")
@@ -93,20 +148,21 @@ func main() {
 ## Testing it
 
 ```bash
-# List event types
-curl -s http://localhost:8080/webhooks/event-types | jq
+# List jobs
+curl -s http://localhost:8080/v1/jobs | jq
 
-# List endpoints
-curl -s http://localhost:8080/webhooks/endpoints?tenant_id=tenant-acme | jq
+# Job counts by state
+curl -s http://localhost:8080/v1/jobs/counts | jq
 
-# Send an event via API
-curl -s -X POST http://localhost:8080/webhooks/events \
-  -H "Content-Type: application/json" \
-  -d '{"type":"order.shipped","tenant_id":"tenant-acme","data":{"order_id":"ORD-001"}}' | jq
+# List workflow runs
+curl -s http://localhost:8080/v1/workflows/runs | jq
+
+# List cron entries
+curl -s http://localhost:8080/v1/crons | jq
 
 # Check DLQ
-curl -s http://localhost:8080/webhooks/dlq | jq
+curl -s http://localhost:8080/v1/dlq | jq
 
 # View stats
-curl -s http://localhost:8080/webhooks/stats | jq
+curl -s http://localhost:8080/v1/stats | jq
 ```

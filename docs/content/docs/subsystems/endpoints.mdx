@@ -1,51 +1,84 @@
 ---
-title: Endpoints
-description: Webhook endpoint management, subscriptions, and secret rotation.
+title: Cron
+description: Distributed cron scheduling with leader election and per-tenant support.
 ---
 
-The endpoint service manages webhook delivery targets. Each endpoint belongs to a tenant and subscribes to event types via glob patterns.
+The `cron` package provides distributed cron scheduling. Only the cluster leader fires cron entries, guaranteeing at-most-once job enqueue even when multiple Dispatch instances are running.
 
-## Creating an endpoint
+## Registering a cron
 
-```go
-ep, err := r.Endpoints().Create(ctx, endpoint.Input{
-    TenantID:    "tenant-acme",
-    URL:         "https://acme.example.com/webhook",
-    Description: "Acme production webhook",
-    EventTypes:  []string{"order.*", "invoice.created"},
-    Headers:     map[string]string{"X-Custom": "value"},
-    RateLimit:   100,
-    Metadata:    map[string]string{"env": "production"},
-})
-```
-
-A signing secret is auto-generated (format: `whsec_` + 32 bytes hex) unless provided in the input.
-
-## Operations
-
-| Method | Description |
-|--------|-------------|
-| `Create(ctx, input)` | Register a new endpoint |
-| `Get(ctx, id)` | Get endpoint by ID |
-| `Update(ctx, id, input)` | Partial update |
-| `Delete(ctx, id)` | Remove endpoint |
-| `List(ctx, tenantID, opts)` | List endpoints for a tenant |
-| `SetEnabled(ctx, id, bool)` | Enable or disable |
-| `RotateSecret(ctx, id)` | Generate a new signing secret |
-
-## Secret rotation
+Use `engine.RegisterCron` at startup:
 
 ```go
-newSecret, err := r.Endpoints().RotateSecret(ctx, endpointID)
+type ReportInput struct {
+    Format string `json:"format"`
+}
+
+var GenerateReport = job.NewDefinition("generate_report",
+    func(ctx context.Context, input ReportInput) error {
+        return generateDailyReport(input.Format)
+    },
+)
+
+// Run every day at 9 AM
+engine.RegisterCron(ctx, eng, "daily-report", "0 9 * * *",
+    GenerateReport, ReportInput{Format: "pdf"})
 ```
 
-The old secret is immediately replaced. Deliver the new secret to the endpoint owner through a secure channel.
+The cron entry is persisted in the store. If an entry with the same name already exists, `ErrDuplicateCron` is returned (unless `UpsertOnConflict` is used).
 
-## Disabling endpoints
+## Schedule format
 
-Endpoints can be disabled manually or automatically:
+Dispatch uses standard 5-field cron expressions (via `robfig/cron/v3`):
 
-- **Manual**: `r.Endpoints().SetEnabled(ctx, id, false)`
-- **Automatic**: When a delivery receives HTTP 410 Gone, the engine disables the endpoint.
+```
+┌───────────── minute (0–59)
+│ ┌─────────── hour (0–23)
+│ │ ┌───────── day of month (1–31)
+│ │ │ ┌─────── month (1–12)
+│ │ │ │ ┌───── day of week (0–6, Sunday=0)
+│ │ │ │ │
+* * * * *
+```
 
-Disabled endpoints are excluded from delivery resolution.
+Common expressions:
+
+| Expression | Meaning |
+|-----------|---------|
+| `* * * * *` | Every minute |
+| `0 * * * *` | Every hour |
+| `0 9 * * 1-5` | Weekdays at 9 AM |
+| `0 0 1 * *` | First of each month at midnight |
+| `@hourly` | Every hour (alias) |
+| `@daily` | Every day at midnight (alias) |
+
+## Enable / Disable
+
+Cron entries can be toggled at runtime:
+
+```bash
+POST /v1/crons/:cronId/enable
+POST /v1/crons/:cronId/disable
+```
+
+Disabled entries are skipped by the scheduler without being deleted.
+
+## Admin API
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET` | `/v1/crons` | List all cron entries |
+| `GET` | `/v1/crons/:cronId` | Get cron entry |
+| `POST` | `/v1/crons/:cronId/enable` | Enable |
+| `POST` | `/v1/crons/:cronId/disable` | Disable |
+| `DELETE` | `/v1/crons/:cronId` | Delete |
+
+## Extension hook
+
+When a cron fires and a job is enqueued, the `ext.CronFired` hook is called:
+
+```go
+type CronFired interface {
+    OnCronFired(ctx context.Context, entryName string, jobID id.JobID) error
+}
+```

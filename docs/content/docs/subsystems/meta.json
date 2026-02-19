@@ -2,12 +2,12 @@
   "title": "Subsystems",
   "pages": [
     "catalog",
-    "endpoints",
-    "events",
     "delivery",
     "dlq",
-    "signatures",
+    "endpoints",
+    "events",
     "rate-limiting",
+    "signatures",
     "observability",
     "admin-api"
   ]

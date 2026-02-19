@@ -1,50 +1,86 @@
 ---
 title: Observability
-description: Prometheus metrics and OpenTelemetry tracing.
+description: OpenTelemetry metrics and tracing for Dispatch.
 ---
 
-The `observability` package provides Prometheus metrics and OpenTelemetry tracing for monitoring Relay in production.
+Dispatch provides two layers of observability:
 
-## Prometheus metrics
+1. **System-wide metrics** via `observability.MetricsExtension` — counters for every lifecycle event.
+2. **Per-job tracing and metrics** via `middleware.Tracing()` and `middleware.Metrics()` — spans and histograms per execution.
 
-```go
-import "github.com/xraph/relay/observability"
+## System-wide metrics (extension)
 
-metrics := observability.NewMetrics(prometheus.DefaultRegisterer)
-```
-
-### Available metrics
-
-| Metric | Type | Description |
-|--------|------|-------------|
-| `relay_events_sent_total` | Counter | Total events submitted |
-| `relay_deliveries_total` | CounterVec | Delivery attempts by status (`delivered`, `failed`, `retried`) |
-| `relay_delivery_latency_seconds` | Histogram | HTTP request latency per delivery |
-| `relay_dlq_size` | Gauge | Current DLQ entries |
-| `relay_pending_deliveries` | Gauge | Current pending deliveries |
-
-### Recording deliveries
+Register `MetricsExtension` as a lifecycle extension:
 
 ```go
-metrics.RecordDelivery("delivered", 0.245)
-metrics.RecordDelivery("failed", 1.023)
+import "github.com/xraph/dispatch/observability"
+
+metricsExt := observability.NewMetricsExtension(
+    observability.WithTracerProvider(tp),
+    observability.WithMetricFactory(factory),
+)
+
+eng := engine.Build(d,
+    engine.WithExtension(metricsExt),
+)
 ```
 
-## OpenTelemetry tracing
+### Metrics recorded
+
+| Event | Metric | Labels |
+|-------|--------|--------|
+| Job enqueued | `dispatch_jobs_enqueued_total` | `name`, `queue` |
+| Job completed | `dispatch_jobs_completed_total` | `name`, `queue` |
+| Job failed | `dispatch_jobs_failed_total` | `name`, `queue` |
+| Job retrying | `dispatch_jobs_retried_total` | `name`, `queue` |
+| Job DLQ | `dispatch_jobs_dlq_total` | `name`, `queue` |
+| Workflow started | `dispatch_workflows_started_total` | `name` |
+| Workflow completed | `dispatch_workflows_completed_total` | `name` |
+| Workflow failed | `dispatch_workflows_failed_total` | `name` |
+| Cron fired | `dispatch_crons_fired_total` | `name` |
+
+## Per-job tracing (middleware)
+
+Add `middleware.Tracing()` to the engine:
 
 ```go
-import "github.com/xraph/relay/observability"
-
-tracer := observability.NewTracer()
-
-ctx, span := tracer.StartDeliverySpan(ctx, deliveryID, eventID, endpointID)
-defer tracer.EndDeliverySpan(span, statusCode, latencyMs, errMsg)
+eng := engine.Build(d,
+    engine.WithMiddleware(middleware.Tracing()),
+    engine.WithTracerProvider(tp),
+)
 ```
 
-Each delivery span includes attributes:
-- `relay.delivery_id`
-- `relay.event_id`
-- `relay.endpoint_id`
-- `http.status_code`
-- `relay.latency_ms`
-- `relay.error` (if present)
+Each job execution creates an OpenTelemetry span with attributes:
+- `dispatch.job.name`
+- `dispatch.job.queue`
+- `dispatch.job.id`
+- `dispatch.job.retry_count`
+- `error` (if the job failed)
+
+## Per-job metrics (middleware)
+
+Add `middleware.Metrics()` to the engine:
+
+```go
+eng := engine.Build(d,
+    engine.WithMiddleware(middleware.Metrics()),
+    engine.WithMetricFactory(factory),
+)
+```
+
+Records a histogram `dispatch_job_duration_seconds` labelled by `name`, `queue`, and `status` (`completed` / `failed`).
+
+## Combining both layers
+
+For full observability, use both:
+
+```go
+eng := engine.Build(d,
+    engine.WithExtension(observability.NewMetricsExtension(
+        observability.WithTracerProvider(tp),
+    )),
+    engine.WithMiddleware(middleware.Tracing()),
+    engine.WithMiddleware(middleware.Metrics()),
+    engine.WithTracerProvider(tp),
+)
+```

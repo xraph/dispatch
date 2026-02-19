@@ -1,13 +1,13 @@
 ---
 title: Entities
-description: The base entity type and how domain objects are structured in Relay.
+description: The base entity type and how domain objects are structured in Dispatch.
 ---
 
-Every domain object in Relay -- event types, endpoints, events, deliveries, DLQ entries -- embeds a common base type that provides creation and update timestamps.
+Every domain object in Dispatch embeds a common base type that provides creation and update timestamps.
 
 ## The base entity
 
-The `internal/entity` package defines `Entity`:
+The root `dispatch` package defines `Entity`:
 
 ```go
 type Entity struct {
@@ -16,124 +16,132 @@ type Entity struct {
 }
 ```
 
-Create a new entity with `entity.New()`, which sets both timestamps to the current UTC time. IDs are assigned separately using the `id` package.
+IDs are separate, type-safe TypeID values assigned at creation time. See [Identity](/docs/concepts/identity).
 
 ## Domain entities
 
-### EventType
+### Job
 
-Defined in `catalog/event_type.go`. Wraps a `WebhookDefinition` with identity and state:
+Defined in `job/job.go`. A unit of background work:
 
 ```go
-type EventType struct {
-    entity.Entity
-    ID           id.ID              `json:"id"`
-    Definition   WebhookDefinition  `json:"definition"`
-    IsDeprecated bool               `json:"deprecated"`
-    DeprecatedAt *time.Time         `json:"deprecated_at,omitempty"`
-    ScopeAppID   string             `json:"scope_app_id,omitempty"`
-    Metadata     map[string]string  `json:"metadata,omitempty"`
+type Job struct {
+    dispatch.Entity
+    ID          id.JobID      `json:"id"`
+    Name        string        `json:"name"`
+    Queue       string        `json:"queue"`
+    Payload     []byte        `json:"payload"`
+    State       State         `json:"state"`
+    Priority    int           `json:"priority"`
+    MaxRetries  int           `json:"max_retries"`
+    RetryCount  int           `json:"retry_count"`
+    LastError   string        `json:"last_error,omitempty"`
+    ScopeAppID  string        `json:"scope_app_id,omitempty"`
+    ScopeOrgID  string        `json:"scope_org_id,omitempty"`
+    WorkerID    id.WorkerID   `json:"worker_id,omitempty"`
+    RunAt       time.Time     `json:"run_at"`
+    StartedAt   *time.Time    `json:"started_at,omitempty"`
+    CompletedAt *time.Time    `json:"completed_at,omitempty"`
+    HeartbeatAt *time.Time    `json:"heartbeat_at,omitempty"`
+    Timeout     time.Duration `json:"timeout,omitempty"`
 }
 ```
 
-### Endpoint
+**Job states:**
 
-Defined in `endpoint/endpoint.go`. A webhook delivery target registered by a tenant:
+| State | Meaning |
+|-------|---------|
+| `pending` | Waiting to be picked up by a worker |
+| `running` | Currently executing |
+| `completed` | Finished successfully |
+| `retrying` | Failed but scheduled for retry |
+| `failed` | Failed terminally (no more retries) |
+| `cancelled` | Explicitly cancelled |
+
+### Workflow Run
+
+Defined in `workflow/run.go`. A single execution of a workflow definition:
 
 ```go
-type Endpoint struct {
-    entity.Entity
-    ID          id.ID             `json:"id"`
-    TenantID    string            `json:"tenant_id"`
-    URL         string            `json:"url"`
-    Description string            `json:"description"`
-    Secret      string            `json:"-"`
-    EventTypes  []string          `json:"event_types"`
-    Headers     map[string]string `json:"headers,omitempty"`
-    Enabled     bool              `json:"enabled"`
-    RateLimit   int               `json:"rate_limit"`
-    Metadata    map[string]string `json:"metadata,omitempty"`
+type Run struct {
+    dispatch.Entity
+    ID          id.RunID   `json:"id"`
+    Name        string     `json:"name"`
+    State       RunState   `json:"state"`
+    Input       []byte     `json:"input,omitempty"`
+    Output      []byte     `json:"output,omitempty"`
+    Error       string     `json:"error,omitempty"`
+    ScopeAppID  string     `json:"scope_app_id,omitempty"`
+    ScopeOrgID  string     `json:"scope_org_id,omitempty"`
+    StartedAt   time.Time  `json:"started_at"`
+    CompletedAt *time.Time `json:"completed_at,omitempty"`
 }
 ```
 
-The `Secret` field is never serialized to JSON (tagged `json:"-"`).
+**Run states:** `running`, `completed`, `failed`.
 
-### Event
+### Cron Entry
 
-Defined in `event/event.go`. A webhook event submitted for delivery:
-
-```go
-type Event struct {
-    entity.Entity
-    ID             id.ID  `json:"id"`
-    Type           string `json:"type"`
-    TenantID       string `json:"tenant_id"`
-    Data           any    `json:"data"`
-    IdempotencyKey string `json:"idempotency_key,omitempty"`
-}
-```
-
-### Delivery
-
-Defined in `delivery/delivery.go`. A single webhook delivery attempt:
-
-```go
-type Delivery struct {
-    entity.Entity
-    ID             id.ID      `json:"id"`
-    EventID        id.ID      `json:"event_id"`
-    EndpointID     id.ID      `json:"endpoint_id"`
-    State          State      `json:"state"`
-    AttemptCount   int        `json:"attempt_count"`
-    MaxAttempts    int        `json:"max_attempts"`
-    NextAttemptAt  time.Time  `json:"next_attempt_at"`
-    LastError      string     `json:"last_error,omitempty"`
-    LastStatusCode int        `json:"last_status_code,omitempty"`
-    LastResponse   string     `json:"last_response,omitempty"`
-    LastLatencyMs  int        `json:"last_latency_ms,omitempty"`
-    CompletedAt    *time.Time `json:"completed_at,omitempty"`
-}
-```
-
-Delivery states: `pending`, `delivered`, `failed`.
-
-### DLQ Entry
-
-Defined in `dlq/entry.go`. A permanently failed delivery:
+Defined in `cron/entry.go`. A recurring job schedule:
 
 ```go
 type Entry struct {
-    entity.Entity
-    ID             id.ID      `json:"id"`
-    DeliveryID     id.ID      `json:"delivery_id"`
-    EventID        id.ID      `json:"event_id"`
-    EndpointID     id.ID      `json:"endpoint_id"`
-    EventType      string     `json:"event_type"`
-    TenantID       string     `json:"tenant_id"`
-    URL            string     `json:"url"`
-    Payload        any        `json:"payload"`
-    Error          string     `json:"error"`
-    AttemptCount   int        `json:"attempt_count"`
-    LastStatusCode int        `json:"last_status_code,omitempty"`
-    ReplayedAt     *time.Time `json:"replayed_at,omitempty"`
-    FailedAt       time.Time  `json:"failed_at"`
+    dispatch.Entity
+    ID          id.CronID  `json:"id"`
+    Name        string     `json:"name"`
+    Schedule    string     `json:"schedule"`
+    JobName     string     `json:"job_name"`
+    Queue       string     `json:"queue,omitempty"`
+    Payload     []byte     `json:"payload,omitempty"`
+    ScopeAppID  string     `json:"scope_app_id,omitempty"`
+    ScopeOrgID  string     `json:"scope_org_id,omitempty"`
+    LastRunAt   *time.Time `json:"last_run_at,omitempty"`
+    NextRunAt   *time.Time `json:"next_run_at,omitempty"`
+    LockedBy    string     `json:"locked_by,omitempty"`
+    LockedUntil *time.Time `json:"locked_until,omitempty"`
+    Enabled     bool       `json:"enabled"`
 }
 ```
 
-## WebhookDefinition
+### DLQ Entry
 
-The canonical description of a webhook event type, defined in `catalog/definition.go`:
+Defined in `dlq/entry.go`. A job that exhausted its retry budget:
 
 ```go
-type WebhookDefinition struct {
-    Name          string          `json:"name"`
-    Description   string          `json:"description"`
-    Group         string          `json:"group,omitempty"`
-    Schema        json.RawMessage `json:"schema,omitempty"`
-    SchemaVersion string          `json:"schema_version,omitempty"`
-    Version       string          `json:"version"`
-    Example       json.RawMessage `json:"example,omitempty"`
+type Entry struct {
+    ID         id.DLQID   `json:"id"`
+    JobID      id.JobID   `json:"job_id"`
+    JobName    string     `json:"job_name"`
+    Queue      string     `json:"queue"`
+    Payload    []byte     `json:"payload"`
+    Error      string     `json:"error"`
+    RetryCount int        `json:"retry_count"`
+    MaxRetries int        `json:"max_retries"`
+    ScopeAppID string     `json:"scope_app_id,omitempty"`
+    ScopeOrgID string     `json:"scope_org_id,omitempty"`
+    FailedAt   time.Time  `json:"failed_at"`
+    ReplayedAt *time.Time `json:"replayed_at,omitempty"`
+    CreatedAt  time.Time  `json:"created_at"`
 }
 ```
 
-The `Name` follows dot-separated convention: `"invoice.created"`, `"deployment.completed"`.
+### Worker
+
+Defined in `cluster/worker.go`. A running Dispatch instance in a distributed cluster:
+
+```go
+type Worker struct {
+    ID          id.WorkerID       `json:"id"`
+    Hostname    string            `json:"hostname"`
+    Queues      []string          `json:"queues"`
+    Concurrency int               `json:"concurrency"`
+    State       WorkerState       `json:"state"`
+    IsLeader    bool              `json:"is_leader"`
+    LeaderUntil *time.Time        `json:"leader_until,omitempty"`
+    LastSeen    time.Time         `json:"last_seen"`
+    Metadata    map[string]string `json:"metadata,omitempty"`
+    CreatedAt   time.Time         `json:"created_at"`
+}
+```
+
+**Worker states:** `active`, `draining`, `dead`.

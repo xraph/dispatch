@@ -1,50 +1,63 @@
 ---
-title: Rate Limiting
-description: Per-endpoint token bucket rate limiting.
+title: Middleware
+description: Composable job execution middleware for logging, tracing, metrics, recovery, and scope.
 ---
 
-The `ratelimit` package provides a token bucket rate limiter that throttles deliveries per endpoint.
+Middleware wraps each job execution with cross-cutting logic. It is composed into a chain using `middleware.Chain` and applied synchronously before and after each job runs.
 
-## How it works
+## Built-in middleware
 
-Each endpoint has an optional `RateLimit` field (deliveries per second). When set to a positive value, the rate limiter controls delivery throughput.
+| Middleware | Function | Purpose |
+|-----------|----------|---------|
+| Logging | `middleware.Logging(logger)` | Logs job name, queue, duration, and outcome |
+| Recover | `middleware.Recover()` | Catches panics and converts them to errors |
+| Timeout | `middleware.Timeout()` | Cancels the job context after `job.Timeout` |
+| Tracing | `middleware.Tracing()` | Wraps execution in an OpenTelemetry span |
+| Metrics | `middleware.Metrics()` | Records per-job duration and outcome counters |
+| Scope | `middleware.Scope()` | Injects Forge app/org IDs from job into context |
 
-The limiter uses a token bucket algorithm:
-- Bucket starts full at the rate limit value.
-- Each delivery consumes one token.
-- Tokens refill continuously at the configured rate.
-- When empty, deliveries are delayed until tokens become available.
-
-## Usage
+## Registering middleware
 
 ```go
-import "github.com/xraph/relay/ratelimit"
+eng := engine.Build(d,
+    engine.WithMiddleware(middleware.Logging(slog.Default())),
+    engine.WithMiddleware(middleware.Recover()),
+    engine.WithMiddleware(middleware.Timeout()),
+    engine.WithMiddleware(middleware.Tracing()),
+    engine.WithMiddleware(middleware.Metrics()),
+    engine.WithMiddleware(middleware.Scope()),
+)
+```
 
-limiter := ratelimit.New()
+Middleware are applied **right-to-left** (last registered = outermost wrapper). With the list above, execution order is:
 
-// Check if allowed (non-blocking)
-if limiter.Allow("ep_01h455vb...", 100) {
-    // proceed with delivery
+```
+Logging → Recover → Timeout → Tracing → Metrics → Scope → handler
+```
+
+## Writing custom middleware
+
+```go
+func RateLimitMiddleware(limiter *rate.Limiter) middleware.Middleware {
+    return func(ctx context.Context, j *job.Job, next middleware.Handler) error {
+        if err := limiter.Wait(ctx); err != nil {
+            return err
+        }
+        return next(ctx)
+    }
 }
-
-// Block until allowed (context-aware)
-err := limiter.Wait(ctx, "ep_01h455vb...", 100)
-
-// Reset state for an endpoint
-limiter.Reset("ep_01h455vb...")
 ```
 
-## Configuration
+Custom middleware must call `next(ctx)` to continue the chain, unless intentionally short-circuiting.
 
-Set the rate limit when creating an endpoint:
+## Composing manually
 
 ```go
-ep, err := r.Endpoints().Create(ctx, endpoint.Input{
-    TenantID:   "tenant-acme",
-    URL:        "https://example.com/webhook",
-    EventTypes: []string{"*"},
-    RateLimit:  100,  // 100 deliveries per second
-})
+chain := middleware.Chain(
+    middleware.Logging(logger),
+    middleware.Recover(),
+    middleware.Timeout(),
+)
 ```
 
-A `RateLimit` of `0` means unlimited (no throttling).
+`Chain` returns a single `Middleware` that applies each middleware in order.

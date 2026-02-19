@@ -1,32 +1,36 @@
 ---
 title: Introduction
-description: Composable webhook delivery engine for Go.
+description: Composable durable execution engine for Go.
 ---
 
-Relay is a Go library that handles webhook delivery for multi-tenant SaaS applications. Import it into your Go program to get dynamic event type definitions, tenant-scoped endpoints, guaranteed delivery with HMAC-SHA256 signatures, retry with exponential backoff, dead letter queues, and replay capabilities.
+Dispatch is a Go library for background job processing, durable workflow orchestration, cron scheduling, and distributed worker coordination. Import it into your Go program — no separate binary, no DSL, no YAML.
 
-Relay is a **library** -- not a service. You bring your own HTTP server, database, and auth layer. Relay provides the webhook plumbing.
+Dispatch is a **library** — not a service. You bring your own database, HTTP server, and process lifecycle. Dispatch provides the execution plumbing.
 
 ## What it does
 
-- **Dynamic webhook catalog** -- Register event types at runtime with optional JSON Schema validation.
-- **Tenant-scoped endpoints** -- Each endpoint belongs to a tenant and subscribes to event types via glob patterns.
-- **Guaranteed delivery** -- Exponential backoff retries (default: 5s, 30s, 2m, 15m, 2h). Failed deliveries land in the dead letter queue.
-- **HMAC-SHA256 signatures** -- Every delivery is signed. Receivers verify authenticity with a single function call.
-- **Rate limiting** -- Per-endpoint token bucket limiter prevents overloading downstream services.
-- **Admin HTTP API** -- Full CRUD for event types, endpoints, events, deliveries, and DLQ replay.
-- **Observability** -- Prometheus counters, latency histograms, DLQ gauges, and OpenTelemetry tracing per delivery.
-- **Pluggable storage** -- Memory, PostgreSQL (pgx/v5), or Bun ORM. Implement `store.Store` for anything else.
+- **Background jobs** — Define typed handlers, enqueue with priority, retry with configurable backoff.
+- **Durable workflows** — Multi-step Go functions that checkpoint progress and resume after failure.
+- **Distributed cron** — Leader-elected cron scheduling with per-tenant support and runtime enable/disable.
+- **Dead letter queue** — Jobs that exhaust retries land in the DLQ for inspection, replay, or purge.
+- **Distributed workers** — Worker registration, heartbeats, leader election, and automatic work stealing.
+- **Middleware** — Composable chain for logging, tracing, metrics, panic recovery, and Forge scope injection.
+- **Extension hooks** — Opt-in lifecycle interfaces for every job, workflow, cron, and shutdown event.
+- **OpenTelemetry** — Built-in metrics and tracing via the `observability` and `middleware` packages.
+- **Relay integration** — Emit typed webhook events at every lifecycle point via `relay_hook`.
+- **Pluggable storage** — Memory, PostgreSQL (pgx/v5), Bun ORM, SQLite, Redis. Implement `store.Store` for anything else.
 
 ## Design philosophy
 
-**Library, not framework.** Relay is a set of Go packages you import, not a binary you deploy. You control the `main` function, the HTTP server, and the process lifecycle.
+**Library, not framework.** Dispatch is a set of Go packages you import. You control the `main` function, the HTTP server, and the process lifecycle.
 
-**Interfaces over implementations.** Every subsystem defines a Go interface. The library ships with defaults (in-memory store, built-in sender), but you can replace any piece.
+**Interfaces over implementations.** Every subsystem defines a Go interface. Swap any storage backend with a single type change.
 
-**Composable stores.** Each subsystem has its own store interface. The aggregate `store.Store` composes them all. Swap the entire backend with a single type.
+**Composable stores.** Each subsystem has its own store interface. The aggregate `store.Store` composes them all. One backend satisfies every subsystem.
 
-**Multi-tenant by default.** Every endpoint and event is scoped to a tenant ID. The `scope` package captures context-level app and organization IDs.
+**Workflows as ordinary Go functions.** No YAML, no protobuf, no external scheduler. A workflow is a function; a step is a closure.
+
+**TypeID everywhere.** All entities use type-prefixed, K-sortable, UUIDv7-based identifiers. Passing a `CronID` where a `JobID` is expected is a compile error.
 
 ## Quick look
 
@@ -35,52 +39,52 @@ package main
 
 import (
     "context"
-    "encoding/json"
     "log"
 
-    "github.com/xraph/relay"
-    "github.com/xraph/relay/catalog"
-    "github.com/xraph/relay/endpoint"
-    "github.com/xraph/relay/event"
-    "github.com/xraph/relay/store/memory"
+    "github.com/xraph/dispatch"
+    "github.com/xraph/dispatch/engine"
+    "github.com/xraph/dispatch/job"
+    "github.com/xraph/dispatch/store/memory"
+)
+
+type EmailInput struct {
+    To      string `json:"to"`
+    Subject string `json:"subject"`
+}
+
+var SendEmail = job.NewDefinition("send_email",
+    func(ctx context.Context, input EmailInput) error {
+        log.Printf("sending to %s: %s", input.To, input.Subject)
+        return nil
+    },
 )
 
 func main() {
     ctx := context.Background()
 
-    r, err := relay.New(relay.WithStore(memory.New()))
+    d, err := dispatch.New(dispatch.WithStore(memory.New()))
     if err != nil {
         log.Fatal(err)
     }
 
-    r.RegisterEventType(ctx, catalog.WebhookDefinition{
-        Name:        "order.created",
-        Description: "Fired when a new order is placed",
-        Version:     "2025-01-01",
-    })
+    eng := engine.Build(d)
+    engine.Register(eng, SendEmail)
 
-    r.Endpoints().Create(ctx, endpoint.Input{
-        TenantID:   "tenant-acme",
-        URL:        "https://acme.example.com/webhook",
-        EventTypes: []string{"order.*"},
-    })
+    d.Start(ctx)
+    defer d.Stop(ctx)
 
-    r.Send(ctx, &event.Event{
-        Type:     "order.created",
-        TenantID: "tenant-acme",
-        Data:     json.RawMessage(`{"order_id":"ORD-001","amount":99.99}`),
+    engine.Enqueue(ctx, eng, SendEmail, EmailInput{
+        To:      "user@example.com",
+        Subject: "Welcome!",
     })
-
-    r.Start(ctx)
-    defer r.Stop(ctx)
 }
 ```
 
 ## Where to go next
 
 <Cards>
-  <Card title="Getting started" href="/docs/getting-started" description="Install the module and send your first webhook." />
+  <Card title="Getting started" href="/docs/getting-started" description="Install Dispatch and process your first job in minutes." />
   <Card title="Architecture" href="/docs/architecture" description="Understand how the packages fit together." />
   <Card title="Core concepts" href="/docs/concepts/identity" description="Learn about TypeIDs, entities, and configuration." />
-  <Card title="API reference" href="/docs/api-reference/http-api" description="Full HTTP endpoint documentation." />
+  <Card title="API reference" href="/docs/api-reference/http-api" description="Full HTTP admin API documentation." />
 </Cards>

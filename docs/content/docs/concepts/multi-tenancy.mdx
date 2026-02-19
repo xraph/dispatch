@@ -1,55 +1,70 @@
 ---
 title: Multi-Tenancy
-description: How Relay isolates tenants and scopes every operation.
+description: How Dispatch scopes jobs and workflows to app and organization contexts.
 ---
 
-Multi-tenancy is built into Relay at the data model level. Every endpoint and event carries a `TenantID` field that determines ownership and routing.
+Multi-tenancy support is built into Dispatch via the `scope` package and the `ScopeAppID` / `ScopeOrgID` fields on every entity. It integrates naturally with the Forge framework but degrades gracefully in standalone mode.
 
-## Tenant scoping
+## Scope fields on entities
 
-### Endpoints
+Every major entity carries scope fields:
 
-Each endpoint belongs to exactly one tenant:
+| Entity | Fields |
+|--------|--------|
+| `job.Job` | `ScopeAppID`, `ScopeOrgID` |
+| `workflow.Run` | `ScopeAppID`, `ScopeOrgID` |
+| `cron.Entry` | `ScopeAppID`, `ScopeOrgID` |
+| `dlq.Entry` | `ScopeAppID`, `ScopeOrgID` |
+
+These fields are populated automatically from the context at enqueue time via `scope.Capture(ctx)`.
+
+## The scope middleware
+
+Add `middleware.Scope()` to the engine's middleware chain. It reads scope fields from the enqueued `Job` and injects them back into the handler's `context.Context`:
 
 ```go
-ep, err := r.Endpoints().Create(ctx, endpoint.Input{
-    TenantID:   "tenant-acme",
-    URL:        "https://acme.example.com/webhook",
-    EventTypes: []string{"order.*"},
-})
+eng := engine.Build(d,
+    engine.WithMiddleware(middleware.Scope()),
+)
 ```
 
-### Events
-
-Events are scoped to a tenant. When `Send()` resolves matching endpoints, it only considers endpoints belonging to the same tenant:
+Inside a job handler, retrieve the scope:
 
 ```go
-r.Send(ctx, &event.Event{
-    Type:     "order.created",
-    TenantID: "tenant-acme",
-    Data:     orderPayload,
-})
+import "github.com/xraph/dispatch/scope"
+
+func(ctx context.Context, input MyInput) error {
+    appID, orgID := scope.Capture(ctx)
+    // use appID / orgID to scope database queries
+    return nil
+}
 ```
 
 ## The scope package
 
-The `scope` package provides context-level scoping for app and organization IDs. In standalone mode, scope is a no-op:
+In standalone mode, `scope.Capture` returns empty strings (no-op):
 
 ```go
-import "github.com/xraph/relay/scope"
+import "github.com/xraph/dispatch/scope"
 
-appID, orgID := scope.Capture(ctx)   // returns empty strings in standalone mode
-ctx = scope.Restore(ctx, appID, orgID)
+appID, orgID := scope.Capture(ctx)        // "" in standalone mode
+ctx = scope.Restore(ctx, appID, orgID)    // inject into context
 ```
 
-When used with the Forge framework, the scope package reads app and organization IDs from the Forge context.
+When running inside the Forge framework, the scope package reads app and organization IDs from the Forge context automatically.
 
-## Scope fields on entities
+## Per-queue tenant routing
 
-| Entity | Fields |
-|--------|--------|
-| `EventType` | `ScopeAppID` |
-| `Endpoint` | `ScopeAppID`, `ScopeOrgID` |
-| `Event` | `ScopeAppID`, `ScopeOrgID` |
+Combine scope with per-queue configuration to isolate tenant traffic:
 
-These fields are populated automatically by `Send()` using `scope.Capture(ctx)`.
+```go
+eng := engine.Build(d,
+    engine.WithQueueConfig(
+        queue.Config{Name: "tenant-acme",  MaxConcurrency: 5},
+        queue.Config{Name: "tenant-beta",  MaxConcurrency: 2},
+    ),
+)
+
+// Enqueue to a tenant-specific queue:
+engine.EnqueueOnQueue(ctx, eng, SendEmail, input, "tenant-acme")
+```

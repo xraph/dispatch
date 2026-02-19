@@ -1,19 +1,22 @@
 ---
 title: Custom Store
-description: Implement your own store backend.
+description: Implement your own store backend for Dispatch.
 ---
 
-Relay's store layer is interface-based. You can implement a custom backend by satisfying the `store.Store` interface.
+Dispatch's store layer is interface-based. You can implement a custom backend by satisfying the `store.Store` interface.
 
 ## The interface
 
 ```go
+import "github.com/xraph/dispatch/store"
+
 type Store interface {
-    catalog.Store
-    endpoint.Store
-    event.Store
-    delivery.Store
+    job.Store
+    workflow.Store
+    cron.Store
     dlq.Store
+    event.Store
+    cluster.Store
 
     Migrate(ctx context.Context) error
     Ping(ctx context.Context) error
@@ -21,54 +24,85 @@ type Store interface {
 }
 ```
 
-This composes five subsystem interfaces plus three lifecycle methods.
+This composes six subsystem interfaces plus three lifecycle methods.
 
-## Subsystem interfaces
+## Key subsystem interfaces
 
-### catalog.Store
+### job.Store
 
 ```go
 type Store interface {
-    RegisterType(ctx context.Context, et *EventType) error
-    GetType(ctx context.Context, name string) (*EventType, error)
-    GetTypeByID(ctx context.Context, etID id.ID) (*EventType, error)
-    ListTypes(ctx context.Context, opts ListOpts) ([]*EventType, error)
-    MatchTypes(ctx context.Context, eventType string) ([]*EventType, error)
-    DeleteType(ctx context.Context, name string) error
+    EnqueueJob(ctx context.Context, j *Job) error
+    DequeueJobs(ctx context.Context, queues []string, limit int) ([]*Job, error)
+    GetJob(ctx context.Context, jobID id.JobID) (*Job, error)
+    UpdateJob(ctx context.Context, j *Job) error
+    CancelJob(ctx context.Context, jobID id.JobID) error
+    ListJobs(ctx context.Context, opts ListOpts) ([]*Job, error)
+    CountJobs(ctx context.Context) (map[State]int, error)
 }
 ```
 
-### endpoint.Store
+### workflow.Store
 
 ```go
 type Store interface {
-    CreateEndpoint(ctx context.Context, ep *Endpoint) error
-    GetEndpoint(ctx context.Context, epID id.ID) (*Endpoint, error)
-    UpdateEndpoint(ctx context.Context, ep *Endpoint) error
-    DeleteEndpoint(ctx context.Context, epID id.ID) error
-    ListEndpoints(ctx context.Context, tenantID string, opts ListOpts) ([]*Endpoint, error)
-    SetEnabled(ctx context.Context, epID id.ID, enabled bool) error
-    Resolve(ctx context.Context, tenantID string, eventType string) ([]*Endpoint, error)
+    CreateRun(ctx context.Context, r *Run) error
+    GetRun(ctx context.Context, runID id.RunID) (*Run, error)
+    UpdateRun(ctx context.Context, r *Run) error
+    ListRuns(ctx context.Context, opts ListOpts) ([]*Run, error)
+    SaveCheckpoint(ctx context.Context, cp *Checkpoint) error
+    GetCheckpoint(ctx context.Context, runID id.RunID, stepName string) (*Checkpoint, error)
 }
 ```
 
-### delivery.Store
+### cron.Store
 
 ```go
 type Store interface {
-    EnqueueBatch(ctx context.Context, deliveries []*Delivery) error
-    Dequeue(ctx context.Context, limit int) ([]*Delivery, error)
-    GetDelivery(ctx context.Context, delID id.ID) (*Delivery, error)
-    UpdateDelivery(ctx context.Context, d *Delivery) error
-    ListByEndpoint(ctx context.Context, epID id.ID, opts ListOpts) ([]*Delivery, error)
-    ListByEvent(ctx context.Context, evtID id.ID, opts ListOpts) ([]*Delivery, error)
+    CreateCron(ctx context.Context, e *Entry) error
+    GetCron(ctx context.Context, cronID id.CronID) (*Entry, error)
+    ListCrons(ctx context.Context, opts ListOpts) ([]*Entry, error)
+    UpdateCron(ctx context.Context, e *Entry) error
+    DeleteCron(ctx context.Context, cronID id.CronID) error
+    ListDueCrons(ctx context.Context, now time.Time) ([]*Entry, error)
+}
+```
+
+### cluster.Store
+
+```go
+type Store interface {
+    RegisterWorker(ctx context.Context, w *Worker) error
+    UpdateWorker(ctx context.Context, w *Worker) error
+    ListWorkers(ctx context.Context) ([]*Worker, error)
+    AcquireLeadership(ctx context.Context, workerID id.WorkerID, until time.Time) (bool, error)
+    RenewLeadership(ctx context.Context, workerID id.WorkerID, until time.Time) error
 }
 ```
 
 ## Implementation tips
 
-1. Start with the memory store source as a reference (`store/memory/store.go`).
-2. The `Resolve()` method must filter by tenant ID, enabled status, and match event type patterns against endpoint subscriptions.
-3. `Dequeue()` should atomically claim pending deliveries whose `NextAttemptAt` is in the past.
-4. `Migrate()` should be idempotent (safe to call multiple times).
-5. Run the existing test suite against your implementation to verify correctness.
+1. Start with `store/memory/store.go` as a reference implementation.
+2. `DequeueJobs` should **atomically** claim jobs in `pending` state whose `RunAt <= now`, updating their state to `running` and setting `WorkerID`.
+3. `AcquireLeadership` should use optimistic locking or a database advisory lock.
+4. `Migrate` must be idempotent — safe to call multiple times.
+5. Run the existing test suite against your implementation:
+
+```bash
+go test ./store/... -run TestStore -v
+```
+
+## Testing with the memory store
+
+The in-memory store is a zero-dependency implementation suitable for tests:
+
+```go
+import "github.com/xraph/dispatch/store/memory"
+
+store := memory.New()
+
+d, _ := dispatch.New(dispatch.WithStore(store))
+eng := engine.Build(d)
+```
+
+Use it in unit tests and integration tests that don't need persistence across restarts.

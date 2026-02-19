@@ -1,72 +1,118 @@
 ---
-title: Catalog
-description: Event type registration, glob matching, and JSON Schema validation.
+title: Jobs
+description: Typed job definitions, the registry, state machine, retries, and backoff.
 ---
 
-The catalog manages webhook event type definitions. It provides an in-memory cache backed by the store, and validates event payloads against JSON Schema.
+Jobs are the fundamental unit of work in Dispatch. A job definition is a typed Go function that processes a JSON payload.
 
-## Registering event types
+## Defining a job
 
 ```go
-et, err := r.RegisterEventType(ctx, catalog.WebhookDefinition{
-    Name:        "invoice.created",
-    Description: "Fired when a new invoice is generated",
-    Group:       "billing",
-    Version:     "2025-01-01",
-    Schema:      json.RawMessage(`{"type":"object","properties":{"invoice_id":{"type":"string"}}}`),
-    Example:     json.RawMessage(`{"invoice_id":"INV-001","amount":99.99}`),
+import "github.com/xraph/dispatch/job"
+
+type EmailInput struct {
+    To      string `json:"to"`
+    Subject string `json:"subject"`
+    Body    string `json:"body"`
+}
+
+var SendEmail = job.NewDefinition("send_email",
+    func(ctx context.Context, input EmailInput) error {
+        return mailer.Send(input.To, input.Subject, input.Body)
+    },
+)
+```
+
+The generic type parameter `T` must be JSON-serializable. `NewDefinition` returns a `*Definition[T]` that carries both the name and the handler.
+
+## Registering a job
+
+Use `engine.Register` at startup:
+
+```go
+engine.Register(eng, SendEmail)
+engine.Register(eng, GenerateReport)
+engine.Register(eng, ProcessPayment)
+```
+
+Internally, `Register` calls `job.RegisterDefinition` on the engine's `*job.Registry`, converting the typed handler to a type-erased `HandlerFunc`.
+
+## Enqueueing a job
+
+```go
+engine.Enqueue(ctx, eng, SendEmail, EmailInput{
+    To:      "user@example.com",
+    Subject: "Welcome!",
 })
 ```
 
-Fields:
-- **Name** -- Dot-separated event type name (e.g., `invoice.created`).
-- **Description** -- Human-readable explanation.
-- **Group** -- Optional category for organization.
-- **Schema** -- Optional JSON Schema (draft-07) for payload validation.
-- **SchemaVersion** -- Tracks schema changes.
-- **Version** -- API version (date-based convention: `2025-01-01`).
-- **Example** -- Optional example payload for documentation.
-
-## Caching
-
-The catalog caches event types in memory with a configurable TTL (default: 30s). Cache operations:
+Additional enqueue options:
 
 ```go
-r.Catalog().WarmCache(ctx)       // preload all types into cache
-r.Catalog().InvalidateCache()    // force fresh reads from store
+// Schedule for the future
+engine.EnqueueAt(ctx, eng, SendEmail, input, time.Now().Add(10*time.Minute))
+
+// Set priority (higher = dequeued first)
+engine.EnqueueWithPriority(ctx, eng, SendEmail, input, 10)
+
+// Target a specific queue
+engine.EnqueueOnQueue(ctx, eng, SendEmail, input, "critical")
 ```
 
-## Glob matching
+## State machine
 
-Endpoint subscriptions use glob patterns to match event types:
+A job progresses through these states:
 
-| Pattern | Matches |
-|---------|---------|
-| `invoice.created` | Exact match only |
-| `invoice.*` | `invoice.created`, `invoice.paid`, etc. |
-| `*` | Everything |
+```
+pending → running → completed
+pending → running → retrying → pending → running → ...
+pending → running → failed
+pending → running → failed → dlq
+pending → cancelled
+```
 
-The `catalog.Match(pattern, eventType)` function handles the matching logic.
+| State | Meaning |
+|-------|---------|
+| `pending` | Waiting to be picked up |
+| `running` | Currently executing |
+| `completed` | Finished successfully |
+| `retrying` | Failed but scheduled for retry |
+| `failed` | Failed terminally (no retries remain) |
+| `cancelled` | Explicitly cancelled |
 
-## Deprecation
+## Retries and backoff
 
-Event types are soft-deleted (deprecated) rather than hard-deleted:
+Configure retries on the job definition:
 
 ```go
-r.Catalog().DeleteType(ctx, "invoice.created")
+var SendEmail = job.NewDefinition("send_email",
+    handler,
+    job.WithMaxRetries(5),
+)
 ```
 
-Sending events with a deprecated type returns `ErrEventTypeDeprecated`.
-
-## Store interface
+Configure the backoff strategy on the engine:
 
 ```go
-type Store interface {
-    RegisterType(ctx context.Context, et *EventType) error
-    GetType(ctx context.Context, name string) (*EventType, error)
-    GetTypeByID(ctx context.Context, etID id.ID) (*EventType, error)
-    ListTypes(ctx context.Context, opts ListOpts) ([]*EventType, error)
-    MatchTypes(ctx context.Context, eventType string) ([]*EventType, error)
-    DeleteType(ctx context.Context, name string) error
-}
+eng := engine.Build(d,
+    engine.WithBackoff(backoff.Exponential(
+        backoff.WithBase(5*time.Second),
+        backoff.WithMax(2*time.Hour),
+    )),
+)
 ```
+
+After `MaxRetries` is exhausted, the job is moved to the DLQ.
+
+## Job timeout
+
+Set a per-job execution deadline:
+
+```go
+var SendEmail = job.NewDefinition("send_email",
+    handler,
+    job.WithTimeout(30*time.Second),
+)
+```
+
+The `middleware.Timeout()` middleware enforces this via context cancellation.

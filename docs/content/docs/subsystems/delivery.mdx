@@ -1,71 +1,111 @@
 ---
-title: Delivery
-description: The delivery engine, workers, retry schedule, and decision matrix.
+title: Workflows
+description: Durable multi-step functions with checkpointing, parallel execution, and event waiting.
 ---
 
-The delivery engine is a poll-based worker pool that dequeues pending deliveries, performs HTTP requests, and decides what to do next.
+Workflows are durable, multi-step Go functions. Dispatch checkpoints each completed step so that if the process restarts mid-workflow, execution resumes from the last completed step — not from the beginning.
 
-## Engine lifecycle
+## Defining a workflow
 
 ```go
-r.Start(ctx)        // start the poll loop and workers
-defer r.Stop(ctx)   // wait for in-flight deliveries, then stop
+import "github.com/xraph/dispatch/workflow"
+
+type OrderInput struct {
+    OrderID      string  `json:"order_id"`
+    Amount       float64 `json:"amount"`
+    CustomerID   string  `json:"customer_id"`
+    PaymentToken string  `json:"payment_token"`
+}
+
+var ProcessOrder = workflow.NewWorkflow("process_order",
+    func(wf *workflow.Workflow, input OrderInput) error {
+        if err := wf.Step("validate", func() error {
+            return validateOrder(input.OrderID)
+        }); err != nil {
+            return err
+        }
+
+        if err := wf.Step("charge", func() error {
+            return chargeCard(input.PaymentToken, input.Amount)
+        }); err != nil {
+            return err
+        }
+
+        return wf.Step("fulfill", func() error {
+            return fulfillOrder(input.OrderID)
+        })
+    },
+)
 ```
 
-## How it works
-
-1. A ticker fires every `PollInterval` (default: 1s).
-2. Each tick dequeues up to `BatchSize` (default: 50) pending deliveries.
-3. Deliveries are dispatched to `Concurrency` (default: 10) goroutine workers.
-4. Each worker fetches the endpoint and event, performs the HTTP POST, evaluates the result.
-
-## HTTP request
-
-Each delivery sends an HTTP POST with these headers:
-
-| Header | Value |
-|--------|-------|
-| `Content-Type` | `application/json` |
-| `User-Agent` | `Relay/1.0` |
-| `X-Relay-Event-ID` | Event TypeID |
-| `X-Relay-Event-Type` | Event type name |
-| `X-Relay-Delivery-ID` | Delivery TypeID |
-| `X-Relay-Signature` | `v1=<hex>` HMAC-SHA256 |
-| `X-Relay-Timestamp` | Unix timestamp |
-| Custom headers | From endpoint configuration |
-
-## Decision matrix
-
-After each attempt, the retrier decides the next action:
-
-| HTTP Response | Decision |
-|--------------|----------|
-| 2xx | **Delivered** -- mark complete |
-| 410 Gone | **Disable endpoint** -- disable endpoint, push to DLQ |
-| 400--499 (except 410, 429) | **DLQ** -- client error won't self-correct |
-| 429 Too Many Requests | **Retry** -- if attempts remain, else DLQ |
-| 500--599 | **Retry** -- if attempts remain, else DLQ |
-| 0 (network/timeout) | **Retry** -- if attempts remain, else DLQ |
-
-## Default retry schedule
+## Registering a workflow
 
 ```go
-var DefaultRetrySchedule = []time.Duration{
-    5 * time.Second,   // retry 1
-    30 * time.Second,  // retry 2
-    2 * time.Minute,   // retry 3
-    15 * time.Minute,  // retry 4
-    2 * time.Hour,     // retry 5
+engine.RegisterWorkflow(eng, ProcessOrder)
+```
+
+## Starting a workflow
+
+```go
+engine.StartWorkflow(ctx, eng, ProcessOrder, OrderInput{
+    OrderID: "ORD-001",
+    Amount:  99.99,
+})
+```
+
+## Steps
+
+`wf.Step(name, fn)` executes `fn` and persists a checkpoint. If the workflow is re-executed (after a crash or restart), a step with an existing checkpoint is **skipped** and its stored result is returned.
+
+This guarantees that side effects (HTTP calls, DB writes, email sends) happen exactly once across process restarts.
+
+## Parallel steps
+
+Run independent steps concurrently:
+
+```go
+if err := wf.Parallel(
+    func() error { return sendConfirmationEmail(input.CustomerID) },
+    func() error { return updateInventory(input.OrderID) },
+    func() error { return notifyWarehouse(input.OrderID) },
+); err != nil {
+    return err
 }
 ```
 
-## Configuration
+`Parallel` fails fast if any step returns an error. All non-failed goroutines complete before the error is returned.
 
-| Option | Default | Description |
-|--------|---------|-------------|
-| `WithConcurrency(n)` | `10` | Worker goroutines |
-| `WithPollInterval(d)` | `1s` | Poll frequency |
-| `WithBatchSize(n)` | `50` | Deliveries per tick |
-| `WithRequestTimeout(d)` | `30s` | HTTP timeout per attempt |
-| `WithMaxRetries(n)` | `5` | Max attempts before DLQ |
-| `WithRetrySchedule(s)` | See above | Backoff intervals |
+## Waiting for events
+
+A workflow can pause until an external event arrives:
+
+```go
+payload, err := wf.WaitForEvent(ctx, "payment.confirmed", 24*time.Hour)
+if err != nil {
+    return err // timeout or context cancelled
+}
+```
+
+To trigger the event from outside:
+
+```go
+engine.TriggerEvent(ctx, eng, runID, "payment.confirmed", confirmationPayload)
+```
+
+## Sleeping
+
+Pause execution for a duration (persists across restarts):
+
+```go
+if err := wf.Sleep(ctx, 30*time.Minute); err != nil {
+    return err
+}
+```
+
+## Run states
+
+| State | Meaning |
+|-------|---------|
+| `running` | Workflow is executing |
+| `completed` | All steps finished successfully |
+| `failed` | A step failed terminally |

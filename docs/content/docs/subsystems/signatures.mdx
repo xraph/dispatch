@@ -1,62 +1,82 @@
 ---
-title: Signatures
-description: HMAC-SHA256 webhook signing and verification.
+title: Extensions
+description: Lifecycle hooks for jobs, workflows, cron, and shutdown events.
 ---
 
-Every webhook delivery is signed with HMAC-SHA256 using the endpoint's signing secret.
+Extensions are notified of lifecycle events and can react to them — recording metrics, emitting webhooks, writing audit logs, etc.
 
-## Signing format
+Each lifecycle hook is a **separate interface**. Extensions only implement the interfaces they care about, and the `ext.Registry` fans events out to all registered extensions.
 
-The signed content is `"{timestamp}.{payload}"`. The signature is returned in the format `v1=<hex>`.
-
-### Headers sent with each delivery
-
-| Header | Example |
-|--------|---------|
-| `X-Relay-Signature` | `v1=5257a869...` |
-| `X-Relay-Timestamp` | `1704067200` |
-
-## Signing
+## Implementing an extension
 
 ```go
-import "github.com/xraph/relay/signature"
+import (
+    "github.com/xraph/dispatch/ext"
+    "github.com/xraph/dispatch/job"
+)
 
-sig := signature.Sign(payload, secret, timestamp)
-// "v1=5257a869e4c5a2b5..."
-```
+type AuditExtension struct {
+    logger *slog.Logger
+}
 
-## Verification
+func (e *AuditExtension) Name() string { return "audit" }
 
-```go
-ok := signature.Verify(payload, secret, timestamp, receivedSignature)
-```
+// Job hooks (opt in by implementing the interface)
+func (e *AuditExtension) OnJobCompleted(ctx context.Context, j *job.Job, elapsed time.Duration) error {
+    e.logger.Info("job completed", "name", j.Name, "elapsed", elapsed)
+    return nil
+}
 
-## Secret format
-
-Secrets are generated with `signature.GenerateSecret()`:
-
-```
-whsec_<64 hex characters>
-```
-
-Format: `whsec_` prefix + 32 random bytes encoded as hex (70 characters total).
-
-## Receiver-side verification example
-
-```go
-func webhookHandler(w http.ResponseWriter, r *http.Request) {
-    body, _ := io.ReadAll(r.Body)
-    sig := r.Header.Get("X-Relay-Signature")
-    ts := r.Header.Get("X-Relay-Timestamp")
-
-    timestamp, _ := strconv.ParseInt(ts, 10, 64)
-
-    if !signature.Verify(body, mySecret, timestamp, sig) {
-        http.Error(w, "invalid signature", http.StatusUnauthorized)
-        return
-    }
-
-    // Process the webhook...
-    w.WriteHeader(http.StatusOK)
+func (e *AuditExtension) OnJobFailed(ctx context.Context, j *job.Job, err error) error {
+    e.logger.Error("job failed", "name", j.Name, "error", err)
+    return nil
 }
 ```
+
+## Registering an extension
+
+```go
+eng := engine.Build(d,
+    engine.WithExtension(&AuditExtension{logger: slog.Default()}),
+    engine.WithExtension(observability.NewMetricsExtension()),
+)
+```
+
+Multiple extensions can be registered. They are called in registration order for each event.
+
+## Available hooks
+
+### Job lifecycle
+
+| Interface | Method | Triggered when |
+|-----------|--------|----------------|
+| `ext.JobEnqueued` | `OnJobEnqueued` | Job is accepted into the queue |
+| `ext.JobStarted` | `OnJobStarted` | Worker begins executing |
+| `ext.JobCompleted` | `OnJobCompleted` | Job finishes successfully |
+| `ext.JobFailed` | `OnJobFailed` | Job fails with no retries remaining |
+| `ext.JobRetrying` | `OnJobRetrying` | Job fails and is scheduled for retry |
+| `ext.JobDLQ` | `OnJobDLQ` | Job is moved to the DLQ |
+
+### Workflow lifecycle
+
+| Interface | Method | Triggered when |
+|-----------|--------|----------------|
+| `ext.WorkflowStarted` | `OnWorkflowStarted` | Workflow run begins |
+| `ext.WorkflowStepCompleted` | `OnWorkflowStepCompleted` | A step completes |
+| `ext.WorkflowStepFailed` | `OnWorkflowStepFailed` | A step fails |
+| `ext.WorkflowCompleted` | `OnWorkflowCompleted` | Workflow finishes successfully |
+| `ext.WorkflowFailed` | `OnWorkflowFailed` | Workflow fails terminally |
+
+### Other hooks
+
+| Interface | Method | Triggered when |
+|-----------|--------|----------------|
+| `ext.CronFired` | `OnCronFired` | A cron entry fires and a job is enqueued |
+| `ext.Shutdown` | `OnShutdown` | The dispatcher shuts down gracefully |
+
+## Built-in extensions
+
+| Extension | Package | Purpose |
+|-----------|---------|---------|
+| `MetricsExtension` | `observability` | OpenTelemetry counters for every lifecycle event |
+| `RelayHookExtension` | `relay_hook` | Emit typed webhook events via Relay |

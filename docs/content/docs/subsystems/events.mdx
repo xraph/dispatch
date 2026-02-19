@@ -1,60 +1,55 @@
 ---
-title: Events
-description: Event submission, idempotency, and the validation pipeline.
+title: Cluster
+description: Distributed worker coordination, leader election, heartbeats, and work stealing.
 ---
 
-Events are webhook payloads submitted for delivery. The `Send()` method validates, persists, and fans out each event.
+The `cluster` package enables multiple Dispatch instances to coordinate work. One instance is the cluster leader at any time; the others are followers.
 
-## Sending an event
+## How it works
 
-```go
-err := r.Send(ctx, &event.Event{
-    Type:           "order.created",
-    TenantID:       "tenant-acme",
-    Data:           json.RawMessage(`{"order_id":"ORD-001"}`),
-    IdempotencyKey: "order-ORD-001",
-})
-```
+1. Every Dispatch instance registers a `cluster.Worker` record at startup with its hostname, queues, and concurrency.
+2. Workers send **heartbeats** on `HeartbeatInterval` (default: 10s) to update `LastSeen`.
+3. The **leader** is determined by `AcquireLeadership` using optimistic locking in the store. Leadership is renewed before it expires.
+4. The leader periodically:
+   - Fires due cron entries
+   - Scans for **stale workers** (workers whose heartbeat has been missing longer than `StaleJobThreshold`)
+   - Reclaims stale workers' in-flight jobs and re-enqueues them (work stealing)
 
-## Validation pipeline
+## Worker states
 
-`Send()` executes these checks in order:
+| State | Meaning |
+|-------|---------|
+| `active` | Healthy and processing jobs |
+| `draining` | Finishing in-flight jobs, not accepting new ones (shutdown) |
+| `dead` | Stopped responding; in-flight jobs eligible for reassignment |
 
-1. **Type lookup** -- Verify the event type exists in the catalog.
-2. **Deprecation check** -- Reject deprecated event types.
-3. **Schema validation** -- If the event type has a JSON Schema, validate `Data` against it.
+## Leadership
 
-## Idempotency
+Only the leader performs:
+- Cron scheduling
+- Stale-job recovery
+- Work rebalancing
 
-The `IdempotencyKey` field prevents duplicate event processing. If a key has already been used, `Send()` returns `nil` (no-op success). This allows safe retries from the caller.
+If leadership is lost mid-operation, `dispatch.ErrLeadershipLost` is returned. This is normal and safe to ignore — another worker will acquire leadership shortly.
 
-## Fan-out
+## Kubernetes consensus
 
-After validation, `Send()` resolves matching endpoints and creates one `Delivery` record per endpoint in `pending` state:
-
-1. Resolve endpoints for the tenant whose subscription patterns match the event type.
-2. Create a `Delivery` per matched endpoint.
-3. The delivery engine picks up pending deliveries on its next poll cycle.
-
-## Event entity
+For Kubernetes deployments, use `cluster/k8s` which implements leader election via the Kubernetes API (client-go):
 
 ```go
-type Event struct {
-    entity.Entity
-    ID             id.ID  `json:"id"`
-    Type           string `json:"type"`
-    TenantID       string `json:"tenant_id"`
-    Data           any    `json:"data"`
-    IdempotencyKey string `json:"idempotency_key,omitempty"`
-}
+import "github.com/xraph/dispatch/cluster/k8s"
+
+leaderElector := k8s.NewLeaderElector(kubeClient, namespace, leaseName)
+eng := engine.Build(d,
+    engine.WithLeaderElector(leaderElector),
+)
 ```
 
-## Store interface
+This ensures correct behavior across pod restarts and rolling updates.
 
-```go
-type Store interface {
-    CreateEvent(ctx context.Context, evt *Event) error
-    GetEvent(ctx context.Context, evtID id.ID) (*Event, error)
-    ListEvents(ctx context.Context, opts ListOpts) ([]*Event, error)
-}
-```
+## Configuration
+
+| Config field | Default | Meaning |
+|-------------|---------|---------|
+| `HeartbeatInterval` | `10s` | How often workers update `LastSeen` |
+| `StaleJobThreshold` | `30s` | How long before a worker is considered dead |

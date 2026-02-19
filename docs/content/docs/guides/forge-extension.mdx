@@ -1,45 +1,81 @@
 ---
 title: Forge Extension
-description: Mount Relay into a Forge application.
+description: Mount Dispatch into a Forge application.
 ---
 
-Relay includes an extension adapter for the [Forge](https://github.com/xraph/forge) framework.
+Dispatch includes an extension adapter for the [Forge](https://github.com/xraph/forge) framework. It handles store wiring, migration, route registration, and lifecycle management automatically.
 
 ## Setup
 
 ```go
 import (
-    "github.com/xraph/relay/extension"
-    "github.com/xraph/relay/store/memory"
+    "github.com/xraph/dispatch/extension"
+    "github.com/xraph/dispatch/store/postgres"
 )
 
-ext := extension.NewExtension(
-    extension.WithPrefix("/webhooks"),
-)
+store, _ := postgres.New(ctx, os.Getenv("DATABASE_URL"))
 
-// Create the admin API handler
-handler := ext.Handler(store, catalog, endpointSvc, dlqSvc)
+ext := extension.New(
+    extension.WithStore(store),
+    extension.WithConcurrency(20),
+    extension.WithQueues([]string{"default", "critical"}),
+    extension.WithBasePath("/api/dispatch"),
+)
 ```
+
+Register the extension with your Forge app:
+
+```go
+app := forge.New()
+app.RegisterExtension(ext)
+```
+
+Forge will call `ext.Start(ctx)` on application start and `ext.Stop(ctx)` on shutdown.
 
 ## Extension options
 
 | Option | Purpose | Default |
 |--------|---------|---------|
-| `WithPrefix(path)` | URL prefix for admin API routes | `/webhooks` |
+| `WithStore(s)` | Persistence backend (required) | — |
+| `WithConcurrency(n)` | Max concurrent jobs | `10` |
+| `WithQueues(q)` | Queues to poll | `["default"]` |
+| `WithBasePath(p)` | HTTP API prefix | `"/api/dispatch"` |
+| `WithExtension(x)` | Register a lifecycle extension | — |
+| `WithMiddleware(m)` | Add job execution middleware | — |
+| `WithBackoff(b)` | Retry backoff strategy | exponential |
+| `WithDisableRoutes()` | Skip HTTP route registration | `false` |
+| `WithDisableMigrate()` | Skip auto-migration at startup | `false` |
 
-## How it works
+## Auto-migration
 
-The extension provides:
-- A configurable URL prefix for all admin API routes.
-- A `Handler()` method that creates the admin API handler from your services.
-- Integration point for Forge's dependency injection and lifecycle.
-
-## Standalone usage
-
-The extension's `Handler()` method works without Forge:
+By default, `extension.New()` runs `store.Migrate(ctx)` during `Start`. Disable this if you manage migrations externally:
 
 ```go
-ext := extension.NewExtension()
-h := ext.Handler(store, catalog, epSvc, dlqSvc)
-http.Handle(ext.Prefix()+"/", http.StripPrefix(ext.Prefix(), h))
+ext := extension.New(
+    extension.WithStore(store),
+    extension.WithDisableMigrate(),
+)
+```
+
+## Accessing the engine from Forge context
+
+When using Forge dependency injection, retrieve the engine from context:
+
+```go
+eng := extension.EngineFromContext(ctx)
+engine.Enqueue(ctx, eng, SendEmail, input)
+```
+
+## Standalone usage (without Forge)
+
+The extension works without Forge too:
+
+```go
+ext := extension.New(extension.WithStore(store))
+ext.Start(ctx)
+defer ext.Stop(ctx)
+
+eng := ext.Engine()
+engine.Register(eng, SendEmail)
+engine.Enqueue(ctx, eng, SendEmail, input)
 ```
