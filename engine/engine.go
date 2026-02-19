@@ -17,7 +17,7 @@ import (
 	"os"
 	"time"
 
-	"go.opentelemetry.io/otel/metric"
+	gu "github.com/xraph/go-utils/metrics"
 	"go.opentelemetry.io/otel/trace"
 
 	"github.com/xraph/dispatch"
@@ -94,7 +94,9 @@ type Engine struct {
 
 	// OpenTelemetry providers (optional; nil means use global).
 	tracerProvider trace.TracerProvider
-	meterProvider  metric.MeterProvider
+	// metricFactory is the go-utils MetricFactory for engine-level metrics.
+	// nil means use gu.NewMetricsCollector default.
+	metricFactory gu.MetricFactory
 }
 
 // Option configures an Engine.
@@ -139,13 +141,12 @@ func WithTracerProvider(tp trace.TracerProvider) Option {
 	}
 }
 
-// WithMeterProvider sets a custom OTel MeterProvider for the engine.
-// When set, both the metrics middleware and the observability extension
-// use this provider instead of the global one.
-// If not set, the global otel.GetMeterProvider() is used.
-func WithMeterProvider(mp metric.MeterProvider) Option {
+// WithMetricFactory sets the go-utils MetricFactory for engine-level metrics.
+// Use fapp.Metrics() in forge applications to integrate with the forge metrics system.
+// If not set, a default metrics collector is used.
+func WithMetricFactory(factory gu.MetricFactory) Option {
 	return func(eng *Engine) {
-		eng.meterProvider = mp
+		eng.metricFactory = factory
 	}
 }
 
@@ -230,23 +231,13 @@ func Build(d *dispatch.Dispatcher, opts ...Option) (*Engine, error) {
 		tracingMw = mw.Tracing()
 	}
 
-	// Build metrics middleware (custom provider or global).
-	var metricsMw mw.Middleware
-	if eng.meterProvider != nil {
-		meter := eng.meterProvider.Meter("github.com/xraph/dispatch")
-		metricsMw = mw.MetricsWithMeter(meter)
-	} else {
-		metricsMw = mw.Metrics()
+	// Build metrics middleware and observability extension using the metric factory.
+	factory := eng.metricFactory
+	if factory == nil {
+		factory = gu.NewMetricsCollector("dispatch")
 	}
-
-	// Register the observability metrics extension.
-	var obsExt *observability.MetricsExtension
-	if eng.meterProvider != nil {
-		meter := eng.meterProvider.Meter("github.com/xraph/dispatch/observability")
-		obsExt = observability.NewMetricsExtensionWithMeter(meter)
-	} else {
-		obsExt = observability.NewMetricsExtension()
-	}
+	metricsMw := mw.MetricsWithFactory(factory)
+	obsExt := observability.NewMetricsExtensionWithFactory(factory)
 	eng.extensions.Register(obsExt)
 
 	// Build default middleware stack: recover → tracing → metrics → logging → scope → timeout.

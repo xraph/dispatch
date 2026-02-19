@@ -110,7 +110,8 @@ func (e *Extension) init(fapp forge.App) error {
 	if e.bo != nil {
 		boCount = 1
 	}
-	engOpts := make([]engine.Option, 0, len(e.exts)+len(e.mws)+boCount)
+	engOpts := make([]engine.Option, 0, len(e.exts)+len(e.mws)+boCount+1)
+	engOpts = append(engOpts, engine.WithMetricFactory(fapp.Metrics()))
 	for _, x := range e.exts {
 		engOpts = append(engOpts, engine.WithExtension(x))
 	}

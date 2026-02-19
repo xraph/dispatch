@@ -11,9 +11,7 @@ require (
 	github.com/xraph/vessel v0.0.5
 	go.jetify.com/typeid v1.3.0
 	go.opentelemetry.io/otel v1.40.0
-	go.opentelemetry.io/otel/metric v1.40.0
 	go.opentelemetry.io/otel/sdk v1.40.0
-	go.opentelemetry.io/otel/sdk/metric v1.40.0
 	go.opentelemetry.io/otel/trace v1.40.0
 	golang.org/x/sync v0.19.0
 	golang.org/x/time v0.12.0
@@ -110,7 +108,7 @@ require (
 	github.com/uptrace/bunrouter v1.0.23 // indirect
 	github.com/x448/float16 v0.8.4 // indirect
 	github.com/xraph/confy v0.0.3 // indirect
-	github.com/xraph/go-utils v0.0.11 // indirect
+	github.com/xraph/go-utils v0.0.11
 	github.com/yusufpapurcu/wmi v1.2.4 // indirect
 	go.opentelemetry.io/auto/sdk v1.2.1 // indirect
 	go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp v0.49.0 // indirect
@@ -144,5 +142,6 @@ require (
 require (
 	github.com/gofrs/uuid/v5 v5.2.0 // indirect
 	github.com/grpc-ecosystem/grpc-gateway/v2 v2.28.0 // indirect
+	go.opentelemetry.io/otel/metric v1.40.0 // indirect
 	google.golang.org/grpc v1.79.1 // indirect
 )
