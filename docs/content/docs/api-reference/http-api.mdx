@@ -1,212 +1,353 @@
 ---
 title: HTTP Admin API
-description: Complete reference for the Relay admin API endpoints.
+description: Complete reference for the Dispatch admin API endpoints.
 ---
 
-The admin API is served by `api.NewHandler()`. Mount it under a prefix of your choice. All requests and responses use JSON.
+The admin API is served by `api.New(eng, router)`. All routes are mounted under `/v1`. Requests and responses use JSON.
 
 ## Setup
 
 ```go
-handler := api.NewHandler(r.Store(), r.Catalog(), r.Endpoints(), r.DLQ(), logger)
-mux.Handle("/webhooks/", http.StripPrefix("/webhooks", handler))
+import (
+    "github.com/xraph/dispatch/api"
+    "github.com/xraph/dispatch/engine"
+)
+
+// With Forge router:
+a := api.New(eng, forgeRouter)
+a.RegisterRoutes(forgeRouter)
+
+// Standalone (net/http):
+mux := http.NewServeMux()
+api.RegisterRoutes(mux, eng)  // convenience wrapper
 ```
 
-## Event Types
+Using the Forge extension auto-registers routes unless `WithDisableRoutes(true)` is set.
 
-### Register event type
+---
+
+## Jobs
+
+### List jobs
 
 ```http
-POST /event-types
-Content-Type: application/json
+GET /v1/jobs?state=pending&queue=critical&limit=50&offset=0
+```
 
+Query parameters:
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `state` | string | Filter: `pending`, `running`, `completed`, `failed`, `retrying`, `cancelled` |
+| `queue` | string | Filter by queue name |
+| `limit` | int | Max results (default: 50, max: 1000) |
+| `offset` | int | Pagination offset |
+
+**Response `200 OK`:**
+```json
+[
+  {
+    "id": "job_01h455vb4pex5vsknk084sn02q",
+    "name": "send_email",
+    "queue": "default",
+    "state": "completed",
+    "payload": {"to":"user@example.com","subject":"Welcome"},
+    "attempt": 1,
+    "max_attempts": 3,
+    "run_at": "2025-01-15T10:00:00Z",
+    "started_at": "2025-01-15T10:00:01Z",
+    "completed_at": "2025-01-15T10:00:02Z",
+    "scope_app_id": "",
+    "scope_org_id": "org_01h455vb"
+  }
+]
+```
+
+### Get job
+
+```http
+GET /v1/jobs/{jobId}
+```
+
+**Response `200 OK`:** Single job object (same schema as above).
+
+**Response `404 Not Found`:** `{"error": "job not found"}`
+
+### Cancel job
+
+Cancels a job in `pending` or `retrying` state.
+
+```http
+POST /v1/jobs/{jobId}/cancel
+```
+
+**Response `204 No Content`**
+
+**Response `400 Bad Request`:** If the job is not in a cancellable state.
+
+### Job counts
+
+Returns counts grouped by state.
+
+```http
+GET /v1/jobs/counts
+```
+
+**Response `200 OK`:**
+```json
 {
-  "name": "invoice.created",
-  "description": "Fired when a new invoice is generated",
-  "group": "billing",
-  "version": "2025-01-01",
-  "schema": {"type": "object"},
-  "example": {"invoice_id": "INV-001"}
+  "pending": 12,
+  "running": 3,
+  "completed": 4820,
+  "failed": 7,
+  "retrying": 2,
+  "cancelled": 1
 }
 ```
 
-**Response:** `201 Created`
+---
 
-### List event types
+## Workflows
+
+### List registered workflows
+
+Returns the names of all workflows registered with the engine.
 
 ```http
-GET /event-types?group=billing&limit=20&offset=0
+GET /v1/workflows
 ```
 
-**Response:** `200 OK` with array of event types.
-
-### Get event type
-
-```http
-GET /event-types/{name}
-```
-
-### Deprecate event type
-
-```http
-DELETE /event-types/{name}
-```
-
-Soft-deletes the event type. Sending events with this type will fail.
-
-## Endpoints
-
-### Create endpoint
-
-```http
-POST /endpoints
-Content-Type: application/json
-
+**Response `200 OK`:**
+```json
 {
-  "tenant_id": "tenant-acme",
-  "url": "https://acme.example.com/webhook",
-  "description": "Production webhook",
-  "event_types": ["order.*", "invoice.created"],
-  "headers": {"X-Custom": "value"},
-  "rate_limit": 100,
-  "metadata": {"env": "production"}
+  "names": ["onboard_user", "process_order", "send_report"]
 }
 ```
 
-**Response:** `201 Created` with endpoint including generated `id` and `secret`.
-
-### List endpoints
+### List workflow runs
 
 ```http
-GET /endpoints?tenant_id=tenant-acme&limit=20&offset=0
+GET /v1/workflows/runs?state=running&limit=50&offset=0
 ```
 
-### Get endpoint
+Query parameters:
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `state` | string | Filter: `running`, `completed`, `failed` |
+| `limit` | int | Max results (default: 50) |
+| `offset` | int | Pagination offset |
+
+**Response `200 OK`:**
+```json
+[
+  {
+    "id": "run_01h455vb4pex5vsknk084sn02q",
+    "name": "onboard_user",
+    "state": "running",
+    "current_step": "send-welcome",
+    "started_at": "2025-01-15T10:00:00Z",
+    "completed_at": null,
+    "scope_app_id": "",
+    "scope_org_id": "org_01h455vb"
+  }
+]
+```
+
+### Get workflow run
 
 ```http
-GET /endpoints/{id}
+GET /v1/workflows/runs/{runId}
 ```
 
-### Update endpoint
+**Response `200 OK`:** Single run object.
 
-```http
-PUT /endpoints/{id}
-Content-Type: application/json
+**Response `404 Not Found`:** `{"error": "run not found"}`
 
-{
-  "url": "https://new-url.example.com/webhook",
-  "event_types": ["order.*"],
-  "rate_limit": 200
-}
-```
-
-### Delete endpoint
-
-```http
-DELETE /endpoints/{id}
-```
-
-### Enable / Disable
-
-```http
-PATCH /endpoints/{id}/enable
-PATCH /endpoints/{id}/disable
-```
-
-### Rotate secret
-
-```http
-POST /endpoints/{id}/rotate-secret
-```
-
-**Response:** `200 OK` with `{"secret": "whsec_..."}`.
-
-## Events
-
-### Send event
-
-```http
-POST /events
-Content-Type: application/json
-
-{
-  "type": "order.created",
-  "tenant_id": "tenant-acme",
-  "data": {"order_id": "ORD-001", "amount": 99.99},
-  "idempotency_key": "order-ORD-001"
-}
-```
-
-**Response:** `201 Created`
-
-### List events
-
-```http
-GET /events?type=order.created&limit=20&offset=0
-```
-
-### Get event
-
-```http
-GET /events/{id}
-```
-
-## Deliveries
-
-### List deliveries for endpoint
-
-```http
-GET /endpoints/{id}/deliveries?state=pending&limit=20&offset=0
-```
+---
 
 ## Dead Letter Queue
 
 ### List DLQ entries
 
 ```http
-GET /dlq?tenant_id=tenant-acme&limit=20&offset=0
+GET /v1/dlq?queue=default&limit=50&offset=0
 ```
 
-### Replay single entry
+Query parameters:
 
-```http
-POST /dlq/{id}/replay
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `queue` | string | Filter by originating queue name |
+| `limit` | int | Max results (default: 50) |
+| `offset` | int | Pagination offset |
+
+**Response `200 OK`:**
+```json
+[
+  {
+    "id": "dlq_01h455vb4pex5vsknk084sn02q",
+    "job_id": "job_01h455vb4pex5vsknk084sn02q",
+    "job_name": "send_email",
+    "queue": "default",
+    "error": "dial tcp: connection refused",
+    "payload": {"to":"user@example.com"},
+    "failed_at": "2025-01-15T10:05:00Z",
+    "scope_org_id": "org_01h455vb"
+  }
+]
 ```
 
-### Bulk replay
+### Get DLQ entry
 
 ```http
-POST /dlq/replay
-Content-Type: application/json
+GET /v1/dlq/{entryId}
+```
 
+**Response `200 OK`:** Single DLQ entry object.
+
+### Replay DLQ entry
+
+Re-enqueues the entry as a new `pending` job in its original queue.
+
+```http
+POST /v1/dlq/{entryId}/replay
+```
+
+**Response `201 Created`:** The newly created `job.Job` object.
+
+### Purge DLQ
+
+Removes DLQ entries older than a threshold.
+
+```http
+POST /v1/dlq/purge
+```
+
+**Response `200 OK`:**
+```json
 {
-  "ids": ["dlq_01h455vb...", "dlq_01h456ab..."]
+  "purged": 42
 }
 ```
 
-## Stats
-
-### System statistics
+### DLQ count
 
 ```http
-GET /stats
+GET /v1/dlq/count
 ```
 
-Returns counts of events, deliveries, DLQ entries, and endpoints.
+**Response `200 OK`:**
+```json
+{
+  "count": 17
+}
+```
+
+---
+
+## Crons
+
+### List cron entries
+
+```http
+GET /v1/crons?limit=50&offset=0
+```
+
+**Response `200 OK`:**
+```json
+[
+  {
+    "id": "cron_01h455vb4pex5vsknk084sn02q",
+    "name": "daily-cleanup",
+    "schedule": "0 3 * * *",
+    "enabled": true,
+    "last_fired_at": "2025-01-15T03:00:00Z",
+    "next_run_at": "2025-01-16T03:00:00Z",
+    "scope_app_id": "",
+    "scope_org_id": ""
+  }
+]
+```
+
+### Get cron entry
+
+```http
+GET /v1/crons/{cronId}
+```
+
+**Response `200 OK`:** Single cron entry object.
+
+### Enable cron entry
+
+```http
+POST /v1/crons/{cronId}/enable
+```
+
+**Response `200 OK`:** Updated cron entry with `enabled: true`.
+
+### Disable cron entry
+
+```http
+POST /v1/crons/{cronId}/disable
+```
+
+**Response `200 OK`:** Updated cron entry with `enabled: false`.
+
+### Delete cron entry
+
+Permanently removes the cron entry. It will no longer fire.
+
+```http
+DELETE /v1/crons/{cronId}
+```
+
+**Response `204 No Content`**
+
+---
+
+## Stats
+
+Returns aggregate statistics across all subsystems.
+
+```http
+GET /v1/stats
+```
+
+**Response `200 OK`:**
+```json
+{
+  "jobs": {
+    "pending": 12,
+    "running": 3,
+    "completed": 4820,
+    "failed": 7,
+    "retrying": 2,
+    "cancelled": 1
+  },
+  "dlq_count": 17,
+  "workflows": {
+    "running": 5,
+    "completed": 312,
+    "failed": 4
+  }
+}
+```
+
+---
 
 ## Error responses
 
-All errors return a JSON object with an `error` field:
+All errors return a JSON object:
 
 ```json
 {
-  "error": "endpoint not found"
+  "error": "job not found"
 }
 ```
 
 | Scenario | Status Code |
 |----------|-------------|
-| Resource not found | 404 |
-| Invalid input / validation | 400 |
-| Duplicate idempotency key | 200 (no-op) |
-| Internal error | 500 |
+| Resource not found | `404` |
+| Invalid input | `400` |
+| Internal error | `500` |

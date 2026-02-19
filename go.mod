@@ -4,6 +4,7 @@ go 1.25.7
 
 require (
 	github.com/jackc/pgx/v5 v5.8.0
+	github.com/redis/go-redis/v9 v9.14.1
 	github.com/robfig/cron/v3 v3.0.1
 	github.com/testcontainers/testcontainers-go v0.40.0
 	github.com/testcontainers/testcontainers-go/modules/postgres v0.40.0
@@ -145,6 +146,7 @@ require (
 )
 
 require (
+	github.com/dgryski/go-rendezvous v0.0.0-20200823014737-9f7001d12a5f // indirect
 	github.com/dustin/go-humanize v1.0.1 // indirect
 	github.com/gofrs/uuid/v5 v5.3.2 // indirect
 	github.com/grpc-ecosystem/grpc-gateway/v2 v2.28.0 // indirect
