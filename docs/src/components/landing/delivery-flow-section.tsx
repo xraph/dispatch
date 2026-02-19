@@ -375,18 +375,18 @@ export function DeliveryFlowSection() {
 
             <div className="mt-8 space-y-5">
               <FeatureBullet
-                title="Schema Validation"
-                description="Every event is validated against its registered schema before delivery. Malformed payloads never reach your endpoints."
+                title="Type-Safe Jobs"
+                description="Every job is typed and validated before execution. Mismatched payloads fail at compile time, not runtime."
                 delay={0.2}
               />
               <FeatureBullet
-                title="Smart Fan-Out"
-                description="Events are distributed to all subscribed endpoints in parallel. Each endpoint has independent retry and rate-limit policies."
+                title="Priority Scheduling"
+                description="Jobs are scheduled by priority and distributed to available workers. Each worker has independent capacity and backoff policies."
                 delay={0.3}
               />
               <FeatureBullet
-                title="Decision Matrix"
-                description="2xx = delivered. 429/5xx = retry with backoff. 4xx = dead letter. 410 = auto-disable endpoint."
+                title="Outcome Routing"
+                description="Success = completed. Transient error = retry with backoff. Exhausted retries = dead letter queue for inspection and replay."
                 delay={0.4}
               />
             </div>
@@ -399,7 +399,7 @@ export function DeliveryFlowSection() {
               className="mt-8"
             >
               <a
-                href="/docs/relay/architecture"
+                href="/docs/architecture"
                 className="inline-flex items-center gap-1 text-sm font-medium text-teal-600 dark:text-teal-400 hover:text-teal-500 transition-colors"
               >
                 Learn about the architecture

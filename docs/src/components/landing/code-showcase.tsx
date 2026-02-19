@@ -8,60 +8,54 @@ const sendCode = `package main
 
 import (
   "log/slog"
-  "github.com/xraph/relay"
-  "github.com/xraph/relay/store/memory"
+  "github.com/xraph/dispatch"
+  "github.com/xraph/dispatch/store/memory"
 )
 
 func main() {
-  r, _ := relay.New(
-    relay.WithStore(memory.New()),
-    relay.WithWorkers(4),
-    relay.WithLogger(slog.Default()),
+  d, _ := dispatch.New(
+    dispatch.WithStore(memory.New()),
+    dispatch.WithWorkers(4),
+    dispatch.WithLogger(slog.Default()),
   )
 
-  // Register an event type
-  r.Catalog().Register("order.created")
+  // Register a typed job handler
+  dispatch.Register(d, "email.send", sendEmail)
 
-  // Register an endpoint
-  r.Endpoints().Create(ctx, relay.Endpoint{
-    URL: "https://api.acme.co/webhooks",
-    EventTypes: []string{"order.created"},
-  })
-
-  // Send an event
-  r.Send(ctx, relay.Event{
-    Type: "order.created",
-    Payload: orderJSON,
+  // Enqueue a job with options
+  d.Enqueue(ctx, dispatch.Job{
+    Type:     "email.send",
+    Payload:  emailJSON,
+    Priority: dispatch.High,
   })
 }`;
 
-const verifyCode = `package main
+const handlerCode = `package main
 
 import (
-  "crypto/hmac"
-  "crypto/sha256"
-  "encoding/hex"
-  "io"
-  "net/http"
+  "context"
+  "github.com/xraph/dispatch"
 )
 
-func webhookHandler(w http.ResponseWriter, r *http.Request) {
-  body, _ := io.ReadAll(r.Body)
-  signature := r.Header.Get("X-Relay-Signature")
+type EmailInput struct {
+  To      string \`json:"to"\`
+  Subject string \`json:"subject"\`
+  Body    string \`json:"body"\`
+}
 
-  // Verify HMAC-SHA256 signature
-  mac := hmac.New(sha256.New, []byte(secret))
-  mac.Write(body)
-  expected := hex.EncodeToString(mac.Sum(nil))
+func sendEmail(
+  ctx context.Context,
+  job *dispatch.Job[EmailInput],
+) error {
+  input := job.Payload
 
-  if !hmac.Equal([]byte(signature), []byte(expected)) {
-    http.Error(w, "invalid signature", 401)
-    return
+  if err := mailer.Send(
+    input.To, input.Subject, input.Body,
+  ); err != nil {
+    // Mark transient errors as retryable
+    return dispatch.Retryable(err)
   }
-
-  // Process the verified webhook
-  processEvent(body)
-  w.WriteHeader(200)
+  return nil
 }`;
 
 export function CodeShowcase() {
@@ -71,7 +65,7 @@ export function CodeShowcase() {
         <SectionHeader
           badge="Developer Experience"
           title="Simple API. Production power."
-          description="Send your first webhook in under 20 lines. Verify signatures on the receiver side with standard crypto."
+          description="Enqueue your first job in under 20 lines. Handle typed payloads on the worker side with zero boilerplate."
         />
 
         <div className="mt-14 grid grid-cols-1 lg:grid-cols-2 gap-6">
@@ -91,7 +85,7 @@ export function CodeShowcase() {
             <CodeBlock code={sendCode} filename="main.go" />
           </motion.div>
 
-          {/* Receiver side */}
+          {/* Handler side */}
           <motion.div
             initial={{ opacity: 0, x: 20 }}
             whileInView={{ opacity: 1, x: 0 }}
@@ -101,10 +95,10 @@ export function CodeShowcase() {
             <div className="mb-3 flex items-center gap-2">
               <div className="size-2 rounded-full bg-green-500" />
               <span className="text-xs font-medium text-fd-muted-foreground uppercase tracking-wider">
-                Receiver
+                Handler
               </span>
             </div>
-            <CodeBlock code={verifyCode} filename="receiver.go" />
+            <CodeBlock code={handlerCode} filename="handler.go" />
           </motion.div>
         </div>
       </div>

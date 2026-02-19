@@ -20,12 +20,12 @@ export function CTA() {
           className="max-w-2xl mx-auto text-center"
         >
           <h2 className="text-3xl font-bold tracking-tight text-fd-foreground sm:text-4xl">
-            Start delivering webhooks
+            Start dispatching jobs
           </h2>
           <p className="mt-4 text-lg text-fd-muted-foreground leading-relaxed">
-            Add production-grade webhook delivery to your Go service in minutes.
-            Relay handles retries, signatures, dead letters, and rate limiting
-            out of the box.
+            Add production-grade background processing to your Go service in
+            minutes. Dispatch handles scheduling, retries, dead letters, and
+            worker coordination out of the box.
           </p>
 
           {/* Install command */}
@@ -38,7 +38,7 @@ export function CTA() {
           >
             <span className="text-fd-muted-foreground select-none">$</span>
             <code className="text-fd-foreground">
-              go get github.com/xraph/relay
+              go get github.com/xraph/dispatch
             </code>
           </motion.div>
 
