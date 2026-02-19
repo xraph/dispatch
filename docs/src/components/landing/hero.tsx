@@ -24,8 +24,8 @@ function GitHubIcon({ className }: { className?: string }) {
   );
 }
 
-// ─── Mini Webhook Flow Diagram ───────────────────────────────
-function MiniWebhookFlow() {
+// ─── Mini Dispatch Flow Diagram ──────────────────────────────
+function MiniDispatchFlow() {
   return (
     <motion.div
       initial={{ opacity: 0 }}
@@ -37,10 +37,10 @@ function MiniWebhookFlow() {
       <div className="absolute inset-0 -m-8 bg-gradient-to-br from-teal-500/5 via-transparent to-cyan-500/5 rounded-3xl blur-2xl" />
 
       <div className="relative space-y-6 p-4">
-        {/* Row 1: Event → Validate → Fan-Out */}
+        {/* Row 1: Job → Queue → Execute */}
         <div className="flex items-center justify-center gap-0">
           <FlowNode
-            label="Event"
+            label="Job"
             color="teal"
             size="sm"
             delay={0.4}
@@ -62,15 +62,15 @@ function MiniWebhookFlow() {
             }
           />
           <FlowLine length={32} color="teal" delay={1} />
-          <FlowNode label="Validate" color="purple" size="sm" delay={0.55} />
+          <FlowNode label="Queue" color="purple" size="sm" delay={0.55} />
           <FlowLine length={32} color="teal" delay={2} />
-          <FlowNode label="Fan-Out" color="teal" size="sm" pulse delay={0.7} />
+          <FlowNode label="Execute" color="teal" size="sm" pulse delay={0.7} />
         </div>
 
-        {/* Row 2: Fan-out to 3 endpoints */}
+        {/* Row 2: Execute to 3 workers */}
         <div className="flex items-start justify-center">
           <div className="space-y-2.5">
-            {/* Endpoint A: Success */}
+            {/* Worker A: Completed */}
             <motion.div
               initial={{ opacity: 0, x: -10 }}
               animate={{ opacity: 1, x: 0 }}
@@ -79,7 +79,7 @@ function MiniWebhookFlow() {
             >
               <FlowLine length={28} color="green" delay={3} />
               <FlowNode
-                label="api.acme.co"
+                label="worker-01"
                 color="gray"
                 size="sm"
                 delay={1.1}
@@ -88,7 +88,7 @@ function MiniWebhookFlow() {
               <StatusBadge status="delivered" />
             </motion.div>
 
-            {/* Endpoint B: Retry */}
+            {/* Worker B: Retry */}
             <motion.div
               initial={{ opacity: 0, x: -10 }}
               animate={{ opacity: 1, x: 0 }}
@@ -97,7 +97,7 @@ function MiniWebhookFlow() {
             >
               <FlowLine length={28} color="amber" delay={5} />
               <FlowNode
-                label="hooks.stripe.io"
+                label="worker-02"
                 color="gray"
                 size="sm"
                 delay={1.3}
@@ -106,7 +106,7 @@ function MiniWebhookFlow() {
               <StatusBadge status="retry" />
             </motion.div>
 
-            {/* Endpoint C: DLQ */}
+            {/* Worker C: DLQ */}
             <motion.div
               initial={{ opacity: 0, x: -10 }}
               animate={{ opacity: 1, x: 0 }}
@@ -114,7 +114,7 @@ function MiniWebhookFlow() {
               className="flex items-center gap-0"
             >
               <FlowLine length={28} color="red" delay={7} />
-              <FlowNode label="notify.svc" color="gray" size="sm" delay={1.5} />
+              <FlowNode label="worker-03" color="gray" size="sm" delay={1.5} />
               <FlowLine length={24} color="red" delay={8} />
               <StatusBadge status="dlq" />
             </motion.div>
@@ -123,10 +123,10 @@ function MiniWebhookFlow() {
 
         {/* Floating capability badges */}
         <div className="flex flex-wrap items-center justify-center gap-2 pt-2">
-          <FloatingBadge label="Guaranteed Delivery" delay={1.6} />
-          <FloatingBadge label="HMAC-SHA256" delay={1.8} />
+          <FloatingBadge label="Typed Handlers" delay={1.6} />
+          <FloatingBadge label="Durable Workflows" delay={1.8} />
           <FloatingBadge label="DLQ + Replay" delay={2.0} />
-          <FloatingBadge label="Rate Limiting" delay={2.2} />
+          <FloatingBadge label="Cron Scheduling" delay={2.2} />
         </div>
       </div>
     </motion.div>
@@ -155,7 +155,7 @@ export function Hero() {
               transition={{ duration: 0.4 }}
             >
               <span className="inline-flex items-center rounded-full border border-teal-500/20 bg-teal-500/10 px-3.5 py-1 text-xs font-medium text-teal-600 dark:text-teal-400 mb-6">
-                Composable webhook delivery engine for Go
+                Composable background job engine for Go
               </span>
             </motion.div>
 
@@ -169,8 +169,8 @@ export function Hero() {
               transition={{ duration: 0.5, delay: 0.6 }}
               className="mt-6 text-lg text-fd-muted-foreground leading-relaxed max-w-lg"
             >
-              Event catalog, guaranteed delivery, HMAC signatures, dead letter
-              queues, rate limiting &mdash; out of the box.
+              Background jobs, durable workflows, cron scheduling, and
+              distributed workers &mdash; out of the box.
             </motion.p>
 
             {/* Install command */}
@@ -182,7 +182,7 @@ export function Hero() {
             >
               <span className="text-fd-muted-foreground select-none">$</span>
               <code className="text-fd-foreground">
-                go get github.com/xraph/relay
+                go get github.com/xraph/dispatch
               </code>
             </motion.div>
 
@@ -204,7 +204,7 @@ export function Hero() {
                 Get Started
               </Link>
               <a
-                href="https://github.com/xraph/relay"
+                href="https://github.com/xraph/dispatch"
                 target="_blank"
                 rel="noreferrer"
                 className={cn(
@@ -218,9 +218,9 @@ export function Hero() {
             </motion.div>
           </div>
 
-          {/* Right: Mini webhook flow diagram */}
+          {/* Right: Mini dispatch flow diagram */}
           <div className="relative lg:pl-8">
-            <MiniWebhookFlow />
+            <MiniDispatchFlow />
           </div>
         </div>
       </div>

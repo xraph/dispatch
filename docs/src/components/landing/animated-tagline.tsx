@@ -3,7 +3,7 @@
 import { motion } from "framer-motion";
 import { cn } from "@/lib/cn";
 
-const words = ["Relay", " your", " webhooks"];
+const words = ["Dispatch", " your", " jobs"];
 
 const charVariants = {
   hidden: {

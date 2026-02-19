@@ -16,9 +16,9 @@ interface FeatureCard {
 
 const features: FeatureCard[] = [
   {
-    title: "Event Catalog",
+    title: "Background Jobs",
     description:
-      "Type-safe event registration with schema validation. Define your event types once, reference them everywhere.",
+      "Define typed handlers, enqueue with priority, and retry with configurable backoff. No event is lost, ever.",
     icon: (
       <svg
         className="size-5"
@@ -35,17 +35,17 @@ const features: FeatureCard[] = [
         <path d="M8 7h8M8 11h6" />
       </svg>
     ),
-    code: `r.Catalog().RegisterEventType(
-  "order.created",
-  relay.WithSchema(orderSchema),
-  relay.WithDescription("New order placed"),
+    code: `dispatch.Register("email.send",
+  dispatch.WithHandler(sendEmail),
+  dispatch.WithPriority(High),
+  dispatch.WithRetry(5),
 )`,
-    filename: "catalog.go",
+    filename: "jobs.go",
   },
   {
-    title: "Guaranteed Delivery",
+    title: "Durable Workflows",
     description:
-      "Configurable retry schedules with exponential backoff. No event is lost, ever.",
+      "Multi-step Go functions that checkpoint progress and resume after failure. No YAML, no DSL.",
     icon: (
       <svg
         className="size-5"
@@ -61,19 +61,17 @@ const features: FeatureCard[] = [
         <path d="M9 12l2 2 4-4" />
       </svg>
     ),
-    code: `relay.WithRetrySchedule(
-  5*time.Second,   // 1st retry
-  30*time.Second,  // 2nd retry
-  2*time.Minute,   // 3rd retry
-  15*time.Minute,  // 4th retry
-  1*time.Hour,     // 5th retry
+    code: `dispatch.Workflow("onboard.user",
+  dispatch.Step("validate", validateUser),
+  dispatch.Step("provision", provisionAccount),
+  dispatch.Step("notify", notifyUser),
 )`,
-    filename: "retry.go",
+    filename: "workflows.go",
   },
   {
     title: "Dead Letter Queue",
     description:
-      "Failed deliveries are captured automatically. Inspect, debug, and replay them on demand.",
+      "Jobs that exhaust retries are captured automatically. Inspect, debug, and replay them on demand.",
     icon: (
       <svg
         className="size-5"
@@ -90,17 +88,17 @@ const features: FeatureCard[] = [
         <path d="M10 13h4" />
       </svg>
     ),
-    code: `items, _ := r.DLQ().List(ctx,
-  dlq.WithEventType("order.created"),
+    code: `items, _ := d.DLQ().List(ctx,
+  dlq.WithJobType("email.send"),
   dlq.WithLimit(10),
 )
-r.DLQ().Replay(ctx, items[0].ID)`,
+d.DLQ().Replay(ctx, items[0].ID)`,
     filename: "dlq.go",
   },
   {
-    title: "HMAC Signatures",
+    title: "Distributed Cron",
     description:
-      "Every payload is signed with HMAC-SHA256. Receivers verify authenticity with a single call.",
+      "Leader-elected cron scheduling with per-tenant support and runtime enable/disable.",
     icon: (
       <svg
         className="size-5"
@@ -112,21 +110,21 @@ r.DLQ().Replay(ctx, items[0].ID)`,
         strokeLinejoin="round"
         aria-hidden="true"
       >
-        <rect x="3" y="11" width="18" height="11" rx="2" ry="2" />
-        <path d="M7 11V7a5 5 0 0110 0v4" />
+        <circle cx="12" cy="12" r="10" />
+        <path d="M12 6v6l4 2" />
       </svg>
     ),
-    code: `valid := relay.VerifySignature(
-  payload,
-  header.Get("X-Relay-Signature"),
-  endpoint.Secret,
+    code: `dispatch.Cron("daily.report",
+  dispatch.WithSchedule("0 9 * * *"),
+  dispatch.WithLeaderElection(true),
+  dispatch.WithTenant(tenantID),
 )`,
-    filename: "verify.go",
+    filename: "cron.go",
   },
   {
-    title: "Rate Limiting",
+    title: "Distributed Workers",
     description:
-      "Per-endpoint token bucket rate limiting protects downstream services from being overwhelmed.",
+      "Worker registration, heartbeats, leader election, and automatic work stealing across nodes.",
     icon: (
       <svg
         className="size-5"
@@ -142,11 +140,12 @@ r.DLQ().Replay(ctx, items[0].ID)`,
         <circle cx="12" cy="12" r="3" />
       </svg>
     ),
-    code: `relay.WithRateLimit(
-  100,            // requests per second
-  time.Second,    // window
-)`,
-    filename: "ratelimit.go",
+    code: `d.Workers().Register(ctx, dispatch.Worker{
+  ID:        workerID,
+  Capacity:  10,
+  Heartbeat: 30 * time.Second,
+})`,
+    filename: "workers.go",
   },
   {
     title: "Pluggable Stores",
@@ -168,10 +167,10 @@ r.DLQ().Replay(ctx, items[0].ID)`,
         <path d="M3 5v14c0 1.66 4.03 3 9 3s9-1.34 9-3V5" />
       </svg>
     ),
-    code: `r, _ := relay.New(
-  relay.WithStore(postgres.New(db)),
-  relay.WithWorkers(8),
-  relay.WithLogger(slog.Default()),
+    code: `d, _ := dispatch.New(
+  dispatch.WithStore(postgres.New(db)),
+  dispatch.WithWorkers(8),
+  dispatch.WithLogger(slog.Default()),
 )`,
     filename: "main.go",
     colSpan: 2,
@@ -202,8 +201,8 @@ export function FeatureBento() {
       <div className="container max-w-(--fd-layout-width) mx-auto px-4 sm:px-6">
         <SectionHeader
           badge="Features"
-          title="Everything you need for webhook delivery"
-          description="Relay handles the hard parts — retries, signatures, dead letters, rate limits — so you can focus on your business logic."
+          title="Everything you need for background processing"
+          description="Dispatch handles the hard parts — retries, scheduling, dead letters, worker coordination — so you can focus on your business logic."
         />
 
         <motion.div

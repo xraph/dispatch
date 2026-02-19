@@ -5,15 +5,15 @@ import { useEffect, useState } from "react";
 import { cn } from "@/lib/cn";
 import { SectionHeader } from "./section-header";
 
-// ─── Event Type Cycler ───────────────────────────────────────
-const eventTypes = ["order.created", "invoice.paid", "user.signup"];
+// ─── Job Type Cycler ─────────────────────────────────────────
+const jobTypes = ["email.send", "report.generate", "user.onboard"];
 
-function CyclingEventType() {
+function CyclingJobType() {
   const [index, setIndex] = useState(0);
 
   useEffect(() => {
     const interval = setInterval(() => {
-      setIndex((prev) => (prev + 1) % eventTypes.length);
+      setIndex((prev) => (prev + 1) % jobTypes.length);
     }, 3500);
     return () => clearInterval(interval);
   }, []);
@@ -22,14 +22,14 @@ function CyclingEventType() {
     <div className="relative h-5 overflow-hidden">
       <AnimatePresence mode="wait">
         <motion.span
-          key={eventTypes[index]}
+          key={jobTypes[index]}
           initial={{ y: 12, opacity: 0 }}
           animate={{ y: 0, opacity: 1 }}
           exit={{ y: -12, opacity: 0 }}
           transition={{ duration: 0.3 }}
           className="absolute inset-0 text-teal-500 dark:text-teal-400 font-mono text-xs font-medium"
         >
-          {eventTypes[index]}
+          {jobTypes[index]}
         </motion.span>
       </AnimatePresence>
     </div>
@@ -230,8 +230,8 @@ function PipelineDiagram() {
           {/* Stage 1: Top pipeline stages */}
           <div className="flex items-center gap-0 flex-wrap justify-center">
             <Stage
-              label="Send()"
-              sublabel={<CyclingEventType />}
+              label="Enqueue()"
+              sublabel={<CyclingJobType />}
               color="text-teal-600 dark:text-teal-400"
               borderColor="border-teal-500/30"
               bgColor="bg-teal-500/5"
@@ -239,8 +239,8 @@ function PipelineDiagram() {
             />
             <Connection color="teal" delay={0} />
             <Stage
-              label="Catalog"
-              sublabel="validate"
+              label="Schedule"
+              sublabel="queue"
               color="text-purple-600 dark:text-purple-400"
               borderColor="border-purple-500/30"
               bgColor="bg-purple-500/5"
@@ -248,8 +248,8 @@ function PipelineDiagram() {
             />
             <Connection color="teal" delay={0.5} />
             <Stage
-              label="Fan-Out"
-              sublabel="distribute"
+              label="Execute"
+              sublabel="process"
               color="text-teal-600 dark:text-teal-400"
               borderColor="border-teal-500/30"
               bgColor="bg-teal-500/8"
@@ -264,23 +264,23 @@ function PipelineDiagram() {
           {/* Stage 2: Endpoints with results */}
           <div className="flex flex-col items-start gap-2.5">
             <EndpointRow
-              name="api.acme.co"
+              name="worker-01"
               status="delivered"
-              statusLabel="200 Delivered"
+              statusLabel="✓ Completed"
               lineColor="green"
               delay={0.5}
             />
             <EndpointRow
-              name="hooks.stripe.io"
+              name="worker-02"
               status={retryResolved ? "delivered" : "retry"}
-              statusLabel={retryResolved ? "200 Delivered" : "503 Retry ↻"}
+              statusLabel={retryResolved ? "✓ Completed" : "↻ Retry"}
               lineColor={retryResolved ? "green" : "amber"}
               delay={0.6}
             />
             <EndpointRow
-              name="notify.svc"
+              name="worker-03"
               status="dlq"
-              statusLabel="422 → DLQ"
+              statusLabel="✗ → DLQ"
               lineColor="red"
               delay={0.7}
             />
@@ -290,7 +290,7 @@ function PipelineDiagram() {
           <div className="flex items-center gap-4 mt-4 text-[10px] text-fd-muted-foreground">
             <div className="flex items-center gap-1.5">
               <div className="size-2 rounded-full bg-green-500" />
-              <span>Delivered</span>
+              <span>Completed</span>
             </div>
             <div className="flex items-center gap-1.5">
               <div className="size-2 rounded-full bg-amber-500" />
@@ -367,9 +367,9 @@ export function DeliveryFlowSection() {
           {/* Left: Text content */}
           <div className="flex flex-col">
             <SectionHeader
-              badge="Delivery Pipeline"
-              title="From event to endpoint. Automatically."
-              description="Relay orchestrates the entire webhook delivery lifecycle — validation, fan-out, delivery, retries, and dead-letter routing."
+              badge="Execution Pipeline"
+              title="From enqueue to execution. Automatically."
+              description="Dispatch orchestrates the entire job lifecycle — scheduling, execution, retries, and dead-letter routing."
               align="left"
             />
 
