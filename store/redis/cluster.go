@@ -2,6 +2,7 @@ package redis
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strconv"
 	"time"
@@ -78,7 +79,7 @@ func (s *Store) ListWorkers(ctx context.Context) ([]*cluster.Worker, error) {
 		return nil, fmt.Errorf("dispatch/redis: list workers: %w", err)
 	}
 
-	var workers []*cluster.Worker
+	workers := make([]*cluster.Worker, 0, len(ids))
 	for _, wID := range ids {
 		vals, getErr := s.client.HGetAll(ctx, workerKey(wID)).Result()
 		if getErr != nil || len(vals) == 0 {
@@ -141,26 +142,32 @@ func (s *Store) AcquireLeadership(ctx context.Context, workerID id.WorkerID, ttl
 	if ok {
 		// We got the lock — update worker fields.
 		until := time.Now().UTC().Add(ttl)
-		s.client.HSet(ctx, wKey, //nolint:errcheck
+		if _, hErr := s.client.HSet(ctx, wKey,
 			"is_leader", "1",
 			"leader_until", until.Format(time.RFC3339Nano),
-		)
+		).Result(); hErr != nil {
+			s.logger.Warn("failed to update leader fields", "error", hErr)
+		}
 		return true, nil
 	}
 
 	// Check if we already hold it.
 	current, err := s.client.Get(ctx, leaderKey).Result()
-	if err != nil && err != goredis.Nil {
+	if err != nil && !errors.Is(err, goredis.Nil) {
 		return false, fmt.Errorf("dispatch/redis: acquire leadership get: %w", err)
 	}
 	if current == wID {
 		// Re-acquire: extend TTL.
-		s.client.Expire(ctx, leaderKey, ttl) //nolint:errcheck
+		if eErr := s.client.Expire(ctx, leaderKey, ttl).Err(); eErr != nil {
+			s.logger.Warn("failed to expire leader key", "error", eErr)
+		}
 		until := time.Now().UTC().Add(ttl)
-		s.client.HSet(ctx, wKey, //nolint:errcheck
+		if _, hErr := s.client.HSet(ctx, wKey,
 			"is_leader", "1",
 			"leader_until", until.Format(time.RFC3339Nano),
-		)
+		).Result(); hErr != nil {
+			s.logger.Warn("failed to update leader fields", "error", hErr)
+		}
 		return true, nil
 	}
 
@@ -173,7 +180,7 @@ func (s *Store) RenewLeadership(ctx context.Context, workerID id.WorkerID, ttl t
 
 	current, err := s.client.Get(ctx, leaderKey).Result()
 	if err != nil {
-		if err == goredis.Nil {
+		if errors.Is(err, goredis.Nil) {
 			return false, nil // no leader
 		}
 		return false, fmt.Errorf("dispatch/redis: renew leadership get: %w", err)
@@ -182,11 +189,15 @@ func (s *Store) RenewLeadership(ctx context.Context, workerID id.WorkerID, ttl t
 		return false, nil // not the leader
 	}
 
-	s.client.Expire(ctx, leaderKey, ttl) //nolint:errcheck
+	if eErr := s.client.Expire(ctx, leaderKey, ttl).Err(); eErr != nil {
+		s.logger.Warn("failed to expire leader key", "error", eErr)
+	}
 	until := time.Now().UTC().Add(ttl)
-	s.client.HSet(ctx, workerKey(wID), //nolint:errcheck
+	if _, hErr := s.client.HSet(ctx, workerKey(wID),
 		"leader_until", until.Format(time.RFC3339Nano),
-	)
+	).Result(); hErr != nil {
+		s.logger.Warn("failed to update leader fields", "error", hErr)
+	}
 	return true, nil
 }
 
@@ -194,7 +205,7 @@ func (s *Store) RenewLeadership(ctx context.Context, workerID id.WorkerID, ttl t
 func (s *Store) GetLeader(ctx context.Context) (*cluster.Worker, error) {
 	wID, err := s.client.Get(ctx, leaderKey).Result()
 	if err != nil {
-		if err == goredis.Nil {
+		if errors.Is(err, goredis.Nil) {
 			return nil, nil // no leader
 		}
 		return nil, fmt.Errorf("dispatch/redis: get leader: %w", err)
@@ -233,9 +244,9 @@ func mapToWorker(m map[string]string) (*cluster.Worker, error) {
 		return nil, fmt.Errorf("dispatch/redis: parse worker id: %w", err)
 	}
 
-	concurrency, _ := strconv.Atoi(m["concurrency"])
-	lastSeen, _ := time.Parse(time.RFC3339Nano, m["last_seen"])
-	createdAt, _ := time.Parse(time.RFC3339Nano, m["created_at"])
+	concurrency, _ := strconv.Atoi(m["concurrency"])              //nolint:errcheck // best-effort parse from trusted Redis data
+	lastSeen, _ := time.Parse(time.RFC3339Nano, m["last_seen"])   //nolint:errcheck // best-effort parse from trusted Redis data
+	createdAt, _ := time.Parse(time.RFC3339Nano, m["created_at"]) //nolint:errcheck // best-effort parse from trusted Redis data
 
 	w := &cluster.Worker{
 		ID:          wID,
@@ -250,7 +261,7 @@ func mapToWorker(m map[string]string) (*cluster.Worker, error) {
 	}
 
 	if v := m["leader_until"]; v != "" {
-		t, _ := time.Parse(time.RFC3339Nano, v)
+		t, _ := time.Parse(time.RFC3339Nano, v) //nolint:errcheck // best-effort parse from trusted Redis data
 		w.LeaderUntil = &t
 	}
 	return w, nil

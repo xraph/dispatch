@@ -145,7 +145,7 @@ func mapToEvent(m map[string]string) (*event.Event, error) {
 		return nil, fmt.Errorf("dispatch/redis: parse event id: %w", err)
 	}
 
-	createdAt, _ := time.Parse(time.RFC3339Nano, m["created_at"])
+	createdAt, _ := time.Parse(time.RFC3339Nano, m["created_at"]) //nolint:errcheck // best-effort parse from trusted Redis data
 
 	return &event.Event{
 		ID:         eID,

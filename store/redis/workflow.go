@@ -2,6 +2,7 @@ package redis
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
@@ -75,7 +76,7 @@ func (s *Store) ListRuns(ctx context.Context, opts workflow.ListOpts) ([]*workfl
 		return nil, fmt.Errorf("dispatch/redis: list runs smembers: %w", err)
 	}
 
-	var runs []*workflow.Run
+	runs := make([]*workflow.Run, 0, len(ids))
 	for _, rID := range ids {
 		vals, getErr := s.client.HGetAll(ctx, runKey(rID)).Result()
 		if getErr != nil || len(vals) == 0 {
@@ -129,7 +130,7 @@ func (s *Store) GetCheckpoint(ctx context.Context, runID id.RunID, stepName stri
 	key := checkpointKey(runID.String(), stepName)
 	data, err := s.client.HGet(ctx, key, "data").Result()
 	if err != nil {
-		if err == goredis.Nil {
+		if errors.Is(err, goredis.Nil) {
 			return nil, nil // no checkpoint is not an error
 		}
 		return nil, fmt.Errorf("dispatch/redis: get checkpoint: %w", err)
@@ -145,7 +146,7 @@ func (s *Store) ListCheckpoints(ctx context.Context, runID id.RunID) ([]*workflo
 		return nil, fmt.Errorf("dispatch/redis: list checkpoints: %w", err)
 	}
 
-	var checkpoints []*workflow.Checkpoint
+	checkpoints := make([]*workflow.Checkpoint, 0, len(steps))
 	for _, step := range steps {
 		key := checkpointKey(rID, step)
 		vals, getErr := s.client.HGetAll(ctx, key).Result()
@@ -153,9 +154,9 @@ func (s *Store) ListCheckpoints(ctx context.Context, runID id.RunID) ([]*workflo
 			continue
 		}
 
-		cpID, _ := id.ParseCheckpointID(vals["id"])
-		rIDParsed, _ := id.ParseRunID(vals["run_id"])
-		createdAt, _ := time.Parse(time.RFC3339Nano, vals["created_at"])
+		cpID, _ := id.ParseCheckpointID(vals["id"])                      //nolint:errcheck // best-effort parse from trusted Redis data
+		rIDParsed, _ := id.ParseRunID(vals["run_id"])                    //nolint:errcheck // best-effort parse from trusted Redis data
+		createdAt, _ := time.Parse(time.RFC3339Nano, vals["created_at"]) //nolint:errcheck // best-effort parse from trusted Redis data
 
 		checkpoints = append(checkpoints, &workflow.Checkpoint{
 			ID:        cpID,
@@ -181,8 +182,8 @@ func runToMap(r *workflow.Run) map[string]interface{} {
 		"scope_app":  r.ScopeAppID,
 		"scope_org":  r.ScopeOrgID,
 		"started_at": r.StartedAt.Format(time.RFC3339Nano),
-		"created_at": r.Entity.CreatedAt.Format(time.RFC3339Nano),
-		"updated_at": r.Entity.UpdatedAt.Format(time.RFC3339Nano),
+		"created_at": r.CreatedAt.Format(time.RFC3339Nano),
+		"updated_at": r.UpdatedAt.Format(time.RFC3339Nano),
 	}
 	if r.CompletedAt != nil {
 		m["completed_at"] = r.CompletedAt.Format(time.RFC3339Nano)
@@ -196,9 +197,9 @@ func mapToRun(m map[string]string) (*workflow.Run, error) {
 		return nil, fmt.Errorf("dispatch/redis: parse run id: %w", err)
 	}
 
-	startedAt, _ := time.Parse(time.RFC3339Nano, m["started_at"])
-	createdAt, _ := time.Parse(time.RFC3339Nano, m["created_at"])
-	updatedAt, _ := time.Parse(time.RFC3339Nano, m["updated_at"])
+	startedAt, _ := time.Parse(time.RFC3339Nano, m["started_at"]) //nolint:errcheck // best-effort parse from trusted Redis data
+	createdAt, _ := time.Parse(time.RFC3339Nano, m["created_at"]) //nolint:errcheck // best-effort parse from trusted Redis data
+	updatedAt, _ := time.Parse(time.RFC3339Nano, m["updated_at"]) //nolint:errcheck // best-effort parse from trusted Redis data
 
 	r := &workflow.Run{
 		Entity: dispatch.Entity{
@@ -217,7 +218,7 @@ func mapToRun(m map[string]string) (*workflow.Run, error) {
 	}
 
 	if v := m["completed_at"]; v != "" {
-		t, _ := time.Parse(time.RFC3339Nano, v)
+		t, _ := time.Parse(time.RFC3339Nano, v) //nolint:errcheck // best-effort parse from trusted Redis data
 		r.CompletedAt = &t
 	}
 	return r, nil

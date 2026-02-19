@@ -2,6 +2,7 @@ package redis
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strconv"
 	"time"
@@ -20,7 +21,7 @@ func (s *Store) RegisterCron(ctx context.Context, entry *cron.Entry) error {
 
 	// Check for duplicate name.
 	existing, err := s.client.HGet(ctx, cronNamesKey, entry.Name).Result()
-	if err != nil && err != goredis.Nil {
+	if err != nil && !errors.Is(err, goredis.Nil) {
 		return fmt.Errorf("dispatch/redis: register cron check name: %w", err)
 	}
 	if existing != "" {
@@ -58,7 +59,7 @@ func (s *Store) ListCrons(ctx context.Context) ([]*cron.Entry, error) {
 		return nil, fmt.Errorf("dispatch/redis: list crons: %w", err)
 	}
 
-	var entries []*cron.Entry
+	entries := make([]*cron.Entry, 0, len(ids))
 	for _, eID := range ids {
 		vals, getErr := s.client.HGetAll(ctx, cronKey(eID)).Result()
 		if getErr != nil || len(vals) == 0 {
@@ -91,12 +92,12 @@ func (s *Store) AcquireCronLock(ctx context.Context, entryID id.CronID, workerID
 	}
 
 	// Check current lock state.
-	lockedBy, _ := s.client.HGet(ctx, key, "locked_by").Result()
-	lockedUntilStr, _ := s.client.HGet(ctx, key, "locked_until").Result()
+	lockedBy, _ := s.client.HGet(ctx, key, "locked_by").Result()          //nolint:errcheck // best-effort parse from trusted Redis data
+	lockedUntilStr, _ := s.client.HGet(ctx, key, "locked_until").Result() //nolint:errcheck // best-effort parse from trusted Redis data
 
 	if lockedBy != "" && lockedBy != wID {
 		// Someone else holds the lock — check if expired.
-		lockedUntil, _ := time.Parse(time.RFC3339Nano, lockedUntilStr)
+		lockedUntil, _ := time.Parse(time.RFC3339Nano, lockedUntilStr) //nolint:errcheck // best-effort parse from trusted Redis data
 		if lockedUntil.After(now) {
 			return false, nil // lock still valid
 		}
@@ -119,7 +120,7 @@ func (s *Store) ReleaseCronLock(ctx context.Context, entryID id.CronID, workerID
 	key := cronKey(entryID.String())
 	wID := workerID.String()
 
-	lockedBy, _ := s.client.HGet(ctx, key, "locked_by").Result()
+	lockedBy, _ := s.client.HGet(ctx, key, "locked_by").Result() //nolint:errcheck // best-effort parse from trusted Redis data
 	if lockedBy != wID {
 		return nil // not our lock, no-op
 	}
@@ -182,7 +183,7 @@ func (s *Store) DeleteCron(ctx context.Context, entryID id.CronID) error {
 	key := cronKey(eID)
 
 	// Get name for name index cleanup.
-	name, _ := s.client.HGet(ctx, key, "name").Result()
+	name, _ := s.client.HGet(ctx, key, "name").Result() //nolint:errcheck // best-effort parse from trusted Redis data
 
 	exists, err := s.client.Exists(ctx, key).Result()
 	if err != nil {
@@ -219,8 +220,8 @@ func cronToMap(e *cron.Entry) map[string]interface{} {
 		"scope_org":  e.ScopeOrgID,
 		"locked_by":  e.LockedBy,
 		"enabled":    strconv.FormatBool(e.Enabled),
-		"created_at": e.Entity.CreatedAt.Format(time.RFC3339Nano),
-		"updated_at": e.Entity.UpdatedAt.Format(time.RFC3339Nano),
+		"created_at": e.CreatedAt.Format(time.RFC3339Nano),
+		"updated_at": e.UpdatedAt.Format(time.RFC3339Nano),
 	}
 	if e.LastRunAt != nil {
 		m["last_run_at"] = e.LastRunAt.Format(time.RFC3339Nano)
@@ -240,9 +241,9 @@ func mapToCron(m map[string]string) (*cron.Entry, error) {
 		return nil, fmt.Errorf("dispatch/redis: parse cron id: %w", err)
 	}
 
-	createdAt, _ := time.Parse(time.RFC3339Nano, m["created_at"])
-	updatedAt, _ := time.Parse(time.RFC3339Nano, m["updated_at"])
-	enabled, _ := strconv.ParseBool(m["enabled"])
+	createdAt, _ := time.Parse(time.RFC3339Nano, m["created_at"]) //nolint:errcheck // best-effort parse from trusted Redis data
+	updatedAt, _ := time.Parse(time.RFC3339Nano, m["updated_at"]) //nolint:errcheck // best-effort parse from trusted Redis data
+	enabled, _ := strconv.ParseBool(m["enabled"])                 //nolint:errcheck // best-effort parse from trusted Redis data
 
 	e := &cron.Entry{
 		Entity: dispatch.Entity{
@@ -262,15 +263,15 @@ func mapToCron(m map[string]string) (*cron.Entry, error) {
 	}
 
 	if v := m["last_run_at"]; v != "" {
-		t, _ := time.Parse(time.RFC3339Nano, v)
+		t, _ := time.Parse(time.RFC3339Nano, v) //nolint:errcheck // best-effort parse from trusted Redis data
 		e.LastRunAt = &t
 	}
 	if v := m["next_run_at"]; v != "" {
-		t, _ := time.Parse(time.RFC3339Nano, v)
+		t, _ := time.Parse(time.RFC3339Nano, v) //nolint:errcheck // best-effort parse from trusted Redis data
 		e.NextRunAt = &t
 	}
 	if v := m["locked_until"]; v != "" {
-		t, _ := time.Parse(time.RFC3339Nano, v)
+		t, _ := time.Parse(time.RFC3339Nano, v) //nolint:errcheck // best-effort parse from trusted Redis data
 		e.LockedUntil = &t
 	}
 	return e, nil

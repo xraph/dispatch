@@ -100,7 +100,7 @@ jobs:
 
       - name: Check formatting (goimports)
         run: |
-          OUTPUT=$(goimports -l -local github.com/xraph/relay .)
+          OUTPUT=$(goimports -l -local github.com/xraph/dispatch .)
           if [ -n "$OUTPUT" ]; then
             echo "::error::The following files need goimports formatting:"
             echo "$OUTPUT"

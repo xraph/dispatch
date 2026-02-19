@@ -82,6 +82,6 @@ jobs:
             ### Installation
 
             ```bash
-            go get github.com/xraph/relay@${{ steps.set-tag.outputs.tag }}
+            go get github.com/xraph/dispatch@${{ steps.set-tag.outputs.tag }}
             ```
           generate_release_notes: true

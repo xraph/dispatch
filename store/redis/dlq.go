@@ -2,6 +2,7 @@ package redis
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strconv"
 	"time"
@@ -35,7 +36,7 @@ func (s *Store) ListDLQ(ctx context.Context, opts dlq.ListOpts) ([]*dlq.Entry, e
 		return nil, fmt.Errorf("dispatch/redis: list dlq: %w", err)
 	}
 
-	var entries []*dlq.Entry
+	entries := make([]*dlq.Entry, 0, len(ids))
 	for _, eID := range ids {
 		vals, getErr := s.client.HGetAll(ctx, dlqKey(eID)).Result()
 		if getErr != nil || len(vals) == 0 {
@@ -107,13 +108,13 @@ func (s *Store) PurgeDLQ(ctx context.Context, before time.Time) (int64, error) {
 		key := dlqKey(eID)
 		failedAtStr, getErr := s.client.HGet(ctx, key, "failed_at").Result()
 		if getErr != nil {
-			if getErr == goredis.Nil {
+			if errors.Is(getErr, goredis.Nil) {
 				continue
 			}
 			return purged, fmt.Errorf("dispatch/redis: purge dlq get: %w", getErr)
 		}
 
-		failedAt, _ := time.Parse(time.RFC3339Nano, failedAtStr)
+		failedAt, _ := time.Parse(time.RFC3339Nano, failedAtStr) //nolint:errcheck // best-effort parse from trusted Redis data
 		if failedAt.Before(before) {
 			pipe := s.client.TxPipeline()
 			pipe.Del(ctx, key)
@@ -164,11 +165,11 @@ func mapToDLQ(m map[string]string) (*dlq.Entry, error) {
 	if err != nil {
 		return nil, fmt.Errorf("dispatch/redis: parse dlq id: %w", err)
 	}
-	jobID, _ := id.ParseJobID(m["job_id"])
-	retryCount, _ := strconv.Atoi(m["retry_count"])
-	maxRetries, _ := strconv.Atoi(m["max_retries"])
-	failedAt, _ := time.Parse(time.RFC3339Nano, m["failed_at"])
-	createdAt, _ := time.Parse(time.RFC3339Nano, m["created_at"])
+	jobID, _ := id.ParseJobID(m["job_id"])                        //nolint:errcheck // best-effort parse from trusted Redis data
+	retryCount, _ := strconv.Atoi(m["retry_count"])               //nolint:errcheck // best-effort parse from trusted Redis data
+	maxRetries, _ := strconv.Atoi(m["max_retries"])               //nolint:errcheck // best-effort parse from trusted Redis data
+	failedAt, _ := time.Parse(time.RFC3339Nano, m["failed_at"])   //nolint:errcheck // best-effort parse from trusted Redis data
+	createdAt, _ := time.Parse(time.RFC3339Nano, m["created_at"]) //nolint:errcheck // best-effort parse from trusted Redis data
 
 	e := &dlq.Entry{
 		ID:         eID,
@@ -186,7 +187,7 @@ func mapToDLQ(m map[string]string) (*dlq.Entry, error) {
 	}
 
 	if v := m["replayed_at"]; v != "" {
-		t, _ := time.Parse(time.RFC3339Nano, v)
+		t, _ := time.Parse(time.RFC3339Nano, v) //nolint:errcheck // best-effort parse from trusted Redis data
 		e.ReplayedAt = &t
 	}
 	return e, nil

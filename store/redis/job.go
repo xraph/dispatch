@@ -3,6 +3,7 @@ package redis
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strconv"
 	"time"
@@ -131,7 +132,7 @@ func (s *Store) DeleteJob(ctx context.Context, jobID id.JobID) error {
 	// Get queue name before deleting to remove from sorted set.
 	q, err := s.client.HGet(ctx, key, "queue").Result()
 	if err != nil {
-		if err == goredis.Nil {
+		if errors.Is(err, goredis.Nil) {
 			return dispatch.ErrJobNotFound
 		}
 		return fmt.Errorf("dispatch/redis: delete job get queue: %w", err)
@@ -155,7 +156,7 @@ func (s *Store) ListJobsByState(ctx context.Context, state job.State, opts job.L
 		return nil, fmt.Errorf("dispatch/redis: list jobs smembers: %w", err)
 	}
 
-	var jobs []*job.Job
+	jobs := make([]*job.Job, 0, len(ids))
 	for _, jID := range ids {
 		j, getErr := s.getJobByKey(ctx, jobKey(jID))
 		if getErr != nil {
@@ -281,8 +282,8 @@ func jobToMap(j *job.Job) map[string]interface{} {
 		"worker_id":   j.WorkerID.String(),
 		"run_at":      j.RunAt.Format(time.RFC3339Nano),
 		"timeout":     strconv.FormatInt(int64(j.Timeout), 10),
-		"created_at":  j.Entity.CreatedAt.Format(time.RFC3339Nano),
-		"updated_at":  j.Entity.UpdatedAt.Format(time.RFC3339Nano),
+		"created_at":  j.CreatedAt.Format(time.RFC3339Nano),
+		"updated_at":  j.UpdatedAt.Format(time.RFC3339Nano),
 	}
 	if j.StartedAt != nil {
 		m["started_at"] = j.StartedAt.Format(time.RFC3339Nano)
@@ -313,14 +314,14 @@ func mapToJob(m map[string]string) (*job.Job, error) {
 		return nil, fmt.Errorf("dispatch/redis: parse job id: %w", err)
 	}
 
-	priority, _ := strconv.Atoi(m["priority"])
-	maxRetries, _ := strconv.Atoi(m["max_retries"])
-	retryCount, _ := strconv.Atoi(m["retry_count"])
-	timeout, _ := strconv.ParseInt(m["timeout"], 10, 64)
+	priority, _ := strconv.Atoi(m["priority"])           //nolint:errcheck // best-effort parse from trusted Redis data
+	maxRetries, _ := strconv.Atoi(m["max_retries"])      //nolint:errcheck // best-effort parse from trusted Redis data
+	retryCount, _ := strconv.Atoi(m["retry_count"])      //nolint:errcheck // best-effort parse from trusted Redis data
+	timeout, _ := strconv.ParseInt(m["timeout"], 10, 64) //nolint:errcheck // best-effort parse from trusted Redis data
 
-	runAt, _ := time.Parse(time.RFC3339Nano, m["run_at"])
-	createdAt, _ := time.Parse(time.RFC3339Nano, m["created_at"])
-	updatedAt, _ := time.Parse(time.RFC3339Nano, m["updated_at"])
+	runAt, _ := time.Parse(time.RFC3339Nano, m["run_at"])         //nolint:errcheck // best-effort parse from trusted Redis data
+	createdAt, _ := time.Parse(time.RFC3339Nano, m["created_at"]) //nolint:errcheck // best-effort parse from trusted Redis data
+	updatedAt, _ := time.Parse(time.RFC3339Nano, m["updated_at"]) //nolint:errcheck // best-effort parse from trusted Redis data
 
 	j := &job.Job{
 		Entity: dispatch.Entity{
@@ -343,18 +344,18 @@ func mapToJob(m map[string]string) (*job.Job, error) {
 	}
 
 	if wid := m["worker_id"]; wid != "" {
-		j.WorkerID, _ = id.ParseWorkerID(wid)
+		j.WorkerID, _ = id.ParseWorkerID(wid) //nolint:errcheck // best-effort parse from trusted Redis data
 	}
 	if v := m["started_at"]; v != "" {
-		t, _ := time.Parse(time.RFC3339Nano, v)
+		t, _ := time.Parse(time.RFC3339Nano, v) //nolint:errcheck // best-effort parse from trusted Redis data
 		j.StartedAt = &t
 	}
 	if v := m["completed_at"]; v != "" {
-		t, _ := time.Parse(time.RFC3339Nano, v)
+		t, _ := time.Parse(time.RFC3339Nano, v) //nolint:errcheck // best-effort parse from trusted Redis data
 		j.CompletedAt = &t
 	}
 	if v := m["heartbeat_at"]; v != "" {
-		t, _ := time.Parse(time.RFC3339Nano, v)
+		t, _ := time.Parse(time.RFC3339Nano, v) //nolint:errcheck // best-effort parse from trusted Redis data
 		j.HeartbeatAt = &t
 	}
 
@@ -373,7 +374,7 @@ func unmarshalStrings(s string) []string {
 		return nil
 	}
 	var out []string
-	_ = json.Unmarshal([]byte(s), &out) //nolint:errcheck
+	_ = json.Unmarshal([]byte(s), &out) //nolint:errcheck // best-effort parse from trusted Redis data
 	return out
 }
 
@@ -383,6 +384,6 @@ func unmarshalMap(s string) map[string]string {
 		return nil
 	}
 	out := make(map[string]string)
-	_ = json.Unmarshal([]byte(s), &out) //nolint:errcheck
+	_ = json.Unmarshal([]byte(s), &out) //nolint:errcheck // best-effort parse from trusted Redis data
 	return out
 }
