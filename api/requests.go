@@ -1,3 +1,4 @@
+// Package api provides request and response types for the Dispatch API.
 package api
 
 import "github.com/xraph/dispatch/job"

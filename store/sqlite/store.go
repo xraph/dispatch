@@ -20,6 +20,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strconv"
 	"io/fs"
 	"log/slog"
 	"sort"
@@ -427,10 +428,10 @@ func (s *Store) ListJobsByState(ctx context.Context, state job.State, opts job.L
 	}
 	q += " ORDER BY created_at ASC"
 	if opts.Limit > 0 {
-		q += fmt.Sprintf(" LIMIT %d", opts.Limit)
+		q += " LIMIT " + strconv.Itoa(opts.Limit)
 	}
 	if opts.Offset > 0 {
-		q += fmt.Sprintf(" OFFSET %d", opts.Offset)
+		q += " OFFSET " + strconv.Itoa(opts.Offset)
 	}
 
 	rows, err := s.db.QueryContext(ctx, q, args...)
@@ -708,10 +709,10 @@ func (s *Store) ListRuns(ctx context.Context, opts workflow.ListOpts) ([]*workfl
 	}
 	q += " ORDER BY created_at ASC"
 	if opts.Limit > 0 {
-		q += fmt.Sprintf(" LIMIT %d", opts.Limit)
+		q += " LIMIT " + strconv.Itoa(opts.Limit)
 	}
 	if opts.Offset > 0 {
-		q += fmt.Sprintf(" OFFSET %d", opts.Offset)
+		q += " OFFSET " + strconv.Itoa(opts.Offset)
 	}
 
 	rows, err := s.db.QueryContext(ctx, q, args...)
@@ -1197,10 +1198,10 @@ func (s *Store) ListDLQ(ctx context.Context, opts dlq.ListOpts) ([]*dlq.Entry, e
 	}
 	q += " ORDER BY failed_at DESC"
 	if opts.Limit > 0 {
-		q += fmt.Sprintf(" LIMIT %d", opts.Limit)
+		q += " LIMIT " + strconv.Itoa(opts.Limit)
 	}
 	if opts.Offset > 0 {
-		q += fmt.Sprintf(" OFFSET %d", opts.Offset)
+		q += " OFFSET " + strconv.Itoa(opts.Offset)
 	}
 
 	rows, err := s.db.QueryContext(ctx, q, args...)
