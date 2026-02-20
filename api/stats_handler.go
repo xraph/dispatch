@@ -1,3 +1,4 @@
+// Package api provides HTTP handlers for the Dispatch API.
 package api
 
 import (
