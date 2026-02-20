@@ -78,12 +78,7 @@ function MiniDispatchFlow() {
               className="flex items-center gap-0"
             >
               <FlowLine length={28} color="green" delay={3} />
-              <FlowNode
-                label="worker-01"
-                color="gray"
-                size="sm"
-                delay={1.1}
-              />
+              <FlowNode label="worker-01" color="gray" size="sm" delay={1.1} />
               <FlowLine length={24} color="green" delay={4} />
               <StatusBadge status="delivered" />
             </motion.div>
@@ -96,12 +91,7 @@ function MiniDispatchFlow() {
               className="flex items-center gap-0"
             >
               <FlowLine length={28} color="amber" delay={5} />
-              <FlowNode
-                label="worker-02"
-                color="gray"
-                size="sm"
-                delay={1.3}
-              />
+              <FlowNode label="worker-02" color="gray" size="sm" delay={1.3} />
               <FlowLine length={24} color="amber" delay={6} />
               <StatusBadge status="retry" />
             </motion.div>
