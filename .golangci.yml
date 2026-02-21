@@ -55,7 +55,7 @@ linters:
           arguments: [checkPrivateReceivers]
         - name: if-return
         - name: increment-decrement
-        - name: var-naming
+        # - name: var-naming  # Disabled: avoid meaningless package names
         - name: var-declaration
         - name: range
         - name: receiver-naming
