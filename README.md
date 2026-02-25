@@ -15,7 +15,7 @@ Dispatch is a library — not a service. Import it, configure a store, and regis
 - **Extension hooks** — Opt-in lifecycle interfaces for every job, workflow, cron, and shutdown event
 - **OpenTelemetry** — Built-in metrics and tracing via the `observability` and `middleware` packages
 - **Relay integration** — Emit typed webhook events at every lifecycle point via `relay_hook`
-- **Pluggable storage** — Memory, PostgreSQL (pgx/v5), Bun ORM, SQLite, Redis
+- **Pluggable storage** — Memory, PostgreSQL (pgx/v5), Grove ORM, SQLite, Redis
 
 ## Quick Start
 
@@ -102,7 +102,7 @@ func main() {
 | `store` | Composite `Store` interface |
 | `store/memory` | In-memory backend (testing) |
 | `store/postgres` | PostgreSQL backend (pgx/v5) |
-| `store/bun` | Bun ORM backend |
+| `store/grovestore` | Grove ORM backend |
 | `store/sqlite` | SQLite backend |
 | `store/redis` | Redis backend |
 | `cluster/k8s` | Kubernetes consensus for leader election |
@@ -113,7 +113,7 @@ func main() {
 |---------|--------|----------|
 | `store/memory` | — | Development and testing |
 | `store/postgres` | pgx/v5 | Production (recommended) |
-| `store/bun` | Bun ORM | Production (Bun-based projects) |
+| `store/grovestore` | Grove ORM | Production (Grove-based projects) |
 | `store/sqlite` | modernc/sqlite | Embedded / single-node |
 | `store/redis` | go-redis | Redis-backed queue state |
 

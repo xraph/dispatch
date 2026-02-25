@@ -5,47 +5,39 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/jackc/pgx/v5"
-
 	"github.com/xraph/dispatch"
 	"github.com/xraph/dispatch/cluster"
 	"github.com/xraph/dispatch/id"
 )
 
 // RegisterWorker adds a new worker to the cluster registry.
+// Uses ON CONFLICT to upsert if the worker already exists.
 func (s *Store) RegisterWorker(ctx context.Context, w *cluster.Worker) error {
-	_, err := s.pool.Exec(ctx, `
-		INSERT INTO dispatch_workers (
-			id, hostname, queues, concurrency, state,
-			is_leader, leader_until, last_seen, metadata, created_at
-		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
-		ON CONFLICT (id) DO UPDATE SET
-			hostname = EXCLUDED.hostname,
-			queues = EXCLUDED.queues,
-			concurrency = EXCLUDED.concurrency,
-			state = EXCLUDED.state,
-			last_seen = EXCLUDED.last_seen,
-			metadata = EXCLUDED.metadata`,
-		w.ID.String(), w.Hostname, w.Queues, w.Concurrency,
-		string(w.State), w.IsLeader, w.LeaderUntil,
-		w.LastSeen, w.Metadata, w.CreatedAt,
-	)
+	m := toWorkerModel(w)
+	_, err := s.pgdb.NewInsert(m).
+		OnConflict("(id) DO UPDATE").
+		Set("hostname = EXCLUDED.hostname").
+		Set("queues = EXCLUDED.queues").
+		Set("concurrency = EXCLUDED.concurrency").
+		Set("state = EXCLUDED.state").
+		Set("last_seen = EXCLUDED.last_seen").
+		Set("metadata = EXCLUDED.metadata").
+		Exec(ctx)
 	if err != nil {
-		return fmt.Errorf("dispatch/postgres: register worker: %w", err)
+		return fmt.Errorf("dispatch/bun: register worker: %w", err)
 	}
 	return nil
 }
 
 // DeregisterWorker removes a worker from the cluster registry.
 func (s *Store) DeregisterWorker(ctx context.Context, workerID id.WorkerID) error {
-	tag, err := s.pool.Exec(ctx,
-		`DELETE FROM dispatch_workers WHERE id = $1`,
-		workerID.String(),
-	)
+	res, err := s.pgdb.NewDelete((*workerModel)(nil)).
+		Where("id = ?", workerID.String()).
+		Exec(ctx)
 	if err != nil {
-		return fmt.Errorf("dispatch/postgres: deregister worker: %w", err)
+		return fmt.Errorf("dispatch/bun: deregister worker: %w", err)
 	}
-	if tag.RowsAffected() == 0 {
+	if rows, _ := res.RowsAffected(); rows == 0 { //nolint:errcheck // driver always returns nil
 		return dispatch.ErrWorkerNotFound
 	}
 	return nil
@@ -53,14 +45,14 @@ func (s *Store) DeregisterWorker(ctx context.Context, workerID id.WorkerID) erro
 
 // HeartbeatWorker updates the last-seen timestamp for a worker.
 func (s *Store) HeartbeatWorker(ctx context.Context, workerID id.WorkerID) error {
-	tag, err := s.pool.Exec(ctx,
-		`UPDATE dispatch_workers SET last_seen = NOW() WHERE id = $1`,
-		workerID.String(),
-	)
+	res, err := s.pgdb.NewUpdate((*workerModel)(nil)).
+		Set("last_seen = NOW()").
+		Where("id = ?", workerID.String()).
+		Exec(ctx)
 	if err != nil {
-		return fmt.Errorf("dispatch/postgres: heartbeat worker: %w", err)
+		return fmt.Errorf("dispatch/bun: heartbeat worker: %w", err)
 	}
-	if tag.RowsAffected() == 0 {
+	if rows, _ := res.RowsAffected(); rows == 0 { //nolint:errcheck // driver always returns nil
 		return dispatch.ErrWorkerNotFound
 	}
 	return nil
@@ -68,28 +60,21 @@ func (s *Store) HeartbeatWorker(ctx context.Context, workerID id.WorkerID) error
 
 // ListWorkers returns all registered workers.
 func (s *Store) ListWorkers(ctx context.Context) ([]*cluster.Worker, error) {
-	rows, err := s.pool.Query(ctx, `
-		SELECT
-			id, hostname, queues, concurrency, state,
-			is_leader, leader_until, last_seen, metadata, created_at
-		FROM dispatch_workers
-		ORDER BY created_at ASC`,
-	)
+	var models []workerModel
+	err := s.pgdb.NewSelect(&models).
+		OrderExpr("created_at ASC").
+		Scan(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("dispatch/postgres: list workers: %w", err)
+		return nil, fmt.Errorf("dispatch/bun: list workers: %w", err)
 	}
-	defer rows.Close()
 
-	var workers []*cluster.Worker
-	for rows.Next() {
-		w, scanErr := scanWorker(rows)
-		if scanErr != nil {
-			return nil, fmt.Errorf("dispatch/postgres: scan worker row: %w", scanErr)
+	workers := make([]*cluster.Worker, 0, len(models))
+	for i := range models {
+		w, convErr := fromWorkerModel(&models[i])
+		if convErr != nil {
+			return nil, fmt.Errorf("dispatch/bun: list workers convert: %w", convErr)
 		}
 		workers = append(workers, w)
-	}
-	if err = rows.Err(); err != nil {
-		return nil, fmt.Errorf("dispatch/postgres: iterate worker rows: %w", err)
 	}
 	return workers, nil
 }
@@ -97,76 +82,68 @@ func (s *Store) ListWorkers(ctx context.Context) ([]*cluster.Worker, error) {
 // ReapDeadWorkers returns workers whose last-seen timestamp is older than
 // the given threshold.
 func (s *Store) ReapDeadWorkers(ctx context.Context, threshold time.Duration) ([]*cluster.Worker, error) {
-	rows, err := s.pool.Query(ctx, `
-		SELECT
-			id, hostname, queues, concurrency, state,
-			is_leader, leader_until, last_seen, metadata, created_at
-		FROM dispatch_workers
-		WHERE last_seen < NOW() - $1::interval`,
-		threshold.String(),
-	)
+	var models []workerModel
+	err := s.pgdb.NewSelect(&models).
+		Where("last_seen < NOW() - ?::interval", threshold.String()).
+		Scan(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("dispatch/postgres: reap dead workers: %w", err)
+		return nil, fmt.Errorf("dispatch/bun: reap dead workers: %w", err)
 	}
-	defer rows.Close()
 
-	var workers []*cluster.Worker
-	for rows.Next() {
-		w, scanErr := scanWorker(rows)
-		if scanErr != nil {
-			return nil, fmt.Errorf("dispatch/postgres: scan dead worker: %w", scanErr)
+	workers := make([]*cluster.Worker, 0, len(models))
+	for i := range models {
+		w, convErr := fromWorkerModel(&models[i])
+		if convErr != nil {
+			return nil, fmt.Errorf("dispatch/bun: reap dead workers convert: %w", convErr)
 		}
 		workers = append(workers, w)
-	}
-	if err = rows.Err(); err != nil {
-		return nil, fmt.Errorf("dispatch/postgres: iterate dead workers: %w", err)
 	}
 	return workers, nil
 }
 
 // AcquireLeadership attempts to become the cluster leader.
-// Uses a single atomic UPDATE to claim leadership when no valid leader exists
-// or the current leader's TTL has expired.
+// Uses a multi-step approach: clear expired → check active → claim.
 func (s *Store) AcquireLeadership(ctx context.Context, workerID id.WorkerID, ttl time.Duration) (bool, error) {
 	wID := workerID.String()
 	until := time.Now().UTC().Add(ttl)
 
 	// Step 1: Clear any expired leader.
-	_, err := s.pool.Exec(ctx, `
-		UPDATE dispatch_workers
-		SET is_leader = FALSE, leader_until = NULL
-		WHERE is_leader = TRUE AND leader_until < NOW()`,
-	)
+	_, err := s.pgdb.NewUpdate((*workerModel)(nil)).
+		Set("is_leader = FALSE").
+		Set("leader_until = NULL").
+		Where("is_leader = TRUE AND leader_until < NOW()").
+		Exec(ctx)
 	if err != nil {
-		return false, fmt.Errorf("dispatch/postgres: clear expired leader: %w", err)
+		return false, fmt.Errorf("dispatch/bun: clear expired leader: %w", err)
 	}
 
 	// Step 2: Check if there's already an active leader that isn't us.
-	var activeLeaderID *string
-	err = s.pool.QueryRow(ctx, `
-		SELECT id FROM dispatch_workers
-		WHERE is_leader = TRUE AND leader_until >= NOW()
-		LIMIT 1`,
-	).Scan(&activeLeaderID)
-	if err != nil && !isNoRows(err) {
-		return false, fmt.Errorf("dispatch/postgres: check leader: %w", err)
-	}
-
-	if activeLeaderID != nil && *activeLeaderID != wID {
+	var activeLeaderID string
+	err = s.pgdb.NewSelect().
+		TableExpr("dispatch_workers").
+		Column("id").
+		Where("is_leader = TRUE AND leader_until >= NOW()").
+		Limit(1).
+		Scan(ctx, &activeLeaderID)
+	if err != nil {
+		if !isNoRows(err) {
+			return false, fmt.Errorf("dispatch/bun: check leader: %w", err)
+		}
+		// No active leader — proceed to claim.
+	} else if activeLeaderID != wID {
 		return false, nil
 	}
 
 	// Step 3: Claim or re-claim leadership.
-	tag, claimErr := s.pool.Exec(ctx, `
-		UPDATE dispatch_workers
-		SET is_leader = TRUE, leader_until = $2
-		WHERE id = $1`,
-		wID, until,
-	)
+	res, claimErr := s.pgdb.NewUpdate((*workerModel)(nil)).
+		Set("is_leader = TRUE").
+		Set("leader_until = ?", until).
+		Where("id = ?", wID).
+		Exec(ctx)
 	if claimErr != nil {
-		return false, fmt.Errorf("dispatch/postgres: claim leadership: %w", claimErr)
+		return false, fmt.Errorf("dispatch/bun: claim leadership: %w", claimErr)
 	}
-	if tag.RowsAffected() == 0 {
+	if rows, _ := res.RowsAffected(); rows == 0 { //nolint:errcheck // driver always returns nil
 		return false, nil
 	}
 
@@ -177,16 +154,14 @@ func (s *Store) AcquireLeadership(ctx context.Context, workerID id.WorkerID, ttl
 func (s *Store) RenewLeadership(ctx context.Context, workerID id.WorkerID, ttl time.Duration) (bool, error) {
 	until := time.Now().UTC().Add(ttl)
 
-	tag, err := s.pool.Exec(ctx, `
-		UPDATE dispatch_workers
-		SET leader_until = $2
-		WHERE id = $1 AND is_leader = TRUE`,
-		workerID.String(), until,
-	)
+	res, err := s.pgdb.NewUpdate((*workerModel)(nil)).
+		Set("leader_until = ?", until).
+		Where("id = ? AND is_leader = TRUE", workerID.String()).
+		Exec(ctx)
 	if err != nil {
-		return false, fmt.Errorf("dispatch/postgres: renew leadership: %w", err)
+		return false, fmt.Errorf("dispatch/bun: renew leadership: %w", err)
 	}
-	if tag.RowsAffected() == 0 {
+	if rows, _ := res.RowsAffected(); rows == 0 { //nolint:errcheck // driver always returns nil
 		return false, nil
 	}
 	return true, nil
@@ -194,47 +169,16 @@ func (s *Store) RenewLeadership(ctx context.Context, workerID id.WorkerID, ttl t
 
 // GetLeader returns the current cluster leader, or nil if there is no leader.
 func (s *Store) GetLeader(ctx context.Context) (*cluster.Worker, error) {
-	row := s.pool.QueryRow(ctx, `
-		SELECT
-			id, hostname, queues, concurrency, state,
-			is_leader, leader_until, last_seen, metadata, created_at
-		FROM dispatch_workers
-		WHERE is_leader = TRUE AND leader_until >= NOW()
-		LIMIT 1`,
-	)
-
-	w, err := scanWorker(row)
+	m := new(workerModel)
+	err := s.pgdb.NewSelect(m).
+		Where("is_leader = TRUE AND leader_until >= NOW()").
+		Limit(1).
+		Scan(ctx)
 	if err != nil {
 		if isNoRows(err) {
 			return nil, nil
 		}
-		return nil, fmt.Errorf("dispatch/postgres: get leader: %w", err)
+		return nil, fmt.Errorf("dispatch/bun: get leader: %w", err)
 	}
-	return w, nil
-}
-
-// scanWorker scans a single worker row.
-func scanWorker(row pgx.Row) (*cluster.Worker, error) {
-	var (
-		w        cluster.Worker
-		idStr    string
-		stateStr string
-	)
-	err := row.Scan(
-		&idStr, &w.Hostname, &w.Queues, &w.Concurrency, &stateStr,
-		&w.IsLeader, &w.LeaderUntil, &w.LastSeen, &w.Metadata, &w.CreatedAt,
-	)
-	if err != nil {
-		return nil, err
-	}
-
-	w.State = cluster.WorkerState(stateStr)
-
-	parsedID, parseErr := id.ParseWorkerID(idStr)
-	if parseErr != nil {
-		return nil, fmt.Errorf("dispatch/postgres: parse worker id %q: %w", idStr, parseErr)
-	}
-	w.ID = parsedID
-
-	return &w, nil
+	return fromWorkerModel(m)
 }

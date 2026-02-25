@@ -1,0 +1,44 @@
+---
+title: MongoDB Store
+description: MongoDB store for document-oriented and horizontally-scalable Dispatch deployments.
+---
+
+The `store/mongo` package implements Dispatch's store interfaces using the grove ORM with the MongoDB driver. Jobs, workflows, cron entries, and events are stored as documents, making it a natural fit for deployments that already run MongoDB.
+
+## Usage
+
+```go
+import (
+    "github.com/xraph/grove"
+    "github.com/xraph/grove/drivers/mongodriver"
+    "github.com/xraph/dispatch/store/mongo"
+)
+
+db, err := grove.Open(mongodriver.Open("mongodb://localhost:27017", "dispatch"))
+if err != nil {
+    log.Fatal(err)
+}
+
+s := mongo.New(db)
+if err := s.Migrate(ctx); err != nil {
+    log.Fatal(err)
+}
+
+d, err := dispatch.New(dispatch.WithStore(s))
+```
+
+## Internals
+
+| Aspect | Detail |
+|--------|--------|
+| Driver | grove ORM + mongodriver |
+| Migrations | Index creation on collections |
+| Transactions | MongoDB sessions (replica-set required for multi-doc txns) |
+| Collections | `dispatch_jobs`, `dispatch_workflow_runs`, `dispatch_checkpoints`, `dispatch_cron_entries`, `dispatch_dlq`, `dispatch_events`, `dispatch_workers` |
+| Close | No-op -- caller owns the `*grove.DB` lifecycle |
+
+## When to use
+
+- Document-oriented workloads where MongoDB is the primary data store.
+- Horizontally-scaled environments requiring sharding.
+- Teams already running MongoDB in their infrastructure.

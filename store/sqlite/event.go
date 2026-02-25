@@ -1,4 +1,4 @@
-package bunstore
+package sqlite
 
 import (
 	"context"
@@ -13,16 +13,15 @@ import (
 // PublishEvent persists a new event and makes it available for subscribers.
 func (s *Store) PublishEvent(ctx context.Context, evt *event.Event) error {
 	m := toEventModel(evt)
-	_, err := s.db.NewInsert().Model(m).Exec(ctx)
+	_, err := s.sdb.NewInsert(m).Exec(ctx)
 	if err != nil {
-		return fmt.Errorf("dispatch/bun: publish event: %w", err)
+		return fmt.Errorf("dispatch/sqlite: publish event: %w", err)
 	}
 	return nil
 }
 
 // SubscribeEvent waits for an unacked event matching the given name.
-// Uses a polling approach with short intervals since Bun is dialect-agnostic
-// and LISTEN/NOTIFY is PostgreSQL-specific.
+// Uses a polling approach with short intervals.
 func (s *Store) SubscribeEvent(ctx context.Context, name string, timeout time.Duration) (*event.Event, error) {
 	deadline := time.Now().Add(timeout)
 
@@ -40,24 +39,24 @@ func (s *Store) SubscribeEvent(ctx context.Context, name string, timeout time.Du
 
 		// Try to find an unacked event.
 		m := new(eventModel)
-		err := s.db.NewSelect().Model(m).
+		err := s.sdb.NewSelect(m).
 			Where("name = ?", name).
-			Where("acked = FALSE").
-			Order("created_at ASC").
+			Where("acked = ?", false).
+			OrderExpr("created_at ASC").
 			Limit(1).
 			Scan(ctx)
 		if err != nil {
 			if isNoRows(err) {
-				// No event yet — wait and retry.
+				// No event yet -- wait and retry.
 				sleepCtx(ctx, 50*time.Millisecond)
 				continue
 			}
-			return nil, fmt.Errorf("dispatch/bun: subscribe event: %w", err)
+			return nil, fmt.Errorf("dispatch/sqlite: subscribe event: %w", err)
 		}
 
 		evt, convErr := fromEventModel(m)
 		if convErr != nil {
-			return nil, fmt.Errorf("dispatch/bun: subscribe event convert: %w", convErr)
+			return nil, fmt.Errorf("dispatch/sqlite: subscribe event convert: %w", convErr)
 		}
 		return evt, nil
 	}
@@ -65,13 +64,12 @@ func (s *Store) SubscribeEvent(ctx context.Context, name string, timeout time.Du
 
 // AckEvent acknowledges an event, marking it as consumed.
 func (s *Store) AckEvent(ctx context.Context, eventID id.EventID) error {
-	res, err := s.db.NewUpdate().
-		TableExpr("dispatch_events").
-		Set("acked = TRUE").
+	res, err := s.sdb.NewUpdate((*eventModel)(nil)).
+		Set("acked = ?", true).
 		Where("id = ?", eventID.String()).
 		Exec(ctx)
 	if err != nil {
-		return fmt.Errorf("dispatch/bun: ack event: %w", err)
+		return fmt.Errorf("dispatch/sqlite: ack event: %w", err)
 	}
 	rows, _ := res.RowsAffected() //nolint:errcheck // driver always returns nil
 	if rows == 0 {

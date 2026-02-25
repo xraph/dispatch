@@ -5,8 +5,6 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/jackc/pgx/v5"
-
 	"github.com/xraph/dispatch"
 	"github.com/xraph/dispatch/cron"
 	"github.com/xraph/dispatch/id"
@@ -15,110 +13,83 @@ import (
 // RegisterCron persists a new cron entry. Returns an error if the name
 // already exists.
 func (s *Store) RegisterCron(ctx context.Context, entry *cron.Entry) error {
-	_, err := s.pool.Exec(ctx, `
-		INSERT INTO dispatch_cron_entries (
-			id, name, schedule, job_name, queue, payload,
-			scope_app_id, scope_org_id,
-			last_run_at, next_run_at, locked_by, locked_until,
-			enabled, created_at, updated_at
-		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)`,
-		entry.ID.String(), entry.Name, entry.Schedule, entry.JobName, entry.Queue, entry.Payload,
-		entry.ScopeAppID, entry.ScopeOrgID,
-		entry.LastRunAt, entry.NextRunAt, nilIfEmpty(entry.LockedBy), entry.LockedUntil,
-		entry.Enabled, entry.CreatedAt, entry.UpdatedAt,
-	)
+	m := toCronModel(entry)
+	_, err := s.pgdb.NewInsert(m).Exec(ctx)
 	if err != nil {
 		if isDuplicateKey(err) {
 			return dispatch.ErrDuplicateCron
 		}
-		return fmt.Errorf("dispatch/postgres: register cron: %w", err)
+		return fmt.Errorf("dispatch/bun: register cron: %w", err)
 	}
 	return nil
 }
 
 // GetCron retrieves a cron entry by ID.
 func (s *Store) GetCron(ctx context.Context, entryID id.CronID) (*cron.Entry, error) {
-	row := s.pool.QueryRow(ctx, `
-		SELECT
-			id, name, schedule, job_name, queue, payload,
-			scope_app_id, scope_org_id,
-			last_run_at, next_run_at, locked_by, locked_until,
-			enabled, created_at, updated_at
-		FROM dispatch_cron_entries
-		WHERE id = $1`,
-		entryID.String(),
-	)
-
-	e, err := scanCron(row)
+	m := new(cronEntryModel)
+	err := s.pgdb.NewSelect(m).
+		Where("id = ?", entryID.String()).
+		Limit(1).
+		Scan(ctx)
 	if err != nil {
 		if isNoRows(err) {
 			return nil, dispatch.ErrCronNotFound
 		}
-		return nil, fmt.Errorf("dispatch/postgres: get cron: %w", err)
+		return nil, fmt.Errorf("dispatch/bun: get cron: %w", err)
 	}
-	return e, nil
+	return fromCronModel(m)
 }
 
 // ListCrons returns all cron entries.
 func (s *Store) ListCrons(ctx context.Context) ([]*cron.Entry, error) {
-	rows, err := s.pool.Query(ctx, `
-		SELECT
-			id, name, schedule, job_name, queue, payload,
-			scope_app_id, scope_org_id,
-			last_run_at, next_run_at, locked_by, locked_until,
-			enabled, created_at, updated_at
-		FROM dispatch_cron_entries
-		ORDER BY created_at ASC`,
-	)
+	var models []cronEntryModel
+	err := s.pgdb.NewSelect(&models).
+		OrderExpr("created_at ASC").
+		Scan(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("dispatch/postgres: list crons: %w", err)
+		return nil, fmt.Errorf("dispatch/bun: list crons: %w", err)
 	}
-	defer rows.Close()
 
-	var entries []*cron.Entry
-	for rows.Next() {
-		e, scanErr := scanCron(rows)
-		if scanErr != nil {
-			return nil, fmt.Errorf("dispatch/postgres: scan cron row: %w", scanErr)
+	entries := make([]*cron.Entry, 0, len(models))
+	for i := range models {
+		e, convErr := fromCronModel(&models[i])
+		if convErr != nil {
+			return nil, fmt.Errorf("dispatch/bun: list crons convert: %w", convErr)
 		}
 		entries = append(entries, e)
-	}
-	if err = rows.Err(); err != nil {
-		return nil, fmt.Errorf("dispatch/postgres: iterate cron rows: %w", err)
 	}
 	return entries, nil
 }
 
 // AcquireCronLock attempts to acquire a distributed lock for a cron entry.
-// Uses row-level locking with FOR UPDATE to prevent race conditions.
+// Uses row-level locking to prevent race conditions.
 func (s *Store) AcquireCronLock(ctx context.Context, entryID id.CronID, workerID id.WorkerID, ttl time.Duration) (bool, error) {
 	now := time.Now().UTC()
 	until := now.Add(ttl)
 	wID := workerID.String()
 
 	// Try to acquire: succeed if no lock, lock expired, or we already hold it.
-	tag, err := s.pool.Exec(ctx, `
-		UPDATE dispatch_cron_entries
-		SET locked_by = $2, locked_until = $3, updated_at = NOW()
-		WHERE id = $1
-		  AND (locked_by IS NULL OR locked_until < $4 OR locked_by = $2)`,
-		entryID.String(), wID, until, now,
-	)
+	res, err := s.pgdb.NewUpdate((*cronEntryModel)(nil)).
+		Set("locked_by = ?", wID).
+		Set("locked_until = ?", until).
+		Set("updated_at = NOW()").
+		Where("id = ?", entryID.String()).
+		Where("(locked_by IS NULL OR locked_until < ? OR locked_by = ?)", now, wID).
+		Exec(ctx)
 	if err != nil {
-		return false, fmt.Errorf("dispatch/postgres: acquire cron lock: %w", err)
+		return false, fmt.Errorf("dispatch/bun: acquire cron lock: %w", err)
 	}
 
-	if tag.RowsAffected() == 0 {
+	rows, _ := res.RowsAffected() //nolint:errcheck // driver always returns nil
+	if rows == 0 {
 		// Check if the entry exists at all.
-		var exists bool
-		existErr := s.pool.QueryRow(ctx,
-			`SELECT EXISTS(SELECT 1 FROM dispatch_cron_entries WHERE id = $1)`,
-			entryID.String(),
-		).Scan(&exists)
+		count, existErr := s.pgdb.NewSelect((*cronEntryModel)(nil)).
+			Where("id = ?", entryID.String()).
+			Count(ctx)
 		if existErr != nil {
-			return false, fmt.Errorf("dispatch/postgres: check cron exists: %w", existErr)
+			return false, fmt.Errorf("dispatch/bun: check cron exists: %w", existErr)
 		}
-		if !exists {
+		if count == 0 {
 			return false, dispatch.ErrCronNotFound
 		}
 		// Entry exists but lock is held by someone else.
@@ -130,30 +101,31 @@ func (s *Store) AcquireCronLock(ctx context.Context, entryID id.CronID, workerID
 
 // ReleaseCronLock releases the distributed lock for a cron entry.
 func (s *Store) ReleaseCronLock(ctx context.Context, entryID id.CronID, workerID id.WorkerID) error {
-	_, err := s.pool.Exec(ctx, `
-		UPDATE dispatch_cron_entries
-		SET locked_by = NULL, locked_until = NULL, updated_at = NOW()
-		WHERE id = $1 AND locked_by = $2`,
-		entryID.String(), workerID.String(),
-	)
+	_, err := s.pgdb.NewUpdate((*cronEntryModel)(nil)).
+		Set("locked_by = NULL").
+		Set("locked_until = NULL").
+		Set("updated_at = NOW()").
+		Where("id = ?", entryID.String()).
+		Where("locked_by = ?", workerID.String()).
+		Exec(ctx)
 	if err != nil {
-		return fmt.Errorf("dispatch/postgres: release cron lock: %w", err)
+		return fmt.Errorf("dispatch/bun: release cron lock: %w", err)
 	}
 	return nil
 }
 
 // UpdateCronLastRun records when a cron entry last fired.
 func (s *Store) UpdateCronLastRun(ctx context.Context, entryID id.CronID, at time.Time) error {
-	tag, err := s.pool.Exec(ctx, `
-		UPDATE dispatch_cron_entries
-		SET last_run_at = $2, updated_at = NOW()
-		WHERE id = $1`,
-		entryID.String(), at,
-	)
+	res, err := s.pgdb.NewUpdate((*cronEntryModel)(nil)).
+		Set("last_run_at = ?", at).
+		Set("updated_at = NOW()").
+		Where("id = ?", entryID.String()).
+		Exec(ctx)
 	if err != nil {
-		return fmt.Errorf("dispatch/postgres: update cron last run: %w", err)
+		return fmt.Errorf("dispatch/bun: update cron last run: %w", err)
 	}
-	if tag.RowsAffected() == 0 {
+	rows, _ := res.RowsAffected() //nolint:errcheck // driver always returns nil
+	if rows == 0 {
 		return dispatch.ErrCronNotFound
 	}
 	return nil
@@ -161,24 +133,14 @@ func (s *Store) UpdateCronLastRun(ctx context.Context, entryID id.CronID, at tim
 
 // UpdateCronEntry updates a cron entry (Enabled, NextRunAt, etc.).
 func (s *Store) UpdateCronEntry(ctx context.Context, entry *cron.Entry) error {
-	tag, err := s.pool.Exec(ctx, `
-		UPDATE dispatch_cron_entries SET
-			name = $2, schedule = $3, job_name = $4, queue = $5, payload = $6,
-			scope_app_id = $7, scope_org_id = $8,
-			last_run_at = $9, next_run_at = $10,
-			locked_by = $11, locked_until = $12,
-			enabled = $13, updated_at = NOW()
-		WHERE id = $1`,
-		entry.ID.String(), entry.Name, entry.Schedule, entry.JobName, entry.Queue, entry.Payload,
-		entry.ScopeAppID, entry.ScopeOrgID,
-		entry.LastRunAt, entry.NextRunAt,
-		nilIfEmpty(entry.LockedBy), entry.LockedUntil,
-		entry.Enabled,
-	)
+	m := toCronModel(entry)
+	m.UpdatedAt = time.Now().UTC()
+	res, err := s.pgdb.NewUpdate(m).WherePK().Exec(ctx)
 	if err != nil {
-		return fmt.Errorf("dispatch/postgres: update cron entry: %w", err)
+		return fmt.Errorf("dispatch/bun: update cron entry: %w", err)
 	}
-	if tag.RowsAffected() == 0 {
+	rows, _ := res.RowsAffected() //nolint:errcheck // driver always returns nil
+	if rows == 0 {
 		return dispatch.ErrCronNotFound
 	}
 	return nil
@@ -186,42 +148,15 @@ func (s *Store) UpdateCronEntry(ctx context.Context, entry *cron.Entry) error {
 
 // DeleteCron removes a cron entry by ID.
 func (s *Store) DeleteCron(ctx context.Context, entryID id.CronID) error {
-	tag, err := s.pool.Exec(ctx, `DELETE FROM dispatch_cron_entries WHERE id = $1`, entryID.String())
+	res, err := s.pgdb.NewDelete((*cronEntryModel)(nil)).
+		Where("id = ?", entryID.String()).
+		Exec(ctx)
 	if err != nil {
-		return fmt.Errorf("dispatch/postgres: delete cron: %w", err)
+		return fmt.Errorf("dispatch/bun: delete cron: %w", err)
 	}
-	if tag.RowsAffected() == 0 {
+	rows, _ := res.RowsAffected() //nolint:errcheck // driver always returns nil
+	if rows == 0 {
 		return dispatch.ErrCronNotFound
 	}
 	return nil
-}
-
-// scanCron scans a single cron entry row.
-func scanCron(row pgx.Row) (*cron.Entry, error) {
-	var (
-		e      cron.Entry
-		idStr  string
-		lockBy *string
-	)
-	err := row.Scan(
-		&idStr, &e.Name, &e.Schedule, &e.JobName, &e.Queue, &e.Payload,
-		&e.ScopeAppID, &e.ScopeOrgID,
-		&e.LastRunAt, &e.NextRunAt, &lockBy, &e.LockedUntil,
-		&e.Enabled, &e.CreatedAt, &e.UpdatedAt,
-	)
-	if err != nil {
-		return nil, err
-	}
-
-	parsedID, parseErr := id.ParseCronID(idStr)
-	if parseErr != nil {
-		return nil, fmt.Errorf("dispatch/postgres: parse cron id %q: %w", idStr, parseErr)
-	}
-	e.ID = parsedID
-
-	if lockBy != nil {
-		e.LockedBy = *lockBy
-	}
-
-	return &e, nil
 }

@@ -2,17 +2,80 @@ package redis
 
 import (
 	"context"
-	"errors"
 	"fmt"
-	"strconv"
 	"time"
-
-	goredis "github.com/redis/go-redis/v9"
 
 	"github.com/xraph/dispatch"
 	"github.com/xraph/dispatch/cron"
 	"github.com/xraph/dispatch/id"
 )
+
+// ── JSON model for KV storage ──
+
+type cronEntity struct {
+	ID          string     `json:"id"`
+	Name        string     `json:"name"`
+	Schedule    string     `json:"schedule"`
+	JobName     string     `json:"job_name"`
+	Queue       string     `json:"queue"`
+	Payload     []byte     `json:"payload,omitempty"`
+	ScopeAppID  string     `json:"scope_app_id"`
+	ScopeOrgID  string     `json:"scope_org_id"`
+	LastRunAt   *time.Time `json:"last_run_at,omitempty"`
+	NextRunAt   *time.Time `json:"next_run_at,omitempty"`
+	LockedBy    string     `json:"locked_by"`
+	LockedUntil *time.Time `json:"locked_until,omitempty"`
+	Enabled     bool       `json:"enabled"`
+	CreatedAt   time.Time  `json:"created_at"`
+	UpdatedAt   time.Time  `json:"updated_at"`
+}
+
+func toCronEntity(e *cron.Entry) *cronEntity {
+	return &cronEntity{
+		ID:          e.ID.String(),
+		Name:        e.Name,
+		Schedule:    e.Schedule,
+		JobName:     e.JobName,
+		Queue:       e.Queue,
+		Payload:     e.Payload,
+		ScopeAppID:  e.ScopeAppID,
+		ScopeOrgID:  e.ScopeOrgID,
+		LastRunAt:   e.LastRunAt,
+		NextRunAt:   e.NextRunAt,
+		LockedBy:    e.LockedBy,
+		LockedUntil: e.LockedUntil,
+		Enabled:     e.Enabled,
+		CreatedAt:   e.CreatedAt,
+		UpdatedAt:   e.UpdatedAt,
+	}
+}
+
+func fromCronEntity(e *cronEntity) (*cron.Entry, error) {
+	eID, err := id.ParseCronID(e.ID)
+	if err != nil {
+		return nil, fmt.Errorf("dispatch/redis: parse cron id: %w", err)
+	}
+
+	return &cron.Entry{
+		Entity: dispatch.Entity{
+			CreatedAt: e.CreatedAt,
+			UpdatedAt: e.UpdatedAt,
+		},
+		ID:          eID,
+		Name:        e.Name,
+		Schedule:    e.Schedule,
+		JobName:     e.JobName,
+		Queue:       e.Queue,
+		Payload:     e.Payload,
+		ScopeAppID:  e.ScopeAppID,
+		ScopeOrgID:  e.ScopeOrgID,
+		LastRunAt:   e.LastRunAt,
+		NextRunAt:   e.NextRunAt,
+		LockedBy:    e.LockedBy,
+		LockedUntil: e.LockedUntil,
+		Enabled:     e.Enabled,
+	}, nil
+}
 
 // RegisterCron persists a new cron entry.
 func (s *Store) RegisterCron(ctx context.Context, entry *cron.Entry) error {
@@ -20,56 +83,59 @@ func (s *Store) RegisterCron(ctx context.Context, entry *cron.Entry) error {
 	key := cronKey(eID)
 
 	// Check for duplicate name.
-	existing, err := s.client.HGet(ctx, cronNamesKey, entry.Name).Result()
-	if err != nil && !errors.Is(err, goredis.Nil) {
+	existing, err := s.rdb.HGet(ctx, cronNamesKey, entry.Name).Result()
+	if err != nil && !isRedisNil(err) {
 		return fmt.Errorf("dispatch/redis: register cron check name: %w", err)
 	}
 	if existing != "" {
 		return dispatch.ErrDuplicateCron
 	}
 
-	pipe := s.client.TxPipeline()
-	pipe.HSet(ctx, key, cronToMap(entry))
+	e := toCronEntity(entry)
+	if setErr := s.setEntity(ctx, key, e); setErr != nil {
+		return fmt.Errorf("dispatch/redis: register cron set: %w", setErr)
+	}
+
+	pipe := s.rdb.TxPipeline()
 	pipe.SAdd(ctx, cronIDsKey, eID)
 	pipe.HSet(ctx, cronNamesKey, entry.Name, eID)
 	_, err = pipe.Exec(ctx)
 	if err != nil {
-		return fmt.Errorf("dispatch/redis: register cron: %w", err)
+		return fmt.Errorf("dispatch/redis: register cron indexes: %w", err)
 	}
 	return nil
 }
 
 // GetCron retrieves a cron entry by ID.
 func (s *Store) GetCron(ctx context.Context, entryID id.CronID) (*cron.Entry, error) {
-	key := cronKey(entryID.String())
-	vals, err := s.client.HGetAll(ctx, key).Result()
-	if err != nil {
+	var e cronEntity
+	if err := s.getEntity(ctx, cronKey(entryID.String()), &e); err != nil {
+		if isNotFound(err) {
+			return nil, dispatch.ErrCronNotFound
+		}
 		return nil, fmt.Errorf("dispatch/redis: get cron: %w", err)
 	}
-	if len(vals) == 0 {
-		return nil, dispatch.ErrCronNotFound
-	}
-	return mapToCron(vals)
+	return fromCronEntity(&e)
 }
 
 // ListCrons returns all cron entries.
 func (s *Store) ListCrons(ctx context.Context) ([]*cron.Entry, error) {
-	ids, err := s.client.SMembers(ctx, cronIDsKey).Result()
+	ids, err := s.rdb.SMembers(ctx, cronIDsKey).Result()
 	if err != nil {
 		return nil, fmt.Errorf("dispatch/redis: list crons: %w", err)
 	}
 
 	entries := make([]*cron.Entry, 0, len(ids))
 	for _, eID := range ids {
-		vals, getErr := s.client.HGetAll(ctx, cronKey(eID)).Result()
-		if getErr != nil || len(vals) == 0 {
+		var e cronEntity
+		if getErr := s.getEntity(ctx, cronKey(eID), &e); getErr != nil {
 			continue
 		}
-		e, convErr := mapToCron(vals)
+		entry, convErr := fromCronEntity(&e)
 		if convErr != nil {
 			continue
 		}
-		entries = append(entries, e)
+		entries = append(entries, entry)
 	}
 	return entries, nil
 }
@@ -79,38 +145,32 @@ func (s *Store) AcquireCronLock(ctx context.Context, entryID id.CronID, workerID
 	eID := entryID.String()
 	key := cronKey(eID)
 	wID := workerID.String()
-	now := time.Now().UTC()
-	until := now.Add(ttl)
+	t := now()
+	until := t.Add(ttl)
 
-	// Check entry exists.
-	exists, err := s.client.Exists(ctx, key).Result()
-	if err != nil {
-		return false, fmt.Errorf("dispatch/redis: acquire cron lock exists: %w", err)
-	}
-	if exists == 0 {
-		return false, dispatch.ErrCronNotFound
+	// Read current entity.
+	var e cronEntity
+	if err := s.getEntity(ctx, key, &e); err != nil {
+		if isNotFound(err) {
+			return false, dispatch.ErrCronNotFound
+		}
+		return false, fmt.Errorf("dispatch/redis: acquire cron lock get: %w", err)
 	}
 
 	// Check current lock state.
-	lockedBy, _ := s.client.HGet(ctx, key, "locked_by").Result()          //nolint:errcheck // best-effort parse from trusted Redis data
-	lockedUntilStr, _ := s.client.HGet(ctx, key, "locked_until").Result() //nolint:errcheck // best-effort parse from trusted Redis data
-
-	if lockedBy != "" && lockedBy != wID {
-		// Someone else holds the lock — check if expired.
-		lockedUntil, _ := time.Parse(time.RFC3339Nano, lockedUntilStr) //nolint:errcheck // best-effort parse from trusted Redis data
-		if lockedUntil.After(now) {
+	if e.LockedBy != "" && e.LockedBy != wID {
+		// Someone else holds the lock -- check if expired.
+		if e.LockedUntil != nil && e.LockedUntil.After(t) {
 			return false, nil // lock still valid
 		}
 	}
 
 	// Acquire or re-acquire.
-	_, err = s.client.HSet(ctx, key,
-		"locked_by", wID,
-		"locked_until", until.Format(time.RFC3339Nano),
-		"updated_at", now.Format(time.RFC3339Nano),
-	).Result()
-	if err != nil {
-		return false, fmt.Errorf("dispatch/redis: acquire cron lock: %w", err)
+	e.LockedBy = wID
+	e.LockedUntil = &until
+	e.UpdatedAt = t
+	if err := s.setEntity(ctx, key, &e); err != nil {
+		return false, fmt.Errorf("dispatch/redis: acquire cron lock set: %w", err)
 	}
 	return true, nil
 }
@@ -120,61 +180,54 @@ func (s *Store) ReleaseCronLock(ctx context.Context, entryID id.CronID, workerID
 	key := cronKey(entryID.String())
 	wID := workerID.String()
 
-	lockedBy, _ := s.client.HGet(ctx, key, "locked_by").Result() //nolint:errcheck // best-effort parse from trusted Redis data
-	if lockedBy != wID {
+	var e cronEntity
+	if err := s.getEntity(ctx, key, &e); err != nil {
+		if isNotFound(err) {
+			return nil // entry gone, no-op
+		}
+		return fmt.Errorf("dispatch/redis: release cron lock get: %w", err)
+	}
+
+	if e.LockedBy != wID {
 		return nil // not our lock, no-op
 	}
 
-	_, err := s.client.HSet(ctx, key,
-		"locked_by", "",
-		"locked_until", "",
-		"updated_at", time.Now().UTC().Format(time.RFC3339Nano),
-	).Result()
-	if err != nil {
-		return fmt.Errorf("dispatch/redis: release cron lock: %w", err)
-	}
-	return nil
+	e.LockedBy = ""
+	e.LockedUntil = nil
+	e.UpdatedAt = now()
+	return s.setEntity(ctx, key, &e)
 }
 
 // UpdateCronLastRun records when a cron entry last fired.
 func (s *Store) UpdateCronLastRun(ctx context.Context, entryID id.CronID, at time.Time) error {
 	key := cronKey(entryID.String())
-	exists, err := s.client.Exists(ctx, key).Result()
-	if err != nil {
-		return fmt.Errorf("dispatch/redis: update last run exists: %w", err)
-	}
-	if exists == 0 {
-		return dispatch.ErrCronNotFound
+	var e cronEntity
+	if err := s.getEntity(ctx, key, &e); err != nil {
+		if isNotFound(err) {
+			return dispatch.ErrCronNotFound
+		}
+		return fmt.Errorf("dispatch/redis: update last run get: %w", err)
 	}
 
-	_, err = s.client.HSet(ctx, key,
-		"last_run_at", at.Format(time.RFC3339Nano),
-		"updated_at", time.Now().UTC().Format(time.RFC3339Nano),
-	).Result()
-	if err != nil {
-		return fmt.Errorf("dispatch/redis: update last run: %w", err)
-	}
-	return nil
+	e.LastRunAt = &at
+	e.UpdatedAt = now()
+	return s.setEntity(ctx, key, &e)
 }
 
 // UpdateCronEntry updates a cron entry.
 func (s *Store) UpdateCronEntry(ctx context.Context, entry *cron.Entry) error {
 	key := cronKey(entry.ID.String())
-	exists, err := s.client.Exists(ctx, key).Result()
+	exists, err := s.entityExists(ctx, key)
 	if err != nil {
 		return fmt.Errorf("dispatch/redis: update cron exists: %w", err)
 	}
-	if exists == 0 {
+	if !exists {
 		return dispatch.ErrCronNotFound
 	}
 
-	m := cronToMap(entry)
-	m["updated_at"] = time.Now().UTC().Format(time.RFC3339Nano)
-	_, err = s.client.HSet(ctx, key, m).Result()
-	if err != nil {
-		return fmt.Errorf("dispatch/redis: update cron: %w", err)
-	}
-	return nil
+	e := toCronEntity(entry)
+	e.UpdatedAt = now()
+	return s.setEntity(ctx, key, e)
 }
 
 // DeleteCron removes a cron entry by ID.
@@ -183,96 +236,23 @@ func (s *Store) DeleteCron(ctx context.Context, entryID id.CronID) error {
 	key := cronKey(eID)
 
 	// Get name for name index cleanup.
-	name, _ := s.client.HGet(ctx, key, "name").Result() //nolint:errcheck // best-effort parse from trusted Redis data
-
-	exists, err := s.client.Exists(ctx, key).Result()
-	if err != nil {
-		return fmt.Errorf("dispatch/redis: delete cron exists: %w", err)
-	}
-	if exists == 0 {
-		return dispatch.ErrCronNotFound
+	var e cronEntity
+	if err := s.getEntity(ctx, key, &e); err != nil {
+		if isNotFound(err) {
+			return dispatch.ErrCronNotFound
+		}
+		return fmt.Errorf("dispatch/redis: delete cron get: %w", err)
 	}
 
-	pipe := s.client.TxPipeline()
+	pipe := s.rdb.TxPipeline()
 	pipe.Del(ctx, key)
 	pipe.SRem(ctx, cronIDsKey, eID)
-	if name != "" {
-		pipe.HDel(ctx, cronNamesKey, name)
+	if e.Name != "" {
+		pipe.HDel(ctx, cronNamesKey, e.Name)
 	}
-	_, err = pipe.Exec(ctx)
+	_, err := pipe.Exec(ctx)
 	if err != nil {
 		return fmt.Errorf("dispatch/redis: delete cron: %w", err)
 	}
 	return nil
-}
-
-// ── helpers ──
-
-func cronToMap(e *cron.Entry) map[string]interface{} {
-	m := map[string]interface{}{
-		"id":         e.ID.String(),
-		"name":       e.Name,
-		"schedule":   e.Schedule,
-		"job_name":   e.JobName,
-		"queue":      e.Queue,
-		"payload":    string(e.Payload),
-		"scope_app":  e.ScopeAppID,
-		"scope_org":  e.ScopeOrgID,
-		"locked_by":  e.LockedBy,
-		"enabled":    strconv.FormatBool(e.Enabled),
-		"created_at": e.CreatedAt.Format(time.RFC3339Nano),
-		"updated_at": e.UpdatedAt.Format(time.RFC3339Nano),
-	}
-	if e.LastRunAt != nil {
-		m["last_run_at"] = e.LastRunAt.Format(time.RFC3339Nano)
-	}
-	if e.NextRunAt != nil {
-		m["next_run_at"] = e.NextRunAt.Format(time.RFC3339Nano)
-	}
-	if e.LockedUntil != nil {
-		m["locked_until"] = e.LockedUntil.Format(time.RFC3339Nano)
-	}
-	return m
-}
-
-func mapToCron(m map[string]string) (*cron.Entry, error) {
-	eID, err := id.ParseCronID(m["id"])
-	if err != nil {
-		return nil, fmt.Errorf("dispatch/redis: parse cron id: %w", err)
-	}
-
-	createdAt, _ := time.Parse(time.RFC3339Nano, m["created_at"]) //nolint:errcheck // best-effort parse from trusted Redis data
-	updatedAt, _ := time.Parse(time.RFC3339Nano, m["updated_at"]) //nolint:errcheck // best-effort parse from trusted Redis data
-	enabled, _ := strconv.ParseBool(m["enabled"])                 //nolint:errcheck // best-effort parse from trusted Redis data
-
-	e := &cron.Entry{
-		Entity: dispatch.Entity{
-			CreatedAt: createdAt,
-			UpdatedAt: updatedAt,
-		},
-		ID:         eID,
-		Name:       m["name"],
-		Schedule:   m["schedule"],
-		JobName:    m["job_name"],
-		Queue:      m["queue"],
-		Payload:    []byte(m["payload"]),
-		ScopeAppID: m["scope_app"],
-		ScopeOrgID: m["scope_org"],
-		LockedBy:   m["locked_by"],
-		Enabled:    enabled,
-	}
-
-	if v := m["last_run_at"]; v != "" {
-		t, _ := time.Parse(time.RFC3339Nano, v) //nolint:errcheck // best-effort parse from trusted Redis data
-		e.LastRunAt = &t
-	}
-	if v := m["next_run_at"]; v != "" {
-		t, _ := time.Parse(time.RFC3339Nano, v) //nolint:errcheck // best-effort parse from trusted Redis data
-		e.NextRunAt = &t
-	}
-	if v := m["locked_until"]; v != "" {
-		t, _ := time.Parse(time.RFC3339Nano, v) //nolint:errcheck // best-effort parse from trusted Redis data
-		e.LockedUntil = &t
-	}
-	return e, nil
 }

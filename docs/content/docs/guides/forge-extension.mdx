@@ -45,6 +45,8 @@ Forge will call `ext.Start(ctx)` on application start and `ext.Stop(ctx)` on shu
 | `WithBackoff(b)` | Retry backoff strategy | exponential |
 | `WithDisableRoutes()` | Skip HTTP route registration | `false` |
 | `WithDisableMigrate()` | Skip auto-migration at startup | `false` |
+| `WithGroveDatabase(name)` | Resolve a grove.DB from DI by name | `""` |
+| `WithGroveKV(name)` | Resolve a grove KV store from DI by name | `""` |
 
 ## Auto-migration
 
@@ -65,6 +67,104 @@ When using Forge dependency injection, retrieve the engine from context:
 eng := extension.EngineFromContext(ctx)
 engine.Enqueue(ctx, eng, SendEmail, input)
 ```
+
+## Grove database integration
+
+When your Forge app uses the [Grove extension](https://github.com/xraph/grove) to manage database connections, Dispatch can automatically resolve a `grove.DB` from the DI container and construct the correct store backend based on the driver type.
+
+### Using the default grove database
+
+If the Grove extension registers a single database (or a default in multi-DB mode), use `WithGroveDatabase` with an empty name:
+
+```go
+ext := extension.New(
+    extension.WithGroveDatabase(""),
+)
+```
+
+### Using a named grove database
+
+In multi-database setups, reference a specific database by name:
+
+```go
+ext := extension.New(
+    extension.WithGroveDatabase("jobs"),
+)
+```
+
+This resolves the grove.DB named `"jobs"` from the DI container and auto-constructs the matching store. The driver type is detected automatically -- you do not need to import individual store packages.
+
+### Using the default grove KV store
+
+If the Grove extension registers a KV store, use `WithGroveKV` with an empty name:
+
+```go
+ext := extension.New(
+    extension.WithGroveKV(""),
+)
+```
+
+### Using a named grove KV store
+
+In multi-KV setups, reference a specific KV store by name:
+
+```go
+ext := extension.New(
+    extension.WithGroveKV("dispatch-kv"),
+)
+```
+
+### Store resolution order
+
+The extension resolves its store in this order:
+
+1. **Explicit store** -- if `WithStore(s)` was called, it is used directly and grove is ignored.
+2. **Grove database** -- if `WithGroveDatabase(name)` was called (or `grove_database` is set in YAML), the named or default `grove.DB` is resolved from DI.
+3. **Grove KV** -- if `WithGroveKV(name)` was called (or `grove_kv` is set in YAML), the named or default grove KV store is resolved from DI.
+4. **In-memory fallback** -- if none of the above is configured, an in-memory store is used.
+
+## YAML configuration
+
+The Dispatch extension automatically loads configuration from your Forge app's YAML config files. It looks for the key `extensions.dispatch` first, then falls back to `dispatch`:
+
+```yaml
+# forge.yaml (or app.yaml, config.yaml, etc.)
+extensions:
+  dispatch:
+    base_path: /api/dispatch
+    grove_database: jobs
+    grove_kv: dispatch-kv
+    concurrency: 20
+    queues:
+      - default
+      - critical
+    disable_routes: false
+    disable_migrate: false
+```
+
+Or at the top level:
+
+```yaml
+dispatch:
+  base_path: /api/dispatch
+  grove_database: ""
+  grove_kv: ""
+  concurrency: 10
+  queues:
+    - default
+```
+
+### Configuration reference
+
+| Field | YAML key | Type | Default | Description |
+|-------|----------|------|---------|-------------|
+| `BasePath` | `base_path` | `string` | `"/api/dispatch"` | URL prefix for all dispatch HTTP routes |
+| `GroveDatabase` | `grove_database` | `string` | `""` | Name of the grove.DB to resolve from DI; empty uses the default DB |
+| `GroveKV` | `grove_kv` | `string` | `""` | Name of the grove KV store to resolve from DI; empty uses the default KV |
+| `Concurrency` | `concurrency` | `int` | `10` | Max concurrent jobs |
+| `Queues` | `queues` | `[]string` | `["default"]` | Queues to poll |
+| `DisableRoutes` | `disable_routes` | `bool` | `false` | Skip HTTP route registration |
+| `DisableMigrate` | `disable_migrate` | `bool` | `false` | Skip auto-migration at startup |
 
 ## Standalone usage (without Forge)
 

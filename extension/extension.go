@@ -1,3 +1,11 @@
+// Package extension provides the Forge extension adapter for Dispatch.
+//
+// It implements the forge.Extension interface to integrate Dispatch
+// into a Forge application with automatic dependency discovery,
+// route registration, and lifecycle management.
+//
+// Configuration can be provided programmatically via Option functions
+// or via YAML configuration files under "extensions.dispatch" or "dispatch" keys.
 package extension
 
 import (
@@ -8,6 +16,8 @@ import (
 	"net/http"
 
 	"github.com/xraph/forge"
+	"github.com/xraph/grove"
+	"github.com/xraph/grove/kv"
 	"github.com/xraph/vessel"
 
 	"github.com/xraph/dispatch"
@@ -16,6 +26,10 @@ import (
 	"github.com/xraph/dispatch/engine"
 	"github.com/xraph/dispatch/ext"
 	mw "github.com/xraph/dispatch/middleware"
+	mongostore "github.com/xraph/dispatch/store/mongo"
+	pgstore "github.com/xraph/dispatch/store/postgres"
+	redisstore "github.com/xraph/dispatch/store/redis"
+	sqlitestore "github.com/xraph/dispatch/store/sqlite"
 )
 
 // ExtensionName is the name registered with Forge.
@@ -33,6 +47,8 @@ var _ forge.Extension = (*Extension)(nil)
 // Extension adapts Dispatch as a Forge extension. It implements the
 // forge.Extension interface so Dispatch can be mounted into any Forge app.
 type Extension struct {
+	*forge.BaseExtension
+
 	config       Config
 	eng          *engine.Engine
 	apiHandler   *api.API
@@ -41,28 +57,20 @@ type Extension struct {
 	exts         []ext.Extension
 	mws          []mw.Middleware
 	bo           backoff.Strategy
+	useGrove     bool
+	useGroveKV   bool
 }
 
 // New creates a Dispatch Forge extension with the given options.
 func New(opts ...ExtOption) *Extension {
-	e := &Extension{}
+	e := &Extension{
+		BaseExtension: forge.NewBaseExtension(ExtensionName, ExtensionVersion, ExtensionDescription),
+	}
 	for _, opt := range opts {
 		opt(e)
 	}
 	return e
 }
-
-// Name returns the extension name.
-func (e *Extension) Name() string { return ExtensionName }
-
-// Description returns the extension description.
-func (e *Extension) Description() string { return ExtensionDescription }
-
-// Version returns the extension version.
-func (e *Extension) Version() string { return ExtensionVersion }
-
-// Dependencies returns the list of extension names this extension depends on.
-func (e *Extension) Dependencies() []string { return []string{} }
 
 // Engine returns the underlying dispatch engine.
 // This is nil until Register is called.
@@ -74,6 +82,14 @@ func (e *Extension) API() *api.API { return e.apiHandler }
 // Register implements [forge.Extension]. It initializes the dispatcher,
 // builds the engine, and optionally registers HTTP routes.
 func (e *Extension) Register(fapp forge.App) error {
+	if err := e.BaseExtension.Register(fapp); err != nil {
+		return err
+	}
+
+	if err := e.loadConfiguration(); err != nil {
+		return err
+	}
+
 	if err := e.init(fapp); err != nil {
 		return err
 	}
@@ -90,6 +106,25 @@ func (e *Extension) Register(fapp forge.App) error {
 
 // init builds the dispatcher and engine.
 func (e *Extension) init(fapp forge.App) error {
+	// Resolve grove database store if configured (takes precedence over grove KV).
+	if e.useGrove {
+		groveDB, err := e.resolveGroveDB(fapp)
+		if err != nil {
+			return fmt.Errorf("dispatch: %w", err)
+		}
+		s, err := e.buildStoreFromGroveDB(groveDB)
+		if err != nil {
+			return err
+		}
+		e.dispatchOpts = append(e.dispatchOpts, dispatch.WithStore(s))
+	} else if e.useGroveKV {
+		kvStore, err := e.resolveGroveKV(fapp)
+		if err != nil {
+			return fmt.Errorf("dispatch: %w", err)
+		}
+		e.dispatchOpts = append(e.dispatchOpts, dispatch.WithStore(redisstore.New(kvStore)))
+	}
+
 	logger := e.logger
 	if logger == nil {
 		logger = slog.Default()
@@ -154,15 +189,23 @@ func (e *Extension) Start(ctx context.Context) error {
 		}
 	}
 
-	return e.eng.Start(ctx)
+	if err := e.eng.Start(ctx); err != nil {
+		return err
+	}
+
+	e.MarkStarted()
+	return nil
 }
 
 // Stop gracefully shuts down the dispatch engine.
 func (e *Extension) Stop(ctx context.Context) error {
 	if e.eng == nil {
+		e.MarkStopped()
 		return nil
 	}
-	return e.eng.Stop(ctx)
+	err := e.eng.Stop(ctx)
+	e.MarkStopped()
+	return err
 }
 
 // Health implements [forge.Extension].
@@ -193,4 +236,164 @@ func (e *Extension) RegisterRoutes(router forge.Router) {
 	if e.apiHandler != nil {
 		e.apiHandler.RegisterRoutes(router)
 	}
+}
+
+// --- Config Loading (mirrors grove/shield extension pattern) ---
+
+// loadConfiguration loads config from YAML files or programmatic sources.
+func (e *Extension) loadConfiguration() error {
+	programmaticConfig := e.config
+
+	// Try loading from config file.
+	fileConfig, configLoaded := e.tryLoadFromConfigFile()
+
+	if !configLoaded {
+		if programmaticConfig.RequireConfig {
+			return errors.New("dispatch: configuration is required but not found in config files; " +
+				"ensure 'extensions.dispatch' or 'dispatch' key exists in your config")
+		}
+
+		// Use programmatic config merged with defaults.
+		e.config = e.mergeWithDefaults(programmaticConfig)
+	} else {
+		// Config loaded from YAML -- merge with programmatic options.
+		e.config = e.mergeConfigurations(fileConfig, programmaticConfig)
+	}
+
+	// Enable grove resolution if YAML config specifies grove settings.
+	if e.config.GroveDatabase != "" {
+		e.useGrove = true
+	}
+	if e.config.GroveKV != "" {
+		e.useGroveKV = true
+	}
+
+	e.Logger().Debug("dispatch: configuration loaded",
+		forge.F("disable_routes", e.config.DisableRoutes),
+		forge.F("disable_migrate", e.config.DisableMigrate),
+		forge.F("base_path", e.config.BasePath),
+		forge.F("grove_database", e.config.GroveDatabase),
+		forge.F("grove_kv", e.config.GroveKV),
+	)
+
+	return nil
+}
+
+// tryLoadFromConfigFile attempts to load config from YAML files.
+func (e *Extension) tryLoadFromConfigFile() (Config, bool) {
+	cm := e.App().Config()
+	var cfg Config
+
+	// Try "extensions.dispatch" first (namespaced pattern).
+	if cm.IsSet("extensions.dispatch") {
+		if err := cm.Bind("extensions.dispatch", &cfg); err == nil {
+			e.Logger().Debug("dispatch: loaded config from file",
+				forge.F("key", "extensions.dispatch"),
+			)
+			return cfg, true
+		}
+		e.Logger().Warn("dispatch: failed to bind extensions.dispatch config",
+			forge.F("error", "bind failed"),
+		)
+	}
+
+	// Try legacy "dispatch" key.
+	if cm.IsSet("dispatch") {
+		if err := cm.Bind("dispatch", &cfg); err == nil {
+			e.Logger().Debug("dispatch: loaded config from file",
+				forge.F("key", "dispatch"),
+			)
+			return cfg, true
+		}
+		e.Logger().Warn("dispatch: failed to bind dispatch config",
+			forge.F("error", "bind failed"),
+		)
+	}
+
+	return Config{}, false
+}
+
+// mergeWithDefaults fills zero-valued fields with defaults.
+func (e *Extension) mergeWithDefaults(cfg Config) Config {
+	defaults := DefaultConfig()
+	if cfg.BasePath == "" {
+		cfg.BasePath = defaults.BasePath
+	}
+	return cfg
+}
+
+// mergeConfigurations merges YAML config with programmatic options.
+// YAML config takes precedence for most fields; programmatic bool flags fill gaps.
+func (e *Extension) mergeConfigurations(yamlConfig, programmaticConfig Config) Config {
+	// Programmatic bool flags override when true.
+	if programmaticConfig.DisableRoutes {
+		yamlConfig.DisableRoutes = true
+	}
+	if programmaticConfig.DisableMigrate {
+		yamlConfig.DisableMigrate = true
+	}
+
+	// String fields: YAML takes precedence.
+	if yamlConfig.BasePath == "" && programmaticConfig.BasePath != "" {
+		yamlConfig.BasePath = programmaticConfig.BasePath
+	}
+	if yamlConfig.GroveDatabase == "" && programmaticConfig.GroveDatabase != "" {
+		yamlConfig.GroveDatabase = programmaticConfig.GroveDatabase
+	}
+	if yamlConfig.GroveKV == "" && programmaticConfig.GroveKV != "" {
+		yamlConfig.GroveKV = programmaticConfig.GroveKV
+	}
+
+	// Fill remaining zeros with defaults.
+	return e.mergeWithDefaults(yamlConfig)
+}
+
+// resolveGroveDB resolves a *grove.DB from the DI container.
+// If GroveDatabase is set, it looks up the named DB; otherwise it uses the default.
+func (e *Extension) resolveGroveDB(fapp forge.App) (*grove.DB, error) {
+	if e.config.GroveDatabase != "" {
+		db, err := vessel.InjectNamed[*grove.DB](fapp.Container(), e.config.GroveDatabase)
+		if err != nil {
+			return nil, fmt.Errorf("grove database %q not found in container: %w", e.config.GroveDatabase, err)
+		}
+		return db, nil
+	}
+	db, err := vessel.Inject[*grove.DB](fapp.Container())
+	if err != nil {
+		return nil, fmt.Errorf("default grove database not found in container: %w", err)
+	}
+	return db, nil
+}
+
+// buildStoreFromGroveDB constructs the appropriate store backend
+// based on the grove driver type (pg, sqlite, mongo).
+func (e *Extension) buildStoreFromGroveDB(db *grove.DB) (dispatch.Storer, error) {
+	driverName := db.Driver().Name()
+	switch driverName {
+	case "pg":
+		return pgstore.New(db), nil
+	case "sqlite":
+		return sqlitestore.New(db), nil
+	case "mongo":
+		return mongostore.New(db), nil
+	default:
+		return nil, fmt.Errorf("dispatch: unsupported grove driver %q", driverName)
+	}
+}
+
+// resolveGroveKV resolves a *kv.Store from the DI container.
+// If GroveKV is set, it looks up the named store; otherwise it uses the default.
+func (e *Extension) resolveGroveKV(fapp forge.App) (*kv.Store, error) {
+	if e.config.GroveKV != "" {
+		s, err := vessel.InjectNamed[*kv.Store](fapp.Container(), e.config.GroveKV)
+		if err != nil {
+			return nil, fmt.Errorf("grove kv store %q not found in container: %w", e.config.GroveKV, err)
+		}
+		return s, nil
+	}
+	s, err := vessel.Inject[*kv.Store](fapp.Container())
+	if err != nil {
+		return nil, fmt.Errorf("default grove kv store not found in container: %w", err)
+	}
+	return s, nil
 }

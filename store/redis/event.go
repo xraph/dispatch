@@ -12,42 +12,73 @@ import (
 	"github.com/xraph/dispatch/id"
 )
 
+// ── JSON model for KV storage ──
+
+type eventEntity struct {
+	ID         string    `json:"id"`
+	Name       string    `json:"name"`
+	Payload    []byte    `json:"payload,omitempty"`
+	ScopeAppID string    `json:"scope_app_id"`
+	ScopeOrgID string    `json:"scope_org_id"`
+	Acked      bool      `json:"acked"`
+	CreatedAt  time.Time `json:"created_at"`
+}
+
+func toEventEntity(evt *event.Event) *eventEntity {
+	return &eventEntity{
+		ID:         evt.ID.String(),
+		Name:       evt.Name,
+		Payload:    evt.Payload,
+		ScopeAppID: evt.ScopeAppID,
+		ScopeOrgID: evt.ScopeOrgID,
+		Acked:      evt.Acked,
+		CreatedAt:  evt.CreatedAt,
+	}
+}
+
+func fromEventEntity(e *eventEntity) (*event.Event, error) {
+	eID, err := id.ParseEventID(e.ID)
+	if err != nil {
+		return nil, fmt.Errorf("dispatch/redis: parse event id: %w", err)
+	}
+
+	return &event.Event{
+		ID:         eID,
+		Name:       e.Name,
+		Payload:    e.Payload,
+		ScopeAppID: e.ScopeAppID,
+		ScopeOrgID: e.ScopeOrgID,
+		Acked:      e.Acked,
+		CreatedAt:  e.CreatedAt,
+	}, nil
+}
+
 // PublishEvent persists a new event and adds it to the name's stream.
 func (s *Store) PublishEvent(ctx context.Context, evt *event.Event) error {
 	eID := evt.ID.String()
 	key := eventKey(eID)
 
-	pipe := s.client.TxPipeline()
-	pipe.HSet(ctx, key,
-		"id", eID,
-		"name", evt.Name,
-		"payload", string(evt.Payload),
-		"scope_app", evt.ScopeAppID,
-		"scope_org", evt.ScopeOrgID,
-		"acked", "0",
-		"created_at", evt.CreatedAt.Format(time.RFC3339Nano),
-	)
+	e := toEventEntity(evt)
+	if err := s.setEntity(ctx, key, e); err != nil {
+		return fmt.Errorf("dispatch/redis: publish event set: %w", err)
+	}
+
 	// Add to the named stream so subscribers get notified.
-	pipe.XAdd(ctx, &goredis.XAddArgs{
+	if err := s.rdb.XAdd(ctx, &goredis.XAddArgs{
 		Stream: eventStreamKey(evt.Name),
 		Values: map[string]interface{}{
 			"event_id": eID,
 		},
-	})
-	_, err := pipe.Exec(ctx)
-	if err != nil {
-		return fmt.Errorf("dispatch/redis: publish event: %w", err)
+	}).Err(); err != nil {
+		return fmt.Errorf("dispatch/redis: publish event stream: %w", err)
 	}
 	return nil
 }
 
 // SubscribeEvent waits for an unacked event matching the given name.
-// Uses XREAD BLOCK for efficient blocking.
+// Uses stream polling for efficient waiting.
 func (s *Store) SubscribeEvent(ctx context.Context, name string, timeout time.Duration) (*event.Event, error) {
 	stream := eventStreamKey(name)
-
-	// Use XREAD with BLOCK to wait for new messages.
-	// We read from the beginning to find unacked events first.
 	deadline := time.Now().Add(timeout)
 
 	for {
@@ -61,13 +92,8 @@ func (s *Store) SubscribeEvent(ctx context.Context, name string, timeout time.Du
 			return nil, nil
 		}
 
-		remaining := time.Until(deadline)
-		if remaining <= 0 {
-			return nil, nil
-		}
-
 		// Read oldest messages from the stream.
-		msgs, err := s.client.XRangeN(ctx, stream, "-", "+", 10).Result()
+		msgs, err := s.rdb.XRangeN(ctx, stream, "-", "+", 10).Result()
 		if err != nil {
 			return nil, fmt.Errorf("dispatch/redis: subscribe xrange: %w", err)
 		}
@@ -79,28 +105,23 @@ func (s *Store) SubscribeEvent(ctx context.Context, name string, timeout time.Du
 			}
 
 			key := eventKey(eID)
-			acked, getErr := s.client.HGet(ctx, key, "acked").Result()
-			if getErr != nil {
+			var e eventEntity
+			if getErr := s.getEntity(ctx, key, &e); getErr != nil {
 				continue
 			}
-			if acked == "1" {
+			if e.Acked {
 				continue // already consumed
 			}
 
-			// Found an unacked event.
-			vals, hErr := s.client.HGetAll(ctx, key).Result()
-			if hErr != nil || len(vals) == 0 {
-				continue
-			}
-
-			evt, convErr := mapToEvent(vals)
+			evt, convErr := fromEventEntity(&e)
 			if convErr != nil {
 				continue
 			}
 			return evt, nil
 		}
 
-		// No unacked event found — wait a bit before retrying.
+		// No unacked event found -- wait a bit before retrying.
+		remaining := time.Until(deadline)
 		blockTime := 50 * time.Millisecond
 		if blockTime > remaining {
 			blockTime = remaining
@@ -113,47 +134,14 @@ func (s *Store) SubscribeEvent(ctx context.Context, name string, timeout time.Du
 func (s *Store) AckEvent(ctx context.Context, eventID id.EventID) error {
 	key := eventKey(eventID.String())
 
-	exists, err := s.client.Exists(ctx, key).Result()
-	if err != nil {
-		return fmt.Errorf("dispatch/redis: ack event exists: %w", err)
-	}
-	if exists == 0 {
-		return dispatch.ErrEventNotFound
-	}
-
-	_, err = s.client.HSet(ctx, key, "acked", "1").Result()
-	if err != nil {
-		return fmt.Errorf("dispatch/redis: ack event: %w", err)
-	}
-	return nil
-}
-
-// sleepCtx sleeps for the given duration, or returns early if the context
-// is cancelled.
-func sleepCtx(ctx context.Context, d time.Duration) {
-	timer := time.NewTimer(d)
-	defer timer.Stop()
-	select {
-	case <-ctx.Done():
-	case <-timer.C:
-	}
-}
-
-func mapToEvent(m map[string]string) (*event.Event, error) {
-	eID, err := id.ParseEventID(m["id"])
-	if err != nil {
-		return nil, fmt.Errorf("dispatch/redis: parse event id: %w", err)
+	var e eventEntity
+	if err := s.getEntity(ctx, key, &e); err != nil {
+		if isNotFound(err) {
+			return dispatch.ErrEventNotFound
+		}
+		return fmt.Errorf("dispatch/redis: ack event get: %w", err)
 	}
 
-	createdAt, _ := time.Parse(time.RFC3339Nano, m["created_at"]) //nolint:errcheck // best-effort parse from trusted Redis data
-
-	return &event.Event{
-		ID:         eID,
-		Name:       m["name"],
-		Payload:    []byte(m["payload"]),
-		ScopeAppID: m["scope_app"],
-		ScopeOrgID: m["scope_org"],
-		Acked:      m["acked"] == "1",
-		CreatedAt:  createdAt,
-	}, nil
+	e.Acked = true
+	return s.setEntity(ctx, key, &e)
 }

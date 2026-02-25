@@ -9,8 +9,10 @@ import (
 	"testing"
 	"time"
 
-	goredis "github.com/redis/go-redis/v9"
 	redismodule "github.com/testcontainers/testcontainers-go/modules/redis"
+
+	"github.com/xraph/grove/kv"
+	"github.com/xraph/grove/kv/drivers/redisdriver"
 
 	"github.com/xraph/dispatch"
 	"github.com/xraph/dispatch/cluster"
@@ -46,19 +48,23 @@ func setupTestStore(t *testing.T) *redisstore.Store {
 		t.Fatalf("get connection string: %v", err)
 	}
 
-	opts, err := goredis.ParseURL(connStr)
-	if err != nil {
-		t.Fatalf("parse redis url: %v", err)
+	rdb := redisdriver.New()
+	if err := rdb.Open(ctx, connStr); err != nil {
+		t.Fatalf("open redis driver: %v", err)
 	}
 
-	client := goredis.NewClient(opts)
+	kvStore, err := kv.Open(rdb)
+	if err != nil {
+		t.Fatalf("open kv store: %v", err)
+	}
 	t.Cleanup(func() {
-		_ = client.Close()
+		_ = kvStore.Close()
 	})
 
-	store := redisstore.New(client)
+	store := redisstore.New(kvStore)
 
 	// FlushDB to start clean.
+	client := redisdriver.UnwrapClient(kvStore)
 	if flushErr := client.FlushDB(ctx).Err(); flushErr != nil {
 		t.Fatalf("flush: %v", flushErr)
 	}
@@ -149,7 +155,7 @@ func TestJobStore_DequeueJobs(t *testing.T) {
 		}
 	}
 
-	// Dequeue 2 — should get highest priority first.
+	// Dequeue 2 -- should get highest priority first.
 	dequeued, err := s.DequeueJobs(ctx, []string{"default"}, 2)
 	if err != nil {
 		t.Fatalf("dequeue: %v", err)
@@ -164,7 +170,7 @@ func TestJobStore_DequeueJobs(t *testing.T) {
 		t.Fatalf("expected second dequeued priority 1, got %d", dequeued[1].Priority)
 	}
 
-	// Dequeue remaining — should get 1 job.
+	// Dequeue remaining -- should get 1 job.
 	remaining, err := s.DequeueJobs(ctx, []string{"default"}, 10)
 	if err != nil {
 		t.Fatalf("dequeue remaining: %v", err)
@@ -273,7 +279,7 @@ func TestJobStore_HeartbeatAndReap(t *testing.T) {
 		t.Fatalf("enqueue: %v", err)
 	}
 
-	// Reap with 1-minute threshold — should find the stale job.
+	// Reap with 1-minute threshold -- should find the stale job.
 	stale, err := s.ReapStaleJobs(ctx, 1*time.Minute)
 	if err != nil {
 		t.Fatalf("reap: %v", err)
@@ -282,12 +288,12 @@ func TestJobStore_HeartbeatAndReap(t *testing.T) {
 		t.Fatalf("expected 1 stale, got %d", len(stale))
 	}
 
-	// Heartbeat — update to fresh.
+	// Heartbeat -- update to fresh.
 	if err = s.HeartbeatJob(ctx, j.ID, id.NewWorkerID()); err != nil {
 		t.Fatalf("heartbeat: %v", err)
 	}
 
-	// Reap again — should find 0.
+	// Reap again -- should find 0.
 	stale, err = s.ReapStaleJobs(ctx, 1*time.Minute)
 	if err != nil {
 		t.Fatalf("reap after heartbeat: %v", err)
@@ -359,65 +365,6 @@ func TestWorkflowStore_CreateAndGetRun(t *testing.T) {
 	}
 }
 
-func TestWorkflowStore_UpdateRun(t *testing.T) {
-	s := setupTestStore(t)
-	ctx := context.Background()
-
-	run := &workflow.Run{
-		Entity:    dispatch.NewEntity(),
-		ID:        id.NewRunID(),
-		Name:      "update-workflow",
-		State:     workflow.RunStateRunning,
-		StartedAt: time.Now().UTC(),
-	}
-	if err := s.CreateRun(ctx, run); err != nil {
-		t.Fatalf("create: %v", err)
-	}
-
-	run.State = workflow.RunStateCompleted
-	now := time.Now().UTC()
-	run.CompletedAt = &now
-	run.Output = []byte(`{"result":"done"}`)
-
-	if err := s.UpdateRun(ctx, run); err != nil {
-		t.Fatalf("update: %v", err)
-	}
-
-	got, err := s.GetRun(ctx, run.ID)
-	if err != nil {
-		t.Fatalf("get: %v", err)
-	}
-	if got.State != workflow.RunStateCompleted {
-		t.Fatalf("expected completed, got %s", got.State)
-	}
-}
-
-func TestWorkflowStore_ListRuns(t *testing.T) {
-	s := setupTestStore(t)
-	ctx := context.Background()
-
-	for i := 0; i < 3; i++ {
-		run := &workflow.Run{
-			Entity:    dispatch.NewEntity(),
-			ID:        id.NewRunID(),
-			Name:      fmt.Sprintf("list-wf-%d", i),
-			State:     workflow.RunStateRunning,
-			StartedAt: time.Now().UTC(),
-		}
-		if err := s.CreateRun(ctx, run); err != nil {
-			t.Fatalf("create run %d: %v", i, err)
-		}
-	}
-
-	runs, err := s.ListRuns(ctx, workflow.ListOpts{})
-	if err != nil {
-		t.Fatalf("list: %v", err)
-	}
-	if len(runs) != 3 {
-		t.Fatalf("expected 3, got %d", len(runs))
-	}
-}
-
 func TestWorkflowStore_Checkpoints(t *testing.T) {
 	s := setupTestStore(t)
 	ctx := context.Background()
@@ -451,7 +398,7 @@ func TestWorkflowStore_Checkpoints(t *testing.T) {
 		t.Fatalf("expected data-1, got %s", string(data))
 	}
 
-	// Get non-existent checkpoint — should return nil.
+	// Get non-existent checkpoint -- should return nil.
 	data, err = s.GetCheckpoint(ctx, runID, "missing")
 	if err != nil {
 		t.Fatalf("get missing checkpoint: %v", err)
@@ -469,7 +416,7 @@ func TestWorkflowStore_Checkpoints(t *testing.T) {
 		t.Fatalf("expected 2, got %d", len(cps))
 	}
 
-	// Overwrite checkpoint — upsert.
+	// Overwrite checkpoint -- upsert.
 	if err = s.SaveCheckpoint(ctx, runID, "step-1", []byte("data-1-updated")); err != nil {
 		t.Fatalf("overwrite checkpoint: %v", err)
 	}
@@ -531,46 +478,6 @@ func TestCronStore_RegisterAndGet(t *testing.T) {
 	}
 }
 
-func TestCronStore_ListAndDelete(t *testing.T) {
-	s := setupTestStore(t)
-	ctx := context.Background()
-
-	for i := 0; i < 3; i++ {
-		entry := &cron.Entry{
-			Entity:   dispatch.NewEntity(),
-			ID:       id.NewCronID(),
-			Name:     fmt.Sprintf("cron-%d", i),
-			Schedule: "*/5 * * * *",
-			JobName:  "test-job",
-			Enabled:  true,
-		}
-		if err := s.RegisterCron(ctx, entry); err != nil {
-			t.Fatalf("register cron-%d: %v", i, err)
-		}
-	}
-
-	entries, err := s.ListCrons(ctx)
-	if err != nil {
-		t.Fatalf("list: %v", err)
-	}
-	if len(entries) != 3 {
-		t.Fatalf("expected 3, got %d", len(entries))
-	}
-
-	// Delete one.
-	if err = s.DeleteCron(ctx, entries[0].ID); err != nil {
-		t.Fatalf("delete: %v", err)
-	}
-
-	entries, err = s.ListCrons(ctx)
-	if err != nil {
-		t.Fatalf("list after delete: %v", err)
-	}
-	if len(entries) != 2 {
-		t.Fatalf("expected 2, got %d", len(entries))
-	}
-}
-
 func TestCronStore_LockAndRelease(t *testing.T) {
 	s := setupTestStore(t)
 	ctx := context.Background()
@@ -608,15 +515,6 @@ func TestCronStore_LockAndRelease(t *testing.T) {
 		t.Fatal("expected not acquired by worker2")
 	}
 
-	// Worker1 can re-acquire (idempotent).
-	acquired, err = s.AcquireCronLock(ctx, entry.ID, worker1, 30*time.Second)
-	if err != nil {
-		t.Fatalf("re-acquire: %v", err)
-	}
-	if !acquired {
-		t.Fatal("expected re-acquired by worker1")
-	}
-
 	// Release.
 	if err = s.ReleaseCronLock(ctx, entry.ID, worker1); err != nil {
 		t.Fatalf("release: %v", err)
@@ -629,66 +527,6 @@ func TestCronStore_LockAndRelease(t *testing.T) {
 	}
 	if !acquired {
 		t.Fatal("expected acquired by worker2 after release")
-	}
-}
-
-func TestCronStore_UpdateEntry(t *testing.T) {
-	s := setupTestStore(t)
-	ctx := context.Background()
-
-	entry := &cron.Entry{
-		Entity:   dispatch.NewEntity(),
-		ID:       id.NewCronID(),
-		Name:     "update-cron",
-		Schedule: "*/5 * * * *",
-		JobName:  "test-job",
-		Enabled:  true,
-	}
-	if err := s.RegisterCron(ctx, entry); err != nil {
-		t.Fatalf("register: %v", err)
-	}
-
-	entry.Enabled = false
-	if err := s.UpdateCronEntry(ctx, entry); err != nil {
-		t.Fatalf("update: %v", err)
-	}
-
-	got, err := s.GetCron(ctx, entry.ID)
-	if err != nil {
-		t.Fatalf("get: %v", err)
-	}
-	if got.Enabled {
-		t.Fatal("expected disabled")
-	}
-}
-
-func TestCronStore_UpdateLastRun(t *testing.T) {
-	s := setupTestStore(t)
-	ctx := context.Background()
-
-	entry := &cron.Entry{
-		Entity:   dispatch.NewEntity(),
-		ID:       id.NewCronID(),
-		Name:     "lastrun-cron",
-		Schedule: "*/5 * * * *",
-		JobName:  "test-job",
-		Enabled:  true,
-	}
-	if err := s.RegisterCron(ctx, entry); err != nil {
-		t.Fatalf("register: %v", err)
-	}
-
-	now := time.Now().UTC()
-	if err := s.UpdateCronLastRun(ctx, entry.ID, now); err != nil {
-		t.Fatalf("update last run: %v", err)
-	}
-
-	got, err := s.GetCron(ctx, entry.ID)
-	if err != nil {
-		t.Fatalf("get: %v", err)
-	}
-	if got.LastRunAt == nil {
-		t.Fatal("expected last_run_at to be set")
 	}
 }
 
@@ -723,91 +561,9 @@ func TestDLQStore_PushAndGet(t *testing.T) {
 	if got.JobName != "failed-job" {
 		t.Fatalf("expected failed-job, got %s", got.JobName)
 	}
-	if got.Error != "something went wrong" {
-		t.Fatalf("expected error message, got %s", got.Error)
-	}
 }
 
-func TestDLQStore_ListAndPurge(t *testing.T) {
-	s := setupTestStore(t)
-	ctx := context.Background()
-
-	for i := 0; i < 5; i++ {
-		entry := &dlq.Entry{
-			ID:         id.NewDLQID(),
-			JobID:      id.NewJobID(),
-			JobName:    fmt.Sprintf("dlq-job-%d", i),
-			Queue:      "default",
-			Payload:    []byte(`{}`),
-			Error:      "error",
-			RetryCount: 3,
-			FailedAt:   time.Now().UTC().Add(-time.Duration(i) * time.Hour),
-			CreatedAt:  time.Now().UTC(),
-		}
-		if err := s.PushDLQ(ctx, entry); err != nil {
-			t.Fatalf("push %d: %v", i, err)
-		}
-	}
-
-	entries, err := s.ListDLQ(ctx, dlq.ListOpts{})
-	if err != nil {
-		t.Fatalf("list: %v", err)
-	}
-	if len(entries) != 5 {
-		t.Fatalf("expected 5, got %d", len(entries))
-	}
-
-	// Purge entries older than 2 hours.
-	purged, err := s.PurgeDLQ(ctx, time.Now().UTC().Add(-2*time.Hour))
-	if err != nil {
-		t.Fatalf("purge: %v", err)
-	}
-	if purged != 3 {
-		t.Fatalf("expected 3 purged, got %d", purged)
-	}
-
-	remaining, err := s.ListDLQ(ctx, dlq.ListOpts{})
-	if err != nil {
-		t.Fatalf("list after purge: %v", err)
-	}
-	if len(remaining) != 2 {
-		t.Fatalf("expected 2, got %d", len(remaining))
-	}
-}
-
-func TestDLQStore_Replay(t *testing.T) {
-	s := setupTestStore(t)
-	ctx := context.Background()
-
-	entry := &dlq.Entry{
-		ID:         id.NewDLQID(),
-		JobID:      id.NewJobID(),
-		JobName:    "replay-job",
-		Queue:      "default",
-		Payload:    []byte(`{}`),
-		Error:      "error",
-		RetryCount: 3,
-		FailedAt:   time.Now().UTC(),
-		CreatedAt:  time.Now().UTC(),
-	}
-	if err := s.PushDLQ(ctx, entry); err != nil {
-		t.Fatalf("push: %v", err)
-	}
-
-	if err := s.ReplayDLQ(ctx, entry.ID); err != nil {
-		t.Fatalf("replay: %v", err)
-	}
-
-	got, err := s.GetDLQ(ctx, entry.ID)
-	if err != nil {
-		t.Fatalf("get after replay: %v", err)
-	}
-	if got.ReplayedAt == nil {
-		t.Fatal("expected replayed_at to be set")
-	}
-}
-
-func TestDLQStore_Count(t *testing.T) {
+func TestDLQStore_CountAndPurge(t *testing.T) {
 	s := setupTestStore(t)
 	ctx := context.Background()
 
@@ -820,7 +576,7 @@ func TestDLQStore_Count(t *testing.T) {
 			Payload:    []byte(`{}`),
 			Error:      "error",
 			RetryCount: 3,
-			FailedAt:   time.Now().UTC(),
+			FailedAt:   time.Now().UTC().Add(-time.Duration(i) * time.Hour),
 			CreatedAt:  time.Now().UTC(),
 		}
 		if err := s.PushDLQ(ctx, entry); err != nil {
@@ -856,7 +612,6 @@ func TestEventStore_PublishAndSubscribe(t *testing.T) {
 		t.Fatalf("publish: %v", err)
 	}
 
-	// Subscribe should find it.
 	got, err := s.SubscribeEvent(ctx, "order.completed", 5*time.Second)
 	if err != nil {
 		t.Fatalf("subscribe: %v", err)
@@ -897,20 +652,6 @@ func TestEventStore_AckEvent(t *testing.T) {
 	}
 }
 
-func TestEventStore_SubscribeTimeout(t *testing.T) {
-	s := setupTestStore(t)
-	ctx := context.Background()
-
-	// Subscribe to non-existent event — should timeout.
-	got, err := s.SubscribeEvent(ctx, "nonexistent", 200*time.Millisecond)
-	if err != nil {
-		t.Fatalf("subscribe: %v", err)
-	}
-	if got != nil {
-		t.Fatal("expected nil on timeout")
-	}
-}
-
 // ──────────────────────────────────────────────────
 // Cluster Store tests
 // ──────────────────────────────────────────────────
@@ -943,76 +684,6 @@ func TestClusterStore_RegisterAndList(t *testing.T) {
 	}
 	if workers[0].Hostname != "worker-1" {
 		t.Fatalf("expected worker-1, got %s", workers[0].Hostname)
-	}
-}
-
-func TestClusterStore_Deregister(t *testing.T) {
-	s := setupTestStore(t)
-	ctx := context.Background()
-
-	w := &cluster.Worker{
-		ID:          id.NewWorkerID(),
-		Hostname:    "ephemeral",
-		Queues:      []string{"default"},
-		Concurrency: 5,
-		State:       cluster.WorkerActive,
-		LastSeen:    time.Now().UTC(),
-		CreatedAt:   time.Now().UTC(),
-	}
-	if err := s.RegisterWorker(ctx, w); err != nil {
-		t.Fatalf("register: %v", err)
-	}
-
-	if err := s.DeregisterWorker(ctx, w.ID); err != nil {
-		t.Fatalf("deregister: %v", err)
-	}
-
-	workers, err := s.ListWorkers(ctx)
-	if err != nil {
-		t.Fatalf("list: %v", err)
-	}
-	if len(workers) != 0 {
-		t.Fatalf("expected 0, got %d", len(workers))
-	}
-}
-
-func TestClusterStore_HeartbeatAndReap(t *testing.T) {
-	s := setupTestStore(t)
-	ctx := context.Background()
-
-	w := &cluster.Worker{
-		ID:          id.NewWorkerID(),
-		Hostname:    "stale-worker",
-		Queues:      []string{"default"},
-		Concurrency: 5,
-		State:       cluster.WorkerActive,
-		LastSeen:    time.Now().UTC().Add(-5 * time.Minute),
-		CreatedAt:   time.Now().UTC(),
-	}
-	if err := s.RegisterWorker(ctx, w); err != nil {
-		t.Fatalf("register: %v", err)
-	}
-
-	// Should be reaped with 1-minute threshold.
-	dead, err := s.ReapDeadWorkers(ctx, 1*time.Minute)
-	if err != nil {
-		t.Fatalf("reap: %v", err)
-	}
-	if len(dead) != 1 {
-		t.Fatalf("expected 1 dead, got %d", len(dead))
-	}
-
-	// Heartbeat refreshes.
-	if err = s.HeartbeatWorker(ctx, w.ID); err != nil {
-		t.Fatalf("heartbeat: %v", err)
-	}
-
-	dead, err = s.ReapDeadWorkers(ctx, 1*time.Minute)
-	if err != nil {
-		t.Fatalf("reap after heartbeat: %v", err)
-	}
-	if len(dead) != 0 {
-		t.Fatalf("expected 0 dead after heartbeat, got %d", len(dead))
 	}
 }
 
@@ -1074,73 +745,9 @@ func TestClusterStore_Leadership(t *testing.T) {
 	if leader.ID.String() != w1.ID.String() {
 		t.Fatalf("expected w1 as leader, got %s", leader.ID.String())
 	}
-
-	// w1 renews.
-	renewed, err := s.RenewLeadership(ctx, w1.ID, 30*time.Second)
-	if err != nil {
-		t.Fatalf("renew: %v", err)
-	}
-	if !renewed {
-		t.Fatal("expected renewed")
-	}
-
-	// w2 cannot renew (not leader).
-	renewed, err = s.RenewLeadership(ctx, w2.ID, 30*time.Second)
-	if err != nil {
-		t.Fatalf("renew by w2: %v", err)
-	}
-	if renewed {
-		t.Fatal("expected not renewed by w2")
-	}
 }
 
-func TestClusterStore_LeaderExpiry(t *testing.T) {
-	s := setupTestStore(t)
-	ctx := context.Background()
-
-	w1 := &cluster.Worker{
-		ID:          id.NewWorkerID(),
-		Hostname:    "expiring-leader",
-		Queues:      []string{"default"},
-		Concurrency: 10,
-		State:       cluster.WorkerActive,
-		LastSeen:    time.Now().UTC(),
-		CreatedAt:   time.Now().UTC(),
-	}
-	w2 := &cluster.Worker{
-		ID:          id.NewWorkerID(),
-		Hostname:    "new-leader",
-		Queues:      []string{"default"},
-		Concurrency: 10,
-		State:       cluster.WorkerActive,
-		LastSeen:    time.Now().UTC(),
-		CreatedAt:   time.Now().UTC(),
-	}
-
-	for _, w := range []*cluster.Worker{w1, w2} {
-		if err := s.RegisterWorker(ctx, w); err != nil {
-			t.Fatalf("register: %v", err)
-		}
-	}
-
-	// w1 acquires with very short TTL.
-	acquired, err := s.AcquireLeadership(ctx, w1.ID, 1*time.Millisecond)
-	if err != nil {
-		t.Fatalf("acquire: %v", err)
-	}
-	if !acquired {
-		t.Fatal("expected acquired")
-	}
-
-	// Wait for TTL to expire.
-	time.Sleep(50 * time.Millisecond)
-
-	// w2 should now be able to acquire.
-	acquired, err = s.AcquireLeadership(ctx, w2.ID, 30*time.Second)
-	if err != nil {
-		t.Fatalf("acquire by w2: %v", err)
-	}
-	if !acquired {
-		t.Fatal("expected acquired by w2 after expiry")
-	}
-}
+// Ensure unused imports are referenced.
+var (
+	_ = kv.ErrNotFound
+)

@@ -1,4 +1,4 @@
-package bunstore
+package sqlite
 
 import (
 	"context"
@@ -14,12 +14,12 @@ import (
 // already exists.
 func (s *Store) RegisterCron(ctx context.Context, entry *cron.Entry) error {
 	m := toCronModel(entry)
-	_, err := s.db.NewInsert().Model(m).Exec(ctx)
+	_, err := s.sdb.NewInsert(m).Exec(ctx)
 	if err != nil {
 		if isDuplicateKey(err) {
 			return dispatch.ErrDuplicateCron
 		}
-		return fmt.Errorf("dispatch/bun: register cron: %w", err)
+		return fmt.Errorf("dispatch/sqlite: register cron: %w", err)
 	}
 	return nil
 }
@@ -27,7 +27,7 @@ func (s *Store) RegisterCron(ctx context.Context, entry *cron.Entry) error {
 // GetCron retrieves a cron entry by ID.
 func (s *Store) GetCron(ctx context.Context, entryID id.CronID) (*cron.Entry, error) {
 	m := new(cronEntryModel)
-	err := s.db.NewSelect().Model(m).
+	err := s.sdb.NewSelect(m).
 		Where("id = ?", entryID.String()).
 		Limit(1).
 		Scan(ctx)
@@ -35,7 +35,7 @@ func (s *Store) GetCron(ctx context.Context, entryID id.CronID) (*cron.Entry, er
 		if isNoRows(err) {
 			return nil, dispatch.ErrCronNotFound
 		}
-		return nil, fmt.Errorf("dispatch/bun: get cron: %w", err)
+		return nil, fmt.Errorf("dispatch/sqlite: get cron: %w", err)
 	}
 	return fromCronModel(m)
 }
@@ -43,18 +43,18 @@ func (s *Store) GetCron(ctx context.Context, entryID id.CronID) (*cron.Entry, er
 // ListCrons returns all cron entries.
 func (s *Store) ListCrons(ctx context.Context) ([]*cron.Entry, error) {
 	var models []cronEntryModel
-	err := s.db.NewSelect().Model(&models).
-		Order("created_at ASC").
+	err := s.sdb.NewSelect(&models).
+		OrderExpr("created_at ASC").
 		Scan(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("dispatch/bun: list crons: %w", err)
+		return nil, fmt.Errorf("dispatch/sqlite: list crons: %w", err)
 	}
 
 	entries := make([]*cron.Entry, 0, len(models))
 	for i := range models {
 		e, convErr := fromCronModel(&models[i])
 		if convErr != nil {
-			return nil, fmt.Errorf("dispatch/bun: list crons convert: %w", convErr)
+			return nil, fmt.Errorf("dispatch/sqlite: list crons convert: %w", convErr)
 		}
 		entries = append(entries, e)
 	}
@@ -62,36 +62,34 @@ func (s *Store) ListCrons(ctx context.Context) ([]*cron.Entry, error) {
 }
 
 // AcquireCronLock attempts to acquire a distributed lock for a cron entry.
-// Uses row-level locking to prevent race conditions.
+// Uses row-level update to prevent race conditions.
 func (s *Store) AcquireCronLock(ctx context.Context, entryID id.CronID, workerID id.WorkerID, ttl time.Duration) (bool, error) {
 	now := time.Now().UTC()
 	until := now.Add(ttl)
 	wID := workerID.String()
 
 	// Try to acquire: succeed if no lock, lock expired, or we already hold it.
-	res, err := s.db.NewUpdate().
-		TableExpr("dispatch_cron_entries").
+	res, err := s.sdb.NewUpdate((*cronEntryModel)(nil)).
 		Set("locked_by = ?", wID).
 		Set("locked_until = ?", until).
-		Set("updated_at = NOW()").
+		Set("updated_at = ?", now).
 		Where("id = ?", entryID.String()).
 		Where("(locked_by IS NULL OR locked_until < ? OR locked_by = ?)", now, wID).
 		Exec(ctx)
 	if err != nil {
-		return false, fmt.Errorf("dispatch/bun: acquire cron lock: %w", err)
+		return false, fmt.Errorf("dispatch/sqlite: acquire cron lock: %w", err)
 	}
 
 	rows, _ := res.RowsAffected() //nolint:errcheck // driver always returns nil
 	if rows == 0 {
 		// Check if the entry exists at all.
-		exists, existErr := s.db.NewSelect().
-			TableExpr("dispatch_cron_entries").
+		count, existErr := s.sdb.NewSelect((*cronEntryModel)(nil)).
 			Where("id = ?", entryID.String()).
-			Exists(ctx)
+			Count(ctx)
 		if existErr != nil {
-			return false, fmt.Errorf("dispatch/bun: check cron exists: %w", existErr)
+			return false, fmt.Errorf("dispatch/sqlite: check cron exists: %w", existErr)
 		}
-		if !exists {
+		if count == 0 {
 			return false, dispatch.ErrCronNotFound
 		}
 		// Entry exists but lock is held by someone else.
@@ -103,30 +101,30 @@ func (s *Store) AcquireCronLock(ctx context.Context, entryID id.CronID, workerID
 
 // ReleaseCronLock releases the distributed lock for a cron entry.
 func (s *Store) ReleaseCronLock(ctx context.Context, entryID id.CronID, workerID id.WorkerID) error {
-	_, err := s.db.NewUpdate().
-		TableExpr("dispatch_cron_entries").
+	now := time.Now().UTC()
+	_, err := s.sdb.NewUpdate((*cronEntryModel)(nil)).
 		Set("locked_by = NULL").
 		Set("locked_until = NULL").
-		Set("updated_at = NOW()").
+		Set("updated_at = ?", now).
 		Where("id = ?", entryID.String()).
 		Where("locked_by = ?", workerID.String()).
 		Exec(ctx)
 	if err != nil {
-		return fmt.Errorf("dispatch/bun: release cron lock: %w", err)
+		return fmt.Errorf("dispatch/sqlite: release cron lock: %w", err)
 	}
 	return nil
 }
 
 // UpdateCronLastRun records when a cron entry last fired.
 func (s *Store) UpdateCronLastRun(ctx context.Context, entryID id.CronID, at time.Time) error {
-	res, err := s.db.NewUpdate().
-		TableExpr("dispatch_cron_entries").
+	now := time.Now().UTC()
+	res, err := s.sdb.NewUpdate((*cronEntryModel)(nil)).
 		Set("last_run_at = ?", at).
-		Set("updated_at = NOW()").
+		Set("updated_at = ?", now).
 		Where("id = ?", entryID.String()).
 		Exec(ctx)
 	if err != nil {
-		return fmt.Errorf("dispatch/bun: update cron last run: %w", err)
+		return fmt.Errorf("dispatch/sqlite: update cron last run: %w", err)
 	}
 	rows, _ := res.RowsAffected() //nolint:errcheck // driver always returns nil
 	if rows == 0 {
@@ -139,9 +137,9 @@ func (s *Store) UpdateCronLastRun(ctx context.Context, entryID id.CronID, at tim
 func (s *Store) UpdateCronEntry(ctx context.Context, entry *cron.Entry) error {
 	m := toCronModel(entry)
 	m.UpdatedAt = time.Now().UTC()
-	res, err := s.db.NewUpdate().Model(m).WherePK().Exec(ctx)
+	res, err := s.sdb.NewUpdate(m).WherePK().Exec(ctx)
 	if err != nil {
-		return fmt.Errorf("dispatch/bun: update cron entry: %w", err)
+		return fmt.Errorf("dispatch/sqlite: update cron entry: %w", err)
 	}
 	rows, _ := res.RowsAffected() //nolint:errcheck // driver always returns nil
 	if rows == 0 {
@@ -152,12 +150,11 @@ func (s *Store) UpdateCronEntry(ctx context.Context, entry *cron.Entry) error {
 
 // DeleteCron removes a cron entry by ID.
 func (s *Store) DeleteCron(ctx context.Context, entryID id.CronID) error {
-	res, err := s.db.NewDelete().
-		TableExpr("dispatch_cron_entries").
+	res, err := s.sdb.NewDelete((*cronEntryModel)(nil)).
 		Where("id = ?", entryID.String()).
 		Exec(ctx)
 	if err != nil {
-		return fmt.Errorf("dispatch/bun: delete cron: %w", err)
+		return fmt.Errorf("dispatch/sqlite: delete cron: %w", err)
 	}
 	rows, _ := res.RowsAffected() //nolint:errcheck // driver always returns nil
 	if rows == 0 {

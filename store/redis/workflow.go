@@ -2,125 +2,177 @@ package redis
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"time"
-
-	goredis "github.com/redis/go-redis/v9"
 
 	"github.com/xraph/dispatch"
 	"github.com/xraph/dispatch/id"
 	"github.com/xraph/dispatch/workflow"
 )
 
+// ── JSON model for KV storage ──
+
+type runEntity struct {
+	ID          string     `json:"id"`
+	Name        string     `json:"name"`
+	State       string     `json:"state"`
+	Input       []byte     `json:"input,omitempty"`
+	Output      []byte     `json:"output,omitempty"`
+	Error       string     `json:"error"`
+	ScopeAppID  string     `json:"scope_app_id"`
+	ScopeOrgID  string     `json:"scope_org_id"`
+	StartedAt   time.Time  `json:"started_at"`
+	CompletedAt *time.Time `json:"completed_at,omitempty"`
+	CreatedAt   time.Time  `json:"created_at"`
+	UpdatedAt   time.Time  `json:"updated_at"`
+}
+
+func toRunEntity(r *workflow.Run) *runEntity {
+	return &runEntity{
+		ID:          r.ID.String(),
+		Name:        r.Name,
+		State:       string(r.State),
+		Input:       r.Input,
+		Output:      r.Output,
+		Error:       r.Error,
+		ScopeAppID:  r.ScopeAppID,
+		ScopeOrgID:  r.ScopeOrgID,
+		StartedAt:   r.StartedAt,
+		CompletedAt: r.CompletedAt,
+		CreatedAt:   r.CreatedAt,
+		UpdatedAt:   r.UpdatedAt,
+	}
+}
+
+func fromRunEntity(e *runEntity) (*workflow.Run, error) {
+	rID, err := id.ParseRunID(e.ID)
+	if err != nil {
+		return nil, fmt.Errorf("dispatch/redis: parse run id: %w", err)
+	}
+
+	return &workflow.Run{
+		Entity: dispatch.Entity{
+			CreatedAt: e.CreatedAt,
+			UpdatedAt: e.UpdatedAt,
+		},
+		ID:          rID,
+		Name:        e.Name,
+		State:       workflow.RunState(e.State),
+		Input:       e.Input,
+		Output:      e.Output,
+		Error:       e.Error,
+		ScopeAppID:  e.ScopeAppID,
+		ScopeOrgID:  e.ScopeOrgID,
+		StartedAt:   e.StartedAt,
+		CompletedAt: e.CompletedAt,
+	}, nil
+}
+
+type checkpointEntity struct {
+	ID        string    `json:"id"`
+	RunID     string    `json:"run_id"`
+	StepName  string    `json:"step_name"`
+	Data      []byte    `json:"data"`
+	CreatedAt time.Time `json:"created_at"`
+}
+
 // CreateRun persists a new workflow run.
 func (s *Store) CreateRun(ctx context.Context, run *workflow.Run) error {
 	rID := run.ID.String()
 	key := runKey(rID)
 
-	exists, err := s.client.Exists(ctx, key).Result()
+	exists, err := s.entityExists(ctx, key)
 	if err != nil {
 		return fmt.Errorf("dispatch/redis: create run exists: %w", err)
 	}
-	if exists > 0 {
+	if exists {
 		return dispatch.ErrJobAlreadyExists // reuse duplicate sentinel
 	}
 
-	pipe := s.client.TxPipeline()
-	pipe.HSet(ctx, key, runToMap(run))
-	pipe.SAdd(ctx, runIDsKey, rID)
-	_, err = pipe.Exec(ctx)
-	if err != nil {
-		return fmt.Errorf("dispatch/redis: create run: %w", err)
+	e := toRunEntity(run)
+	if err := s.setEntity(ctx, key, e); err != nil {
+		return fmt.Errorf("dispatch/redis: create run set: %w", err)
+	}
+
+	if err := s.rdb.SAdd(ctx, runIDsKey, rID).Err(); err != nil {
+		return fmt.Errorf("dispatch/redis: create run index: %w", err)
 	}
 	return nil
 }
 
 // GetRun retrieves a workflow run by ID.
 func (s *Store) GetRun(ctx context.Context, runID id.RunID) (*workflow.Run, error) {
-	key := runKey(runID.String())
-	vals, err := s.client.HGetAll(ctx, key).Result()
-	if err != nil {
+	var e runEntity
+	if err := s.getEntity(ctx, runKey(runID.String()), &e); err != nil {
+		if isNotFound(err) {
+			return nil, dispatch.ErrRunNotFound
+		}
 		return nil, fmt.Errorf("dispatch/redis: get run: %w", err)
 	}
-	if len(vals) == 0 {
-		return nil, dispatch.ErrRunNotFound
-	}
-	return mapToRun(vals)
+	return fromRunEntity(&e)
 }
 
 // UpdateRun persists changes to an existing workflow run.
 func (s *Store) UpdateRun(ctx context.Context, run *workflow.Run) error {
 	key := runKey(run.ID.String())
-	exists, err := s.client.Exists(ctx, key).Result()
+	exists, err := s.entityExists(ctx, key)
 	if err != nil {
 		return fmt.Errorf("dispatch/redis: update run exists: %w", err)
 	}
-	if exists == 0 {
+	if !exists {
 		return dispatch.ErrRunNotFound
 	}
 
-	m := runToMap(run)
-	m["updated_at"] = time.Now().UTC().Format(time.RFC3339Nano)
-	_, err = s.client.HSet(ctx, key, m).Result()
-	if err != nil {
-		return fmt.Errorf("dispatch/redis: update run: %w", err)
-	}
-	return nil
+	e := toRunEntity(run)
+	e.UpdatedAt = now()
+	return s.setEntity(ctx, key, e)
 }
 
 // ListRuns returns workflow runs matching the given options.
 func (s *Store) ListRuns(ctx context.Context, opts workflow.ListOpts) ([]*workflow.Run, error) {
-	ids, err := s.client.SMembers(ctx, runIDsKey).Result()
+	ids, err := s.rdb.SMembers(ctx, runIDsKey).Result()
 	if err != nil {
 		return nil, fmt.Errorf("dispatch/redis: list runs smembers: %w", err)
 	}
 
 	runs := make([]*workflow.Run, 0, len(ids))
 	for _, rID := range ids {
-		vals, getErr := s.client.HGetAll(ctx, runKey(rID)).Result()
-		if getErr != nil || len(vals) == 0 {
+		var e runEntity
+		if getErr := s.getEntity(ctx, runKey(rID), &e); getErr != nil {
 			continue
 		}
-		r, convErr := mapToRun(vals)
+		if opts.State != "" && workflow.RunState(e.State) != opts.State {
+			continue
+		}
+		r, convErr := fromRunEntity(&e)
 		if convErr != nil {
-			continue
-		}
-		if opts.State != "" && r.State != opts.State {
 			continue
 		}
 		runs = append(runs, r)
 	}
 
-	if opts.Offset > 0 && opts.Offset < len(runs) {
-		runs = runs[opts.Offset:]
-	} else if opts.Offset >= len(runs) {
-		return nil, nil
-	}
-	if opts.Limit > 0 && opts.Limit < len(runs) {
-		runs = runs[:opts.Limit]
-	}
-	return runs, nil
+	return applyPagination(runs, opts.Offset, opts.Limit), nil
 }
 
 // SaveCheckpoint persists checkpoint data for a workflow step.
 func (s *Store) SaveCheckpoint(ctx context.Context, runID id.RunID, stepName string, data []byte) error {
 	rID := runID.String()
 	key := checkpointKey(rID, stepName)
-	cpID := id.NewCheckpointID().String()
 
-	pipe := s.client.TxPipeline()
-	pipe.HSet(ctx, key,
-		"id", cpID,
-		"run_id", rID,
-		"step_name", stepName,
-		"data", string(data),
-		"created_at", time.Now().UTC().Format(time.RFC3339Nano),
-	)
-	pipe.SAdd(ctx, checkpointIndexKey(rID), stepName)
-	_, err := pipe.Exec(ctx)
-	if err != nil {
+	e := &checkpointEntity{
+		ID:        id.NewCheckpointID().String(),
+		RunID:     rID,
+		StepName:  stepName,
+		Data:      data,
+		CreatedAt: now(),
+	}
+
+	if err := s.setEntity(ctx, key, e); err != nil {
 		return fmt.Errorf("dispatch/redis: save checkpoint: %w", err)
+	}
+
+	if err := s.rdb.SAdd(ctx, checkpointIndexKey(rID), stepName).Err(); err != nil {
+		return fmt.Errorf("dispatch/redis: save checkpoint index: %w", err)
 	}
 	return nil
 }
@@ -128,20 +180,20 @@ func (s *Store) SaveCheckpoint(ctx context.Context, runID id.RunID, stepName str
 // GetCheckpoint retrieves checkpoint data for a specific workflow step.
 func (s *Store) GetCheckpoint(ctx context.Context, runID id.RunID, stepName string) ([]byte, error) {
 	key := checkpointKey(runID.String(), stepName)
-	data, err := s.client.HGet(ctx, key, "data").Result()
-	if err != nil {
-		if errors.Is(err, goredis.Nil) {
+	var e checkpointEntity
+	if err := s.getEntity(ctx, key, &e); err != nil {
+		if isNotFound(err) {
 			return nil, nil // no checkpoint is not an error
 		}
 		return nil, fmt.Errorf("dispatch/redis: get checkpoint: %w", err)
 	}
-	return []byte(data), nil
+	return e.Data, nil
 }
 
 // ListCheckpoints returns all checkpoints for a workflow run.
 func (s *Store) ListCheckpoints(ctx context.Context, runID id.RunID) ([]*workflow.Checkpoint, error) {
 	rID := runID.String()
-	steps, err := s.client.SMembers(ctx, checkpointIndexKey(rID)).Result()
+	steps, err := s.rdb.SMembers(ctx, checkpointIndexKey(rID)).Result()
 	if err != nil {
 		return nil, fmt.Errorf("dispatch/redis: list checkpoints: %w", err)
 	}
@@ -149,77 +201,21 @@ func (s *Store) ListCheckpoints(ctx context.Context, runID id.RunID) ([]*workflo
 	checkpoints := make([]*workflow.Checkpoint, 0, len(steps))
 	for _, step := range steps {
 		key := checkpointKey(rID, step)
-		vals, getErr := s.client.HGetAll(ctx, key).Result()
-		if getErr != nil || len(vals) == 0 {
+		var e checkpointEntity
+		if getErr := s.getEntity(ctx, key, &e); getErr != nil {
 			continue
 		}
 
-		cpID, _ := id.ParseCheckpointID(vals["id"])                      //nolint:errcheck // best-effort parse from trusted Redis data
-		rIDParsed, _ := id.ParseRunID(vals["run_id"])                    //nolint:errcheck // best-effort parse from trusted Redis data
-		createdAt, _ := time.Parse(time.RFC3339Nano, vals["created_at"]) //nolint:errcheck // best-effort parse from trusted Redis data
+		cpID, _ := id.ParseCheckpointID(e.ID)  //nolint:errcheck // best-effort
+		rIDParsed, _ := id.ParseRunID(e.RunID) //nolint:errcheck // best-effort
 
 		checkpoints = append(checkpoints, &workflow.Checkpoint{
 			ID:        cpID,
 			RunID:     rIDParsed,
-			StepName:  vals["step_name"],
-			Data:      []byte(vals["data"]),
-			CreatedAt: createdAt,
+			StepName:  e.StepName,
+			Data:      e.Data,
+			CreatedAt: e.CreatedAt,
 		})
 	}
 	return checkpoints, nil
-}
-
-// ── helpers ──
-
-func runToMap(r *workflow.Run) map[string]interface{} {
-	m := map[string]interface{}{
-		"id":         r.ID.String(),
-		"name":       r.Name,
-		"state":      string(r.State),
-		"input":      string(r.Input),
-		"output":     string(r.Output),
-		"error":      r.Error,
-		"scope_app":  r.ScopeAppID,
-		"scope_org":  r.ScopeOrgID,
-		"started_at": r.StartedAt.Format(time.RFC3339Nano),
-		"created_at": r.CreatedAt.Format(time.RFC3339Nano),
-		"updated_at": r.UpdatedAt.Format(time.RFC3339Nano),
-	}
-	if r.CompletedAt != nil {
-		m["completed_at"] = r.CompletedAt.Format(time.RFC3339Nano)
-	}
-	return m
-}
-
-func mapToRun(m map[string]string) (*workflow.Run, error) {
-	rID, err := id.ParseRunID(m["id"])
-	if err != nil {
-		return nil, fmt.Errorf("dispatch/redis: parse run id: %w", err)
-	}
-
-	startedAt, _ := time.Parse(time.RFC3339Nano, m["started_at"]) //nolint:errcheck // best-effort parse from trusted Redis data
-	createdAt, _ := time.Parse(time.RFC3339Nano, m["created_at"]) //nolint:errcheck // best-effort parse from trusted Redis data
-	updatedAt, _ := time.Parse(time.RFC3339Nano, m["updated_at"]) //nolint:errcheck // best-effort parse from trusted Redis data
-
-	r := &workflow.Run{
-		Entity: dispatch.Entity{
-			CreatedAt: createdAt,
-			UpdatedAt: updatedAt,
-		},
-		ID:         rID,
-		Name:       m["name"],
-		State:      workflow.RunState(m["state"]),
-		Input:      []byte(m["input"]),
-		Output:     []byte(m["output"]),
-		Error:      m["error"],
-		ScopeAppID: m["scope_app"],
-		ScopeOrgID: m["scope_org"],
-		StartedAt:  startedAt,
-	}
-
-	if v := m["completed_at"]; v != "" {
-		t, _ := time.Parse(time.RFC3339Nano, v) //nolint:errcheck // best-effort parse from trusted Redis data
-		r.CompletedAt = &t
-	}
-	return r, nil
 }

@@ -1,47 +1,48 @@
 ---
 title: PostgreSQL Store
-description: Production-ready PostgreSQL store using pgx/v5.
+description: Production-ready PostgreSQL store using grove ORM with pgdriver.
 ---
 
-The PostgreSQL store uses `pgx/v5` for direct database access. It is the recommended store for production deployments.
+The `store/postgres` package implements Dispatch's store interfaces using the grove ORM with the PostgreSQL driver. It is the recommended store for production deployments.
 
 ## Usage
 
 ```go
-import "github.com/xraph/relay/store/postgres"
+import (
+    "github.com/xraph/grove"
+    "github.com/xraph/grove/drivers/pgdriver"
+    "github.com/xraph/dispatch/store/postgres"
+)
 
-s, err := postgres.New(ctx, "postgres://user:pass@localhost:5432/relay?sslmode=disable")
+db, err := grove.Open(pgdriver.Open("postgres://user:pass@localhost:5432/dispatch?sslmode=disable"))
 if err != nil {
     log.Fatal(err)
 }
 
+s := postgres.New(db)
 if err := s.Migrate(ctx); err != nil {
     log.Fatal(err)
 }
 
-r, err := relay.New(relay.WithStore(s))
+d, err := dispatch.New(dispatch.WithStore(s))
 ```
-
-## Configuration
-
-The store accepts a PostgreSQL connection string. Connection pooling is handled by pgx.
 
 ## Migrations
 
-Call `s.Migrate(ctx)` before first use. This creates all required tables and indexes.
+Call `s.Migrate(ctx)` before first use. This creates all required tables and indexes. Migrations are idempotent -- safe to run on every startup.
 
 ## Internals
 
 | Aspect | Detail |
 |--------|--------|
-| Driver | pgx/v5 with connection pool |
-| Migrations | Auto-create tables on `Migrate()` |
+| Driver | grove ORM + pgdriver |
+| Migrations | grove orchestrator with embedded SQL migrations |
 | Transactions | Database-level ACID |
-| Ping | `pool.Ping(ctx)` |
-| Close | Closes the connection pool |
+| Ping | `db.Ping(ctx)` |
+| Close | No-op -- caller owns the `*grove.DB` lifecycle |
 
 ## When to use
 
-- Production deployments.
-- When you need ACID transactions and full SQL query power.
-- Multi-process environments.
+- Production deployments requiring ACID transactions and full SQL query power.
+- Multi-process environments with connection pooling.
+- When you need durable storage for jobs, workflows, and events.

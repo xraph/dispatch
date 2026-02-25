@@ -27,7 +27,7 @@ Dispatch is organized as a set of focused Go packages. The root `dispatch` packa
 │                      store.Store                          │
 │   (job + workflow + cron + dlq + event + cluster stores) │
 ├──────────┬──────────┬──────────┬──────────────────────────┤
-│ Postgres │   Bun    │  SQLite  │  Memory (testing only)   │
+│ Postgres │  Grove   │  SQLite  │  Memory (testing only)   │
 │ (pgx/v5) │  (ORM)   │          │                          │
 └──────────┴──────────┴──────────┴──────────────────────────┘
 ```
@@ -68,7 +68,7 @@ type Store interface {
 }
 ```
 
-Each subsystem defines its own store interface independently. A single backend implementation satisfies all of them. The memory, PostgreSQL, Bun, SQLite, and Redis backends all implement this interface.
+Each subsystem defines its own store interface independently. A single backend implementation satisfies all of them. The memory, PostgreSQL, Grove, SQLite, and Redis backends all implement this interface.
 
 ## Extension and middleware composition
 
@@ -102,7 +102,7 @@ Extensions and middleware are independent composition axes:
 | `store` | Composite `Store` interface |
 | `store/memory` | In-memory backend (development and testing) |
 | `store/postgres` | PostgreSQL backend (pgx/v5) |
-| `store/bun` | Bun ORM backend |
+| `store/grovestore` | Grove ORM backend |
 | `store/sqlite` | SQLite backend |
 | `store/redis` | Redis backend |
 | `cluster/k8s` | Kubernetes consensus for leader election |

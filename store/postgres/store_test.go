@@ -4,6 +4,7 @@ package postgres_test
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -13,6 +14,9 @@ import (
 	"github.com/testcontainers/testcontainers-go"
 	pgmodule "github.com/testcontainers/testcontainers-go/modules/postgres"
 	"github.com/testcontainers/testcontainers-go/wait"
+	"github.com/uptrace/bun"
+	"github.com/uptrace/bun/dialect/pgdialect"
+	"github.com/uptrace/bun/driver/pgdriver"
 
 	"github.com/xraph/dispatch"
 	"github.com/xraph/dispatch/cluster"
@@ -21,12 +25,12 @@ import (
 	"github.com/xraph/dispatch/event"
 	"github.com/xraph/dispatch/id"
 	"github.com/xraph/dispatch/job"
-	pgstore "github.com/xraph/dispatch/store/postgres"
+	"github.com/xraph/dispatch/store/postgres"
 	"github.com/xraph/dispatch/workflow"
 )
 
-// setupTestStore creates a Postgres container and returns a connected Store.
-func setupTestStore(t *testing.T) *pgstore.Store {
+// setupTestStore creates a Postgres container and returns a connected Bun Store.
+func setupTestStore(t *testing.T) *postgres.Store {
 	t.Helper()
 
 	ctx := context.Background()
@@ -56,13 +60,15 @@ func setupTestStore(t *testing.T) *pgstore.Store {
 		t.Fatalf("get connection string: %v", err)
 	}
 
-	store, err := pgstore.New(ctx, connStr, pgstore.WithLogger(slog.Default()))
-	if err != nil {
-		t.Fatalf("create store: %v", err)
-	}
+	// Create Bun DB from pgdriver.
+	sqldb := sql.OpenDB(pgdriver.NewConnector(pgdriver.WithDSN(connStr)))
+	db := bun.NewDB(sqldb, pgdialect.New())
+
 	t.Cleanup(func() {
-		_ = store.Close()
+		_ = db.Close()
 	})
+
+	store := postgres.New(db, postgres.WithLogger(slog.Default()))
 
 	if migErr := store.Migrate(ctx); migErr != nil {
 		t.Fatalf("migrate: %v", migErr)

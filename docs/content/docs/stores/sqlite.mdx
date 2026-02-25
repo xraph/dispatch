@@ -1,0 +1,45 @@
+---
+title: SQLite Store
+description: Lightweight SQLite store for embedded and single-node Dispatch deployments.
+---
+
+The `store/sqlite` package implements Dispatch's store interfaces using the grove ORM with the SQLite driver. It requires no external database process, making it suitable for embedded deployments, CLI tools, and standalone applications.
+
+## Usage
+
+```go
+import (
+    "github.com/xraph/grove"
+    "github.com/xraph/grove/drivers/sqlitedriver"
+    "github.com/xraph/dispatch/store/sqlite"
+)
+
+db, err := grove.Open(sqlitedriver.Open("dispatch.db"))
+if err != nil {
+    log.Fatal(err)
+}
+
+s := sqlite.New(db)
+if err := s.Migrate(ctx); err != nil {
+    log.Fatal(err)
+}
+
+d, err := dispatch.New(dispatch.WithStore(s))
+```
+
+## Internals
+
+| Aspect | Detail |
+|--------|--------|
+| Driver | grove ORM + sqlitedriver |
+| Migrations | grove orchestrator with programmatic migrations |
+| Transactions | SQLite-level transactions |
+| Concurrency | Multiple readers, single writer (WAL mode) |
+| Ping | `db.Ping(ctx)` |
+| Close | No-op -- caller owns the `*grove.DB` lifecycle |
+
+## When to use
+
+- Embedded or edge deployments where running PostgreSQL is impractical.
+- Local development and integration tests.
+- Single-process applications with moderate throughput.

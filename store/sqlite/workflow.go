@@ -1,4 +1,4 @@
-package bunstore
+package sqlite
 
 import (
 	"context"
@@ -13,12 +13,12 @@ import (
 // CreateRun persists a new workflow run.
 func (s *Store) CreateRun(ctx context.Context, run *workflow.Run) error {
 	m := toRunModel(run)
-	_, err := s.db.NewInsert().Model(m).Exec(ctx)
+	_, err := s.sdb.NewInsert(m).Exec(ctx)
 	if err != nil {
 		if isDuplicateKey(err) {
 			return dispatch.ErrJobAlreadyExists
 		}
-		return fmt.Errorf("dispatch/bun: create run: %w", err)
+		return fmt.Errorf("dispatch/sqlite: create run: %w", err)
 	}
 	return nil
 }
@@ -26,7 +26,7 @@ func (s *Store) CreateRun(ctx context.Context, run *workflow.Run) error {
 // GetRun retrieves a workflow run by ID.
 func (s *Store) GetRun(ctx context.Context, runID id.RunID) (*workflow.Run, error) {
 	m := new(workflowRunModel)
-	err := s.db.NewSelect().Model(m).
+	err := s.sdb.NewSelect(m).
 		Where("id = ?", runID.String()).
 		Limit(1).
 		Scan(ctx)
@@ -34,7 +34,7 @@ func (s *Store) GetRun(ctx context.Context, runID id.RunID) (*workflow.Run, erro
 		if isNoRows(err) {
 			return nil, dispatch.ErrRunNotFound
 		}
-		return nil, fmt.Errorf("dispatch/bun: get run: %w", err)
+		return nil, fmt.Errorf("dispatch/sqlite: get run: %w", err)
 	}
 	return fromRunModel(m)
 }
@@ -43,9 +43,9 @@ func (s *Store) GetRun(ctx context.Context, runID id.RunID) (*workflow.Run, erro
 func (s *Store) UpdateRun(ctx context.Context, run *workflow.Run) error {
 	m := toRunModel(run)
 	m.UpdatedAt = time.Now().UTC()
-	res, err := s.db.NewUpdate().Model(m).WherePK().Exec(ctx)
+	res, err := s.sdb.NewUpdate(m).WherePK().Exec(ctx)
 	if err != nil {
-		return fmt.Errorf("dispatch/bun: update run: %w", err)
+		return fmt.Errorf("dispatch/sqlite: update run: %w", err)
 	}
 	rows, _ := res.RowsAffected() //nolint:errcheck // driver always returns nil
 	if rows == 0 {
@@ -57,13 +57,13 @@ func (s *Store) UpdateRun(ctx context.Context, run *workflow.Run) error {
 // ListRuns returns workflow runs matching the given options.
 func (s *Store) ListRuns(ctx context.Context, opts workflow.ListOpts) ([]*workflow.Run, error) {
 	var models []workflowRunModel
-	q := s.db.NewSelect().Model(&models)
+	q := s.sdb.NewSelect(&models)
 
 	if opts.State != "" {
 		q = q.Where("state = ?", string(opts.State))
 	}
 
-	q = q.Order("created_at ASC")
+	q = q.OrderExpr("created_at ASC")
 
 	if opts.Limit > 0 {
 		q = q.Limit(opts.Limit)
@@ -74,14 +74,14 @@ func (s *Store) ListRuns(ctx context.Context, opts workflow.ListOpts) ([]*workfl
 
 	err := q.Scan(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("dispatch/bun: list runs: %w", err)
+		return nil, fmt.Errorf("dispatch/sqlite: list runs: %w", err)
 	}
 
 	runs := make([]*workflow.Run, 0, len(models))
 	for i := range models {
 		r, convErr := fromRunModel(&models[i])
 		if convErr != nil {
-			return nil, fmt.Errorf("dispatch/bun: list runs convert: %w", convErr)
+			return nil, fmt.Errorf("dispatch/sqlite: list runs convert: %w", convErr)
 		}
 		runs = append(runs, r)
 	}
@@ -98,13 +98,13 @@ func (s *Store) SaveCheckpoint(ctx context.Context, runID id.RunID, stepName str
 		Data:      data,
 		CreatedAt: time.Now().UTC(),
 	}
-	_, err := s.db.NewInsert().Model(m).
-		On("CONFLICT (run_id, step_name) DO UPDATE").
+	_, err := s.sdb.NewInsert(m).
+		OnConflict("(run_id, step_name) DO UPDATE").
 		Set("data = EXCLUDED.data").
 		Set("created_at = EXCLUDED.created_at").
 		Exec(ctx)
 	if err != nil {
-		return fmt.Errorf("dispatch/bun: save checkpoint: %w", err)
+		return fmt.Errorf("dispatch/sqlite: save checkpoint: %w", err)
 	}
 	return nil
 }
@@ -113,7 +113,7 @@ func (s *Store) SaveCheckpoint(ctx context.Context, runID id.RunID, stepName str
 // Returns nil data if no checkpoint exists.
 func (s *Store) GetCheckpoint(ctx context.Context, runID id.RunID, stepName string) ([]byte, error) {
 	m := new(checkpointModel)
-	err := s.db.NewSelect().Model(m).
+	err := s.sdb.NewSelect(m).
 		Where("run_id = ?", runID.String()).
 		Where("step_name = ?", stepName).
 		Limit(1).
@@ -122,7 +122,7 @@ func (s *Store) GetCheckpoint(ctx context.Context, runID id.RunID, stepName stri
 		if isNoRows(err) {
 			return nil, nil // no checkpoint is not an error
 		}
-		return nil, fmt.Errorf("dispatch/bun: get checkpoint: %w", err)
+		return nil, fmt.Errorf("dispatch/sqlite: get checkpoint: %w", err)
 	}
 	return m.Data, nil
 }
@@ -130,19 +130,19 @@ func (s *Store) GetCheckpoint(ctx context.Context, runID id.RunID, stepName stri
 // ListCheckpoints returns all checkpoints for a workflow run.
 func (s *Store) ListCheckpoints(ctx context.Context, runID id.RunID) ([]*workflow.Checkpoint, error) {
 	var models []checkpointModel
-	err := s.db.NewSelect().Model(&models).
+	err := s.sdb.NewSelect(&models).
 		Where("run_id = ?", runID.String()).
-		Order("created_at ASC").
+		OrderExpr("created_at ASC").
 		Scan(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("dispatch/bun: list checkpoints: %w", err)
+		return nil, fmt.Errorf("dispatch/sqlite: list checkpoints: %w", err)
 	}
 
 	checkpoints := make([]*workflow.Checkpoint, 0, len(models))
 	for i := range models {
 		cp, convErr := fromCheckpointModel(&models[i])
 		if convErr != nil {
-			return nil, fmt.Errorf("dispatch/bun: list checkpoints convert: %w", convErr)
+			return nil, fmt.Errorf("dispatch/sqlite: list checkpoints convert: %w", convErr)
 		}
 		checkpoints = append(checkpoints, cp)
 	}

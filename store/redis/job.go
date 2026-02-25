@@ -3,7 +3,6 @@ package redis
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"strconv"
 	"time"
@@ -15,24 +14,113 @@ import (
 	"github.com/xraph/dispatch/job"
 )
 
-// EnqueueJob stores the job as a Hash and adds it to the queue's Sorted Set.
+// ── JSON model for KV storage ──
+
+type jobEntity struct {
+	ID          string     `json:"id"`
+	Name        string     `json:"name"`
+	Queue       string     `json:"queue"`
+	Payload     []byte     `json:"payload"`
+	State       string     `json:"state"`
+	Priority    int        `json:"priority"`
+	MaxRetries  int        `json:"max_retries"`
+	RetryCount  int        `json:"retry_count"`
+	LastError   string     `json:"last_error"`
+	ScopeAppID  string     `json:"scope_app_id"`
+	ScopeOrgID  string     `json:"scope_org_id"`
+	WorkerID    string     `json:"worker_id"`
+	RunAt       time.Time  `json:"run_at"`
+	StartedAt   *time.Time `json:"started_at,omitempty"`
+	CompletedAt *time.Time `json:"completed_at,omitempty"`
+	HeartbeatAt *time.Time `json:"heartbeat_at,omitempty"`
+	Timeout     int64      `json:"timeout"`
+	CreatedAt   time.Time  `json:"created_at"`
+	UpdatedAt   time.Time  `json:"updated_at"`
+}
+
+func toJobEntity(j *job.Job) *jobEntity {
+	return &jobEntity{
+		ID:          j.ID.String(),
+		Name:        j.Name,
+		Queue:       j.Queue,
+		Payload:     j.Payload,
+		State:       string(j.State),
+		Priority:    j.Priority,
+		MaxRetries:  j.MaxRetries,
+		RetryCount:  j.RetryCount,
+		LastError:   j.LastError,
+		ScopeAppID:  j.ScopeAppID,
+		ScopeOrgID:  j.ScopeOrgID,
+		WorkerID:    j.WorkerID.String(),
+		RunAt:       j.RunAt,
+		StartedAt:   j.StartedAt,
+		CompletedAt: j.CompletedAt,
+		HeartbeatAt: j.HeartbeatAt,
+		Timeout:     j.Timeout.Nanoseconds(),
+		CreatedAt:   j.CreatedAt,
+		UpdatedAt:   j.UpdatedAt,
+	}
+}
+
+func fromJobEntity(e *jobEntity) (*job.Job, error) {
+	parsedID, err := id.ParseJobID(e.ID)
+	if err != nil {
+		return nil, fmt.Errorf("dispatch/redis: parse job id: %w", err)
+	}
+
+	j := &job.Job{
+		Entity: dispatch.Entity{
+			CreatedAt: e.CreatedAt,
+			UpdatedAt: e.UpdatedAt,
+		},
+		ID:          parsedID,
+		Name:        e.Name,
+		Queue:       e.Queue,
+		Payload:     e.Payload,
+		State:       job.State(e.State),
+		Priority:    e.Priority,
+		MaxRetries:  e.MaxRetries,
+		RetryCount:  e.RetryCount,
+		LastError:   e.LastError,
+		ScopeAppID:  e.ScopeAppID,
+		ScopeOrgID:  e.ScopeOrgID,
+		RunAt:       e.RunAt,
+		StartedAt:   e.StartedAt,
+		CompletedAt: e.CompletedAt,
+		HeartbeatAt: e.HeartbeatAt,
+		Timeout:     time.Duration(e.Timeout),
+	}
+
+	if e.WorkerID != "" {
+		parsedWorker, wErr := id.ParseWorkerID(e.WorkerID)
+		if wErr == nil {
+			j.WorkerID = parsedWorker
+		}
+	}
+
+	return j, nil
+}
+
+// EnqueueJob stores the job as a JSON entity and adds it to the queue's Sorted Set.
 func (s *Store) EnqueueJob(ctx context.Context, j *job.Job) error {
 	jID := j.ID.String()
 	key := jobKey(jID)
 
 	// Check for duplicate.
-	exists, err := s.client.Exists(ctx, key).Result()
+	exists, err := s.entityExists(ctx, key)
 	if err != nil {
 		return fmt.Errorf("dispatch/redis: enqueue check exists: %w", err)
 	}
-	if exists > 0 {
+	if exists {
 		return dispatch.ErrJobAlreadyExists
 	}
 
-	fields := jobToMap(j)
+	e := toJobEntity(j)
+	if setErr := s.setEntity(ctx, key, e); setErr != nil {
+		return fmt.Errorf("dispatch/redis: enqueue set entity: %w", setErr)
+	}
 
-	pipe := s.client.TxPipeline()
-	pipe.HSet(ctx, key, fields)
+	pipe := s.rdb.TxPipeline()
 	pipe.SAdd(ctx, jobIDsKey, jID)
 
 	// Add to queue sorted set: score = priority (negated for DESC) + time component.
@@ -41,14 +129,14 @@ func (s *Store) EnqueueJob(ctx context.Context, j *job.Job) error {
 
 	_, err = pipe.Exec(ctx)
 	if err != nil {
-		return fmt.Errorf("dispatch/redis: enqueue job: %w", err)
+		return fmt.Errorf("dispatch/redis: enqueue job indexes: %w", err)
 	}
 	return nil
 }
 
 // DequeueJobs atomically pops up to limit jobs from the given queues.
 func (s *Store) DequeueJobs(ctx context.Context, queues []string, limit int) ([]*job.Job, error) {
-	now := time.Now().UTC()
+	t := now()
 	var jobs []*job.Job
 
 	for _, q := range queues {
@@ -59,7 +147,7 @@ func (s *Store) DequeueJobs(ctx context.Context, queues []string, limit int) ([]
 		qk := queueKey(q)
 
 		// Pop from sorted set (lowest score = highest priority + earliest RunAt).
-		members, err := s.client.ZPopMin(ctx, qk, int64(remaining)).Result()
+		members, err := s.rdb.ZPopMin(ctx, qk, int64(remaining)).Result()
 		if err != nil {
 			return nil, fmt.Errorf("dispatch/redis: dequeue zpopmin: %w", err)
 		}
@@ -71,20 +159,22 @@ func (s *Store) DequeueJobs(ctx context.Context, queues []string, limit int) ([]
 			}
 
 			key := jobKey(jID)
-			// Update state to running.
-			pipe := s.client.TxPipeline()
-			pipe.HSet(ctx, key,
-				"state", string(job.StateRunning),
-				"started_at", now.Format(time.RFC3339Nano),
-				"updated_at", now.Format(time.RFC3339Nano),
-			)
-			if _, pErr := pipe.Exec(ctx); pErr != nil {
-				return nil, fmt.Errorf("dispatch/redis: dequeue update: %w", pErr)
+			var e jobEntity
+			if getErr := s.getEntity(ctx, key, &e); getErr != nil {
+				continue // skip missing
 			}
 
-			j, getErr := s.getJobByKey(ctx, key)
-			if getErr != nil {
-				return nil, getErr
+			// Update state to running.
+			e.State = string(job.StateRunning)
+			e.StartedAt = &t
+			e.UpdatedAt = t
+			if setErr := s.setEntity(ctx, key, &e); setErr != nil {
+				return nil, fmt.Errorf("dispatch/redis: dequeue update: %w", setErr)
+			}
+
+			j, convErr := fromJobEntity(&e)
+			if convErr != nil {
+				return nil, convErr
 			}
 			jobs = append(jobs, j)
 		}
@@ -94,11 +184,14 @@ func (s *Store) DequeueJobs(ctx context.Context, queues []string, limit int) ([]
 
 // GetJob retrieves a job by ID.
 func (s *Store) GetJob(ctx context.Context, jobID id.JobID) (*job.Job, error) {
-	j, err := s.getJobByKey(ctx, jobKey(jobID.String()))
-	if err != nil {
-		return nil, err
+	var e jobEntity
+	if err := s.getEntity(ctx, jobKey(jobID.String()), &e); err != nil {
+		if isNotFound(err) {
+			return nil, dispatch.ErrJobNotFound
+		}
+		return nil, fmt.Errorf("dispatch/redis: get job: %w", err)
 	}
-	return j, nil
+	return fromJobEntity(&e)
 }
 
 // UpdateJob persists changes to an existing job.
@@ -106,22 +199,17 @@ func (s *Store) UpdateJob(ctx context.Context, j *job.Job) error {
 	jID := j.ID.String()
 	key := jobKey(jID)
 
-	exists, err := s.client.Exists(ctx, key).Result()
+	exists, err := s.entityExists(ctx, key)
 	if err != nil {
 		return fmt.Errorf("dispatch/redis: update job exists: %w", err)
 	}
-	if exists == 0 {
+	if !exists {
 		return dispatch.ErrJobNotFound
 	}
 
-	fields := jobToMap(j)
-	fields["updated_at"] = time.Now().UTC().Format(time.RFC3339Nano)
-
-	_, err = s.client.HSet(ctx, key, fields).Result()
-	if err != nil {
-		return fmt.Errorf("dispatch/redis: update job: %w", err)
-	}
-	return nil
+	e := toJobEntity(j)
+	e.UpdatedAt = now()
+	return s.setEntity(ctx, key, e)
 }
 
 // DeleteJob removes a job by ID.
@@ -130,19 +218,20 @@ func (s *Store) DeleteJob(ctx context.Context, jobID id.JobID) error {
 	key := jobKey(jID)
 
 	// Get queue name before deleting to remove from sorted set.
-	q, err := s.client.HGet(ctx, key, "queue").Result()
-	if err != nil {
-		if errors.Is(err, goredis.Nil) {
+	var e jobEntity
+	if err := s.getEntity(ctx, key, &e); err != nil {
+		if isNotFound(err) {
 			return dispatch.ErrJobNotFound
 		}
-		return fmt.Errorf("dispatch/redis: delete job get queue: %w", err)
+		return fmt.Errorf("dispatch/redis: delete job get: %w", err)
 	}
 
-	pipe := s.client.TxPipeline()
+	// Delete entity via raw Redis DEL (KV store may not have Delete).
+	pipe := s.rdb.TxPipeline()
 	pipe.Del(ctx, key)
 	pipe.SRem(ctx, jobIDsKey, jID)
-	pipe.ZRem(ctx, queueKey(q), jID)
-	_, err = pipe.Exec(ctx)
+	pipe.ZRem(ctx, queueKey(e.Queue), jID)
+	_, err := pipe.Exec(ctx)
 	if err != nil {
 		return fmt.Errorf("dispatch/redis: delete job: %w", err)
 	}
@@ -151,80 +240,73 @@ func (s *Store) DeleteJob(ctx context.Context, jobID id.JobID) error {
 
 // ListJobsByState returns jobs matching the given state.
 func (s *Store) ListJobsByState(ctx context.Context, state job.State, opts job.ListOpts) ([]*job.Job, error) {
-	ids, err := s.client.SMembers(ctx, jobIDsKey).Result()
+	ids, err := s.rdb.SMembers(ctx, jobIDsKey).Result()
 	if err != nil {
 		return nil, fmt.Errorf("dispatch/redis: list jobs smembers: %w", err)
 	}
 
 	jobs := make([]*job.Job, 0, len(ids))
 	for _, jID := range ids {
-		j, getErr := s.getJobByKey(ctx, jobKey(jID))
-		if getErr != nil {
+		var e jobEntity
+		if getErr := s.getEntity(ctx, jobKey(jID), &e); getErr != nil {
 			continue // skip missing
 		}
-		if j.State != state {
+		if job.State(e.State) != state {
 			continue
 		}
-		if opts.Queue != "" && j.Queue != opts.Queue {
+		if opts.Queue != "" && e.Queue != opts.Queue {
+			continue
+		}
+		j, convErr := fromJobEntity(&e)
+		if convErr != nil {
 			continue
 		}
 		jobs = append(jobs, j)
 	}
 
-	// Apply offset/limit.
-	if opts.Offset > 0 && opts.Offset < len(jobs) {
-		jobs = jobs[opts.Offset:]
-	} else if opts.Offset >= len(jobs) {
-		return nil, nil
-	}
-	if opts.Limit > 0 && opts.Limit < len(jobs) {
-		jobs = jobs[:opts.Limit]
-	}
-	return jobs, nil
+	return applyPagination(jobs, opts.Offset, opts.Limit), nil
 }
 
 // HeartbeatJob updates the heartbeat timestamp for a running job.
-func (s *Store) HeartbeatJob(ctx context.Context, jobID id.JobID, workerID id.WorkerID) error {
+func (s *Store) HeartbeatJob(ctx context.Context, jobID id.JobID, _ id.WorkerID) error {
 	key := jobKey(jobID.String())
-	exists, err := s.client.Exists(ctx, key).Result()
-	if err != nil {
-		return fmt.Errorf("dispatch/redis: heartbeat exists: %w", err)
-	}
-	if exists == 0 {
-		return dispatch.ErrJobNotFound
+	var e jobEntity
+	if err := s.getEntity(ctx, key, &e); err != nil {
+		if isNotFound(err) {
+			return dispatch.ErrJobNotFound
+		}
+		return fmt.Errorf("dispatch/redis: heartbeat get: %w", err)
 	}
 
-	now := time.Now().UTC().Format(time.RFC3339Nano)
-	_, err = s.client.HSet(ctx, key,
-		"heartbeat_at", now,
-		"worker_id", workerID.String(),
-		"updated_at", now,
-	).Result()
-	if err != nil {
-		return fmt.Errorf("dispatch/redis: heartbeat job: %w", err)
-	}
-	return nil
+	t := now()
+	e.HeartbeatAt = &t
+	e.UpdatedAt = t
+	return s.setEntity(ctx, key, &e)
 }
 
 // ReapStaleJobs returns running jobs whose last heartbeat is older than the threshold.
 func (s *Store) ReapStaleJobs(ctx context.Context, threshold time.Duration) ([]*job.Job, error) {
-	cutoff := time.Now().UTC().Add(-threshold)
+	cutoff := now().Add(-threshold)
 
-	ids, err := s.client.SMembers(ctx, jobIDsKey).Result()
+	ids, err := s.rdb.SMembers(ctx, jobIDsKey).Result()
 	if err != nil {
 		return nil, fmt.Errorf("dispatch/redis: reap smembers: %w", err)
 	}
 
 	var stale []*job.Job
 	for _, jID := range ids {
-		j, getErr := s.getJobByKey(ctx, jobKey(jID))
-		if getErr != nil {
+		var e jobEntity
+		if getErr := s.getEntity(ctx, jobKey(jID), &e); getErr != nil {
 			continue
 		}
-		if j.State != job.StateRunning {
+		if job.State(e.State) != job.StateRunning {
 			continue
 		}
-		if j.HeartbeatAt != nil && j.HeartbeatAt.Before(cutoff) {
+		if e.HeartbeatAt != nil && e.HeartbeatAt.Before(cutoff) {
+			j, convErr := fromJobEntity(&e)
+			if convErr != nil {
+				continue
+			}
 			stale = append(stale, j)
 		}
 	}
@@ -233,21 +315,29 @@ func (s *Store) ReapStaleJobs(ctx context.Context, threshold time.Duration) ([]*
 
 // CountJobs returns the number of jobs matching the given options.
 func (s *Store) CountJobs(ctx context.Context, opts job.CountOpts) (int64, error) {
-	ids, err := s.client.SMembers(ctx, jobIDsKey).Result()
+	ids, err := s.rdb.SMembers(ctx, jobIDsKey).Result()
 	if err != nil {
 		return 0, fmt.Errorf("dispatch/redis: count smembers: %w", err)
 	}
 
 	var count int64
 	for _, jID := range ids {
-		j, getErr := s.getJobByKey(ctx, jobKey(jID))
+		raw, getErr := s.kv.GetRaw(ctx, jobKey(jID))
 		if getErr != nil {
 			continue
 		}
-		if opts.State != "" && j.State != opts.State {
+		// Quick check state/queue from JSON without full decode.
+		var partial struct {
+			State string `json:"state"`
+			Queue string `json:"queue"`
+		}
+		if json.Unmarshal(raw, &partial) != nil {
 			continue
 		}
-		if opts.Queue != "" && j.Queue != opts.Queue {
+		if opts.State != "" && job.State(partial.State) != opts.State {
+			continue
+		}
+		if opts.Queue != "" && partial.Queue != opts.Queue {
 			continue
 		}
 		count++
@@ -255,135 +345,6 @@ func (s *Store) CountJobs(ctx context.Context, opts job.CountOpts) (int64, error
 	return count, nil
 }
 
-// ── helpers ──
+// ── unused but kept for reference ──
 
-// jobScore computes a sorted-set score from priority and run_at.
-// Lower score = dequeued first.
-// We negate priority so higher priority = lower score.
-func jobScore(priority int, runAt time.Time) float64 {
-	// Use negative priority so higher priority jobs sort first.
-	// Add a fractional time component for FIFO within same priority.
-	return float64(-priority) + float64(runAt.UnixMilli())/1e15
-}
-
-func jobToMap(j *job.Job) map[string]interface{} {
-	m := map[string]interface{}{
-		"id":          j.ID.String(),
-		"name":        j.Name,
-		"queue":       j.Queue,
-		"payload":     string(j.Payload),
-		"state":       string(j.State),
-		"priority":    strconv.Itoa(j.Priority),
-		"max_retries": strconv.Itoa(j.MaxRetries),
-		"retry_count": strconv.Itoa(j.RetryCount),
-		"last_error":  j.LastError,
-		"scope_app":   j.ScopeAppID,
-		"scope_org":   j.ScopeOrgID,
-		"worker_id":   j.WorkerID.String(),
-		"run_at":      j.RunAt.Format(time.RFC3339Nano),
-		"timeout":     strconv.FormatInt(int64(j.Timeout), 10),
-		"created_at":  j.CreatedAt.Format(time.RFC3339Nano),
-		"updated_at":  j.UpdatedAt.Format(time.RFC3339Nano),
-	}
-	if j.StartedAt != nil {
-		m["started_at"] = j.StartedAt.Format(time.RFC3339Nano)
-	}
-	if j.CompletedAt != nil {
-		m["completed_at"] = j.CompletedAt.Format(time.RFC3339Nano)
-	}
-	if j.HeartbeatAt != nil {
-		m["heartbeat_at"] = j.HeartbeatAt.Format(time.RFC3339Nano)
-	}
-	return m
-}
-
-func (s *Store) getJobByKey(ctx context.Context, key string) (*job.Job, error) {
-	vals, err := s.client.HGetAll(ctx, key).Result()
-	if err != nil {
-		return nil, fmt.Errorf("dispatch/redis: get job: %w", err)
-	}
-	if len(vals) == 0 {
-		return nil, dispatch.ErrJobNotFound
-	}
-	return mapToJob(vals)
-}
-
-func mapToJob(m map[string]string) (*job.Job, error) {
-	jID, err := id.ParseJobID(m["id"])
-	if err != nil {
-		return nil, fmt.Errorf("dispatch/redis: parse job id: %w", err)
-	}
-
-	priority, _ := strconv.Atoi(m["priority"])           //nolint:errcheck // best-effort parse from trusted Redis data
-	maxRetries, _ := strconv.Atoi(m["max_retries"])      //nolint:errcheck // best-effort parse from trusted Redis data
-	retryCount, _ := strconv.Atoi(m["retry_count"])      //nolint:errcheck // best-effort parse from trusted Redis data
-	timeout, _ := strconv.ParseInt(m["timeout"], 10, 64) //nolint:errcheck // best-effort parse from trusted Redis data
-
-	runAt, _ := time.Parse(time.RFC3339Nano, m["run_at"])         //nolint:errcheck // best-effort parse from trusted Redis data
-	createdAt, _ := time.Parse(time.RFC3339Nano, m["created_at"]) //nolint:errcheck // best-effort parse from trusted Redis data
-	updatedAt, _ := time.Parse(time.RFC3339Nano, m["updated_at"]) //nolint:errcheck // best-effort parse from trusted Redis data
-
-	j := &job.Job{
-		Entity: dispatch.Entity{
-			CreatedAt: createdAt,
-			UpdatedAt: updatedAt,
-		},
-		ID:         jID,
-		Name:       m["name"],
-		Queue:      m["queue"],
-		Payload:    []byte(m["payload"]),
-		State:      job.State(m["state"]),
-		Priority:   priority,
-		MaxRetries: maxRetries,
-		RetryCount: retryCount,
-		LastError:  m["last_error"],
-		ScopeAppID: m["scope_app"],
-		ScopeOrgID: m["scope_org"],
-		RunAt:      runAt,
-		Timeout:    time.Duration(timeout),
-	}
-
-	if wid := m["worker_id"]; wid != "" {
-		j.WorkerID, _ = id.ParseWorkerID(wid) //nolint:errcheck // best-effort parse from trusted Redis data
-	}
-	if v := m["started_at"]; v != "" {
-		t, _ := time.Parse(time.RFC3339Nano, v) //nolint:errcheck // best-effort parse from trusted Redis data
-		j.StartedAt = &t
-	}
-	if v := m["completed_at"]; v != "" {
-		t, _ := time.Parse(time.RFC3339Nano, v) //nolint:errcheck // best-effort parse from trusted Redis data
-		j.CompletedAt = &t
-	}
-	if v := m["heartbeat_at"]; v != "" {
-		t, _ := time.Parse(time.RFC3339Nano, v) //nolint:errcheck // best-effort parse from trusted Redis data
-		j.HeartbeatAt = &t
-	}
-
-	return j, nil
-}
-
-// marshalJSON is a helper to marshal to JSON string.
-func marshalJSON(v interface{}) string {
-	b, _ := json.Marshal(v) //nolint:errcheck // marshal should not fail for basic types
-	return string(b)
-}
-
-// unmarshalStrings parses a JSON array of strings.
-func unmarshalStrings(s string) []string {
-	if s == "" || s == "null" {
-		return nil
-	}
-	var out []string
-	_ = json.Unmarshal([]byte(s), &out) //nolint:errcheck // best-effort parse from trusted Redis data
-	return out
-}
-
-// unmarshalMap parses a JSON map.
-func unmarshalMap(s string) map[string]string {
-	if s == "" || s == "null" {
-		return nil
-	}
-	out := make(map[string]string)
-	_ = json.Unmarshal([]byte(s), &out) //nolint:errcheck // best-effort parse from trusted Redis data
-	return out
-}
+var _ = strconv.Itoa // suppress unused import if needed

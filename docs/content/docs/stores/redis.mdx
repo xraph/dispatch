@@ -1,0 +1,44 @@
+---
+title: Redis Store
+description: High-throughput Redis store for ephemeral and latency-sensitive Dispatch workloads.
+---
+
+The `store/redis` package implements Dispatch's store interfaces using Grove KV backed by the Redis driver. Jobs use Sorted Sets as priority queues, events use Streams, and all entities are stored as JSON via Grove KV.
+
+## Usage
+
+```go
+import (
+    "github.com/xraph/grove/kv"
+    "github.com/xraph/grove/kv/drivers/redisdriver"
+    "github.com/xraph/dispatch/store/redis"
+)
+
+kvStore, err := kv.Open(redisdriver.Open("redis://localhost:6379/0"))
+if err != nil {
+    log.Fatal(err)
+}
+
+s := redis.New(kvStore)
+if err := s.Ping(ctx); err != nil {
+    log.Fatal(err)
+}
+
+d, err := dispatch.New(dispatch.WithStore(s))
+```
+
+## Internals
+
+| Aspect | Detail |
+|--------|--------|
+| Driver | Grove KV + redisdriver |
+| Migrations | No-op (schemaless) |
+| Data structures | Sorted Sets for job queues, Streams for events, JSON for entities |
+| Ping | `kv.Ping(ctx)` |
+| Close | No-op -- caller owns the `*kv.Store` lifecycle |
+
+## When to use
+
+- High-throughput, low-latency job processing.
+- Ephemeral workloads where persistence is not critical.
+- Environments already running Redis for caching or pub/sub.
