@@ -148,3 +148,38 @@ func (s *Store) ListCheckpoints(ctx context.Context, runID id.RunID) ([]*workflo
 	}
 	return checkpoints, nil
 }
+
+// ListChildRuns returns all child workflow runs for a parent.
+func (s *Store) ListChildRuns(ctx context.Context, parentRunID id.RunID) ([]*workflow.Run, error) {
+	var models []workflowRunModel
+	err := s.pgdb.NewSelect(&models).
+		Where("parent_run_id = ?", parentRunID.String()).
+		OrderExpr("created_at ASC").
+		Scan(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("dispatch/bun: list child runs: %w", err)
+	}
+
+	runs := make([]*workflow.Run, 0, len(models))
+	for i := range models {
+		r, convErr := fromRunModel(&models[i])
+		if convErr != nil {
+			return nil, fmt.Errorf("dispatch/bun: list child runs convert: %w", convErr)
+		}
+		runs = append(runs, r)
+	}
+	return runs, nil
+}
+
+// DeleteCheckpointsAfter removes all checkpoints created after the
+// given step name (by creation order). Used for workflow replay.
+func (s *Store) DeleteCheckpointsAfter(ctx context.Context, runID id.RunID, afterStep string) error {
+	_, err := s.pgdb.NewDelete(&checkpointModel{}).
+		Where("run_id = ?", runID.String()).
+		Where("created_at > (SELECT created_at FROM dispatch_checkpoints WHERE run_id = ? AND step_name = ?)", runID.String(), afterStep).
+		Exec(ctx)
+	if err != nil {
+		return fmt.Errorf("dispatch/bun: delete checkpoints after: %w", err)
+	}
+	return nil
+}

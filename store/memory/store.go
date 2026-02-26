@@ -399,6 +399,53 @@ func (m *Store) ListCheckpoints(_ context.Context, runID id.RunID) ([]*workflow.
 	return result, nil
 }
 
+// ListChildRuns returns all child workflow runs for a parent.
+func (m *Store) ListChildRuns(_ context.Context, parentRunID id.RunID) ([]*workflow.Run, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	var result []*workflow.Run
+	for _, r := range m.runs {
+		if r.ParentRunID != nil && *r.ParentRunID == parentRunID {
+			result = append(result, r)
+		}
+	}
+
+	sort.Slice(result, func(i, k int) bool {
+		return result[i].CreatedAt.Before(result[k].CreatedAt)
+	})
+
+	return result, nil
+}
+
+// DeleteCheckpointsAfter removes all checkpoints created after the
+// given step name (by creation order). Used for workflow replay.
+func (m *Store) DeleteCheckpointsAfter(_ context.Context, runID id.RunID, afterStep string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	prefix := runID.String() + ":"
+
+	// Find the "after" checkpoint's creation time.
+	targetKey := checkpointKey(runID, afterStep)
+	target, ok := m.checkpoints[targetKey]
+	if !ok {
+		return nil // step not found; nothing to delete
+	}
+
+	// Delete all checkpoints for this run created at or after the target,
+	// except the target itself. Using !Before covers the case where
+	// multiple checkpoints share the exact same timestamp.
+	for k, cp := range m.checkpoints {
+		if len(k) > len(prefix) && k[:len(prefix)] == prefix && k != targetKey {
+			if !cp.CreatedAt.Before(target.CreatedAt) {
+				delete(m.checkpoints, k)
+			}
+		}
+	}
+	return nil
+}
+
 // ──────────────────────────────────────────────────
 // Cron Store
 // ──────────────────────────────────────────────────

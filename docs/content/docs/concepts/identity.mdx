@@ -1,70 +1,69 @@
 ---
 title: Identity (TypeID)
-description: How Dispatch uses type-safe, prefix-qualified identifiers for every entity.
+description: How Dispatch uses prefix-qualified, globally unique identifiers for every entity.
 ---
 
-Every entity in Dispatch has a TypeID. TypeIDs are globally unique, K-sortable, URL-safe identifiers built on UUIDv7 with a human-readable prefix that tells you what kind of entity you're looking at.
+Every entity in Dispatch has a TypeID. TypeIDs are globally unique, sortable, URL-safe identifiers built on UUIDv7 with a human-readable prefix that tells you what kind of entity you're looking at.
 
 A TypeID looks like this:
 
 ```
-job_01h2xcejqtf2nbrexx3vqjhp41
-wfrun_01h455vb4pex5vsknk084sn02q
+job_01h455vb4pex5vsknk084sn02q
 ```
 
-The prefix identifies the entity type. The suffix is a base32-encoded UUIDv7 that encodes creation time, so IDs sort chronologically.
-
-## Compile-time safety
-
-Dispatch uses **separate typed aliases** for each entity. Passing a `CronID` where a `JobID` is expected is a compile error:
-
-```go
-var cronID id.CronID = id.NewCronID()
-var jobID  id.JobID  = cronID  // compile error: cannot use CronID as JobID
-```
+The `job` prefix identifies this as a job. The suffix is a base32-encoded UUIDv7 that encodes creation time, so IDs sort chronologically.
 
 ## The `id` package
 
-The `id` package wraps [go.jetify.com/typeid](https://github.com/jetify-com/typeid-go) with typed aliases for each entity.
+The `id` package wraps the [TypeID Go library](https://github.com/jetify-com/typeid-go) (v2) with a single `ID` struct. All entity types share the same struct -- the prefix distinguishes them.
 
 ### Creating IDs
 
 ```go
 import "github.com/xraph/dispatch/id"
 
-jobID  := id.NewJobID()   // job_01h455vb...
-runID  := id.NewRunID()   // wfrun_01h455vb...
-cronID := id.NewCronID()  // cron_01h455vb...
-dlqID  := id.NewDLQID()   // dlq_01h455vb...
+jobID      := id.New(id.PrefixJob)        // job_01h455vb...
+workflowID := id.New(id.PrefixWorkflow)   // wf_01h455vb...
+runID      := id.New(id.PrefixRun)        // wfrun_01h455vb...
+cronID     := id.New(id.PrefixCron)       // cron_01h455vb...
 ```
+
+Convenience constructors: `id.NewJobID()`, `id.NewWorkflowID()`, `id.NewRunID()`, `id.NewCheckpointID()`, `id.NewCronID()`, `id.NewDLQID()`, `id.NewEventID()`, `id.NewWorkerID()`.
 
 ### Parsing IDs
 
 ```go
-jobID, err  := id.ParseJobID("job_01h455vb4pex5vsknk084sn02q")
-runID, err  := id.ParseRunID("wfrun_01h455vb4pex5vsknk084sn02q")
-cronID, err := id.ParseCronID("cron_01h455vb4pex5vsknk084sn02q")
-
-// Accept any valid prefix (when type is dynamic):
-anyID, err := id.ParseAny("wkr_01h455vb4pex5vsknk084sn02q")
+parsed, err := id.Parse("job_01h455vb4pex5vsknk084sn02q")
+parsed, err := id.ParseWithPrefix("job_01h455vb...", id.PrefixJob)  // validates prefix
+parsed, err := id.ParseJobID("job_01h455vb...")                     // convenience
 ```
 
-Parsing rejects IDs with the wrong prefix:
+### Nil ID
 
 ```go
-_, err := id.ParseJobID("cron_01h455...")
-// err: prefix mismatch
+var empty id.ID
+empty.IsNil()  // true
+empty.String() // ""
+id.Nil.IsNil() // true
 ```
+
+### Database storage
+
+`id.ID` implements `Scanner` and `driver.Valuer`. Stores as a string, returns `NULL` for nil IDs.
+
+### JSON serialization
+
+`id.ID` implements `TextMarshaler` and `TextUnmarshaler`. Nil IDs serialize as empty strings.
 
 ## Prefix reference
 
-| Type | Prefix | Example |
-|------|--------|---------|
-| `id.JobID` | `job` | `job_01h2xcejqtf2nbrexx3vqjhp41` |
-| `id.WorkflowID` | `wf` | `wf_01h455vb4pex5vsknk084sn02q` |
-| `id.RunID` | `wfrun` | `wfrun_01h455vb4pex5vsknk084sn02q` |
-| `id.CheckpointID` | `ckpt` | `ckpt_01h455vb4pex5vsknk084sn02q` |
-| `id.CronID` | `cron` | `cron_01h455vb4pex5vsknk084sn02q` |
-| `id.DLQID` | `dlq` | `dlq_01h455vb4pex5vsknk084sn02q` |
-| `id.EventID` | `evt` | `evt_01h455vb4pex5vsknk084sn02q` |
-| `id.WorkerID` | `wkr` | `wkr_01h455vb4pex5vsknk084sn02q` |
+| Constant | Prefix | Entity |
+|----------|--------|--------|
+| `id.PrefixJob` | `job` | Job |
+| `id.PrefixWorkflow` | `wf` | Workflow |
+| `id.PrefixRun` | `wfrun` | Workflow run |
+| `id.PrefixCheckpoint` | `ckpt` | Checkpoint |
+| `id.PrefixCron` | `cron` | Cron schedule |
+| `id.PrefixDLQ` | `dlq` | Dead letter queue entry |
+| `id.PrefixEvent` | `evt` | Event |
+| `id.PrefixWorker` | `wkr` | Worker |

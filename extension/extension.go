@@ -23,6 +23,7 @@ import (
 	"github.com/xraph/dispatch"
 	"github.com/xraph/dispatch/api"
 	"github.com/xraph/dispatch/backoff"
+	"github.com/xraph/dispatch/dwp"
 	"github.com/xraph/dispatch/engine"
 	"github.com/xraph/dispatch/ext"
 	mw "github.com/xraph/dispatch/middleware"
@@ -52,13 +53,16 @@ type Extension struct {
 	config       Config
 	eng          *engine.Engine
 	apiHandler   *api.API
+	dwpServer    *dwp.Server
 	logger       *slog.Logger
 	dispatchOpts []dispatch.Option
 	exts         []ext.Extension
 	mws          []mw.Middleware
+	dwpOpts      []dwp.Option
 	bo           backoff.Strategy
 	useGrove     bool
 	useGroveKV   bool
+	enableDWP    bool
 }
 
 // New creates a Dispatch Forge extension with the given options.
@@ -78,6 +82,9 @@ func (e *Extension) Engine() *engine.Engine { return e.eng }
 
 // API returns the API handler.
 func (e *Extension) API() *api.API { return e.apiHandler }
+
+// DWPServer returns the DWP server, or nil if DWP is not enabled.
+func (e *Extension) DWPServer() *dwp.Server { return e.dwpServer }
 
 // Register implements [forge.Extension]. It initializes the dispatcher,
 // builds the engine, and optionally registers HTTP routes.
@@ -157,6 +164,11 @@ func (e *Extension) init(fapp forge.App) error {
 		engOpts = append(engOpts, engine.WithBackoff(e.bo))
 	}
 
+	// Enable stream broker if DWP is requested (via option or config).
+	if e.enableDWP || e.config.EnableDWP {
+		engOpts = append(engOpts, engine.WithStreamBroker())
+	}
+
 	e.eng, err = engine.Build(d, engOpts...)
 	if err != nil {
 		return fmt.Errorf("dispatch: build engine: %w", err)
@@ -168,6 +180,23 @@ func (e *Extension) init(fapp forge.App) error {
 	// Register HTTP routes unless disabled.
 	if !e.config.DisableRoutes {
 		e.apiHandler.RegisterRoutes(fapp.Router())
+	}
+
+	// Create DWP server if stream broker is available.
+	if e.eng.StreamBroker() != nil {
+		dwpOptList := make([]dwp.Option, 0, len(e.dwpOpts)+2)
+		dwpOptList = append(dwpOptList, dwp.WithLogger(logger))
+		if e.config.DWPBasePath != "" {
+			dwpOptList = append(dwpOptList, dwp.WithPath(e.config.DWPBasePath))
+		}
+		dwpOptList = append(dwpOptList, e.dwpOpts...)
+
+		handler := dwp.NewHandler(e.eng, e.eng.StreamBroker(), logger)
+		e.dwpServer = dwp.NewServer(e.eng.StreamBroker(), handler, dwpOptList...)
+
+		if !e.config.DisableRoutes {
+			e.dwpServer.RegisterRoutes(fapp.Router())
+		}
 	}
 
 	return nil
@@ -333,6 +362,10 @@ func (e *Extension) mergeConfigurations(yamlConfig, programmaticConfig Config) C
 		yamlConfig.DisableMigrate = true
 	}
 
+	if programmaticConfig.EnableDWP {
+		yamlConfig.EnableDWP = true
+	}
+
 	// String fields: YAML takes precedence.
 	if yamlConfig.BasePath == "" && programmaticConfig.BasePath != "" {
 		yamlConfig.BasePath = programmaticConfig.BasePath
@@ -342,6 +375,9 @@ func (e *Extension) mergeConfigurations(yamlConfig, programmaticConfig Config) C
 	}
 	if yamlConfig.GroveKV == "" && programmaticConfig.GroveKV != "" {
 		yamlConfig.GroveKV = programmaticConfig.GroveKV
+	}
+	if yamlConfig.DWPBasePath == "" && programmaticConfig.DWPBasePath != "" {
+		yamlConfig.DWPBasePath = programmaticConfig.DWPBasePath
 	}
 
 	// Fill remaining zeros with defaults.

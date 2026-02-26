@@ -2,6 +2,8 @@
   "title": "Guides",
   "pages": [
     "full-example",
+    "examples",
+    "testing",
     "forge-extension",
     "custom-store",
     "webhook-verification"

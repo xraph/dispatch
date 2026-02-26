@@ -33,6 +33,7 @@ import (
 	"github.com/xraph/dispatch/observability"
 	"github.com/xraph/dispatch/queue"
 	"github.com/xraph/dispatch/scope"
+	"github.com/xraph/dispatch/stream"
 	"github.com/xraph/dispatch/worker"
 	"github.com/xraph/dispatch/workflow"
 )
@@ -87,6 +88,11 @@ type Engine struct {
 	cronStore    cron.Store
 	clusterStore cluster.Store
 	scheduler    *cron.Scheduler
+
+	// Stream broker (real-time event pub/sub).
+	broker       *stream.Broker
+	brokerOpts   []stream.BrokerOption
+	enableBroker bool
 
 	// Queue subsystem.
 	queueConfigs []queue.Config
@@ -150,6 +156,17 @@ func WithMetricFactory(factory gu.MetricFactory) Option {
 	}
 }
 
+// WithStreamBroker enables the real-time stream broker for event pub/sub.
+// The broker is automatically registered as an extension so it receives
+// all job and workflow lifecycle events. It is required for DWP (Dispatch
+// Wire Protocol) real-time subscriptions.
+func WithStreamBroker(opts ...stream.BrokerOption) Option {
+	return func(eng *Engine) {
+		eng.enableBroker = true
+		eng.brokerOpts = opts
+	}
+}
+
 // Build creates an Engine from an existing Dispatcher.
 // The Dispatcher's store must implement job.Store.
 func Build(d *dispatch.Dispatcher, opts ...Option) (*Engine, error) {
@@ -206,6 +223,12 @@ func Build(d *dispatch.Dispatcher, opts ...Option) (*Engine, error) {
 
 	for _, opt := range opts {
 		opt(eng)
+	}
+
+	// Create stream broker if enabled (must be before pool so events flow).
+	if eng.enableBroker {
+		eng.broker = stream.NewBroker(logger, eng.brokerOpts...)
+		eng.extensions.Register(eng.broker)
 	}
 
 	// Default backoff strategy if none provided.
@@ -432,6 +455,9 @@ func (eng *Engine) Scheduler() *cron.Scheduler { return eng.scheduler }
 // QueueManager returns the queue manager, or nil if no queue configs
 // were provided.
 func (eng *Engine) QueueManager() *queue.Manager { return eng.queueManager }
+
+// StreamBroker returns the real-time event broker, or nil if not enabled.
+func (eng *Engine) StreamBroker() *stream.Broker { return eng.broker }
 
 // RegisterCron registers a typed cron definition with the engine.
 // It validates the schedule expression, computes the initial NextRunAt,

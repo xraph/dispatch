@@ -33,4 +33,11 @@ type Run struct {
 	ScopeOrgID  string     `json:"scope_org_id,omitempty"`
 	StartedAt   time.Time  `json:"started_at"`
 	CompletedAt *time.Time `json:"completed_at,omitempty"`
+
+	// Version is the workflow definition version this run executes.
+	// Zero means version 1 (unversioned).
+	Version int `json:"version,omitempty"`
+
+	// ParentRunID links this run to its parent (nil for top-level runs).
+	ParentRunID *id.RunID `json:"parent_run_id,omitempty"`
 }

@@ -219,3 +219,58 @@ func (s *Store) ListCheckpoints(ctx context.Context, runID id.RunID) ([]*workflo
 	}
 	return checkpoints, nil
 }
+
+// ListChildRuns returns all child workflow runs for a parent.
+func (s *Store) ListChildRuns(ctx context.Context, parentRunID id.RunID) ([]*workflow.Run, error) {
+	// Redis doesn't have relational indexes, so we scan all runs.
+	allRuns, err := s.ListRuns(ctx, workflow.ListOpts{})
+	if err != nil {
+		return nil, err
+	}
+
+	var children []*workflow.Run
+	for _, r := range allRuns {
+		if r.ParentRunID != nil && *r.ParentRunID == parentRunID {
+			children = append(children, r)
+		}
+	}
+	return children, nil
+}
+
+// DeleteCheckpointsAfter removes all checkpoints created after the
+// given step name (by creation order). Used for workflow replay.
+func (s *Store) DeleteCheckpointsAfter(ctx context.Context, runID id.RunID, afterStep string) error {
+	rID := runID.String()
+
+	// Get the target checkpoint's time.
+	var target checkpointEntity
+	if err := s.getEntity(ctx, checkpointKey(rID, afterStep), &target); err != nil {
+		if isNotFound(err) {
+			return nil // step not found; nothing to delete
+		}
+		return fmt.Errorf("dispatch/redis: get target checkpoint: %w", err)
+	}
+
+	// List all step names for this run.
+	steps, err := s.rdb.SMembers(ctx, checkpointIndexKey(rID)).Result()
+	if err != nil {
+		return fmt.Errorf("dispatch/redis: list checkpoint steps: %w", err)
+	}
+
+	for _, step := range steps {
+		key := checkpointKey(rID, step)
+		var e checkpointEntity
+		if getErr := s.getEntity(ctx, key, &e); getErr != nil {
+			continue
+		}
+		if e.CreatedAt.After(target.CreatedAt) {
+			if delErr := s.rdb.Del(ctx, key).Err(); delErr != nil {
+				return fmt.Errorf("delete checkpoint %s: %w", key, delErr)
+			}
+			if remErr := s.rdb.SRem(ctx, checkpointIndexKey(rID), step).Err(); remErr != nil {
+				return fmt.Errorf("remove checkpoint index %s: %w", step, remErr)
+			}
+		}
+	}
+	return nil
+}

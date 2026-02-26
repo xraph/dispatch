@@ -1,6 +1,7 @@
 {
   "title": "Subsystems",
   "pages": [
+    "dwp",
     "catalog",
     "delivery",
     "dlq",

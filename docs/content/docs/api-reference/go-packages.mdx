@@ -86,9 +86,22 @@ The engine package is the import-cycle breaker. It composes all subsystems and i
 | Method | Purpose |
 |--------|---------|
 | `Step(name, fn)` | Execute a step; replay checkpoint on re-run |
+| `StepWithCompensation(name, exec, compensate)` | Execute a step with saga compensation |
 | `Parallel(fns...)` | Execute steps in parallel; replay all checkpoints |
 | `WaitForEvent(name, timeout)` | Block until an external event is emitted |
 | `Sleep(duration)` | Durable sleep using a checkpoint |
+| `RunCompensations()` | Manually run all registered compensations |
+
+Package-level generic functions:
+
+| Function | Purpose |
+|----------|---------|
+| `StepWithResult[T](wf, name, fn)` | Execute a step that returns a typed value |
+| `StepWithResultAndCompensation[T](wf, name, exec, compensate)` | Typed step with compensation |
+| `RunChild[T, R](wf, name, input)` | Run a child workflow and wait for its result |
+| `SpawnChild[T](wf, name, input)` | Spawn a fire-and-forget child workflow |
+| `FanOut[T, R](wf, name, items, fn)` | Execute a function over multiple items in parallel |
+| `WaitForAny(wf, events...)` | Block until any of the listed events arrives |
 
 ## cron
 
@@ -313,6 +326,81 @@ Forge adapter for embedding Dispatch in a Forge application.
 | `WithDisableRoutes(b)` | func | Skip automatic HTTP route registration |
 | `WithDisableMigrate(b)` | func | Skip auto-migration on start |
 | `Engine()` | method | Returns `*engine.Engine` after initialization |
+
+## dwp
+
+**Import:** `github.com/xraph/dispatch/dwp`
+
+The Dispatch Wire Protocol package provides a frame-based protocol for remote clients to interact with the engine over WebSocket, SSE, or HTTP RPC. See [DWP Subsystem](/docs/subsystems/dwp) for details.
+
+| Export | Type | Purpose |
+|--------|------|---------|
+| `Server` | struct | DWP server managing transports and connections |
+| `NewServer(broker, handler, opts...)` | func | Create a DWP server |
+| `Handler` | struct | Dispatches incoming DWP frames to engine methods |
+| `NewHandler(eng, broker, logger)` | func | Create a DWP handler |
+| `Frame` | struct | Protocol frame envelope (`ID`, `Type`, `Method`, `Data`, etc.) |
+| `FrameType` | string | Frame type enum: `request`, `response`, `event`, `error`, `ping`, `pong` |
+| `Codec` | interface | Serialization codec (JSON, msgpack) |
+| `Identity` | struct | Authenticated client identity (`Subject`, `AppID`, `OrgID`, `Scopes`) |
+| `APIKeyEntry` | struct | API key configuration (`Token`, `Identity`) |
+| `NewAPIKeyAuthenticator(entries...)` | func | Create a token-based authenticator |
+| `ServerOption` | type | Server option type |
+| `WithAuth(auth)` | func | Set the authenticator |
+| `WithLogger(l)` | func | Set the logger |
+
+Scope constants:
+
+| Constant | Value | Description |
+|----------|-------|-------------|
+| `ScopeAll` | `*` | Full access |
+| `ScopeJobRead` | `job:read` | Read jobs |
+| `ScopeJobWrite` | `job:write` | Write jobs |
+| `ScopeWorkflowRead` | `workflow:read` | Read workflows |
+| `ScopeWorkflowWrite` | `workflow:write` | Write workflows |
+| `ScopeSubscribe` | `subscribe` | Stream subscriptions |
+
+## client
+
+**Import:** `github.com/xraph/dispatch/client`
+
+Native Go client for communicating with a Dispatch server over DWP WebSocket. See [Go Client SDK](/docs/sdks/go) for usage guide.
+
+| Export | Type | Purpose |
+|--------|------|---------|
+| `Client` | struct | DWP WebSocket client |
+| `DialContext(ctx, url, opts...)` | func | Connect, authenticate, and return a client |
+| `Enqueue(ctx, name, payload, opts...)` | method | Enqueue a job |
+| `GetJob(ctx, jobID)` | method | Retrieve a job by ID |
+| `CancelJob(ctx, jobID)` | method | Cancel a job |
+| `StartWorkflow(ctx, name, input)` | method | Start a workflow run |
+| `GetWorkflow(ctx, runID)` | method | Retrieve a workflow run |
+| `PublishEvent(ctx, name, payload)` | method | Publish an event |
+| `Subscribe(ctx, channel)` | method | Subscribe to a stream channel |
+| `Unsubscribe(ctx, subID)` | method | Unsubscribe from a channel |
+| `Watch(ctx, runID)` | method | Watch a workflow run |
+| `Stats(ctx)` | method | Get server statistics |
+| `Close()` | method | Close the connection |
+| `Option` | type | Client option type |
+| `WithToken(t)` | func | Set the auth token |
+| `WithFormat(f)` | func | Set serialization format (`json` or `msgpack`) |
+| `WithLogger(l)` | func | Set the logger |
+| `WithReconnect(b)` | func | Enable automatic reconnection |
+
+## stream
+
+**Import:** `github.com/xraph/dispatch/stream`
+
+In-process event broker for pub/sub channels used by DWP subscriptions and real-time features.
+
+| Export | Type | Purpose |
+|--------|------|---------|
+| `Broker` | struct | In-process pub/sub broker |
+| `NewBroker(logger)` | func | Create a broker |
+| `Publish(channel, event)` | method | Publish an event to a channel |
+| `Subscribe(channel, handler)` | method | Register a handler for a channel |
+| `Unsubscribe(channel, id)` | method | Remove a subscription |
+| `Close()` | method | Shut down the broker |
 
 ## store
 

@@ -31,6 +31,14 @@ type Config struct {
 	// (unnamed) kv.Store is used.
 	GroveKV string `json:"grove_kv" mapstructure:"grove_kv" yaml:"grove_kv"`
 
+	// EnableDWP enables the Dispatch Wire Protocol for real-time
+	// client communication (WebSocket, SSE, HTTP RPC).
+	EnableDWP bool `default:"false" json:"enable_dwp" mapstructure:"enable_dwp" yaml:"enable_dwp"`
+
+	// DWPBasePath is the URL prefix for DWP endpoints.
+	// Default is "/dwp".
+	DWPBasePath string `json:"dwp_base_path" mapstructure:"dwp_base_path" yaml:"dwp_base_path"`
+
 	// RequireConfig requires config to be present in YAML files.
 	// If true and no config is found, Register returns an error.
 	RequireConfig bool `json:"-" yaml:"-"`

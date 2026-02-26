@@ -5,6 +5,7 @@ import (
 
 	"github.com/xraph/dispatch"
 	"github.com/xraph/dispatch/backoff"
+	"github.com/xraph/dispatch/dwp"
 	"github.com/xraph/dispatch/ext"
 	mw "github.com/xraph/dispatch/middleware"
 )
@@ -114,5 +115,15 @@ func WithGroveKV(name string) ExtOption {
 	return func(e *Extension) {
 		e.config.GroveKV = name
 		e.useGroveKV = true
+	}
+}
+
+// WithDWP enables the Dispatch Wire Protocol (DWP) for real-time
+// client communication over WebSocket, SSE, and HTTP RPC.
+// Options configure authentication, codec, and server behaviour.
+func WithDWP(opts ...dwp.Option) ExtOption {
+	return func(e *Extension) {
+		e.enableDWP = true
+		e.dwpOpts = append(e.dwpOpts, opts...)
 	}
 }

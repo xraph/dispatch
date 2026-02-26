@@ -1,0 +1,17 @@
+{
+  "name": "@xraph/dispatch",
+  "version": "0.1.0",
+  "description": "TypeScript client SDK for the Dispatch Wire Protocol (DWP)",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "files": ["dist"],
+  "scripts": {
+    "build": "tsc",
+    "clean": "rm -rf dist"
+  },
+  "keywords": ["dispatch", "dwp", "workflow", "jobs", "queue", "real-time"],
+  "license": "MIT",
+  "devDependencies": {
+    "typescript": "^5.4.0"
+  }
+}

@@ -1,0 +1,160 @@
+---
+title: TypeScript SDK
+description: TypeScript/JavaScript client for connecting to a Dispatch server via the DWP WebSocket protocol.
+---
+
+The `@xraph/dispatch` package provides a TypeScript client for the Dispatch Wire Protocol (DWP). It supports jobs, workflows, real-time subscriptions, and automatic reconnection.
+
+## Installation
+
+```bash
+npm install @xraph/dispatch
+```
+
+## Quick start
+
+```ts
+import { Dispatch } from "@xraph/dispatch";
+
+const client = new Dispatch({
+  url: "wss://api.example.com/dwp",
+  token: "dk_live_abc123",
+});
+
+await client.connect();
+
+// Enqueue a job.
+const job = await client.enqueue("send-email", {
+  to: "user@example.com",
+  subject: "Welcome!",
+});
+console.log("Job ID:", job.job_id);
+
+// Start a workflow.
+const run = await client.startWorkflow("order-pipeline", {
+  order_id: "ORD-001",
+  items: ["widget", "gadget"],
+});
+
+// Watch workflow progress in real time.
+for await (const event of client.watch(run.run_id)) {
+  console.log(`${event.type}: ${JSON.stringify(event.data)}`);
+}
+
+client.close();
+```
+
+## Constructor options
+
+```ts
+const client = new Dispatch({
+  url: "wss://api.example.com/dwp",   // WebSocket URL
+  token: "dk_live_abc123",             // Authentication token
+  format: "json",                       // "json" or "msgpack" (default: "json")
+  reconnect: true,                      // Auto-reconnect (default: true)
+  maxRetries: 10,                       // Max reconnect attempts
+});
+```
+
+## Jobs
+
+```ts
+// Enqueue a job.
+const result = await client.enqueue("send-email", { to: "user@example.com" });
+// result: { job_id: "...", queue: "default", state: "pending" }
+
+// Enqueue with options.
+const result = await client.enqueue("process-image", payload, {
+  queue: "images",
+  priority: 10,
+});
+
+// Get a job.
+const job = await client.getJob(result.job_id);
+
+// Cancel a job.
+await client.cancelJob(result.job_id);
+```
+
+## Workflows
+
+```ts
+// Start a workflow.
+const run = await client.startWorkflow("order-pipeline", {
+  order_id: "ORD-001",
+});
+// run: { run_id: "...", name: "order-pipeline", state: "running" }
+
+// Get a workflow run.
+const details = await client.getWorkflow(run.run_id);
+
+// Get the step timeline.
+const timeline = await client.workflowTimeline(run.run_id);
+
+// Publish an event (triggers WaitForEvent in a workflow).
+await client.publishEvent("payment-received", { order_id: "ORD-001" });
+```
+
+## Subscriptions
+
+The SDK uses async generators for real-time event streaming:
+
+```ts
+// Subscribe to a channel.
+for await (const event of client.subscribe("jobs")) {
+  console.log(event);
+  // { type: "event", channel: "jobs", data: { job_id: "...", state: "completed" } }
+}
+
+// Watch a specific workflow run.
+for await (const event of client.watch(run.run_id)) {
+  console.log(event);
+}
+```
+
+Subscriptions are automatically cleaned up when the generator is stopped (via `break` or `return`).
+
+## Stats
+
+```ts
+const stats = await client.stats();
+console.log(stats);
+// { connections: 5, subscriptions: 12, ... }
+```
+
+## Error handling
+
+```ts
+import { AuthError, ConnectionError, TimeoutError, DispatchError } from "@xraph/dispatch";
+
+try {
+  await client.connect();
+} catch (err) {
+  if (err instanceof AuthError) {
+    console.error("Authentication failed:", err.message);
+  } else if (err instanceof ConnectionError) {
+    console.error("Connection failed:", err.message);
+  }
+}
+```
+
+## API reference
+
+| Method | Returns | Description |
+|--------|---------|-------------|
+| `connect()` | `Promise<string>` | Connect and authenticate; returns session ID |
+| `close()` | `void` | Close the connection |
+| `enqueue(name, payload, options?)` | `Promise<JobResult>` | Enqueue a job |
+| `getJob(jobId)` | `Promise<unknown>` | Get job by ID |
+| `cancelJob(jobId)` | `Promise<void>` | Cancel a job |
+| `startWorkflow(name, input)` | `Promise<WorkflowResult>` | Start a workflow |
+| `getWorkflow(runId)` | `Promise<unknown>` | Get workflow run |
+| `publishEvent(name, payload)` | `Promise<void>` | Publish a workflow event |
+| `workflowTimeline(runId)` | `Promise<unknown>` | Get step timeline |
+| `subscribe(channel)` | `AsyncGenerator<StreamEvent>` | Subscribe to events |
+| `watch(runId)` | `AsyncGenerator<StreamEvent>` | Watch a workflow run |
+| `stats()` | `Promise<unknown>` | Get server statistics |
+
+## Example
+
+See the [full example](https://github.com/xraph/dispatch/blob/main/sdk/typescript/examples/basic.ts) for a complete script demonstrating all operations.

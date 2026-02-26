@@ -169,3 +169,61 @@ func (s *Store) ListCheckpoints(ctx context.Context, runID id.RunID) ([]*workflo
 	}
 	return checkpoints, nil
 }
+
+// ListChildRuns returns all child workflow runs for a parent.
+func (s *Store) ListChildRuns(ctx context.Context, parentRunID id.RunID) ([]*workflow.Run, error) {
+	col := s.mdb.Collection(colWorkflowRuns)
+	findOpts := options.Find().SetSort(bson.D{{Key: "created_at", Value: 1}})
+
+	cursor, err := col.Find(ctx, bson.M{"parent_run_id": parentRunID.String()}, findOpts)
+	if err != nil {
+		return nil, fmt.Errorf("dispatch/mongo: list child runs: %w", err)
+	}
+	defer cursor.Close(ctx)
+
+	var models []workflowRunModel
+	if err := cursor.All(ctx, &models); err != nil {
+		return nil, fmt.Errorf("dispatch/mongo: list child runs decode: %w", err)
+	}
+
+	runs := make([]*workflow.Run, 0, len(models))
+	for i := range models {
+		r, convErr := fromRunModel(&models[i])
+		if convErr != nil {
+			return nil, fmt.Errorf("dispatch/mongo: list child runs convert: %w", convErr)
+		}
+		runs = append(runs, r)
+	}
+	return runs, nil
+}
+
+// DeleteCheckpointsAfter removes all checkpoints created after the
+// given step name (by creation order). Used for workflow replay.
+func (s *Store) DeleteCheckpointsAfter(ctx context.Context, runID id.RunID, afterStep string) error {
+	col := s.mdb.Collection(colCheckpoints)
+
+	// Find the target checkpoint's creation time.
+	var target checkpointModel
+	err := col.FindOne(ctx, bson.M{
+		"run_id":    runID.String(),
+		"step_name": afterStep,
+	}).Decode(&target)
+	if err != nil {
+		if isNoDocuments(err) {
+			return nil // step not found; nothing to delete
+		}
+		return fmt.Errorf("dispatch/mongo: find target checkpoint: %w", err)
+	}
+
+	// Delete all checkpoints for this run created after the target.
+	_, err = col.DeleteMany(ctx, bson.M{
+		"run_id": runID.String(),
+		"created_at": bson.M{
+			"$gt": target.CreatedAt,
+		},
+	})
+	if err != nil {
+		return fmt.Errorf("dispatch/mongo: delete checkpoints after: %w", err)
+	}
+	return nil
+}
