@@ -2,7 +2,8 @@ package dispatch
 
 import (
 	"context"
-	"log/slog"
+
+	log "github.com/xraph/go-utils/log"
 )
 
 // Option configures a Dispatcher.
@@ -39,7 +40,7 @@ type extensionEmitter interface {
 // package to wire everything together.
 type Dispatcher struct {
 	config     Config
-	logger     *slog.Logger
+	logger     log.Logger
 	store      Storer
 	extensions extensionEmitter
 	pool       poolRunner
@@ -52,7 +53,7 @@ type Dispatcher struct {
 func New(opts ...Option) (*Dispatcher, error) {
 	d := &Dispatcher{
 		config: DefaultConfig(),
-		logger: slog.Default(),
+		logger: log.NewNoopLogger(),
 	}
 	for _, opt := range opts {
 		if err := opt(d); err != nil {
@@ -63,7 +64,7 @@ func New(opts ...Option) (*Dispatcher, error) {
 }
 
 // Logger returns the dispatcher's logger.
-func (d *Dispatcher) Logger() *slog.Logger { return d.logger }
+func (d *Dispatcher) Logger() log.Logger { return d.logger }
 
 // Store returns the dispatcher's store.
 func (d *Dispatcher) Store() Storer { return d.store }
@@ -93,7 +94,7 @@ func (d *Dispatcher) Start(ctx context.Context) error {
 func (d *Dispatcher) Stop(ctx context.Context) error {
 	if d.pool != nil && d.started {
 		if err := d.pool.Stop(ctx); err != nil {
-			d.logger.Error("pool stop error", "error", err)
+			d.logger.Error("pool stop error", log.String("error", err.Error()))
 		}
 	}
 	if d.extensions != nil {
@@ -122,7 +123,7 @@ func WithQueues(queues []string) Option {
 }
 
 // WithLogger sets the structured logger for the dispatcher.
-func WithLogger(l *slog.Logger) Option {
+func WithLogger(l log.Logger) Option {
 	return func(d *Dispatcher) error {
 		d.logger = l
 		return nil

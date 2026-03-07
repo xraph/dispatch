@@ -1,0 +1,24 @@
+package components
+
+import "github.com/xraph/forgeui/components/badge"
+
+templ PageHeader(title string, count string, description string) {
+	<div class="flex items-center justify-between">
+		<div>
+			<div class="flex items-center gap-3">
+				<h1 class="text-3xl font-bold tracking-tight">{ title }</h1>
+				if count != "" {
+					@badge.Badge(badge.Props{Variant: badge.VariantSecondary}) {
+						{ count }
+					}
+				}
+			</div>
+			if description != "" {
+				<p class="text-muted-foreground mt-1">{ description }</p>
+			}
+		</div>
+		<div class="flex items-center gap-2">
+			{ children... }
+		</div>
+	</div>
+}

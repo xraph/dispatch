@@ -3,10 +3,10 @@ package observability_test
 import (
 	"context"
 	"errors"
-	"log/slog"
 	"testing"
 	"time"
 
+	log "github.com/xraph/go-utils/log"
 	gu "github.com/xraph/go-utils/metrics"
 
 	"github.com/xraph/dispatch/ext"
@@ -134,7 +134,7 @@ func TestMetricsExtension_CronFired(t *testing.T) {
 
 func TestMetricsExtension_ViaRegistry(t *testing.T) {
 	e := newTestExtension()
-	logger := slog.Default()
+	logger := log.NewNoopLogger()
 
 	reg := ext.NewRegistry(logger)
 	reg.Register(e)

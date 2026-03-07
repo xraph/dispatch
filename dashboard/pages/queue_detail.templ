@@ -1,0 +1,173 @@
+package pages
+
+import (
+	"fmt"
+	"strconv"
+	"github.com/xraph/dispatch/job"
+	"github.com/xraph/dispatch/dashboard/components"
+	"github.com/xraph/dispatch/dashboard/shared"
+	"github.com/xraph/forgeui/components/card"
+	"github.com/xraph/forgeui/components/table"
+	"github.com/xraph/forgeui/components/button"
+)
+
+templ QueueDetailPage(q QueueInfo, jobs []*job.Job, pg shared.PaginationMeta) {
+	<div class="space-y-6">
+		@components.PageHeader(q.Name, fmt.Sprintf("%d active", q.Active), "Queue details") {
+			@button.Button(button.Props{
+				Variant: button.VariantOutline,
+				Attributes: templ.Attributes{
+					"hx-get":    "/queues",
+					"hx-target": "#content",
+				},
+			}) {
+				Back
+			}
+		}
+		<div class="grid grid-cols-2 lg:grid-cols-4 gap-4">
+			@components.StatCard("play", "Active Jobs", strconv.Itoa(q.Active), "Currently processing")
+			if q.HasConfig && q.MaxConcurrency > 0 {
+				@components.StatCard("gauge", "Max Concurrency", strconv.Itoa(q.MaxConcurrency), "Queue-level limit")
+			} else {
+				@components.StatCard("gauge", "Max Concurrency", "unlimited", "No queue-level limit")
+			}
+			if q.HasConfig && q.RateLimit > 0 {
+				@components.StatCard("activity", "Rate Limit", fmt.Sprintf("%.1f/s", q.RateLimit), fmt.Sprintf("Burst: %d", q.RateBurst))
+			} else {
+				@components.StatCard("activity", "Rate Limit", "none", "No rate limiting")
+			}
+			if q.Active > 0 {
+				@components.StatCard("zap", "Status", "Processing", "Queue is active")
+			} else {
+				@components.StatCard("pause", "Status", "Idle", "No active jobs")
+			}
+		</div>
+		@card.Card(card.Props{Class: "rounded-sm"}) {
+			@card.Header() {
+				@card.Title() {
+					Configuration
+				}
+			}
+			@card.Content() {
+				<dl class="grid grid-cols-2 gap-x-4 gap-y-3 text-sm">
+					<dt class="text-muted-foreground">Queue Name</dt>
+					<dd>
+						<code class="text-xs bg-muted px-1.5 py-0.5 rounded-sm">{ q.Name }</code>
+					</dd>
+					<dt class="text-muted-foreground">Active Jobs</dt>
+					<dd class="font-medium">{ strconv.Itoa(q.Active) }</dd>
+					<dt class="text-muted-foreground">Max Concurrency</dt>
+					<dd class="font-medium">
+						if q.HasConfig && q.MaxConcurrency > 0 {
+							{ strconv.Itoa(q.MaxConcurrency) }
+						} else {
+							<span class="text-muted-foreground">unlimited (pool-wide)</span>
+						}
+					</dd>
+					<dt class="text-muted-foreground">Rate Limit</dt>
+					<dd class="font-medium">
+						if q.HasConfig && q.RateLimit > 0 {
+							{ fmt.Sprintf("%.1f jobs/sec", q.RateLimit) }
+						} else {
+							<span class="text-muted-foreground">none</span>
+						}
+					</dd>
+					if q.HasConfig && q.RateBurst > 0 {
+						<dt class="text-muted-foreground">Rate Burst</dt>
+						<dd class="font-medium">{ strconv.Itoa(q.RateBurst) }</dd>
+					}
+					<dt class="text-muted-foreground">Has Explicit Config</dt>
+					<dd class="font-medium">
+						if q.HasConfig {
+							Yes
+						} else {
+							No (using defaults)
+						}
+					</dd>
+				</dl>
+			}
+		}
+		@card.Card(card.Props{Class: "rounded-sm"}) {
+			@card.Header() {
+				@card.Title() {
+					Jobs in Queue
+				}
+				@card.Description() {
+					Recent jobs assigned to this queue
+				}
+			}
+			@card.Content() {
+				if len(jobs) == 0 {
+					@components.EmptyState("briefcase", "No jobs in queue", "Jobs will appear here when enqueued to this queue")
+				} else {
+					@table.Table() {
+						@table.Header() {
+							@table.Row() {
+								@table.Head() {
+									Name
+								}
+								@table.Head() {
+									State
+								}
+								@table.Head() {
+									Priority
+								}
+								@table.Head() {
+									Retries
+								}
+								@table.Head() {
+									Created
+								}
+								@table.Head() {
+									Action
+								}
+							}
+						}
+						@table.Body() {
+							for _, j := range jobs {
+								@table.Row(table.RowProps{
+									Class: "cursor-pointer hover:bg-muted/50",
+									Attributes: templ.Attributes{
+										"hx-get":    "/jobs/detail?id=" + j.ID.String(),
+										"hx-target": "#content",
+									},
+								}) {
+									@table.Cell() {
+										<span class="font-medium text-sm">{ j.Name }</span>
+									}
+									@table.Cell() {
+										@components.JobStateBadge(string(j.State))
+									}
+									@table.Cell() {
+										{ strconv.Itoa(j.Priority) }
+									}
+									@table.Cell() {
+										<span class="text-sm">{ fmt.Sprintf("%d/%d", j.RetryCount, j.MaxRetries) }</span>
+									}
+									@table.Cell() {
+										{{ created := j.CreatedAt.Format("Jan 02 15:04") }}
+										<span class="text-xs text-muted-foreground">{ created }</span>
+									}
+									@table.Cell() {
+										@button.Button(button.Props{
+											Variant: button.VariantOutline,
+											Size:    button.SizeSm,
+											Attributes: templ.Attributes{
+												"hx-get":    "/jobs/detail?id=" + j.ID.String(),
+												"hx-target": "#content",
+											},
+										}) {
+											View
+										}
+									}
+								}
+							}
+						}
+					}
+					{{ baseURL := "/queues/detail?name=" + q.Name }}
+					@Pagination(pg, baseURL)
+				}
+			}
+		}
+	</div>
+}

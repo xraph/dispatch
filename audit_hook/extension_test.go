@@ -3,10 +3,11 @@ package audithook_test
 import (
 	"context"
 	"errors"
-	"log/slog"
 	"sync"
 	"testing"
 	"time"
+
+	log "github.com/xraph/go-utils/log"
 
 	ah "github.com/xraph/dispatch/audit_hook"
 	"github.com/xraph/dispatch/ext"
@@ -474,7 +475,7 @@ func TestExtension_RecorderError_DoesNotPropagate(t *testing.T) {
 func TestExtension_ViaRegistry(t *testing.T) {
 	rec := &mockRecorder{}
 	e := ah.New(rec)
-	logger := slog.Default()
+	logger := log.NewNoopLogger()
 
 	reg := ext.NewRegistry(logger)
 	reg.Register(e)

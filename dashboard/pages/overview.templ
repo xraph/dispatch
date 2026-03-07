@@ -1,0 +1,151 @@
+package pages
+
+import (
+	"strconv"
+	"github.com/xraph/dispatch/job"
+	"github.com/xraph/dispatch/workflow"
+	"github.com/xraph/dispatch/dashboard/components"
+	"github.com/xraph/forgeui/components/card"
+	"github.com/xraph/forgeui/components/table"
+	"github.com/xraph/forgeui/components/button"
+)
+
+templ OverviewPage(pending, running, completed, failed, retrying, cancelled, wfRuns, dlqCount, cronCount, workerCount int64, recentJobs []*job.Job, recentRuns []*workflow.Run) {
+	<div class="space-y-6">
+		@components.PageHeader("Overview", "", "Dispatch job and workflow execution dashboard")
+		<div class="grid grid-cols-2 lg:grid-cols-4 gap-4">
+			@components.StatCard("loader", "Pending", strconv.FormatInt(pending, 10), "Waiting to execute")
+			@components.StatCard("play", "Running", strconv.FormatInt(running, 10), "Currently executing")
+			@components.StatCard("check-circle", "Completed", strconv.FormatInt(completed, 10), "Successfully finished")
+			@components.StatCard("x-circle", "Failed", strconv.FormatInt(failed, 10), "Terminated with error")
+			@components.StatCard("rotate-ccw", "Retrying", strconv.FormatInt(retrying, 10), "Scheduled for retry")
+			@components.StatCard("git-branch", "Workflows", strconv.FormatInt(wfRuns, 10), "Workflow runs")
+			@components.StatCard("alert-triangle", "Dead Letters", strconv.FormatInt(dlqCount, 10), "Failed permanently")
+			@components.StatCard("clock", "Cron Jobs", strconv.FormatInt(cronCount, 10), "Scheduled entries")
+			@components.StatCard("server", "Workers", strconv.FormatInt(workerCount, 10), "Cluster instances")
+		</div>
+		<div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
+			@card.Card(card.Props{Class: "rounded-sm"}) {
+				@card.Header() {
+					@card.Title() {
+						Recent Jobs
+					}
+					@card.Description() {
+						Latest job activity
+					}
+				}
+				@card.Content() {
+					if len(recentJobs) == 0 {
+						@components.EmptyState("briefcase", "No jobs yet", "Jobs will appear here when enqueued")
+					} else {
+						@table.Table() {
+							@table.Header() {
+								@table.Row() {
+									@table.Head() {
+										Name
+									}
+									@table.Head() {
+										Queue
+									}
+									@table.Head() {
+										State
+									}
+									@table.Head() {
+										Created
+									}
+								}
+							}
+							@table.Body() {
+								for _, j := range recentJobs {
+									@table.Row(table.RowProps{
+										Class: "cursor-pointer hover:bg-muted/50",
+										Attributes: templ.Attributes{
+											"hx-get":    "/jobs/detail?id=" + j.ID.String(),
+											"hx-target": "#content",
+										},
+									}) {
+										@table.Cell() {
+											<span class="font-medium text-sm">{ j.Name }</span>
+										}
+										@table.Cell() {
+											<code class="text-xs bg-muted px-1 py-0.5 rounded-sm">{ j.Queue }</code>
+										}
+										@table.Cell() {
+											@components.JobStateBadge(string(j.State))
+										}
+										@table.Cell() {
+											{{ created := j.CreatedAt.Format("Jan 02 15:04") }}
+											<span class="text-xs text-muted-foreground">{ created }</span>
+										}
+									}
+								}
+							}
+						}
+					}
+				}
+			}
+			@card.Card(card.Props{Class: "rounded-sm"}) {
+				@card.Header() {
+					@card.Title() {
+						Recent Workflow Runs
+					}
+					@card.Description() {
+						Latest workflow executions
+					}
+				}
+				@card.Content() {
+					if len(recentRuns) == 0 {
+						@components.EmptyState("git-branch", "No workflow runs", "Workflow runs will appear here")
+					} else {
+						@table.Table() {
+							@table.Header() {
+								@table.Row() {
+									@table.Head() {
+										Name
+									}
+									@table.Head() {
+										State
+									}
+									@table.Head() {
+										Started
+									}
+									@table.Head() {
+										Action
+									}
+								}
+							}
+							@table.Body() {
+								for _, r := range recentRuns {
+									@table.Row() {
+										@table.Cell() {
+											<span class="font-medium text-sm">{ r.Name }</span>
+										}
+										@table.Cell() {
+											@components.WorkflowStateBadge(string(r.State))
+										}
+										@table.Cell() {
+											{{ started := r.StartedAt.Format("Jan 02 15:04") }}
+											<span class="text-xs text-muted-foreground">{ started }</span>
+										}
+										@table.Cell() {
+											@button.Button(button.Props{
+												Variant: button.VariantOutline,
+												Size:    button.SizeSm,
+												Attributes: templ.Attributes{
+													"hx-get":    "/workflows/detail?id=" + r.ID.String(),
+													"hx-target": "#content",
+												},
+											}) {
+												View
+											}
+										}
+									}
+								}
+							}
+						}
+					}
+				}
+			}
+		</div>
+	</div>
+}

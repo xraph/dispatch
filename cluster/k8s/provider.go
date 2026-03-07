@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"log/slog"
 	"strconv"
 	"time"
 
@@ -13,6 +12,8 @@ import (
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
+
+	log "github.com/xraph/go-utils/log"
 
 	"github.com/xraph/dispatch"
 	"github.com/xraph/dispatch/cluster"
@@ -37,7 +38,7 @@ type Provider struct {
 	leaseName        string
 	labelSelector    string
 	annotationPrefix string
-	logger           *slog.Logger
+	logger           log.Logger
 }
 
 // New creates a Kubernetes cluster provider.
@@ -50,7 +51,7 @@ func New(client kubernetes.Interface, namespace string, opts ...Option) *Provide
 		leaseName:        defaultLeaseName,
 		labelSelector:    defaultLabelSelector,
 		annotationPrefix: defaultAnnotationPrefix,
-		logger:           slog.Default(),
+		logger:           log.NewNoopLogger(),
 	}
 	for _, o := range opts {
 		o(p)

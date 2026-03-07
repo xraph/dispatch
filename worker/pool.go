@@ -2,9 +2,10 @@ package worker
 
 import (
 	"context"
-	"log/slog"
 	"sync"
 	"time"
+
+	log "github.com/xraph/go-utils/log"
 
 	"github.com/xraph/dispatch/ext"
 	"github.com/xraph/dispatch/id"
@@ -32,7 +33,7 @@ type Pool struct {
 	queues       []string
 	pollInterval time.Duration
 	workerID     id.WorkerID
-	logger       *slog.Logger
+	logger       log.Logger
 
 	// Heartbeat / reaper configuration.
 	heartbeatInterval time.Duration
@@ -91,7 +92,7 @@ func NewPool(
 	store job.Store,
 	executor *Executor,
 	extensions *ext.Registry,
-	logger *slog.Logger,
+	logger log.Logger,
 	opts ...PoolOption,
 ) *Pool {
 	p := &Pool{
@@ -126,9 +127,9 @@ func (p *Pool) Start(_ context.Context) error {
 	p.running = true
 
 	p.logger.Info("worker pool starting",
-		slog.String("worker_id", p.workerID.String()),
-		slog.Int("concurrency", p.concurrency),
-		slog.Any("queues", p.queues),
+		log.String("worker_id", p.workerID.String()),
+		log.Int("concurrency", p.concurrency),
+		log.Any("queues", p.queues),
 	)
 
 	for range p.concurrency {
@@ -162,7 +163,7 @@ func (p *Pool) Stop(ctx context.Context) error {
 	p.running = false
 	p.mu.Unlock()
 
-	p.logger.Info("worker pool stopping", slog.String("worker_id", p.workerID.String()))
+	p.logger.Info("worker pool stopping", log.String("worker_id", p.workerID.String()))
 
 	// Signal all workers to stop.
 	close(p.stopCh)
@@ -199,7 +200,7 @@ func (p *Pool) dequeueLoop() {
 
 		jobs, err := p.store.DequeueJobs(context.Background(), p.queues, 1)
 		if err != nil {
-			p.logger.Error("dequeue error", slog.String("error", err.Error()))
+			p.logger.Error("dequeue error", log.String("error", err.Error()))
 			p.sleep()
 			continue
 		}
@@ -218,8 +219,8 @@ func (p *Pool) dequeueLoop() {
 			j.RunAt = time.Now().Add(p.pollInterval)
 			if updateErr := p.store.UpdateJob(context.Background(), j); updateErr != nil {
 				p.logger.Error("failed to re-enqueue rate-limited job",
-					slog.String("job_id", j.ID.String()),
-					slog.String("error", updateErr.Error()),
+					log.String("job_id", j.ID.String()),
+					log.String("error", updateErr.Error()),
 				)
 			}
 			p.sleep()
@@ -234,9 +235,9 @@ func (p *Pool) dequeueLoop() {
 		execErr := p.executor.Execute(ctx, j)
 		if execErr != nil {
 			p.logger.Debug("job execution failed",
-				slog.String("job_id", j.ID.String()),
-				slog.String("job_name", j.Name),
-				slog.String("error", execErr.Error()),
+				log.String("job_id", j.ID.String()),
+				log.String("job_name", j.Name),
+				log.String("error", execErr.Error()),
 			)
 		}
 
@@ -278,13 +279,13 @@ func (p *Pool) sendHeartbeats() {
 	for _, jobIDStr := range jobIDs {
 		parsedID, parseErr := id.ParseJobID(jobIDStr)
 		if parseErr != nil {
-			p.logger.Warn("heartbeat: invalid job id", slog.String("job_id", jobIDStr))
+			p.logger.Warn("heartbeat: invalid job id", log.String("job_id", jobIDStr))
 			continue
 		}
 		if err := p.store.HeartbeatJob(context.Background(), parsedID, p.workerID); err != nil {
 			p.logger.Warn("heartbeat failed",
-				slog.String("job_id", jobIDStr),
-				slog.String("error", err.Error()),
+				log.String("job_id", jobIDStr),
+				log.String("error", err.Error()),
 			)
 		}
 	}
@@ -310,7 +311,7 @@ func (p *Pool) reaperLoop() {
 func (p *Pool) reapStaleJobs() {
 	stale, err := p.store.ReapStaleJobs(context.Background(), p.staleJobThreshold)
 	if err != nil {
-		p.logger.Error("reap stale jobs error", slog.String("error", err.Error()))
+		p.logger.Error("reap stale jobs error", log.String("error", err.Error()))
 		return
 	}
 
@@ -323,15 +324,15 @@ func (p *Pool) reapStaleJobs() {
 
 		if updateErr := p.store.UpdateJob(context.Background(), j); updateErr != nil {
 			p.logger.Error("reap: failed to reset stale job",
-				slog.String("job_id", j.ID.String()),
-				slog.String("error", updateErr.Error()),
+				log.String("job_id", j.ID.String()),
+				log.String("error", updateErr.Error()),
 			)
 			continue
 		}
 
 		p.logger.Info("reaped stale job",
-			slog.String("job_id", j.ID.String()),
-			slog.String("job_name", j.Name),
+			log.String("job_id", j.ID.String()),
+			log.String("job_name", j.Name),
 		)
 	}
 }
@@ -359,7 +360,7 @@ func (p *Pool) cancelActiveJobs() {
 	p.activeMu.Lock()
 	defer p.activeMu.Unlock()
 	for jobID, cancel := range p.activeJobs {
-		p.logger.Warn("cancelling active job", slog.String("job_id", jobID))
+		p.logger.Warn("cancelling active job", log.String("job_id", jobID))
 		cancel()
 	}
 }

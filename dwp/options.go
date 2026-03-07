@@ -1,6 +1,6 @@
 package dwp
 
-import "log/slog"
+import log "github.com/xraph/go-utils/log"
 
 // Option configures a DWP Server.
 type Option func(*Server)
@@ -18,7 +18,7 @@ func WithCodec(codec Codec) Option {
 }
 
 // WithLogger sets the logger for the DWP server.
-func WithLogger(logger *slog.Logger) Option {
+func WithLogger(logger log.Logger) Option {
 	return func(s *Server) { s.logger = logger }
 }
 

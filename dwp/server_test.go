@@ -3,8 +3,6 @@ package dwp
 import (
 	"context"
 	"encoding/json"
-	"io"
-	"log/slog"
 	"testing"
 	"time"
 
@@ -14,12 +12,14 @@ import (
 	"github.com/xraph/dispatch/store/memory"
 	"github.com/xraph/dispatch/stream"
 	"github.com/xraph/dispatch/workflow"
+
+	log "github.com/xraph/go-utils/log"
 )
 
 // ── Test Helpers ──────────────────────────────────────
 
-func testLogger() *slog.Logger {
-	return slog.New(slog.NewTextHandler(io.Discard, nil))
+func testLogger() log.Logger {
+	return log.NewNoopLogger()
 }
 
 // setupTestEngine creates a full Engine + stream broker for integration tests.

@@ -3,11 +3,11 @@ package workflow_test
 import (
 	"context"
 	"errors"
-	"io"
-	"log/slog"
 	"sync/atomic"
 	"testing"
 	"time"
+
+	log "github.com/xraph/go-utils/log"
 
 	"github.com/xraph/dispatch/store/memory"
 	"github.com/xraph/dispatch/workflow"
@@ -32,7 +32,7 @@ func TestStep_HappyPath(t *testing.T) {
 	s := memory.New()
 	reg := workflow.NewRegistry()
 	emitter := &trackingEmitter{}
-	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	logger := log.NewNoopLogger()
 	runner := workflow.NewRunner(reg, s, s, emitter, logger)
 
 	var step1Done, step2Done bool
@@ -72,7 +72,7 @@ func TestStep_CheckpointSkip(t *testing.T) {
 	s := memory.New()
 	reg := workflow.NewRegistry()
 	emitter := &trackingEmitter{}
-	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	logger := log.NewNoopLogger()
 	runner := workflow.NewRunner(reg, s, s, emitter, logger)
 
 	var calls int
@@ -112,7 +112,7 @@ func TestStep_Failure(t *testing.T) {
 	s := memory.New()
 	reg := workflow.NewRegistry()
 	emitter := &trackingEmitter{}
-	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	logger := log.NewNoopLogger()
 	runner := workflow.NewRunner(reg, s, s, emitter, logger)
 
 	workflow.RegisterDefinition(reg, workflow.NewWorkflow("fail-step-test", func(wf *workflow.Workflow, _ struct{}) error {
@@ -137,7 +137,7 @@ func TestStep_Failure(t *testing.T) {
 func TestStepWithResult_RoundTrip(t *testing.T) {
 	s := memory.New()
 	reg := workflow.NewRegistry()
-	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	logger := log.NewNoopLogger()
 	runner := workflow.NewRunner(reg, s, s, noopEmitter{}, logger)
 
 	type result struct {
@@ -176,7 +176,7 @@ func TestStepWithResult_RoundTrip(t *testing.T) {
 func TestStepWithResult_CheckpointResume(t *testing.T) {
 	s := memory.New()
 	reg := workflow.NewRegistry()
-	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	logger := log.NewNoopLogger()
 	runner := workflow.NewRunner(reg, s, s, noopEmitter{}, logger)
 
 	var computeCalls int
@@ -230,7 +230,7 @@ func TestParallel_AllSucceed(t *testing.T) {
 	s := memory.New()
 	reg := workflow.NewRegistry()
 	emitter := &trackingEmitter{}
-	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	logger := log.NewNoopLogger()
 	runner := workflow.NewRunner(reg, s, s, emitter, logger)
 
 	var a, b, c atomic.Bool
@@ -258,7 +258,7 @@ func TestParallel_Failure(t *testing.T) {
 	s := memory.New()
 	reg := workflow.NewRegistry()
 	emitter := &trackingEmitter{}
-	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	logger := log.NewNoopLogger()
 	runner := workflow.NewRunner(reg, s, s, emitter, logger)
 
 	workflow.RegisterDefinition(reg, workflow.NewWorkflow("parallel-fail", func(wf *workflow.Workflow, _ struct{}) error {
@@ -281,7 +281,7 @@ func TestParallel_Failure(t *testing.T) {
 func TestParallel_CheckpointSkip(t *testing.T) {
 	s := memory.New()
 	reg := workflow.NewRegistry()
-	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	logger := log.NewNoopLogger()
 	runner := workflow.NewRunner(reg, s, s, noopEmitter{}, logger)
 
 	var calls atomic.Int32
@@ -320,7 +320,7 @@ func TestParallel_CheckpointSkip(t *testing.T) {
 func TestSleep_CheckpointSkip(t *testing.T) {
 	s := memory.New()
 	reg := workflow.NewRegistry()
-	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	logger := log.NewNoopLogger()
 	runner := workflow.NewRunner(reg, s, s, noopEmitter{}, logger)
 
 	workflow.RegisterDefinition(reg, workflow.NewWorkflow("sleep-test", func(wf *workflow.Workflow, _ struct{}) error {

@@ -1,0 +1,120 @@
+package pages
+
+import (
+	"strconv"
+	"github.com/xraph/dispatch/job"
+	"github.com/xraph/dispatch/dashboard/components"
+	"github.com/xraph/forgeui/components/card"
+	"github.com/xraph/forgeui/components/button"
+	"github.com/xraph/forgeui/components/separator"
+)
+
+templ JobDetailPage(j *job.Job) {
+	<div class="space-y-6">
+		@components.PageHeader(j.Name, "", "Job details") {
+			@button.Button(button.Props{
+				Variant: button.VariantOutline,
+				Attributes: templ.Attributes{
+					"hx-get":    "/jobs",
+					"hx-target": "#content",
+				},
+			}) {
+				Back
+			}
+			if j.State == job.StatePending || j.State == job.StateRetrying {
+				@button.Button(button.Props{
+					Variant: button.VariantDestructive,
+					Attributes: templ.Attributes{
+						"hx-post":    "/v1/jobs/" + j.ID.String() + "/cancel",
+						"hx-target":  "#content",
+						"hx-confirm": "Are you sure you want to cancel this job?",
+					},
+				}) {
+					Cancel Job
+				}
+			}
+		}
+		<div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
+			@card.Card(card.Props{Class: "rounded-sm"}) {
+				@card.Header() {
+					@card.Title() {
+						Configuration
+					}
+				}
+				@card.Content() {
+					<dl class="grid grid-cols-2 gap-x-4 gap-y-3 text-sm">
+						@field("ID", j.ID.String(), true)
+						@field("Name", j.Name, false)
+						@field("Queue", j.Queue, true)
+						<dt class="text-muted-foreground">State</dt>
+						<dd>
+							@components.JobStateBadge(string(j.State))
+						</dd>
+						@field("Priority", strconv.Itoa(j.Priority), false)
+						@field("Max Retries", strconv.Itoa(j.MaxRetries), false)
+						@field("Retry Count", strconv.Itoa(j.RetryCount), false)
+						if !j.WorkerID.IsNil() {
+							@field("Worker ID", j.WorkerID.String(), true)
+						}
+						@field("Run At", j.RunAt.Format("Jan 02, 2006 15:04:05"), false)
+						if j.StartedAt != nil {
+							@field("Started At", j.StartedAt.Format("Jan 02, 2006 15:04:05"), false)
+						}
+						if j.CompletedAt != nil {
+							@field("Completed At", j.CompletedAt.Format("Jan 02, 2006 15:04:05"), false)
+						}
+						if j.Timeout > 0 {
+							@field("Timeout", j.Timeout.String(), false)
+						}
+						if j.ScopeAppID != "" {
+							@field("App ID", j.ScopeAppID, true)
+						}
+						if j.ScopeOrgID != "" {
+							@field("Org ID", j.ScopeOrgID, true)
+						}
+					</dl>
+				}
+			}
+			if j.LastError != "" {
+				@card.Card(card.Props{Class: "rounded-sm"}) {
+					@card.Header() {
+						@card.Title() {
+							Error
+						}
+					}
+					@card.Content() {
+						<pre class="bg-destructive/10 text-destructive rounded-sm p-3 text-xs font-mono whitespace-pre-wrap max-h-48 overflow-y-auto">{ j.LastError }</pre>
+					}
+				}
+			}
+		</div>
+		@card.Card(card.Props{Class: "rounded-sm"}) {
+			@card.Header() {
+				@card.Title() {
+					Payload
+				}
+			}
+			@card.Content() {
+				@components.JsonViewer(j.Payload)
+			}
+		}
+		if j.StartedAt != nil && j.CompletedAt != nil {
+			@separator.Separator()
+			<div class="text-sm text-muted-foreground">
+				{{ duration := j.CompletedAt.Sub(*j.StartedAt) }}
+				Duration: { duration.String() }
+			</div>
+		}
+	</div>
+}
+
+templ field(label string, value string, mono bool) {
+	<dt class="text-muted-foreground">{ label }</dt>
+	<dd>
+		if mono {
+			<code class="text-xs bg-muted px-1.5 py-0.5 rounded-sm">{ value }</code>
+		} else {
+			<span class="font-medium">{ value }</span>
+		}
+	</dd>
+}

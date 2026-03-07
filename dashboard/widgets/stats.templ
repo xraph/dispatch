@@ -1,0 +1,16 @@
+package widgets
+
+import (
+	"strconv"
+	"github.com/xraph/dispatch/dashboard/components"
+)
+
+templ StatsWidget(pending, running, completed, failed, wfRuns int64) {
+	<div class="grid grid-cols-2 lg:grid-cols-5 gap-3">
+		@components.StatCard("loader", "Pending", strconv.FormatInt(pending, 10), "")
+		@components.StatCard("play", "Running", strconv.FormatInt(running, 10), "")
+		@components.StatCard("check-circle", "Completed", strconv.FormatInt(completed, 10), "")
+		@components.StatCard("x-circle", "Failed", strconv.FormatInt(failed, 10), "")
+		@components.StatCard("git-branch", "Workflows", strconv.FormatInt(wfRuns, 10), "")
+	</div>
+}

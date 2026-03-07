@@ -1,0 +1,98 @@
+package pages
+
+import (
+	"fmt"
+	"github.com/xraph/dispatch/dlq"
+	"github.com/xraph/dispatch/dashboard/components"
+	"github.com/xraph/forgeui/components/card"
+	"github.com/xraph/forgeui/components/button"
+	"github.com/xraph/forgeui/components/badge"
+)
+
+templ DLQDetailPage(e *dlq.Entry) {
+	<div class="space-y-6">
+		@components.PageHeader(e.JobName, "", "Dead letter queue entry") {
+			@button.Button(button.Props{
+				Variant: button.VariantOutline,
+				Attributes: templ.Attributes{
+					"hx-get":    "/dlq",
+					"hx-target": "#content",
+				},
+			}) {
+				Back
+			}
+			if e.ReplayedAt == nil {
+				@button.Button(button.Props{
+					Variant: button.VariantDefault,
+					Attributes: templ.Attributes{
+						"hx-post":    "/v1/dlq/" + e.ID.String() + "/replay",
+						"hx-target":  "#content",
+						"hx-confirm": "Are you sure you want to replay this DLQ entry as a new job?",
+					},
+				}) {
+					Replay Job
+				}
+			}
+		}
+		<div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
+			@card.Card(card.Props{Class: "rounded-sm"}) {
+				@card.Header() {
+					@card.Title() {
+						Entry Information
+					}
+				}
+				@card.Content() {
+					<dl class="grid grid-cols-2 gap-x-4 gap-y-3 text-sm">
+						@field("DLQ ID", e.ID.String(), true)
+						@field("Job ID", e.JobID.String(), true)
+						@field("Job Name", e.JobName, false)
+						@field("Queue", e.Queue, true)
+						@field("Retry Count", fmt.Sprintf("%d", e.RetryCount), false)
+						@field("Max Retries", fmt.Sprintf("%d", e.MaxRetries), false)
+						@field("Failed At", e.FailedAt.Format("Jan 02, 2006 15:04:05"), false)
+						@field("Created At", e.CreatedAt.Format("Jan 02, 2006 15:04:05"), false)
+						<dt class="text-muted-foreground">Status</dt>
+						<dd>
+							if e.ReplayedAt != nil {
+								@badge.Badge(badge.Props{Variant: badge.VariantSecondary}) {
+									Replayed
+								}
+								<span class="text-xs text-muted-foreground ml-2">{ e.ReplayedAt.Format("Jan 02, 2006 15:04:05") }</span>
+							} else {
+								@badge.Badge(badge.Props{Variant: badge.VariantDestructive}) {
+									Dead
+								}
+							}
+						</dd>
+						if e.ScopeAppID != "" {
+							@field("App ID", e.ScopeAppID, true)
+						}
+						if e.ScopeOrgID != "" {
+							@field("Org ID", e.ScopeOrgID, true)
+						}
+					</dl>
+				}
+			}
+			@card.Card(card.Props{Class: "rounded-sm"}) {
+				@card.Header() {
+					@card.Title() {
+						Error
+					}
+				}
+				@card.Content() {
+					<pre class="bg-destructive/10 text-destructive rounded-sm p-3 text-xs font-mono whitespace-pre-wrap max-h-64 overflow-y-auto">{ e.Error }</pre>
+				}
+			}
+		</div>
+		@card.Card(card.Props{Class: "rounded-sm"}) {
+			@card.Header() {
+				@card.Title() {
+					Payload
+				}
+			}
+			@card.Content() {
+				@components.JsonViewer(e.Payload)
+			}
+		}
+	</div>
+}

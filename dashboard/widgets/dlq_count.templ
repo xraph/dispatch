@@ -1,0 +1,13 @@
+package widgets
+
+import (
+	"strconv"
+	"github.com/xraph/dispatch/dashboard/components"
+)
+
+templ DLQCountWidget(dlqCount int64, failedJobs int64) {
+	<div class="grid grid-cols-2 gap-3">
+		@components.StatCard("alert-triangle", "Dead Letters", strconv.FormatInt(dlqCount, 10), "Failed permanently")
+		@components.StatCard("x-circle", "Failed Jobs", strconv.FormatInt(failedJobs, 10), "Terminated with error")
+	</div>
+}

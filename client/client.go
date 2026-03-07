@@ -23,7 +23,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"log/slog"
 	"net"
 	"sync"
 	"sync/atomic"
@@ -31,6 +30,8 @@ import (
 
 	"github.com/gobwas/ws"
 	"github.com/gobwas/ws/wsutil"
+
+	log "github.com/xraph/go-utils/log"
 
 	"github.com/xraph/dispatch/dwp"
 	"github.com/xraph/dispatch/stream"
@@ -41,7 +42,7 @@ type Client struct {
 	url    string
 	token  string
 	format string
-	logger *slog.Logger
+	logger log.Logger
 
 	// Reconnection.
 	reconnect  bool
@@ -71,7 +72,7 @@ func DialContext(ctx context.Context, url string, opts ...Option) (*Client, erro
 	c := &Client{
 		url:        url,
 		format:     "json",
-		logger:     slog.Default(),
+		logger:     log.NewNoopLogger(),
 		maxRetries: 5,
 		baseDelay:  time.Second,
 	}
@@ -163,13 +164,13 @@ func (c *Client) connect(ctx context.Context) error {
 		var authResp dwp.AuthResponse
 		if len(resp.Data) > 0 {
 			if unmarshalErr := json.Unmarshal(resp.Data, &authResp); unmarshalErr != nil {
-				c.logger.Warn("failed to unmarshal auth response", slog.String("error", unmarshalErr.Error()))
+				c.logger.Warn("failed to unmarshal auth response", log.String("error", unmarshalErr.Error()))
 			}
 		}
 		c.sessionID = authResp.SessionID
 		c.logger.Info("DWP client connected",
-			slog.String("session_id", c.sessionID),
-			slog.String("format", authResp.Format),
+			log.String("session_id", c.sessionID),
+			log.String("format", authResp.Format),
 		)
 		return nil
 	case <-ctx.Done():
@@ -193,7 +194,7 @@ func (c *Client) readLoop() {
 			if c.closed.Load() {
 				return
 			}
-			c.logger.Warn("DWP client read error", slog.String("error", err.Error()))
+			c.logger.Warn("DWP client read error", log.String("error", err.Error()))
 			if c.reconnect {
 				c.tryReconnect()
 			}
@@ -202,7 +203,7 @@ func (c *Client) readLoop() {
 
 		var frame dwp.Frame
 		if unmarshalErr := json.Unmarshal(data, &frame); unmarshalErr != nil {
-			c.logger.Warn("DWP client: invalid frame", slog.String("error", unmarshalErr.Error()))
+			c.logger.Warn("DWP client: invalid frame", log.String("error", unmarshalErr.Error()))
 			continue
 		}
 
@@ -241,13 +242,13 @@ func (c *Client) tryReconnect() {
 	delay := c.baseDelay
 	for i := range c.maxRetries {
 		c.logger.Info("DWP client reconnecting",
-			slog.Int("attempt", i+1),
-			slog.Duration("delay", delay),
+			log.Int("attempt", i+1),
+			log.Duration("delay", delay),
 		)
 		time.Sleep(delay)
 
 		if err := c.connect(context.Background()); err != nil {
-			c.logger.Warn("DWP client reconnect failed", slog.String("error", err.Error()))
+			c.logger.Warn("DWP client reconnect failed", log.String("error", err.Error()))
 			delay = min(delay*2, 30*time.Second)
 			continue
 		}

@@ -1,0 +1,160 @@
+package pages
+
+import (
+	"strconv"
+	"strings"
+	"github.com/xraph/dispatch/cluster"
+	"github.com/xraph/dispatch/id"
+	"github.com/xraph/dispatch/dashboard/components"
+	"github.com/xraph/forgeui/components/card"
+	"github.com/xraph/forgeui/components/table"
+	"github.com/xraph/forgeui/components/badge"
+)
+
+templ WorkersPage(workers []*cluster.Worker, currentWorkerID id.WorkerID) {
+	<div class="space-y-6">
+		@components.PageHeader("Workers", strconv.Itoa(len(workers)), "Cluster worker instances")
+		<div class="grid grid-cols-2 lg:grid-cols-4 gap-4">
+			{{ activeCount := 0 }}
+			{{ drainingCount := 0 }}
+			{{ deadCount := 0 }}
+			{{ leaderCount := 0 }}
+			for _, w := range workers {
+				if w.State == cluster.WorkerActive {
+					{{ activeCount++ }}
+				}
+				if w.State == cluster.WorkerDraining {
+					{{ drainingCount++ }}
+				}
+				if w.State == cluster.WorkerDead {
+					{{ deadCount++ }}
+				}
+				if w.IsLeader {
+					{{ leaderCount++ }}
+				}
+			}
+			@components.StatCard("server", "Active", strconv.Itoa(activeCount), "Healthy workers")
+			@components.StatCard("loader", "Draining", strconv.Itoa(drainingCount), "Shutting down")
+			@components.StatCard("x-circle", "Dead", strconv.Itoa(deadCount), "Unresponsive")
+			@components.StatCard("crown", "Leaders", strconv.Itoa(leaderCount), "Cluster leaders")
+		</div>
+		@card.Card(card.Props{Class: "rounded-sm"}) {
+			@card.Header() {
+				@card.Title() {
+					Cluster Workers
+				}
+				@card.Description() {
+					All registered worker instances in the dispatch cluster
+				}
+			}
+			@card.Content() {
+				if len(workers) == 0 {
+					@components.EmptyState("server", "No workers registered", "Workers register when the dispatcher starts")
+				} else {
+					@table.Table() {
+						@table.Header() {
+							@table.Row() {
+								@table.Head() {
+									Worker
+								}
+								@table.Head() {
+									Hostname
+								}
+								@table.Head() {
+									Queues
+								}
+								@table.Head() {
+									Concurrency
+								}
+								@table.Head() {
+									State
+								}
+								@table.Head() {
+									Last Seen
+								}
+								@table.Head() {
+									Role
+								}
+							}
+						}
+						@table.Body() {
+							for _, w := range workers {
+								@table.Row(table.RowProps{
+									Class: "cursor-pointer hover:bg-muted/50",
+									Attributes: templ.Attributes{
+										"hx-get":    "/workers/detail?id=" + w.ID.String(),
+										"hx-target": "#content",
+									},
+								}) {
+									@table.Cell() {
+										<div class="flex items-center gap-2">
+											<code class="text-xs bg-muted px-1.5 py-0.5 rounded-sm">{ truncateWorkerID(w.ID.String()) }</code>
+											if w.ID == currentWorkerID {
+												@badge.Badge(badge.Props{Variant: badge.VariantDefault}) {
+													self
+												}
+											}
+										</div>
+									}
+									@table.Cell() {
+										<span class="text-sm">{ w.Hostname }</span>
+									}
+									@table.Cell() {
+										<span class="text-xs text-muted-foreground">{ strings.Join(w.Queues, ", ") }</span>
+									}
+									@table.Cell() {
+										<span class="font-mono text-sm">{ strconv.Itoa(w.Concurrency) }</span>
+									}
+									@table.Cell() {
+										@workerStateBadge(w.State)
+									}
+									@table.Cell() {
+										{{ seen := w.LastSeen.Format("Jan 02 15:04:05") }}
+										<span class="text-xs text-muted-foreground">{ seen }</span>
+									}
+									@table.Cell() {
+										if w.IsLeader {
+											@badge.Badge(badge.Props{Variant: badge.VariantDefault}) {
+												Leader
+											}
+										} else {
+											<span class="text-xs text-muted-foreground">follower</span>
+										}
+									}
+								}
+							}
+						}
+					}
+				}
+			}
+		}
+	</div>
+}
+
+templ workerStateBadge(state cluster.WorkerState) {
+	switch state {
+		case cluster.WorkerActive:
+			@badge.Badge(badge.Props{Variant: badge.VariantDefault}) {
+				Active
+			}
+		case cluster.WorkerDraining:
+			@badge.Badge(badge.Props{Variant: badge.VariantSecondary}) {
+				Draining
+			}
+		case cluster.WorkerDead:
+			@badge.Badge(badge.Props{Variant: badge.VariantDestructive}) {
+				Dead
+			}
+		default:
+			@badge.Badge(badge.Props{Variant: badge.VariantOutline}) {
+				{ string(state) }
+			}
+	}
+}
+
+func truncateWorkerID(s string) string {
+	if len(s) > 12 {
+		return s[:12] + "..."
+	}
+	return s
+}

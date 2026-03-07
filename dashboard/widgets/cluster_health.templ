@@ -1,0 +1,82 @@
+package widgets
+
+import (
+	"strconv"
+	"github.com/xraph/dispatch/cluster"
+	"github.com/xraph/dispatch/dashboard/components"
+	"github.com/xraph/forgeui/components/card"
+	"github.com/xraph/forgeui/components/badge"
+)
+
+templ ClusterHealthWidget(workers []*cluster.Worker, leaderHostname string) {
+	<div class="space-y-4">
+		<div class="grid grid-cols-2 lg:grid-cols-4 gap-3">
+			{{ active, draining, dead := countWorkerStates(workers) }}
+			@components.StatCard("server", "Active", strconv.Itoa(active), "")
+			@components.StatCard("loader", "Draining", strconv.Itoa(draining), "")
+			@components.StatCard("x-circle", "Dead", strconv.Itoa(dead), "")
+			@components.StatCard("users", "Total", strconv.Itoa(len(workers)), "")
+		</div>
+		@card.Card(card.Props{Class: "rounded-sm"}) {
+			@card.Content() {
+				if len(workers) == 0 {
+					<p class="text-sm text-muted-foreground text-center py-4">No workers registered</p>
+				} else {
+					<div class="space-y-2">
+						for _, w := range workers {
+							<div class="flex items-center justify-between py-1.5 border-b last:border-0">
+								<div class="flex items-center gap-2">
+									<span class="text-sm font-medium">{ w.Hostname }</span>
+									if w.IsLeader {
+										@badge.Badge(badge.Props{Variant: badge.VariantDefault}) {
+											Leader
+										}
+									}
+								</div>
+								<div class="flex items-center gap-2">
+									<span class="text-xs font-mono text-muted-foreground">{ strconv.Itoa(w.Concurrency) } slots</span>
+									@workerHealthBadge(w.State)
+								</div>
+							</div>
+						}
+					</div>
+				}
+			}
+		}
+	</div>
+}
+
+templ workerHealthBadge(state cluster.WorkerState) {
+	switch state {
+		case cluster.WorkerActive:
+			@badge.Badge(badge.Props{Variant: badge.VariantDefault}) {
+				Active
+			}
+		case cluster.WorkerDraining:
+			@badge.Badge(badge.Props{Variant: badge.VariantSecondary}) {
+				Draining
+			}
+		case cluster.WorkerDead:
+			@badge.Badge(badge.Props{Variant: badge.VariantDestructive}) {
+				Dead
+			}
+		default:
+			@badge.Badge(badge.Props{Variant: badge.VariantOutline}) {
+				{ string(state) }
+			}
+	}
+}
+
+func countWorkerStates(workers []*cluster.Worker) (active, draining, dead int) {
+	for _, w := range workers {
+		switch w.State {
+		case cluster.WorkerActive:
+			active++
+		case cluster.WorkerDraining:
+			draining++
+		case cluster.WorkerDead:
+			dead++
+		}
+	}
+	return
+}

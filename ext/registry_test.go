@@ -3,9 +3,10 @@ package ext_test
 import (
 	"context"
 	"errors"
-	"log/slog"
 	"testing"
 	"time"
+
+	log "github.com/xraph/go-utils/log"
 
 	"github.com/xraph/dispatch/ext"
 	"github.com/xraph/dispatch/id"
@@ -124,7 +125,7 @@ func (e *failingExt) OnShutdown(_ context.Context) error {
 // ──────────────────────────────────────────────────
 
 func TestRegistry_RegisterDiscoversInterfaces(t *testing.T) {
-	r := ext.NewRegistry(slog.Default())
+	r := ext.NewRegistry(log.NewNoopLogger())
 	all := &allHooksExt{}
 	r.Register(all)
 
@@ -137,7 +138,7 @@ func TestRegistry_RegisterDiscoversInterfaces(t *testing.T) {
 }
 
 func TestRegistry_EmitFiresOnlyImplementors(t *testing.T) {
-	r := ext.NewRegistry(slog.Default())
+	r := ext.NewRegistry(log.NewNoopLogger())
 	all := &allHooksExt{}
 	jo := &jobOnlyExt{}
 	r.Register(all)
@@ -166,7 +167,7 @@ func TestRegistry_EmitFiresOnlyImplementors(t *testing.T) {
 }
 
 func TestRegistry_AllJobHooksFire(t *testing.T) {
-	r := ext.NewRegistry(slog.Default())
+	r := ext.NewRegistry(log.NewNoopLogger())
 	all := &allHooksExt{}
 	r.Register(all)
 
@@ -195,7 +196,7 @@ func TestRegistry_AllJobHooksFire(t *testing.T) {
 }
 
 func TestRegistry_AllWorkflowHooksFire(t *testing.T) {
-	r := ext.NewRegistry(slog.Default())
+	r := ext.NewRegistry(log.NewNoopLogger())
 	all := &allHooksExt{}
 	r.Register(all)
 
@@ -223,7 +224,7 @@ func TestRegistry_AllWorkflowHooksFire(t *testing.T) {
 }
 
 func TestRegistry_CronAndShutdownHooksFire(t *testing.T) {
-	r := ext.NewRegistry(slog.Default())
+	r := ext.NewRegistry(log.NewNoopLogger())
 	all := &allHooksExt{}
 	r.Register(all)
 
@@ -243,7 +244,7 @@ func TestRegistry_CronAndShutdownHooksFire(t *testing.T) {
 }
 
 func TestRegistry_HookErrorsLoggedNotPropagated(t *testing.T) {
-	r := ext.NewRegistry(slog.Default())
+	r := ext.NewRegistry(log.NewNoopLogger())
 	failing := &failingExt{}
 	all := &allHooksExt{}
 
@@ -263,7 +264,7 @@ func TestRegistry_HookErrorsLoggedNotPropagated(t *testing.T) {
 }
 
 func TestRegistry_EmptyRegistryNoOp(_ *testing.T) {
-	r := ext.NewRegistry(slog.Default())
+	r := ext.NewRegistry(log.NewNoopLogger())
 	ctx := context.Background()
 
 	// None of these should panic or error.
@@ -283,7 +284,7 @@ func TestRegistry_EmptyRegistryNoOp(_ *testing.T) {
 }
 
 func TestRegistry_MultipleExtensionsOrderPreserved(t *testing.T) {
-	r := ext.NewRegistry(slog.Default())
+	r := ext.NewRegistry(log.NewNoopLogger())
 	ext1 := &allHooksExt{}
 	ext2 := &allHooksExt{}
 	r.Register(ext1)

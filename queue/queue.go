@@ -146,3 +146,25 @@ func (m *Manager) ActiveCount(queue string) int {
 	}
 	return 0
 }
+
+// QueueConfig returns the configuration for the named queue and true,
+// or a zero Config and false if the queue has no explicit configuration.
+func (m *Manager) QueueConfig(queue string) (Config, bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if qs := m.queues[queue]; qs != nil {
+		return qs.config, true
+	}
+	return Config{}, false
+}
+
+// QueueNames returns the names of all configured queues.
+func (m *Manager) QueueNames() []string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	names := make([]string, 0, len(m.queues))
+	for name := range m.queues {
+		names = append(names, name)
+	}
+	return names
+}

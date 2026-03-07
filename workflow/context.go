@@ -2,8 +2,9 @@ package workflow
 
 import (
 	"context"
-	"log/slog"
 	"time"
+
+	log "github.com/xraph/go-utils/log"
 
 	"github.com/xraph/dispatch/event"
 	"github.com/xraph/dispatch/id"
@@ -51,7 +52,7 @@ type Workflow struct {
 	store      Store
 	eventStore event.Store
 	emitter    StepEmitter
-	logger     *slog.Logger
+	logger     log.Logger
 
 	// childStarter is used by RunChild/SpawnChild to start child workflows.
 	childStarter ChildStarter
@@ -69,7 +70,7 @@ func NewWorkflowContext(
 	store Store,
 	eventStore event.Store,
 	emitter StepEmitter,
-	logger *slog.Logger,
+	logger log.Logger,
 ) *Workflow {
 	return &Workflow{
 		ctx:        ctx,
@@ -110,8 +111,8 @@ func (w *Workflow) RunCompensations() error {
 		data, err := w.store.GetCheckpoint(w.ctx, w.run.ID, stepName)
 		if err != nil {
 			w.logger.Error("failed to check compensation checkpoint",
-				slog.String("step", comp.StepName),
-				slog.String("error", err.Error()),
+				log.String("step", comp.StepName),
+				log.String("error", err.Error()),
 			)
 			continue
 		}
@@ -124,8 +125,8 @@ func (w *Workflow) RunCompensations() error {
 		if compErr := comp.Compensate(w.ctx); compErr != nil {
 			w.emitter.EmitStepFailed(w.ctx, w.run, stepName, compErr)
 			w.logger.Error("compensation failed",
-				slog.String("step", comp.StepName),
-				slog.String("error", compErr.Error()),
+				log.String("step", comp.StepName),
+				log.String("error", compErr.Error()),
 			)
 			continue // Best-effort: continue with remaining compensations.
 		}
@@ -133,8 +134,8 @@ func (w *Workflow) RunCompensations() error {
 		// Checkpoint the compensation.
 		if saveErr := w.store.SaveCheckpoint(w.ctx, w.run.ID, stepName, []byte{}); saveErr != nil {
 			w.logger.Error("failed to checkpoint compensation",
-				slog.String("step", comp.StepName),
-				slog.String("error", saveErr.Error()),
+				log.String("step", comp.StepName),
+				log.String("error", saveErr.Error()),
 			)
 		}
 

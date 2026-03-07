@@ -7,9 +7,16 @@ package id
 
 import (
 	"database/sql/driver"
+	"encoding/binary"
 	"fmt"
 
 	"go.jetify.com/typeid/v2"
+)
+
+// BSON type constants (avoids importing the mongo-driver bson package).
+const (
+	bsonTypeString byte = 0x02
+	bsonTypeNull   byte = 0x0A
 )
 
 // Prefix identifies the entity type encoded in a TypeID.
@@ -244,6 +251,55 @@ func (i *ID) UnmarshalText(data []byte) error {
 	*i = parsed
 
 	return nil
+}
+
+// MarshalBSONValue satisfies bson.ValueMarshaler (mongo-driver v2) so the ID
+// is stored as a BSON string instead of an opaque struct. No bson import needed
+// because Go uses structural typing for interface satisfaction.
+func (i ID) MarshalBSONValue() (bsonType byte, data []byte, err error) {
+	if !i.valid {
+		return bsonTypeNull, nil, nil
+	}
+
+	s := i.inner.String()
+	l := len(s) + 1 // length includes null terminator
+
+	buf := make([]byte, 4+len(s)+1)
+	binary.LittleEndian.PutUint32(buf, uint32(l)) //nolint:gosec // TypeID strings are <64 bytes; no overflow
+	copy(buf[4:], s)
+	// trailing 0x00 is already zero from make
+
+	return bsonTypeString, buf, nil
+}
+
+// UnmarshalBSONValue satisfies bson.ValueUnmarshaler (mongo-driver v2).
+func (i *ID) UnmarshalBSONValue(t byte, data []byte) error {
+	if t == bsonTypeNull {
+		*i = Nil
+
+		return nil
+	}
+
+	if t != bsonTypeString {
+		return fmt.Errorf("id: cannot unmarshal BSON type 0x%02x into ID", t)
+	}
+
+	if len(data) < 5 { //nolint:mnd // 4-byte length + at least 1 null terminator
+		*i = Nil
+
+		return nil
+	}
+
+	l := binary.LittleEndian.Uint32(data[:4])
+	if l <= 1 { // empty string (just null terminator)
+		*i = Nil
+
+		return nil
+	}
+
+	s := string(data[4 : 4+l-1]) // exclude null terminator
+
+	return i.UnmarshalText([]byte(s))
 }
 
 // Value implements driver.Valuer for database storage.

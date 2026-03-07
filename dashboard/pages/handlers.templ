@@ -1,0 +1,118 @@
+package pages
+
+import (
+	"strconv"
+	"github.com/xraph/dispatch/dashboard/components"
+	"github.com/xraph/forgeui/components/card"
+	"github.com/xraph/forgeui/components/table"
+	"github.com/xraph/forgeui/components/badge"
+)
+
+templ HandlersPage(jobNames []string, workflowNames []string) {
+	<div class="space-y-6">
+		@components.PageHeader("Registered Handlers", "", "Job and workflow handlers registered with the engine")
+		<div class="grid grid-cols-2 lg:grid-cols-3 gap-4">
+			@components.StatCard("briefcase", "Job Handlers", strconv.Itoa(len(jobNames)), "Registered job types")
+			@components.StatCard("git-branch", "Workflows", strconv.Itoa(len(workflowNames)), "Registered workflow types")
+			@components.StatCard("package", "Total", strconv.Itoa(len(jobNames)+len(workflowNames)), "All registered handlers")
+		</div>
+		<div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
+			@card.Card(card.Props{Class: "rounded-sm"}) {
+				@card.Header() {
+					@card.Title() {
+						Job Handlers
+					}
+					@card.Description() {
+						Registered job handler definitions
+					}
+				}
+				@card.Content() {
+					if len(jobNames) == 0 {
+						@components.EmptyState("briefcase", "No job handlers", "Register job handlers using engine.Register()")
+					} else {
+						@table.Table() {
+							@table.Header() {
+								@table.Row() {
+									@table.Head() {
+										#
+									}
+									@table.Head() {
+										Handler Name
+									}
+									@table.Head() {
+										Type
+									}
+								}
+							}
+							@table.Body() {
+								for i, name := range jobNames {
+									@table.Row() {
+										@table.Cell() {
+											<span class="text-xs text-muted-foreground">{ strconv.Itoa(i + 1) }</span>
+										}
+										@table.Cell() {
+											<code class="text-sm font-medium">{ name }</code>
+										}
+										@table.Cell() {
+											@badge.Badge(badge.Props{Variant: badge.VariantDefault}) {
+												Job
+											}
+										}
+									}
+								}
+							}
+						}
+					}
+				}
+			}
+			@card.Card(card.Props{Class: "rounded-sm"}) {
+				@card.Header() {
+					@card.Title() {
+						Workflow Definitions
+					}
+					@card.Description() {
+						Registered workflow handler definitions
+					}
+				}
+				@card.Content() {
+					if len(workflowNames) == 0 {
+						@components.EmptyState("git-branch", "No workflows", "Register workflows using engine.RegisterWorkflow()")
+					} else {
+						@table.Table() {
+							@table.Header() {
+								@table.Row() {
+									@table.Head() {
+										#
+									}
+									@table.Head() {
+										Workflow Name
+									}
+									@table.Head() {
+										Type
+									}
+								}
+							}
+							@table.Body() {
+								for i, name := range workflowNames {
+									@table.Row() {
+										@table.Cell() {
+											<span class="text-xs text-muted-foreground">{ strconv.Itoa(i + 1) }</span>
+										}
+										@table.Cell() {
+											<code class="text-sm font-medium">{ name }</code>
+										}
+										@table.Cell() {
+											@badge.Badge(badge.Props{Variant: badge.VariantOutline}) {
+												Workflow
+											}
+										}
+									}
+								}
+							}
+						}
+					}
+				}
+			}
+		</div>
+	</div>
+}

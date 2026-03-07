@@ -3,7 +3,6 @@ package worker_test
 import (
 	"context"
 	"encoding/json"
-	"log/slog"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -16,13 +15,15 @@ import (
 	"github.com/xraph/dispatch/middleware"
 	"github.com/xraph/dispatch/store/memory"
 	"github.com/xraph/dispatch/worker"
+
+	log "github.com/xraph/go-utils/log"
 )
 
 func setupTestPool(t *testing.T, concurrency int, pollInterval time.Duration) (
 	*worker.Pool, *memory.Store, *job.Registry,
 ) {
 	t.Helper()
-	logger := slog.Default()
+	logger := log.NewNoopLogger()
 	s := memory.New()
 	reg := job.NewRegistry()
 	extensions := ext.NewRegistry(logger)
@@ -213,7 +214,7 @@ func TestPool_GracefulShutdown(t *testing.T) {
 }
 
 func TestPool_ExtensionFires(t *testing.T) {
-	logger := slog.Default()
+	logger := log.NewNoopLogger()
 	s := memory.New()
 	reg := job.NewRegistry()
 	extensions := ext.NewRegistry(logger)

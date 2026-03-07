@@ -3,8 +3,9 @@ package middleware_test
 import (
 	"context"
 	"errors"
-	"log/slog"
 	"testing"
+
+	log "github.com/xraph/go-utils/log"
 
 	"github.com/xraph/dispatch/id"
 	"github.com/xraph/dispatch/job"
@@ -86,7 +87,7 @@ func TestChain_PropagatesError(t *testing.T) {
 }
 
 func TestRecover_CatchesPanic(t *testing.T) {
-	logger := slog.Default()
+	logger := log.NewNoopLogger()
 	mw := middleware.Recover(logger)
 	j := &job.Job{Name: "panicky", ID: id.NewJobID()}
 
@@ -102,7 +103,7 @@ func TestRecover_CatchesPanic(t *testing.T) {
 }
 
 func TestRecover_PassesThrough(t *testing.T) {
-	logger := slog.Default()
+	logger := log.NewNoopLogger()
 	mw := middleware.Recover(logger)
 	j := &job.Job{Name: "normal", ID: id.NewJobID()}
 
@@ -120,7 +121,7 @@ func TestRecover_PassesThrough(t *testing.T) {
 }
 
 func TestLogging_Success(t *testing.T) {
-	logger := slog.Default()
+	logger := log.NewNoopLogger()
 	mw := middleware.Logging(logger)
 	j := &job.Job{Name: "log-test", ID: id.NewJobID(), Queue: "default"}
 
@@ -138,7 +139,7 @@ func TestLogging_Success(t *testing.T) {
 }
 
 func TestLogging_Error(t *testing.T) {
-	logger := slog.Default()
+	logger := log.NewNoopLogger()
 	mw := middleware.Logging(logger)
 	j := &job.Job{Name: "log-test", ID: id.NewJobID(), Queue: "default"}
 	want := errors.New("fail")

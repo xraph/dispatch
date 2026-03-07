@@ -6,9 +6,10 @@ import (
 	"encoding/gob"
 	"encoding/json"
 	"fmt"
-	"log/slog"
 	"strings"
 	"time"
+
+	log "github.com/xraph/go-utils/log"
 
 	"github.com/xraph/dispatch/event"
 	"github.com/xraph/dispatch/id"
@@ -28,8 +29,8 @@ func (w *Workflow) Step(name string, fn func(ctx context.Context) error) error {
 	}
 	if data != nil {
 		w.logger.Debug("skipping checkpointed step",
-			slog.String("run_id", w.run.ID.String()),
-			slog.String("step", name),
+			log.String("run_id", w.run.ID.String()),
+			log.String("step", name),
 		)
 		return nil
 	}
@@ -76,8 +77,8 @@ func StepWithResult[T any](w *Workflow, name string, fn func(ctx context.Context
 			return zero, fmt.Errorf("workflow %s: decode checkpoint %q: %w", w.run.Name, name, decErr)
 		}
 		w.logger.Debug("returning checkpointed result",
-			slog.String("run_id", w.run.ID.String()),
-			slog.String("step", name),
+			log.String("run_id", w.run.ID.String()),
+			log.String("step", name),
 		)
 		return result, nil
 	}
@@ -122,8 +123,8 @@ func (w *Workflow) Parallel(groupName string, steps ...func(ctx context.Context)
 	}
 	if data != nil {
 		w.logger.Debug("skipping checkpointed parallel group",
-			slog.String("run_id", w.run.ID.String()),
-			slog.String("group", groupName),
+			log.String("run_id", w.run.ID.String()),
+			log.String("group", groupName),
 		)
 		return nil
 	}
@@ -209,8 +210,8 @@ func (w *Workflow) WaitForEvent(name string, timeout time.Duration) (*event.Even
 	// Ack the event.
 	if ackErr := w.eventStore.AckEvent(w.ctx, evt.ID); ackErr != nil {
 		w.logger.Warn("failed to ack event",
-			slog.String("event_id", evt.ID.String()),
-			slog.String("error", ackErr.Error()),
+			log.String("event_id", evt.ID.String()),
+			log.String("error", ackErr.Error()),
 		)
 	}
 
@@ -239,8 +240,8 @@ func (w *Workflow) Sleep(name string, d time.Duration) error {
 	}
 	if data != nil {
 		w.logger.Debug("skipping checkpointed sleep",
-			slog.String("run_id", w.run.ID.String()),
-			slog.String("step", name),
+			log.String("run_id", w.run.ID.String()),
+			log.String("step", name),
 		)
 		return nil
 	}
@@ -319,8 +320,8 @@ func RunChild[T, R any](w *Workflow, name string, input T) (R, error) {
 			return zero, fmt.Errorf("workflow %s: decode child checkpoint %q: %w", w.run.Name, name, decErr)
 		}
 		w.logger.Debug("returning checkpointed child result",
-			slog.String("run_id", w.run.ID.String()),
-			slog.String("child", name),
+			log.String("run_id", w.run.ID.String()),
+			log.String("child", name),
 		)
 		return result, nil
 	}
@@ -391,9 +392,9 @@ func SpawnChild[T any](w *Workflow, name string, input T) (id.RunID, error) {
 			return id.Nil, fmt.Errorf("workflow %s: decode spawn checkpoint %q: %w", w.run.Name, name, parseErr)
 		}
 		w.logger.Debug("returning checkpointed spawn ID",
-			slog.String("run_id", w.run.ID.String()),
-			slog.String("child", name),
-			slog.String("child_run_id", runID.String()),
+			log.String("run_id", w.run.ID.String()),
+			log.String("child", name),
+			log.String("child_run_id", runID.String()),
 		)
 		return runID, nil
 	}
@@ -444,8 +445,8 @@ func FanOut[T, R any](w *Workflow, name string, inputs []T) ([]R, error) {
 			return nil, fmt.Errorf("workflow %s: decode fanout checkpoint %q: %w", w.run.Name, name, decErr)
 		}
 		w.logger.Debug("returning checkpointed fanout results",
-			slog.String("run_id", w.run.ID.String()),
-			slog.String("group", name),
+			log.String("run_id", w.run.ID.String()),
+			log.String("group", name),
 		)
 		return results, nil
 	}

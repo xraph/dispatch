@@ -3,7 +3,8 @@ package postgres
 import (
 	"context"
 	"fmt"
-	"log/slog"
+
+	log "github.com/xraph/go-utils/log"
 
 	"github.com/xraph/grove"
 	"github.com/xraph/grove/drivers/pgdriver"
@@ -33,14 +34,14 @@ var (
 type Store struct {
 	db     *grove.DB
 	pgdb   *pgdriver.PgDB
-	logger *slog.Logger
+	logger log.Logger
 }
 
 // Option configures the Store.
 type Option func(*Store)
 
 // WithLogger sets the logger for the store.
-func WithLogger(logger *slog.Logger) Option {
+func WithLogger(logger log.Logger) Option {
 	return func(s *Store) {
 		s.logger = logger
 	}
@@ -52,7 +53,7 @@ func New(db *grove.DB, opts ...Option) *Store {
 	s := &Store{
 		db:     db,
 		pgdb:   pgdriver.Unwrap(db),
-		logger: slog.Default(),
+		logger: log.NewNoopLogger(),
 	}
 	for _, opt := range opts {
 		opt(s)

@@ -7,7 +7,6 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
-	"log/slog"
 	"testing"
 	"time"
 
@@ -27,6 +26,8 @@ import (
 	"github.com/xraph/dispatch/job"
 	"github.com/xraph/dispatch/store/postgres"
 	"github.com/xraph/dispatch/workflow"
+
+	log "github.com/xraph/go-utils/log"
 )
 
 // setupTestStore creates a Postgres container and returns a connected Bun Store.
@@ -68,7 +69,7 @@ func setupTestStore(t *testing.T) *postgres.Store {
 		_ = db.Close()
 	})
 
-	store := postgres.New(db, postgres.WithLogger(slog.Default()))
+	store := postgres.New(db, postgres.WithLogger(log.NewNoopLogger()))
 
 	if migErr := store.Migrate(ctx); migErr != nil {
 		t.Fatalf("migrate: %v", migErr)

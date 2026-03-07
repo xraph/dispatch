@@ -3,6 +3,7 @@ module github.com/xraph/dispatch
 go 1.25.7
 
 require (
+	github.com/a-h/templ v0.3.1001
 	github.com/jackc/pgx/v5 v5.8.0
 	github.com/redis/go-redis/v9 v9.18.0
 	github.com/robfig/cron/v3 v3.0.1
@@ -13,15 +14,16 @@ require (
 	github.com/uptrace/bun/dialect/pgdialect v1.2.16
 	github.com/uptrace/bun/driver/pgdriver v1.2.16
 	github.com/vmihailenco/msgpack/v5 v5.4.1
-	github.com/xraph/forge v0.10.0
-	github.com/xraph/grove v0.0.5
-	github.com/xraph/grove/drivers/mongodriver v0.0.5
-	github.com/xraph/grove/drivers/pgdriver v0.0.5
-	github.com/xraph/grove/drivers/sqlitedriver v0.0.5
-	github.com/xraph/grove/kv v0.0.5
-	github.com/xraph/grove/kv/drivers/redisdriver v0.0.5
-	github.com/xraph/relay v0.0.1
-	github.com/xraph/vessel v0.0.5
+	github.com/xraph/forge v1.2.0
+	github.com/xraph/forgeui v1.2.0
+	github.com/xraph/grove v1.0.0
+	github.com/xraph/grove/drivers/mongodriver v1.0.0
+	github.com/xraph/grove/drivers/pgdriver v1.0.0
+	github.com/xraph/grove/drivers/sqlitedriver v1.0.0
+	github.com/xraph/grove/kv v1.0.0
+	github.com/xraph/grove/kv/drivers/redisdriver v1.0.0
+	github.com/xraph/relay v0.2.0
+	github.com/xraph/vessel v1.0.0
 	go.jetify.com/typeid/v2 v2.0.0-alpha.3
 	go.mongodb.org/mongo-driver/v2 v2.5.0
 	go.opentelemetry.io/otel v1.40.0
@@ -121,8 +123,8 @@ require (
 	github.com/tklauser/numcpus v0.6.1 // indirect
 	github.com/uptrace/bunrouter v1.0.23 // indirect
 	github.com/x448/float16 v0.8.4 // indirect
-	github.com/xraph/confy v0.0.3 // indirect
-	github.com/xraph/go-utils v0.0.11
+	github.com/xraph/confy v0.1.0 // indirect
+	github.com/xraph/go-utils v1.0.0
 	github.com/yusufpapurcu/wmi v1.2.4 // indirect
 	go.opentelemetry.io/auto/sdk v1.2.1 // indirect
 	go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp v0.49.0 // indirect
@@ -154,6 +156,8 @@ require (
 )
 
 require (
+	github.com/Oudwins/tailwind-merge-go v0.2.1 // indirect
+	github.com/cenkalti/backoff/v5 v5.0.3 // indirect
 	github.com/dgryski/go-rendezvous v0.0.0-20200823014737-9f7001d12a5f // indirect
 	github.com/dunglas/httpsfv v1.1.0 // indirect
 	github.com/dustin/go-humanize v1.0.1 // indirect
@@ -162,6 +166,10 @@ require (
 	github.com/jinzhu/inflection v1.0.0 // indirect
 	github.com/mdelapenya/tlscert v0.2.0 // indirect
 	github.com/ncruces/go-strftime v1.0.0 // indirect
+	github.com/prometheus/client_golang v1.23.2 // indirect
+	github.com/prometheus/client_model v0.6.2 // indirect
+	github.com/prometheus/common v0.66.1 // indirect
+	github.com/prometheus/procfs v0.16.1 // indirect
 	github.com/puzpuzpuz/xsync/v3 v3.5.1 // indirect
 	github.com/remyoudompheng/bigfft v0.0.0-20230129092748-24d4a6f8daec // indirect
 	github.com/santhosh-tekuri/jsonschema/v6 v6.0.2 // indirect
@@ -171,12 +179,19 @@ require (
 	github.com/xdg-go/scram v1.2.0 // indirect
 	github.com/xdg-go/stringprep v1.0.4 // indirect
 	github.com/youmark/pkcs8 v0.0.0-20240726163527-a2c0da244d78 // indirect
+	go.opentelemetry.io/otel/exporters/jaeger v1.17.0 // indirect
+	go.opentelemetry.io/otel/exporters/otlp/otlptrace v1.40.0 // indirect
+	go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracehttp v1.40.0 // indirect
 	go.opentelemetry.io/otel/metric v1.40.0 // indirect
+	go.opentelemetry.io/proto/otlp v1.9.0 // indirect
 	go.uber.org/atomic v1.11.0 // indirect
+	google.golang.org/genproto/googleapis/api v0.0.0-20260209200024-4cfbd4190f57 // indirect
+	google.golang.org/genproto/googleapis/rpc v0.0.0-20260209200024-4cfbd4190f57 // indirect
 	google.golang.org/grpc v1.79.1 // indirect
 	mellium.im/sasl v0.3.2 // indirect
 	modernc.org/libc v1.68.0 // indirect
 	modernc.org/mathutil v1.7.1 // indirect
 	modernc.org/memory v1.11.0 // indirect
 	modernc.org/sqlite v1.46.1 // indirect
+	nhooyr.io/websocket v1.8.17 // indirect
 )

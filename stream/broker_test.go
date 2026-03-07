@@ -2,14 +2,14 @@ package stream
 
 import (
 	"encoding/json"
-	"log/slog"
-	"os"
 	"testing"
 	"time"
+
+	log "github.com/xraph/go-utils/log"
 )
 
-func testLogger() *slog.Logger {
-	return slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+func testLogger() log.Logger {
+	return log.NewNoopLogger()
 }
 
 func TestBrokerSubscribeAndPublish(t *testing.T) {

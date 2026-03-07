@@ -1,0 +1,137 @@
+package pages
+
+import (
+	"fmt"
+	"github.com/xraph/dispatch/dlq"
+	"github.com/xraph/dispatch/dashboard/shared"
+	"github.com/xraph/dispatch/dashboard/components"
+	"github.com/xraph/forgeui/components/button"
+	"github.com/xraph/forgeui/components/input"
+	"github.com/xraph/forgeui/components/table"
+	"github.com/xraph/forgeui/components/badge"
+)
+
+func truncate(s string, max int) string {
+	if len(s) <= max {
+		return s
+	}
+	return s[:max] + "..."
+}
+
+templ DLQPage(entries []*dlq.Entry, queueFilter string, pg shared.PaginationMeta) {
+	<div class="space-y-6">
+		@components.PageHeader("Dead Letter Queue", fmt.Sprintf("%d", pg.Total), "Failed jobs that exhausted retries") {
+			@button.Button(button.Props{
+				Variant: button.VariantDestructive,
+				Size:    button.SizeSm,
+				Attributes: templ.Attributes{
+					"hx-post":    "/v1/dlq/purge",
+					"hx-target":  "#content",
+					"hx-confirm": "Are you sure you want to purge DLQ entries older than 30 days?",
+				},
+			}) {
+				Purge Old Entries
+			}
+		}
+		<div class="flex gap-4">
+			@input.Input(input.Props{
+				Type:        "search",
+				Placeholder: "Filter by queue...",
+				Name:        "queue",
+				Value:       queueFilter,
+				Class:       "max-w-sm rounded-sm",
+				Attributes: templ.Attributes{
+					"hx-get":      "/dlq",
+					"hx-target":   "#content",
+					"hx-trigger":  "input changed delay:300ms",
+					"hx-push-url": "true",
+					"hx-include":  "[name='queue']",
+				},
+			})
+		</div>
+		if len(entries) == 0 {
+			@components.EmptyState("alert-triangle", "No dead letters", "All jobs completed successfully or are still retrying")
+		} else {
+			@table.Table() {
+				@table.Header() {
+					@table.Row() {
+						@table.Head() {
+							Job Name
+						}
+						@table.Head() {
+							Queue
+						}
+						@table.Head() {
+							Error
+						}
+						@table.Head() {
+							Retries
+						}
+						@table.Head() {
+							Failed At
+						}
+						@table.Head() {
+							Status
+						}
+						@table.Head() {
+							Action
+						}
+					}
+				}
+				@table.Body() {
+					for _, e := range entries {
+						@table.Row(table.RowProps{
+							Class: "cursor-pointer hover:bg-muted/50",
+							Attributes: templ.Attributes{
+								"hx-get":    "/dlq/detail?id=" + e.ID.String(),
+								"hx-target": "#content",
+							},
+						}) {
+							@table.Cell() {
+								<span class="font-medium text-sm">{ e.JobName }</span>
+							}
+							@table.Cell() {
+								<code class="text-xs bg-muted px-1 py-0.5 rounded-sm">{ e.Queue }</code>
+							}
+							@table.Cell() {
+								<span class="text-xs text-destructive">{ truncate(e.Error, 60) }</span>
+							}
+							@table.Cell() {
+								<span class="text-sm">{ fmt.Sprintf("%d/%d", e.RetryCount, e.MaxRetries) }</span>
+							}
+							@table.Cell() {
+								{{ failedAt := e.FailedAt.Format("Jan 02 15:04") }}
+								<span class="text-xs text-muted-foreground">{ failedAt }</span>
+							}
+							@table.Cell() {
+								if e.ReplayedAt != nil {
+									@badge.Badge(badge.Props{Variant: badge.VariantSecondary}) {
+										Replayed
+									}
+								} else {
+									@badge.Badge(badge.Props{Variant: badge.VariantDestructive}) {
+										Dead
+									}
+								}
+							}
+							@table.Cell() {
+								@button.Button(button.Props{
+									Variant: button.VariantOutline,
+									Size:    button.SizeSm,
+									Attributes: templ.Attributes{
+										"hx-get":    "/dlq/detail?id=" + e.ID.String(),
+										"hx-target": "#content",
+									},
+								}) {
+									View
+								}
+							}
+						}
+					}
+				}
+			}
+			{{ baseURL := "/dlq?queue=" + queueFilter }}
+			@Pagination(pg, baseURL)
+		}
+	</div>
+}

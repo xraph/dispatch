@@ -1,12 +1,12 @@
 package k8s
 
-import "log/slog"
+import log "github.com/xraph/go-utils/log"
 
 // Option configures a Provider.
 type Option func(*Provider)
 
 // WithLogger sets a custom logger.
-func WithLogger(l *slog.Logger) Option {
+func WithLogger(l log.Logger) Option {
 	return func(p *Provider) { p.logger = l }
 }
 

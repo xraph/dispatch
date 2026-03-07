@@ -1,0 +1,199 @@
+package pages
+
+import (
+	"strconv"
+	"github.com/xraph/dispatch/workflow"
+	"github.com/xraph/dispatch/dashboard/components"
+	"github.com/xraph/forgeui/components/card"
+	"github.com/xraph/forgeui/components/button"
+	"github.com/xraph/forgeui/components/table"
+)
+
+templ WorkflowDetailPage(r *workflow.Run, checkpoints []*workflow.Checkpoint, childRuns []*workflow.Run) {
+	<div class="space-y-6">
+		@components.PageHeader(r.Name, "", "Workflow run details") {
+			@button.Button(button.Props{
+				Variant: button.VariantOutline,
+				Attributes: templ.Attributes{
+					"hx-get":    "/workflows",
+					"hx-target": "#content",
+				},
+			}) {
+				Back
+			}
+		}
+		<div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
+			@card.Card(card.Props{Class: "rounded-sm"}) {
+				@card.Header() {
+					@card.Title() {
+						Run Information
+					}
+				}
+				@card.Content() {
+					<dl class="grid grid-cols-2 gap-x-4 gap-y-3 text-sm">
+						@field("ID", r.ID.String(), true)
+						@field("Name", r.Name, false)
+						<dt class="text-muted-foreground">State</dt>
+						<dd>
+							@components.WorkflowStateBadge(string(r.State))
+						</dd>
+						if r.Version > 0 {
+							@field("Version", strconv.Itoa(r.Version), false)
+						}
+						@field("Started At", r.StartedAt.Format("Jan 02, 2006 15:04:05"), false)
+						if r.CompletedAt != nil {
+							@field("Completed At", r.CompletedAt.Format("Jan 02, 2006 15:04:05"), false)
+						}
+						if r.ParentRunID != nil {
+							<dt class="text-muted-foreground">Parent Run</dt>
+							<dd>
+								<a class="cursor-pointer text-primary hover:underline"
+									hx-get={ "/workflows/detail?id=" + r.ParentRunID.String() }
+									hx-target="#content">
+									<code class="text-xs bg-muted px-1.5 py-0.5 rounded-sm">{ r.ParentRunID.String() }</code>
+								</a>
+							</dd>
+						}
+						if r.ScopeAppID != "" {
+							@field("App ID", r.ScopeAppID, true)
+						}
+						if r.ScopeOrgID != "" {
+							@field("Org ID", r.ScopeOrgID, true)
+						}
+					</dl>
+				}
+			}
+			if r.Error != "" {
+				@card.Card(card.Props{Class: "rounded-sm"}) {
+					@card.Header() {
+						@card.Title() {
+							Error
+						}
+					}
+					@card.Content() {
+						<pre class="bg-destructive/10 text-destructive rounded-sm p-3 text-xs font-mono whitespace-pre-wrap max-h-48 overflow-y-auto">{ r.Error }</pre>
+					}
+				}
+			}
+		</div>
+		<div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
+			@card.Card(card.Props{Class: "rounded-sm"}) {
+				@card.Header() {
+					@card.Title() {
+						Input
+					}
+				}
+				@card.Content() {
+					@components.JsonViewer(r.Input)
+				}
+			}
+			@card.Card(card.Props{Class: "rounded-sm"}) {
+				@card.Header() {
+					@card.Title() {
+						Output
+					}
+				}
+				@card.Content() {
+					@components.JsonViewer(r.Output)
+				}
+			}
+		</div>
+		if len(checkpoints) > 0 {
+			@card.Card(card.Props{Class: "rounded-sm"}) {
+				@card.Header() {
+					@card.Title() {
+						Checkpoints
+					}
+				}
+				@card.Content() {
+					@table.Table() {
+						@table.Header() {
+							@table.Row() {
+								@table.Head() {
+									Step
+								}
+								@table.Head() {
+									Data
+								}
+							}
+						}
+						@table.Body() {
+							for _, cp := range checkpoints {
+								@table.Row() {
+									@table.Cell() {
+										<code class="text-xs bg-muted px-1 py-0.5 rounded-sm">{ cp.StepName }</code>
+									}
+									@table.Cell() {
+										@components.JsonViewer(cp.Data)
+									}
+								}
+							}
+						}
+					}
+				}
+			}
+		}
+		if len(childRuns) > 0 {
+			@card.Card(card.Props{Class: "rounded-sm"}) {
+				@card.Header() {
+					@card.Title() {
+						Child Workflow Runs
+					}
+				}
+				@card.Content() {
+					@table.Table() {
+						@table.Header() {
+							@table.Row() {
+								@table.Head() {
+									ID
+								}
+								@table.Head() {
+									Name
+								}
+								@table.Head() {
+									State
+								}
+								@table.Head() {
+									Action
+								}
+							}
+						}
+						@table.Body() {
+							for _, child := range childRuns {
+								@table.Row() {
+									@table.Cell() {
+										<code class="text-xs bg-muted px-1 py-0.5 rounded-sm">{ child.ID.String() }</code>
+									}
+									@table.Cell() {
+										<span class="font-medium text-sm">{ child.Name }</span>
+									}
+									@table.Cell() {
+										@components.WorkflowStateBadge(string(child.State))
+									}
+									@table.Cell() {
+										@button.Button(button.Props{
+											Variant: button.VariantOutline,
+											Size:    button.SizeSm,
+											Attributes: templ.Attributes{
+												"hx-get":    "/workflows/detail?id=" + child.ID.String(),
+												"hx-target": "#content",
+											},
+										}) {
+											View
+										}
+									}
+								}
+							}
+						}
+					}
+				}
+			}
+		}
+		if r.CompletedAt != nil {
+			<div class="text-sm text-muted-foreground">
+				{{ duration := r.CompletedAt.Sub(r.StartedAt) }}
+				Duration: { duration.String() }
+			</div>
+		}
+	</div>
+}

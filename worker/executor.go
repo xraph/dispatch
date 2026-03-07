@@ -6,8 +6,9 @@ package worker
 import (
 	"context"
 	"fmt"
-	"log/slog"
 	"time"
+
+	log "github.com/xraph/go-utils/log"
 
 	"github.com/xraph/dispatch/backoff"
 	"github.com/xraph/dispatch/dlq"
@@ -25,7 +26,7 @@ type Executor struct {
 	dlqService *dlq.Service
 	backoff    backoff.Strategy
 	mw         middleware.Middleware
-	logger     *slog.Logger
+	logger     log.Logger
 }
 
 // NewExecutor creates an Executor with the given dependencies.
@@ -35,7 +36,7 @@ func NewExecutor(
 	store job.Store,
 	dlqService *dlq.Service,
 	bo backoff.Strategy,
-	logger *slog.Logger,
+	logger log.Logger,
 	mws ...middleware.Middleware,
 ) *Executor {
 	return &Executor{
@@ -87,9 +88,9 @@ func (e *Executor) handleSuccess(ctx context.Context, j *job.Job, now time.Time,
 
 	if updateErr := e.store.UpdateJob(ctx, j); updateErr != nil {
 		e.logger.Error("failed to update job after success",
-			slog.String("job_id", j.ID.String()),
-			slog.String("job_name", j.Name),
-			slog.String("error", updateErr.Error()),
+			log.String("job_id", j.ID.String()),
+			log.String("job_name", j.Name),
+			log.String("error", updateErr.Error()),
 		)
 		return updateErr
 	}
@@ -119,8 +120,8 @@ func (e *Executor) scheduleRetry(ctx context.Context, j *job.Job, now time.Time)
 
 	if updateErr := e.store.UpdateJob(ctx, j); updateErr != nil {
 		e.logger.Error("failed to update job for retry",
-			slog.String("job_id", j.ID.String()),
-			slog.String("error", updateErr.Error()),
+			log.String("job_id", j.ID.String()),
+			log.String("error", updateErr.Error()),
 		)
 		return updateErr
 	}
@@ -128,11 +129,11 @@ func (e *Executor) scheduleRetry(ctx context.Context, j *job.Job, now time.Time)
 	e.extensions.EmitJobRetrying(ctx, j, j.RetryCount, nextRunAt)
 
 	e.logger.Info("job scheduled for retry",
-		slog.String("job_id", j.ID.String()),
-		slog.String("job_name", j.Name),
-		slog.Int("attempt", j.RetryCount),
-		slog.Int("max_retries", j.MaxRetries),
-		slog.Duration("delay", delay),
+		log.String("job_id", j.ID.String()),
+		log.String("job_name", j.Name),
+		log.Int("attempt", j.RetryCount),
+		log.Int("max_retries", j.MaxRetries),
+		log.Duration("delay", delay),
 	)
 
 	return fmt.Errorf("job %s retry %d/%d: %w", j.Name, j.RetryCount, j.MaxRetries, fmt.Errorf("%s", j.LastError))
@@ -144,8 +145,8 @@ func (e *Executor) sendToDLQ(ctx context.Context, j *job.Job, handlerErr error) 
 
 	if updateErr := e.store.UpdateJob(ctx, j); updateErr != nil {
 		e.logger.Error("failed to update job as failed",
-			slog.String("job_id", j.ID.String()),
-			slog.String("error", updateErr.Error()),
+			log.String("job_id", j.ID.String()),
+			log.String("error", updateErr.Error()),
 		)
 		return updateErr
 	}
@@ -153,8 +154,8 @@ func (e *Executor) sendToDLQ(ctx context.Context, j *job.Job, handlerErr error) 
 	if e.dlqService != nil {
 		if dlqErr := e.dlqService.Push(ctx, j, handlerErr); dlqErr != nil {
 			e.logger.Error("failed to push job to DLQ",
-				slog.String("job_id", j.ID.String()),
-				slog.String("error", dlqErr.Error()),
+				log.String("job_id", j.ID.String()),
+				log.String("error", dlqErr.Error()),
 			)
 		}
 	}
@@ -163,10 +164,10 @@ func (e *Executor) sendToDLQ(ctx context.Context, j *job.Job, handlerErr error) 
 	e.extensions.EmitJobDLQ(ctx, j, handlerErr)
 
 	e.logger.Warn("job moved to DLQ after exhausting retries",
-		slog.String("job_id", j.ID.String()),
-		slog.String("job_name", j.Name),
-		slog.Int("retry_count", j.RetryCount),
-		slog.String("error", handlerErr.Error()),
+		log.String("job_id", j.ID.String()),
+		log.String("job_name", j.Name),
+		log.Int("retry_count", j.RetryCount),
+		log.String("error", handlerErr.Error()),
 	)
 
 	return handlerErr

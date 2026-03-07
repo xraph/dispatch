@@ -2,11 +2,12 @@ package cron
 
 import (
 	"context"
-	"log/slog"
 	"sync"
 	"time"
 
 	cronlib "github.com/robfig/cron/v3"
+
+	log "github.com/xraph/go-utils/log"
 
 	"github.com/xraph/dispatch/cluster"
 	"github.com/xraph/dispatch/id"
@@ -60,7 +61,7 @@ type Scheduler struct {
 	enqueue      EnqueueFunc
 	emitter      Emitter
 	workerID     id.WorkerID
-	logger       *slog.Logger
+	logger       log.Logger
 
 	tickInterval time.Duration
 	lockTTL      time.Duration
@@ -81,11 +82,11 @@ func NewScheduler(
 	enqueue EnqueueFunc,
 	emitter Emitter,
 	workerID id.WorkerID,
-	logger *slog.Logger,
+	logger log.Logger,
 	opts ...SchedulerOption,
 ) *Scheduler {
 	if logger == nil {
-		logger = slog.Default()
+		logger = log.NewNoopLogger()
 	}
 	s := &Scheduler{
 		cronStore:    cronStore,
@@ -112,8 +113,8 @@ func (s *Scheduler) Start(_ context.Context) error {
 	go s.leaderLoop()
 	go s.tickLoop()
 	s.logger.Info("cron scheduler started",
-		slog.String("worker_id", s.workerID.String()),
-		slog.Duration("tick_interval", s.tickInterval),
+		log.String("worker_id", s.workerID.String()),
+		log.Duration("tick_interval", s.tickInterval),
 	)
 	return nil
 }
@@ -153,7 +154,7 @@ func (s *Scheduler) tryLeadership() {
 	// Try to renew first (cheap if already leader).
 	renewed, err := s.clusterStore.RenewLeadership(ctx, s.workerID, s.leaderTTL)
 	if err != nil {
-		s.logger.Warn("leadership renew error", slog.String("error", err.Error()))
+		s.logger.Warn("leadership renew error", log.String("error", err.Error()))
 		return
 	}
 	if renewed {
@@ -163,11 +164,11 @@ func (s *Scheduler) tryLeadership() {
 	// Not leader yet; try to acquire.
 	acquired, err := s.clusterStore.AcquireLeadership(ctx, s.workerID, s.leaderTTL)
 	if err != nil {
-		s.logger.Warn("leadership acquire error", slog.String("error", err.Error()))
+		s.logger.Warn("leadership acquire error", log.String("error", err.Error()))
 		return
 	}
 	if acquired {
-		s.logger.Info("acquired cron leadership", slog.String("worker_id", s.workerID.String()))
+		s.logger.Info("acquired cron leadership", log.String("worker_id", s.workerID.String()))
 	}
 }
 
@@ -194,7 +195,7 @@ func (s *Scheduler) tick() {
 	// Check if we are the leader.
 	leader, err := s.clusterStore.GetLeader(ctx)
 	if err != nil {
-		s.logger.Warn("get leader error", slog.String("error", err.Error()))
+		s.logger.Warn("get leader error", log.String("error", err.Error()))
 		return
 	}
 	if leader == nil || leader.ID.String() != s.workerID.String() {
@@ -204,7 +205,7 @@ func (s *Scheduler) tick() {
 	// List all cron entries.
 	entries, err := s.cronStore.ListCrons(ctx)
 	if err != nil {
-		s.logger.Error("list crons error", slog.String("error", err.Error()))
+		s.logger.Error("list crons error", log.String("error", err.Error()))
 		return
 	}
 
@@ -225,8 +226,8 @@ func (s *Scheduler) fireEntry(ctx context.Context, entry *Entry, now time.Time) 
 	acquired, err := s.cronStore.AcquireCronLock(ctx, entry.ID, s.workerID, s.lockTTL)
 	if err != nil {
 		s.logger.Error("acquire cron lock error",
-			slog.String("cron_id", entry.ID.String()),
-			slog.String("error", err.Error()),
+			log.String("cron_id", entry.ID.String()),
+			log.String("error", err.Error()),
 		)
 		return
 	}
@@ -242,14 +243,14 @@ func (s *Scheduler) fireEntry(ctx context.Context, entry *Entry, now time.Time) 
 	jobID, enqErr := s.enqueue(ctx, entry.JobName, entry.Payload, enqOpts...)
 	if enqErr != nil {
 		s.logger.Error("cron enqueue error",
-			slog.String("cron_name", entry.Name),
-			slog.String("job_name", entry.JobName),
-			slog.String("error", enqErr.Error()),
+			log.String("cron_name", entry.Name),
+			log.String("job_name", entry.JobName),
+			log.String("error", enqErr.Error()),
 		)
 		if relErr := s.cronStore.ReleaseCronLock(ctx, entry.ID, s.workerID); relErr != nil {
 			s.logger.Error("release cron lock error",
-				slog.String("cron_id", entry.ID.String()),
-				slog.String("error", relErr.Error()),
+				log.String("cron_id", entry.ID.String()),
+				log.String("error", relErr.Error()),
 			)
 		}
 		return
@@ -258,8 +259,8 @@ func (s *Scheduler) fireEntry(ctx context.Context, entry *Entry, now time.Time) 
 	// Update LastRunAt.
 	if updateErr := s.cronStore.UpdateCronLastRun(ctx, entry.ID, now); updateErr != nil {
 		s.logger.Error("update cron last run error",
-			slog.String("cron_id", entry.ID.String()),
-			slog.String("error", updateErr.Error()),
+			log.String("cron_id", entry.ID.String()),
+			log.String("error", updateErr.Error()),
 		)
 	}
 
@@ -267,17 +268,17 @@ func (s *Scheduler) fireEntry(ctx context.Context, entry *Entry, now time.Time) 
 	sched, parseErr := s.getOrParseSchedule(entry.Schedule)
 	if parseErr != nil {
 		s.logger.Error("parse cron schedule error",
-			slog.String("cron_name", entry.Name),
-			slog.String("schedule", entry.Schedule),
-			slog.String("error", parseErr.Error()),
+			log.String("cron_name", entry.Name),
+			log.String("schedule", entry.Schedule),
+			log.String("error", parseErr.Error()),
 		)
 	} else {
 		next := sched.Next(now)
 		entry.NextRunAt = &next
 		if updateErr := s.cronStore.UpdateCronEntry(ctx, entry); updateErr != nil {
 			s.logger.Error("update cron next run error",
-				slog.String("cron_id", entry.ID.String()),
-				slog.String("error", updateErr.Error()),
+				log.String("cron_id", entry.ID.String()),
+				log.String("error", updateErr.Error()),
 			)
 		}
 	}
@@ -285,8 +286,8 @@ func (s *Scheduler) fireEntry(ctx context.Context, entry *Entry, now time.Time) 
 	// Release lock.
 	if relErr := s.cronStore.ReleaseCronLock(ctx, entry.ID, s.workerID); relErr != nil {
 		s.logger.Error("release cron lock error",
-			slog.String("cron_id", entry.ID.String()),
-			slog.String("error", relErr.Error()),
+			log.String("cron_id", entry.ID.String()),
+			log.String("error", relErr.Error()),
 		)
 	}
 
@@ -296,9 +297,9 @@ func (s *Scheduler) fireEntry(ctx context.Context, entry *Entry, now time.Time) 
 	}
 
 	s.logger.Info("cron fired",
-		slog.String("cron_name", entry.Name),
-		slog.String("job_name", entry.JobName),
-		slog.String("job_id", jobID.String()),
+		log.String("cron_name", entry.Name),
+		log.String("job_name", entry.JobName),
+		log.String("job_id", jobID.String()),
 	)
 }
 

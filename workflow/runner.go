@@ -4,8 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"log/slog"
 	"time"
+
+	log "github.com/xraph/go-utils/log"
 
 	"github.com/xraph/dispatch"
 	"github.com/xraph/dispatch/event"
@@ -30,7 +31,7 @@ type Runner struct {
 	store      Store
 	eventStore event.Store
 	emitter    RunEmitter
-	logger     *slog.Logger
+	logger     log.Logger
 }
 
 // NewRunner creates a workflow runner.
@@ -39,7 +40,7 @@ func NewRunner(
 	store Store,
 	eventStore event.Store,
 	emitter RunEmitter,
-	logger *slog.Logger,
+	logger log.Logger,
 ) *Runner {
 	return &Runner{
 		registry:   registry,
@@ -121,13 +122,13 @@ func (r *Runner) executeRun(ctx context.Context, run *Run, runner RunnerFunc, in
 		// Run saga compensations before marking as failed.
 		if len(wf.Compensations()) > 0 {
 			r.logger.Info("running saga compensations",
-				slog.String("run_id", run.ID.String()),
-				slog.Int("count", len(wf.Compensations())),
+				log.String("run_id", run.ID.String()),
+				log.Int("count", len(wf.Compensations())),
 			)
 			if compErr := wf.RunCompensations(); compErr != nil {
 				r.logger.Error("compensation errors during workflow failure",
-					slog.String("run_id", run.ID.String()),
-					slog.String("error", compErr.Error()),
+					log.String("run_id", run.ID.String()),
+					log.String("error", compErr.Error()),
 				)
 			}
 		}
@@ -137,8 +138,8 @@ func (r *Runner) executeRun(ctx context.Context, run *Run, runner RunnerFunc, in
 		run.CompletedAt = &now
 		if updateErr := r.store.UpdateRun(ctx, run); updateErr != nil {
 			r.logger.Error("failed to update run as failed",
-				slog.String("run_id", run.ID.String()),
-				slog.String("error", updateErr.Error()),
+				log.String("run_id", run.ID.String()),
+				log.String("error", updateErr.Error()),
 			)
 		}
 		r.emitter.EmitWorkflowFailed(ctx, run, err)
@@ -149,8 +150,8 @@ func (r *Runner) executeRun(ctx context.Context, run *Run, runner RunnerFunc, in
 	run.CompletedAt = &now
 	if updateErr := r.store.UpdateRun(ctx, run); updateErr != nil {
 		r.logger.Error("failed to update run as completed",
-			slog.String("run_id", run.ID.String()),
-			slog.String("error", updateErr.Error()),
+			log.String("run_id", run.ID.String()),
+			log.String("error", updateErr.Error()),
 		)
 	}
 	r.emitter.EmitWorkflowCompleted(ctx, run, elapsed)
@@ -294,13 +295,13 @@ func (r *Runner) ResumeAll(ctx context.Context) error {
 
 	for _, run := range runs {
 		r.logger.Info("resuming workflow run",
-			slog.String("run_id", run.ID.String()),
-			slog.String("workflow", run.Name),
+			log.String("run_id", run.ID.String()),
+			log.String("workflow", run.Name),
 		)
 		if resumeErr := r.Resume(ctx, run.ID); resumeErr != nil {
 			r.logger.Error("failed to resume workflow run",
-				slog.String("run_id", run.ID.String()),
-				slog.String("error", resumeErr.Error()),
+				log.String("run_id", run.ID.String()),
+				log.String("error", resumeErr.Error()),
 			)
 		}
 	}

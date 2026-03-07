@@ -1,0 +1,119 @@
+package pages
+
+import (
+	"strconv"
+	"github.com/xraph/dispatch/dashboard/components"
+	"github.com/xraph/forgeui/components/card"
+	"github.com/xraph/forgeui/components/table"
+	"github.com/xraph/forgeui/components/badge"
+)
+
+// QueueInfo holds per-queue display data.
+type QueueInfo struct {
+	Name           string
+	Active         int
+	MaxConcurrency int
+	RateLimit      float64
+	RateBurst      int
+	HasConfig      bool // true if an explicit queue.Config exists
+}
+
+templ QueuesPage(queues []QueueInfo, concurrency int) {
+	<div class="space-y-6">
+		@components.PageHeader("Queues", "", "Queue activity and configuration")
+		<div class="grid grid-cols-2 lg:grid-cols-4 gap-4">
+			@components.StatCard("layers", "Queues", strconv.Itoa(len(queues)), "Configured queues")
+			@components.StatCard("zap", "Concurrency", strconv.Itoa(concurrency), "Max parallel jobs")
+			{{ totalActive := 0 }}
+			for _, q := range queues {
+				{{ totalActive += q.Active }}
+			}
+			@components.StatCard("play", "Active Jobs", strconv.Itoa(totalActive), "Currently processing")
+			{{ idle := concurrency - totalActive }}
+			if idle < 0 {
+				{{ idle = 0 }}
+			}
+			@components.StatCard("pause", "Idle Slots", strconv.Itoa(idle), "Available capacity")
+		</div>
+		@card.Card(card.Props{Class: "rounded-sm"}) {
+			@card.Header() {
+				@card.Title() {
+					Queue Activity
+				}
+				@card.Description() {
+					Active jobs and configuration per queue
+				}
+			}
+			@card.Content() {
+				if len(queues) == 0 {
+					@components.EmptyState("layers", "No queues configured", "Queues will appear when the dispatcher starts polling")
+				} else {
+					@table.Table() {
+						@table.Header() {
+							@table.Row() {
+								@table.Head() {
+									Queue
+								}
+								@table.Head() {
+									Active Jobs
+								}
+								@table.Head() {
+									Max Concurrency
+								}
+								@table.Head() {
+									Rate Limit
+								}
+								@table.Head() {
+									Status
+								}
+							}
+						}
+						@table.Body() {
+							for _, q := range queues {
+								@table.Row(table.RowProps{
+									Class: "cursor-pointer hover:bg-muted/50",
+									Attributes: templ.Attributes{
+										"hx-get":    "/queues/detail?name=" + q.Name,
+										"hx-target": "#content",
+									},
+								}) {
+									@table.Cell() {
+										<code class="text-sm font-medium bg-muted px-2 py-0.5 rounded-sm">{ q.Name }</code>
+									}
+									@table.Cell() {
+										<span class="font-mono text-sm">{ strconv.Itoa(q.Active) }</span>
+									}
+									@table.Cell() {
+										if q.HasConfig && q.MaxConcurrency > 0 {
+											<span class="font-mono text-sm">{ strconv.Itoa(q.MaxConcurrency) }</span>
+										} else {
+											<span class="text-sm text-muted-foreground">unlimited</span>
+										}
+									}
+									@table.Cell() {
+										if q.HasConfig && q.RateLimit > 0 {
+											<span class="font-mono text-sm">{ strconv.FormatFloat(q.RateLimit, 'f', 1, 64) }/s</span>
+										} else {
+											<span class="text-sm text-muted-foreground">none</span>
+										}
+									}
+									@table.Cell() {
+										if q.Active > 0 {
+											@badge.Badge(badge.Props{Variant: badge.VariantDefault}) {
+												Processing
+											}
+										} else {
+											@badge.Badge(badge.Props{Variant: badge.VariantSecondary}) {
+												Idle
+											}
+										}
+									}
+								}
+							}
+						}
+					}
+				}
+			}
+		}
+	</div>
+}

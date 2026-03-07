@@ -1,0 +1,45 @@
+package pages
+
+import (
+	"fmt"
+	"github.com/xraph/dispatch/dashboard/shared"
+	"github.com/xraph/forgeui/components/button"
+)
+
+templ Pagination(pg shared.PaginationMeta, baseURL string) {
+	if pg.TotalPages > 1 {
+		<div class="flex items-center justify-between pt-4">
+			<span class="text-sm text-muted-foreground">
+				{ fmt.Sprintf("Page %d of %d (%d total)", pg.CurrentPage, pg.TotalPages, pg.Total) }
+			</span>
+			<div class="flex gap-2">
+				if pg.CurrentPage > 1 {
+					@button.Button(button.Props{
+						Variant: button.VariantOutline,
+						Size:    button.SizeSm,
+						Attributes: templ.Attributes{
+							"hx-get":    fmt.Sprintf("%s&offset=%d&limit=%d", baseURL, pg.Offset-pg.Limit, pg.Limit),
+							"hx-target": "#content",
+							"hx-swap":   "innerHTML",
+						},
+					}) {
+						Previous
+					}
+				}
+				if pg.CurrentPage < pg.TotalPages {
+					@button.Button(button.Props{
+						Variant: button.VariantOutline,
+						Size:    button.SizeSm,
+						Attributes: templ.Attributes{
+							"hx-get":    fmt.Sprintf("%s&offset=%d&limit=%d", baseURL, pg.Offset+pg.Limit, pg.Limit),
+							"hx-target": "#content",
+							"hx-swap":   "innerHTML",
+						},
+					}) {
+						Next
+					}
+				}
+			</div>
+		</div>
+	}
+}

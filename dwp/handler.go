@@ -3,7 +3,8 @@ package dwp
 import (
 	"context"
 	"encoding/json"
-	"log/slog"
+
+	log "github.com/xraph/go-utils/log"
 
 	"github.com/xraph/dispatch/engine"
 	"github.com/xraph/dispatch/id"
@@ -18,11 +19,11 @@ type Handler struct {
 	eng        *engine.Engine
 	broker     *stream.Broker
 	federation *Federation
-	logger     *slog.Logger
+	logger     log.Logger
 }
 
 // NewHandler creates a new DWP method handler.
-func NewHandler(eng *engine.Engine, broker *stream.Broker, logger *slog.Logger) *Handler {
+func NewHandler(eng *engine.Engine, broker *stream.Broker, logger log.Logger) *Handler {
 	return &Handler{eng: eng, broker: broker, logger: logger}
 }
 

@@ -231,3 +231,48 @@ func TestUniqueness(t *testing.T) {
 		t.Errorf("two consecutive NewJobID() calls returned the same ID: %q", a.String())
 	}
 }
+
+func TestBSONRoundTrip(t *testing.T) {
+	original := id.NewJobID()
+
+	bsonType, data, err := original.MarshalBSONValue()
+	if err != nil {
+		t.Fatalf("MarshalBSONValue failed: %v", err)
+	}
+	if bsonType != 0x02 {
+		t.Fatalf("expected BSON string type 0x02, got 0x%02x", bsonType)
+	}
+
+	var restored id.ID
+	if unmarshalErr := restored.UnmarshalBSONValue(bsonType, data); unmarshalErr != nil {
+		t.Fatalf("UnmarshalBSONValue failed: %v", unmarshalErr)
+	}
+	if restored.String() != original.String() {
+		t.Errorf("BSON round-trip mismatch: %q != %q", restored.String(), original.String())
+	}
+
+	var nilID id.ID
+	bsonType, data, err = nilID.MarshalBSONValue()
+	if err != nil {
+		t.Fatalf("MarshalBSONValue(nil) failed: %v", err)
+	}
+	if bsonType != 0x0A {
+		t.Fatalf("expected BSON null type 0x0A, got 0x%02x", bsonType)
+	}
+
+	var restored2 id.ID
+	if unmarshalErr := restored2.UnmarshalBSONValue(bsonType, data); unmarshalErr != nil {
+		t.Fatalf("UnmarshalBSONValue(nil) failed: %v", unmarshalErr)
+	}
+	if !restored2.IsNil() {
+		t.Error("expected nil after BSON round-trip of nil ID")
+	}
+}
+
+func TestBSONUnmarshalInvalidType(t *testing.T) {
+	var restored id.ID
+	err := restored.UnmarshalBSONValue(0x01, []byte{0x00, 0x00, 0x00, 0x00})
+	if err == nil {
+		t.Error("expected error for invalid BSON type, got nil")
+	}
+}

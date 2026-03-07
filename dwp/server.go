@@ -3,7 +3,8 @@ package dwp
 import (
 	"encoding/json"
 	"fmt"
-	"log/slog"
+
+	log "github.com/xraph/go-utils/log"
 
 	"github.com/xraph/forge"
 
@@ -19,7 +20,7 @@ type Server struct {
 	auth         Authenticator
 	defaultCodec Codec
 	conns        *ConnectionManager
-	logger       *slog.Logger
+	logger       log.Logger
 	basePath     string
 }
 
@@ -30,7 +31,7 @@ func NewServer(broker *stream.Broker, handler *Handler, opts ...Option) *Server 
 		handler:      handler,
 		defaultCodec: &JSONCodec{},
 		conns:        NewConnectionManager(),
-		logger:       slog.Default(),
+		logger:       log.NewNoopLogger(),
 		basePath:     "/dwp",
 	}
 	for _, opt := range opts {
@@ -52,24 +53,24 @@ func (s *Server) Connections() *ConnectionManager { return s.conns }
 func (s *Server) RegisterRoutes(router forge.Router) {
 	// Primary: WebSocket
 	if err := router.WebSocket(s.basePath, s.handleWebSocket); err != nil {
-		s.logger.Error("failed to register DWP WebSocket", slog.String("error", err.Error()))
+		s.logger.Error("failed to register DWP WebSocket", log.String("error", err.Error()))
 	}
 
 	// Fallback: SSE for read-only subscriptions (uses EventStream handler)
 	if err := router.EventStream(s.basePath+"/sse", s.handleSSE); err != nil {
-		s.logger.Error("failed to register DWP SSE", slog.String("error", err.Error()))
+		s.logger.Error("failed to register DWP SSE", log.String("error", err.Error()))
 	}
 
 	// One-shot: HTTP RPC
 	if err := router.POST(s.basePath+"/rpc", s.handleHTTPRPC); err != nil {
-		s.logger.Error("failed to register DWP RPC", slog.String("error", err.Error()))
+		s.logger.Error("failed to register DWP RPC", log.String("error", err.Error()))
 	}
 }
 
 // handleWebSocket is the main WebSocket connection handler.
 func (s *Server) handleWebSocket(ctx forge.Context, conn forge.Connection) error {
 	connID := conn.ID()
-	s.logger.Info("DWP WebSocket connected", slog.String("conn_id", connID))
+	s.logger.Info("DWP WebSocket connected", log.String("conn_id", connID))
 
 	// Wait for auth frame.
 	authData, readErr := conn.Read()
@@ -125,7 +126,7 @@ func (s *Server) handleWebSocket(ctx forge.Context, conn forge.Connection) error
 	defer func() {
 		s.broker.RemoveSubscriber(connID)
 		s.conns.Remove(connID)
-		s.logger.Info("DWP WebSocket disconnected", slog.String("conn_id", connID))
+		s.logger.Info("DWP WebSocket disconnected", log.String("conn_id", connID))
 	}()
 
 	// Send auth response.
@@ -141,9 +142,9 @@ func (s *Server) handleWebSocket(ctx forge.Context, conn forge.Connection) error
 	}
 
 	s.logger.Info("DWP authenticated",
-		slog.String("conn_id", connID),
-		slog.String("subject", identity.Subject),
-		slog.String("codec", codec.Name()),
+		log.String("conn_id", connID),
+		log.String("subject", identity.Subject),
+		log.String("codec", codec.Name()),
 	)
 
 	// Create a subscriber for this connection and start a goroutine
@@ -164,7 +165,7 @@ func (s *Server) handleWebSocket(ctx forge.Context, conn forge.Connection) error
 		if decErr != nil {
 			errFrame := NewErrorFrame("", ErrCodeBadRequest, "invalid frame: "+decErr.Error())
 			if writeErr := s.writeFrame(conn, codec, errFrame); writeErr != nil {
-				s.logger.Warn("failed to write error frame", slog.String("error", writeErr.Error()))
+				s.logger.Warn("failed to write error frame", log.String("error", writeErr.Error()))
 			}
 			continue
 		}
@@ -178,7 +179,7 @@ func (s *Server) handleWebSocket(ctx forge.Context, conn forge.Connection) error
 				Timestamp: frame.Timestamp,
 			}
 			if writeErr := s.writeFrame(conn, codec, pong); writeErr != nil {
-				s.logger.Warn("failed to write pong frame", slog.String("error", writeErr.Error()))
+				s.logger.Warn("failed to write pong frame", log.String("error", writeErr.Error()))
 			}
 			continue
 		}
@@ -189,7 +190,7 @@ func (s *Server) handleWebSocket(ctx forge.Context, conn forge.Connection) error
 			if reqScope != "" && !identity.HasScope(reqScope) {
 				errFrame := NewErrorFrame(frame.ID, ErrCodeForbidden, "insufficient permissions")
 				if writeErr := s.writeFrame(conn, codec, errFrame); writeErr != nil {
-					s.logger.Warn("failed to write forbidden frame", slog.String("error", writeErr.Error()))
+					s.logger.Warn("failed to write forbidden frame", log.String("error", writeErr.Error()))
 				}
 				continue
 			}
@@ -220,7 +221,7 @@ func (s *Server) handleWebSocket(ctx forge.Context, conn forge.Connection) error
 			}
 
 			if writeErr := s.writeFrame(conn, codec, respFrame); writeErr != nil {
-				s.logger.Warn("failed to write response frame", slog.String("error", writeErr.Error()))
+				s.logger.Warn("failed to write response frame", log.String("error", writeErr.Error()))
 			}
 		}
 	}

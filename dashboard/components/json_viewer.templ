@@ -1,0 +1,26 @@
+package components
+
+import "encoding/json"
+
+func formatJSON(data []byte) string {
+	if len(data) == 0 {
+		return "{}"
+	}
+	var v interface{}
+	if err := json.Unmarshal(data, &v); err != nil {
+		return string(data)
+	}
+	pretty, err := json.MarshalIndent(v, "", "  ")
+	if err != nil {
+		return string(data)
+	}
+	return string(pretty)
+}
+
+templ JsonViewer(data []byte) {
+	if len(data) == 0 {
+		<p class="text-sm text-muted-foreground">No data</p>
+	} else {
+		<pre class="bg-muted rounded-sm p-3 text-xs font-mono whitespace-pre-wrap max-h-64 overflow-y-auto">{ formatJSON(data) }</pre>
+	}
+}

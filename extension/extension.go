@@ -12,17 +12,21 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"log/slog"
 	"net/http"
 
 	"github.com/xraph/forge"
+	"github.com/xraph/forge/extensions/dashboard"
+	"github.com/xraph/forge/extensions/dashboard/contributor"
 	"github.com/xraph/grove"
 	"github.com/xraph/grove/kv"
 	"github.com/xraph/vessel"
 
+	log "github.com/xraph/go-utils/log"
+
 	"github.com/xraph/dispatch"
 	"github.com/xraph/dispatch/api"
 	"github.com/xraph/dispatch/backoff"
+	dispatchdash "github.com/xraph/dispatch/dashboard"
 	"github.com/xraph/dispatch/dwp"
 	"github.com/xraph/dispatch/engine"
 	"github.com/xraph/dispatch/ext"
@@ -42,8 +46,11 @@ const ExtensionDescription = "Durable execution engine for background jobs, work
 // ExtensionVersion is the semantic version.
 const ExtensionVersion = "0.1.0"
 
-// Ensure Extension implements forge.Extension at compile time.
-var _ forge.Extension = (*Extension)(nil)
+// Ensure Extension implements forge.Extension and dashboard.DashboardAware at compile time.
+var (
+	_ forge.Extension          = (*Extension)(nil)
+	_ dashboard.DashboardAware = (*Extension)(nil)
+)
 
 // Extension adapts Dispatch as a Forge extension. It implements the
 // forge.Extension interface so Dispatch can be mounted into any Forge app.
@@ -54,7 +61,7 @@ type Extension struct {
 	eng          *engine.Engine
 	apiHandler   *api.API
 	dwpServer    *dwp.Server
-	logger       *slog.Logger
+	logger       log.Logger
 	dispatchOpts []dispatch.Option
 	exts         []ext.Extension
 	mws          []mw.Middleware
@@ -130,11 +137,21 @@ func (e *Extension) init(fapp forge.App) error {
 			return fmt.Errorf("dispatch: %w", err)
 		}
 		e.dispatchOpts = append(e.dispatchOpts, dispatch.WithStore(redisstore.New(kvStore)))
+	} else if db, err := vessel.Inject[*grove.DB](fapp.Container()); err == nil {
+		// Auto-discover default grove.DB from container (matches authsome/cortex pattern).
+		s, err := e.buildStoreFromGroveDB(db)
+		if err != nil {
+			return err
+		}
+		e.dispatchOpts = append(e.dispatchOpts, dispatch.WithStore(s))
+		e.Logger().Info("dispatch: auto-discovered grove.DB from container",
+			forge.F("driver", db.Driver().Name()),
+		)
 	}
 
 	logger := e.logger
 	if logger == nil {
-		logger = slog.Default()
+		logger = log.NewNoopLogger()
 	}
 
 	// Build dispatcher options.
@@ -179,7 +196,11 @@ func (e *Extension) init(fapp forge.App) error {
 
 	// Register HTTP routes unless disabled.
 	if !e.config.DisableRoutes {
-		e.apiHandler.RegisterRoutes(fapp.Router())
+		basePath := e.config.BasePath
+		if basePath == "" {
+			basePath = "/api/dispatch"
+		}
+		e.apiHandler.RegisterRoutes(fapp.Router().Group(basePath))
 	}
 
 	// Create DWP server if stream broker is available.
@@ -432,4 +453,14 @@ func (e *Extension) resolveGroveKV(fapp forge.App) (*kv.Store, error) {
 		return nil, fmt.Errorf("default grove kv store not found in container: %w", err)
 	}
 	return s, nil
+}
+
+// DashboardContributor implements dashboard.DashboardAware. It returns a
+// LocalContributor that renders dispatch pages, widgets, and settings in the
+// Forge dashboard using templ + ForgeUI.
+func (e *Extension) DashboardContributor() contributor.LocalContributor {
+	return dispatchdash.New(
+		dispatchdash.NewManifest(),
+		e.eng,
+	)
 }

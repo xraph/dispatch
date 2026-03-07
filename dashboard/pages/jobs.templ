@@ -1,0 +1,125 @@
+package pages
+
+import (
+	"fmt"
+	"strconv"
+	"github.com/xraph/dispatch/job"
+	"github.com/xraph/dispatch/dashboard/shared"
+	"github.com/xraph/dispatch/dashboard/components"
+	"github.com/xraph/forgeui/components/button"
+	"github.com/xraph/forgeui/components/input"
+	"github.com/xraph/forgeui/components/table"
+)
+
+templ JobsPage(jobs []*job.Job, stateFilter string, queueFilter string, pg shared.PaginationMeta) {
+	<div class="space-y-6">
+		@components.PageHeader("Jobs", fmt.Sprintf("%d", pg.Total), "Manage background jobs") {
+		}
+		<div class="flex gap-4">
+			<select name="state" class="flex h-10 rounded-sm border border-input bg-background px-3 py-2 text-sm"
+				hx-get="/jobs"
+				hx-target="#content"
+				hx-trigger="change"
+				hx-push-url="true"
+				hx-include="[name='state'],[name='queue']">
+				<option value="">All States</option>
+				<option value="pending" selected?={ stateFilter == "pending" }>Pending</option>
+				<option value="running" selected?={ stateFilter == "running" }>Running</option>
+				<option value="completed" selected?={ stateFilter == "completed" }>Completed</option>
+				<option value="failed" selected?={ stateFilter == "failed" }>Failed</option>
+				<option value="retrying" selected?={ stateFilter == "retrying" }>Retrying</option>
+				<option value="cancelled" selected?={ stateFilter == "cancelled" }>Cancelled</option>
+			</select>
+			@input.Input(input.Props{
+				Type:        "search",
+				Placeholder: "Filter by queue...",
+				Name:        "queue",
+				Value:       queueFilter,
+				Class:       "max-w-sm rounded-sm",
+				Attributes: templ.Attributes{
+					"hx-get":      "/jobs",
+					"hx-target":   "#content",
+					"hx-trigger":  "input changed delay:300ms",
+					"hx-push-url": "true",
+					"hx-include":  "[name='state'],[name='queue']",
+				},
+			})
+		</div>
+		if len(jobs) == 0 {
+			@components.EmptyState("briefcase", "No jobs found", "Jobs will appear here when enqueued")
+		} else {
+			@table.Table() {
+				@table.Header() {
+					@table.Row() {
+						@table.Head() {
+							Name
+						}
+						@table.Head() {
+							Queue
+						}
+						@table.Head() {
+							State
+						}
+						@table.Head() {
+							Priority
+						}
+						@table.Head() {
+							Retries
+						}
+						@table.Head() {
+							Created
+						}
+						@table.Head() {
+							Action
+						}
+					}
+				}
+				@table.Body() {
+					for _, j := range jobs {
+						@table.Row(table.RowProps{
+							Class: "cursor-pointer hover:bg-muted/50",
+							Attributes: templ.Attributes{
+								"hx-get":    "/jobs/detail?id=" + j.ID.String(),
+								"hx-target": "#content",
+							},
+						}) {
+							@table.Cell() {
+								<span class="font-medium text-sm">{ j.Name }</span>
+							}
+							@table.Cell() {
+								<code class="text-xs bg-muted px-1 py-0.5 rounded-sm">{ j.Queue }</code>
+							}
+							@table.Cell() {
+								@components.JobStateBadge(string(j.State))
+							}
+							@table.Cell() {
+								{ strconv.Itoa(j.Priority) }
+							}
+							@table.Cell() {
+								<span class="text-sm">{ fmt.Sprintf("%d/%d", j.RetryCount, j.MaxRetries) }</span>
+							}
+							@table.Cell() {
+								{{ created := j.CreatedAt.Format("Jan 02 15:04") }}
+								<span class="text-xs text-muted-foreground">{ created }</span>
+							}
+							@table.Cell() {
+								@button.Button(button.Props{
+									Variant: button.VariantOutline,
+									Size:    button.SizeSm,
+									Attributes: templ.Attributes{
+										"hx-get":    "/jobs/detail?id=" + j.ID.String(),
+										"hx-target": "#content",
+									},
+								}) {
+									View
+								}
+							}
+						}
+					}
+				}
+			}
+			{{ baseURL := "/jobs?state=" + stateFilter + "&queue=" + queueFilter }}
+			@Pagination(pg, baseURL)
+		}
+	</div>
+}

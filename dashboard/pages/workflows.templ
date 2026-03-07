@@ -1,0 +1,113 @@
+package pages
+
+import (
+	"fmt"
+	"github.com/xraph/dispatch/workflow"
+	"github.com/xraph/dispatch/dashboard/shared"
+	"github.com/xraph/dispatch/dashboard/components"
+	"github.com/xraph/forgeui/components/button"
+	"github.com/xraph/forgeui/components/table"
+)
+
+templ WorkflowsPage(runs []*workflow.Run, registeredNames []string, stateFilter string, pg shared.PaginationMeta) {
+	<div class="space-y-6">
+		@components.PageHeader("Workflow Runs", fmt.Sprintf("%d", pg.Total), "View workflow execution history") {
+		}
+		<div class="flex gap-4">
+			<select name="state" class="flex h-10 rounded-sm border border-input bg-background px-3 py-2 text-sm"
+				hx-get="/workflows"
+				hx-target="#content"
+				hx-trigger="change"
+				hx-push-url="true"
+				hx-include="[name='state']">
+				<option value="">All States</option>
+				<option value="running" selected?={ stateFilter == "running" }>Running</option>
+				<option value="completed" selected?={ stateFilter == "completed" }>Completed</option>
+				<option value="failed" selected?={ stateFilter == "failed" }>Failed</option>
+			</select>
+		</div>
+		if len(registeredNames) > 0 {
+			<div class="flex flex-wrap gap-2">
+				<span class="text-sm text-muted-foreground">Registered:</span>
+				for _, name := range registeredNames {
+					<code class="text-xs bg-muted px-1.5 py-0.5 rounded-sm">{ name }</code>
+				}
+			</div>
+		}
+		if len(runs) == 0 {
+			@components.EmptyState("git-branch", "No workflow runs found", "Workflow runs will appear here when workflows are started")
+		} else {
+			@table.Table() {
+				@table.Header() {
+					@table.Row() {
+						@table.Head() {
+							ID
+						}
+						@table.Head() {
+							Name
+						}
+						@table.Head() {
+							State
+						}
+						@table.Head() {
+							Started
+						}
+						@table.Head() {
+							Completed
+						}
+						@table.Head() {
+							Action
+						}
+					}
+				}
+				@table.Body() {
+					for _, r := range runs {
+						@table.Row(table.RowProps{
+							Class: "cursor-pointer hover:bg-muted/50",
+							Attributes: templ.Attributes{
+								"hx-get":    "/workflows/detail?id=" + r.ID.String(),
+								"hx-target": "#content",
+							},
+						}) {
+							@table.Cell() {
+								<code class="text-xs bg-muted px-1 py-0.5 rounded-sm">{ r.ID.String() }</code>
+							}
+							@table.Cell() {
+								<span class="font-medium text-sm">{ r.Name }</span>
+							}
+							@table.Cell() {
+								@components.WorkflowStateBadge(string(r.State))
+							}
+							@table.Cell() {
+								{{ started := r.StartedAt.Format("Jan 02 15:04") }}
+								<span class="text-xs text-muted-foreground">{ started }</span>
+							}
+							@table.Cell() {
+								if r.CompletedAt != nil {
+									{{ completed := r.CompletedAt.Format("Jan 02 15:04") }}
+									<span class="text-xs text-muted-foreground">{ completed }</span>
+								} else {
+									<span class="text-xs text-muted-foreground">-</span>
+								}
+							}
+							@table.Cell() {
+								@button.Button(button.Props{
+									Variant: button.VariantOutline,
+									Size:    button.SizeSm,
+									Attributes: templ.Attributes{
+										"hx-get":    "/workflows/detail?id=" + r.ID.String(),
+										"hx-target": "#content",
+									},
+								}) {
+									View
+								}
+							}
+						}
+					}
+				}
+			}
+			{{ baseURL := "/workflows?state=" + stateFilter }}
+			@Pagination(pg, baseURL)
+		}
+	</div>
+}

@@ -1,8 +1,9 @@
 package client
 
 import (
-	"log/slog"
 	"time"
+
+	log "github.com/xraph/go-utils/log"
 )
 
 // Option configures a Client.
@@ -20,7 +21,7 @@ func WithFormat(format string) Option {
 }
 
 // WithLogger sets the structured logger.
-func WithLogger(logger *slog.Logger) Option {
+func WithLogger(logger log.Logger) Option {
 	return func(c *Client) { c.logger = logger }
 }
 

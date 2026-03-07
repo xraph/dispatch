@@ -3,10 +3,10 @@ package workflow_test
 import (
 	"context"
 	"errors"
-	"io"
-	"log/slog"
 	"testing"
 	"time"
+
+	log "github.com/xraph/go-utils/log"
 
 	"github.com/xraph/dispatch/store/memory"
 	"github.com/xraph/dispatch/workflow"
@@ -26,7 +26,7 @@ func (noopEmitter) EmitWorkflowFailed(_ context.Context, _ *workflow.Run, _ erro
 func newTestRunner() (*workflow.Runner, *workflow.Registry, *memory.Store) {
 	s := memory.New()
 	reg := workflow.NewRegistry()
-	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	logger := log.NewNoopLogger()
 	runner := workflow.NewRunner(reg, s, s, noopEmitter{}, logger)
 	return runner, reg, s
 }
@@ -109,7 +109,7 @@ func TestRunner_StartUnknownWorkflow(t *testing.T) {
 func TestRunner_ResumeFromCheckpoint(t *testing.T) {
 	s := memory.New()
 	reg := workflow.NewRegistry()
-	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	logger := log.NewNoopLogger()
 	runner := workflow.NewRunner(reg, s, s, noopEmitter{}, logger)
 
 	var step1Calls, step2Calls int
@@ -163,7 +163,7 @@ func TestRunner_ResumeFromCheckpoint(t *testing.T) {
 func TestRunner_ResumeAll(t *testing.T) {
 	s := memory.New()
 	reg := workflow.NewRegistry()
-	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	logger := log.NewNoopLogger()
 	runner := workflow.NewRunner(reg, s, s, noopEmitter{}, logger)
 
 	var calls int

@@ -1,0 +1,67 @@
+package widgets
+
+import (
+	"github.com/xraph/dispatch/job"
+	"github.com/xraph/dispatch/dashboard/components"
+	"github.com/xraph/forgeui/components/table"
+	"github.com/xraph/forgeui/components/button"
+)
+
+templ RecentJobsWidget(jobs []*job.Job) {
+	if len(jobs) == 0 {
+		@components.EmptyState("briefcase", "No recent jobs", "Jobs will appear here when enqueued")
+	} else {
+		@table.Table() {
+			@table.Header() {
+				@table.Row() {
+					@table.Head() {
+						Name
+					}
+					@table.Head() {
+						Queue
+					}
+					@table.Head() {
+						State
+					}
+					@table.Head() {
+						Created
+					}
+					@table.Head() {
+						Action
+					}
+				}
+			}
+			@table.Body() {
+				for _, j := range jobs {
+					@table.Row() {
+						@table.Cell() {
+							<span class="font-medium text-sm">{ j.Name }</span>
+						}
+						@table.Cell() {
+							<code class="text-xs bg-muted px-1 py-0.5 rounded-sm">{ j.Queue }</code>
+						}
+						@table.Cell() {
+							@components.JobStateBadge(string(j.State))
+						}
+						@table.Cell() {
+							{{ created := j.CreatedAt.Format("Jan 02 15:04") }}
+							<span class="text-xs text-muted-foreground">{ created }</span>
+						}
+						@table.Cell() {
+							@button.Button(button.Props{
+								Variant: button.VariantOutline,
+								Size:    button.SizeSm,
+								Attributes: templ.Attributes{
+									"hx-get":    "/jobs/detail?id=" + j.ID.String(),
+									"hx-target": "#content",
+								},
+							}) {
+								View
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+}

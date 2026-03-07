@@ -3,13 +3,14 @@ package relayhook_test
 import (
 	"context"
 	"errors"
-	"log/slog"
 	"testing"
 	"time"
 
 	"github.com/xraph/relay"
 	revent "github.com/xraph/relay/event"
 	"github.com/xraph/relay/store/memory"
+
+	log "github.com/xraph/go-utils/log"
 
 	"github.com/xraph/dispatch/ext"
 	"github.com/xraph/dispatch/id"
@@ -287,7 +288,7 @@ func TestRelayHookExtension_WithEvents_FiltersDisabled(t *testing.T) {
 func TestRelayHookExtension_ViaRegistry(t *testing.T) {
 	r := newTestRelay(t)
 	h := rh.New(r)
-	logger := slog.Default()
+	logger := log.NewNoopLogger()
 
 	reg := ext.NewRegistry(logger)
 	reg.Register(h)

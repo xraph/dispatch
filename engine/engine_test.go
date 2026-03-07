@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"log/slog"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -20,6 +19,7 @@ import (
 	"github.com/xraph/dispatch/workflow"
 
 	"github.com/xraph/forge"
+	log "github.com/xraph/go-utils/log"
 )
 
 // ──────────────────────────────────────────────────
@@ -519,7 +519,7 @@ func TestEngine_ConcurrentJobs(t *testing.T) {
 	d, err := dispatch.New(
 		dispatch.WithStore(s),
 		dispatch.WithConcurrency(4),
-		dispatch.WithLogger(slog.Default()),
+		dispatch.WithLogger(log.NewNoopLogger()),
 	)
 	if err != nil {
 		t.Fatalf("dispatch.New: %v", err)

@@ -1,7 +1,7 @@
 package extension
 
 import (
-	"log/slog"
+	log "github.com/xraph/go-utils/log"
 
 	"github.com/xraph/dispatch"
 	"github.com/xraph/dispatch/backoff"
@@ -92,7 +92,7 @@ func WithRequireConfig(require bool) ExtOption {
 }
 
 // WithLogger sets the structured logger for the dispatch engine.
-func WithLogger(l *slog.Logger) ExtOption {
+func WithLogger(l log.Logger) ExtOption {
 	return func(e *Extension) {
 		e.logger = l
 	}

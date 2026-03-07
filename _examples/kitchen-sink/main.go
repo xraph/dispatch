@@ -39,11 +39,12 @@ package main
 import (
 	"context"
 	"fmt"
-	"log/slog"
 	"os"
 	"os/signal"
 	"syscall"
 	"time"
+
+	log "github.com/xraph/go-utils/log"
 
 	"github.com/xraph/dispatch"
 	"github.com/xraph/dispatch/cron"
@@ -57,7 +58,7 @@ import (
 )
 
 func main() {
-	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	logger := log.NewNoopLogger()
 
 	// ──────────────────────────────────────────────────
 	// 1. Create the Dispatch engine
@@ -71,7 +72,7 @@ func main() {
 		dispatch.WithLogger(logger),
 	)
 	if err != nil {
-		logger.Error("failed to create dispatcher", slog.String("error", err.Error()))
+		fmt.Fprintf(os.Stderr, "failed to create dispatcher: %v\n", err)
 		os.Exit(1)
 	}
 
@@ -79,7 +80,7 @@ func main() {
 		engine.WithStreamBroker(),
 	)
 	if err != nil {
-		logger.Error("failed to build engine", slog.String("error", err.Error()))
+		fmt.Fprintf(os.Stderr, "failed to build engine: %v\n", err)
 		os.Exit(1)
 	}
 
@@ -92,9 +93,9 @@ func main() {
 		To      string `json:"to"`
 		Subject string `json:"subject"`
 	}) error {
-		logger.Info("sending email", slog.String("to", p.To), slog.String("subject", p.Subject))
+		logger.Info("sending email", log.String("to", p.To), log.String("subject", p.Subject))
 		time.Sleep(100 * time.Millisecond) // Simulate I/O.
-		logger.Info("email sent", slog.String("to", p.To))
+		logger.Info("email sent", log.String("to", p.To))
 		return nil
 	}))
 
@@ -105,12 +106,12 @@ func main() {
 		Height int    `json:"height"`
 	}) error {
 		logger.Info("processing image",
-			slog.String("url", p.URL),
-			slog.Int("width", p.Width),
-			slog.Int("height", p.Height),
+			log.String("url", p.URL),
+			log.Int("width", p.Width),
+			log.Int("height", p.Height),
 		)
 		time.Sleep(200 * time.Millisecond) // Simulate processing.
-		logger.Info("image processed", slog.String("url", p.URL))
+		logger.Info("image processed", log.String("url", p.URL))
 		return nil
 	}))
 
@@ -120,8 +121,8 @@ func main() {
 		Amount  float64 `json:"amount"`
 	}) error {
 		logger.Info("charging payment",
-			slog.String("order_id", p.OrderID),
-			slog.Float64("amount", p.Amount),
+			log.String("order_id", p.OrderID),
+			log.Float64("amount", p.Amount),
 		)
 		return nil
 	}))
@@ -138,7 +139,7 @@ func main() {
 		}) error {
 			// Step 1: Validate the order.
 			if err := wf.Step("validate", func(ctx context.Context) error {
-				logger.Info("validating order", slog.String("order_id", input.OrderID))
+				logger.Info("validating order", log.String("order_id", input.OrderID))
 				if len(input.Items) == 0 {
 					return fmt.Errorf("order has no items")
 				}
@@ -152,8 +153,8 @@ func main() {
 				func(ctx context.Context) (float64, error) {
 					price := float64(len(input.Items)) * 19.99
 					logger.Info("calculated total",
-						slog.String("order_id", input.OrderID),
-						slog.Float64("total", price),
+						log.String("order_id", input.OrderID),
+						log.Float64("total", price),
 					)
 					return price, nil
 				})
@@ -164,8 +165,8 @@ func main() {
 			// Step 3: Process payment.
 			if err := wf.Step("process-payment", func(ctx context.Context) error {
 				logger.Info("processing payment",
-					slog.String("order_id", input.OrderID),
-					slog.Float64("amount", total),
+					log.String("order_id", input.OrderID),
+					log.Float64("amount", total),
 				)
 				return nil
 			}); err != nil {
@@ -175,7 +176,7 @@ func main() {
 			// Step 4: Send confirmation.
 			return wf.Step("send-confirmation", func(ctx context.Context) error {
 				logger.Info("sending order confirmation",
-					slog.String("order_id", input.OrderID),
+					log.String("order_id", input.OrderID),
 				)
 				return nil
 			})
@@ -191,11 +192,11 @@ func main() {
 			if err := wf.StepWithCompensation(
 				"reserve-hotel",
 				func(ctx context.Context) error {
-					logger.Info("reserving hotel", slog.String("trip_id", input.TripID))
+					logger.Info("reserving hotel", log.String("trip_id", input.TripID))
 					return nil
 				},
 				func(ctx context.Context) error {
-					logger.Info("cancelling hotel reservation", slog.String("trip_id", input.TripID))
+					logger.Info("cancelling hotel reservation", log.String("trip_id", input.TripID))
 					return nil
 				},
 			); err != nil {
@@ -206,11 +207,11 @@ func main() {
 			if err := wf.StepWithCompensation(
 				"reserve-flight",
 				func(ctx context.Context) error {
-					logger.Info("reserving flight", slog.String("trip_id", input.TripID))
+					logger.Info("reserving flight", log.String("trip_id", input.TripID))
 					return nil
 				},
 				func(ctx context.Context) error {
-					logger.Info("cancelling flight reservation", slog.String("trip_id", input.TripID))
+					logger.Info("cancelling flight reservation", log.String("trip_id", input.TripID))
 					return nil
 				},
 			); err != nil {
@@ -221,11 +222,11 @@ func main() {
 			return wf.StepWithCompensation(
 				"reserve-car",
 				func(ctx context.Context) error {
-					logger.Info("reserving rental car", slog.String("trip_id", input.TripID))
+					logger.Info("reserving rental car", log.String("trip_id", input.TripID))
 					return nil
 				},
 				func(ctx context.Context) error {
-					logger.Info("cancelling car reservation", slog.String("trip_id", input.TripID))
+					logger.Info("cancelling car reservation", log.String("trip_id", input.TripID))
 					return nil
 				},
 			)
@@ -238,7 +239,7 @@ func main() {
 			ItemID string `json:"item_id"`
 		}) error {
 			return wf.Step("process", func(ctx context.Context) error {
-				logger.Info("processing item", slog.String("item_id", input.ItemID))
+				logger.Info("processing item", log.String("item_id", input.ItemID))
 				time.Sleep(50 * time.Millisecond)
 				return nil
 			})
@@ -259,14 +260,14 @@ func main() {
 					return fmt.Errorf("spawn child for %s: %w", itemID, err)
 				}
 				logger.Info("spawned child workflow",
-					slog.String("item_id", itemID),
-					slog.String("child_run_id", runID.String()),
+					log.String("item_id", itemID),
+					log.String("child_run_id", runID.String()),
 				)
 			}
 
 			return wf.Step("finalize", func(ctx context.Context) error {
 				logger.Info("batch processing finalized",
-					slog.Int("total_items", len(input.ItemIDs)),
+					log.Int("total_items", len(input.ItemIDs)),
 				)
 				return nil
 			})
@@ -286,7 +287,7 @@ func main() {
 		Queue:    "images",
 		Payload:  struct{}{},
 	}); err != nil {
-		logger.Error("failed to register cron", slog.String("error", err.Error()))
+		logger.Error("failed to register cron", log.String("error", err.Error()))
 	}
 
 	// ──────────────────────────────────────────────────
@@ -329,14 +330,14 @@ func main() {
 
 	// Start the engine (begins processing jobs and cron ticks).
 	if err := eng.Start(ctx); err != nil {
-		logger.Error("failed to start engine", slog.String("error", err.Error()))
+		fmt.Fprintf(os.Stderr, "failed to start engine: %v\n", err)
 		os.Exit(1)
 	}
 
 	logger.Info("Dispatch kitchen-sink example running",
-		slog.String("dwp_ws", "ws://localhost:8080/dwp"),
-		slog.String("dwp_rpc", "http://localhost:8080/dwp/rpc"),
-		slog.String("dwp_sse", "http://localhost:8080/dwp/sse"),
+		log.String("dwp_ws", "ws://localhost:8080/dwp"),
+		log.String("dwp_rpc", "http://localhost:8080/dwp/rpc"),
+		log.String("dwp_sse", "http://localhost:8080/dwp/sse"),
 	)
 
 	// Enqueue a demo job to show it works.
@@ -348,7 +349,7 @@ func main() {
 		Subject: "Welcome to Dispatch!",
 	})
 	if demoJob != nil {
-		logger.Info("demo job enqueued", slog.String("job_id", demoJob.ID.String()))
+		logger.Info("demo job enqueued", log.String("job_id", demoJob.ID.String()))
 	}
 
 	// Start a demo workflow.
@@ -360,7 +361,7 @@ func main() {
 		Items:   []string{"widget", "gadget"},
 	})
 	if demoRun != nil {
-		logger.Info("demo workflow started", slog.String("run_id", demoRun.ID.String()))
+		logger.Info("demo workflow started", log.String("run_id", demoRun.ID.String()))
 	}
 
 	// Wait for shutdown signal.
@@ -372,7 +373,7 @@ func main() {
 	shutdownCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 	if err := eng.Stop(shutdownCtx); err != nil {
-		logger.Error("engine shutdown error", slog.String("error", err.Error()))
+		logger.Error("engine shutdown error", log.String("error", err.Error()))
 	}
 	logger.Info("goodbye")
 }

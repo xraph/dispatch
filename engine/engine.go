@@ -13,10 +13,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log/slog"
 	"os"
 	"time"
 
+	log "github.com/xraph/go-utils/log"
 	gu "github.com/xraph/go-utils/metrics"
 	"go.opentelemetry.io/otel/trace"
 
@@ -77,7 +77,7 @@ type Engine struct {
 	bo         backoff.Strategy
 	pool       *worker.Pool
 	mws        []mw.Middleware
-	logger     *slog.Logger
+	logger     log.Logger
 
 	// Workflow subsystem.
 	wfRegistry *workflow.Registry
@@ -333,7 +333,7 @@ func Build(d *dispatch.Dispatcher, opts ...Option) (*Engine, error) {
 		CreatedAt:   time.Now().UTC(),
 	}
 	if regErr := cls.RegisterWorker(context.Background(), w); regErr != nil {
-		logger.Warn("failed to register worker in cluster store", slog.String("error", regErr.Error()))
+		logger.Warn("failed to register worker in cluster store", log.String("error", regErr.Error()))
 	}
 
 	return eng, nil
@@ -395,13 +395,18 @@ func (eng *Engine) EnqueueRaw(ctx context.Context, name string, payload []byte, 
 	return j, nil
 }
 
+// Health checks the health of the engine by pinging the dispatcher's store.
+func (eng *Engine) Health(ctx context.Context) error {
+	return eng.d.Store().Ping(ctx)
+}
+
 // Start begins job processing by starting the worker pool and cron scheduler.
 // It also resumes any workflow runs left in "running" state (crash recovery).
 func (eng *Engine) Start(ctx context.Context) error {
 	// Resume any interrupted workflow runs (best-effort, non-fatal).
 	if resumeErr := eng.wfRunner.ResumeAll(ctx); resumeErr != nil {
 		eng.logger.Warn("failed to resume workflow runs",
-			slog.String("error", resumeErr.Error()),
+			log.String("error", resumeErr.Error()),
 		)
 	}
 
@@ -417,12 +422,12 @@ func (eng *Engine) Start(ctx context.Context) error {
 func (eng *Engine) Stop(ctx context.Context) error {
 	// Deregister this worker from the cluster.
 	if err := eng.clusterStore.DeregisterWorker(ctx, eng.pool.WorkerID()); err != nil {
-		eng.logger.Warn("failed to deregister worker", slog.String("error", err.Error()))
+		eng.logger.Warn("failed to deregister worker", log.String("error", err.Error()))
 	}
 
 	// Stop the cron scheduler.
 	if err := eng.scheduler.Stop(ctx); err != nil {
-		eng.logger.Error("cron scheduler stop error", slog.String("error", err.Error()))
+		eng.logger.Error("cron scheduler stop error", log.String("error", err.Error()))
 	}
 
 	return eng.d.Stop(ctx)
@@ -455,6 +460,12 @@ func (eng *Engine) Scheduler() *cron.Scheduler { return eng.scheduler }
 // QueueManager returns the queue manager, or nil if no queue configs
 // were provided.
 func (eng *Engine) QueueManager() *queue.Manager { return eng.queueManager }
+
+// ClusterStore returns the cluster store for worker management.
+func (eng *Engine) ClusterStore() cluster.Store { return eng.clusterStore }
+
+// WorkerID returns this engine's unique worker identifier.
+func (eng *Engine) WorkerID() id.WorkerID { return eng.pool.WorkerID() }
 
 // StreamBroker returns the real-time event broker, or nil if not enabled.
 func (eng *Engine) StreamBroker() *stream.Broker { return eng.broker }
@@ -500,10 +511,10 @@ func RegisterCron[T any](ctx context.Context, eng *Engine, def *cron.Definition[
 	}
 
 	eng.logger.Info("cron registered",
-		slog.String("name", def.Name),
-		slog.String("schedule", def.Schedule),
-		slog.String("job_name", def.JobName),
-		slog.Time("next_run_at", next),
+		log.String("name", def.Name),
+		log.String("schedule", def.Schedule),
+		log.String("job_name", def.JobName),
+		log.Time("next_run_at", next),
 	)
 
 	return nil

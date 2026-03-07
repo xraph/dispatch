@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"log/slog"
 	"net"
 	"sync"
 	"sync/atomic"
@@ -12,6 +11,8 @@ import (
 
 	"github.com/gobwas/ws"
 	"github.com/gobwas/ws/wsutil"
+
+	log "github.com/xraph/go-utils/log"
 
 	"github.com/xraph/dispatch/engine"
 	"github.com/xraph/dispatch/job"
@@ -68,7 +69,7 @@ type Federation struct {
 	eng    *engine.Engine
 	broker *stream.Broker
 	auth   Authenticator
-	logger *slog.Logger
+	logger log.Logger
 
 	// Peers keyed by peer ID.
 	peers sync.Map // peerID → *Peer
@@ -123,7 +124,7 @@ func WithFederationAuth(auth Authenticator) FederationOption {
 }
 
 // NewFederation creates a new federation manager.
-func NewFederation(eng *engine.Engine, broker *stream.Broker, logger *slog.Logger, opts ...FederationOption) *Federation {
+func NewFederation(eng *engine.Engine, broker *stream.Broker, logger log.Logger, opts ...FederationOption) *Federation {
 	f := &Federation{
 		eng:               eng,
 		broker:            broker,
@@ -293,8 +294,8 @@ func (f *Federation) ForwardJob(ctx context.Context, peerID, name string, payloa
 
 	f.jobsForwarded.Add(1)
 	f.logger.Info("job forwarded to peer",
-		slog.String("peer", peerID),
-		slog.String("job_name", name),
+		log.String("peer", peerID),
+		log.String("job_name", name),
 	)
 	return nil
 }
@@ -440,8 +441,8 @@ func (f *Federation) connectPeer(ctx context.Context, peer *Peer) error {
 	}()
 
 	f.logger.Info("federation peer connected",
-		slog.String("peer_id", peer.ID),
-		slog.String("url", peer.URL),
+		log.String("peer_id", peer.ID),
+		log.String("url", peer.URL),
 	)
 	return nil
 }
@@ -471,8 +472,8 @@ func (f *Federation) peerReadLoop(peer *Peer) {
 		data, err := wsutil.ReadServerText(conn)
 		if err != nil {
 			f.logger.Warn("federation peer read error",
-				slog.String("peer_id", peer.ID),
-				slog.String("error", err.Error()),
+				log.String("peer_id", peer.ID),
+				log.String("error", err.Error()),
 			)
 			peer.mu.Lock()
 			peer.State = PeerStateDisconnected
@@ -527,8 +528,8 @@ func (f *Federation) reconnectPeer(peer *Peer) {
 		}
 
 		f.logger.Info("federation reconnecting to peer",
-			slog.String("peer_id", peer.ID),
-			slog.Duration("backoff", backoff),
+			log.String("peer_id", peer.ID),
+			log.Duration("backoff", backoff),
 		)
 
 		time.Sleep(backoff)
@@ -622,8 +623,8 @@ func (f *Federation) sendHeartbeats() {
 
 		if err := writeJSONFrame(conn, heartbeat); err != nil {
 			f.logger.Warn("federation heartbeat failed",
-				slog.String("peer_id", peer.ID),
-				slog.String("error", err.Error()),
+				log.String("peer_id", peer.ID),
+				log.String("error", err.Error()),
 			)
 		}
 		return true
@@ -655,8 +656,8 @@ func (f *Federation) checkPeerHealth() {
 
 		if state == PeerStateConnected && now.Sub(lastSeen) > f.heartbeatTimeout {
 			f.logger.Warn("federation peer timed out",
-				slog.String("peer_id", peer.ID),
-				slog.Duration("since_last_seen", now.Sub(lastSeen)),
+				log.String("peer_id", peer.ID),
+				log.Duration("since_last_seen", now.Sub(lastSeen)),
 			)
 			f.disconnectPeer(peer)
 

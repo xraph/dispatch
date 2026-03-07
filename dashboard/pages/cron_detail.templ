@@ -1,0 +1,128 @@
+package pages
+
+import (
+	"github.com/xraph/dispatch/cron"
+	"github.com/xraph/dispatch/dashboard/components"
+	"github.com/xraph/forgeui/components/card"
+	"github.com/xraph/forgeui/components/button"
+)
+
+templ CronDetailPage(e *cron.Entry) {
+	<div class="space-y-6">
+		@components.PageHeader(e.Name, "", "Cron schedule details") {
+			@button.Button(button.Props{
+				Variant: button.VariantOutline,
+				Attributes: templ.Attributes{
+					"hx-get":    "/crons",
+					"hx-target": "#content",
+				},
+			}) {
+				Back
+			}
+			if e.Enabled {
+				@button.Button(button.Props{
+					Variant: button.VariantOutline,
+					Attributes: templ.Attributes{
+						"hx-post":    "/v1/crons/" + e.ID.String() + "/disable",
+						"hx-target":  "#content",
+						"hx-confirm": "Are you sure you want to disable this cron schedule?",
+					},
+				}) {
+					Disable
+				}
+			} else {
+				@button.Button(button.Props{
+					Variant: button.VariantDefault,
+					Attributes: templ.Attributes{
+						"hx-post":    "/v1/crons/" + e.ID.String() + "/enable",
+						"hx-target":  "#content",
+						"hx-confirm": "Are you sure you want to enable this cron schedule?",
+					},
+				}) {
+					Enable
+				}
+			}
+			@button.Button(button.Props{
+				Variant: button.VariantDestructive,
+				Attributes: templ.Attributes{
+					"hx-delete":  "/v1/crons/" + e.ID.String(),
+					"hx-target":  "#content",
+					"hx-confirm": "Are you sure you want to delete this cron schedule? This action cannot be undone.",
+				},
+			}) {
+				Delete
+			}
+		}
+		<div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
+			@card.Card(card.Props{Class: "rounded-sm"}) {
+				@card.Header() {
+					@card.Title() {
+						Schedule Information
+					}
+				}
+				@card.Content() {
+					<dl class="grid grid-cols-2 gap-x-4 gap-y-3 text-sm">
+						@field("Cron ID", e.ID.String(), true)
+						@field("Name", e.Name, false)
+						@field("Schedule", e.Schedule, true)
+						@field("Job Name", e.JobName, false)
+						@field("Queue", e.Queue, true)
+						<dt class="text-muted-foreground">Status</dt>
+						<dd>
+							@components.EnabledBadge(e.Enabled)
+						</dd>
+						if e.LastRunAt != nil {
+							@field("Last Run", e.LastRunAt.Format("Jan 02, 2006 15:04:05"), false)
+						} else {
+							@field("Last Run", "Never", false)
+						}
+						if e.NextRunAt != nil {
+							@field("Next Run", e.NextRunAt.Format("Jan 02, 2006 15:04:05"), false)
+						} else {
+							@field("Next Run", "-", false)
+						}
+						if e.ScopeAppID != "" {
+							@field("App ID", e.ScopeAppID, true)
+						}
+						if e.ScopeOrgID != "" {
+							@field("Org ID", e.ScopeOrgID, true)
+						}
+					</dl>
+				}
+			}
+			@card.Card(card.Props{Class: "rounded-sm"}) {
+				@card.Header() {
+					@card.Title() {
+						Lock Information
+					}
+				}
+				@card.Content() {
+					<dl class="grid grid-cols-2 gap-x-4 gap-y-3 text-sm">
+						if e.LockedBy != "" {
+							@field("Locked By", e.LockedBy, true)
+						} else {
+							@field("Locked By", "Not locked", false)
+						}
+						if e.LockedUntil != nil {
+							@field("Locked Until", e.LockedUntil.Format("Jan 02, 2006 15:04:05"), false)
+						} else {
+							@field("Locked Until", "-", false)
+						}
+					</dl>
+				}
+			}
+		</div>
+		if len(e.Payload) > 0 {
+			@card.Card(card.Props{Class: "rounded-sm"}) {
+				@card.Header() {
+					@card.Title() {
+						Payload
+					}
+				}
+				@card.Content() {
+					@components.JsonViewer(e.Payload)
+				}
+			}
+		}
+	</div>
+}

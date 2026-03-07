@@ -1,0 +1,132 @@
+package pages
+
+import (
+	"fmt"
+	"github.com/xraph/dispatch/cron"
+	"github.com/xraph/dispatch/dashboard/components"
+	"github.com/xraph/forgeui/components/button"
+	"github.com/xraph/forgeui/components/table"
+)
+
+templ CronsPage(entries []*cron.Entry) {
+	<div class="space-y-6">
+		@components.PageHeader("Cron Schedules", fmt.Sprintf("%d", len(entries)), "Scheduled recurring jobs") {
+		}
+		if len(entries) == 0 {
+			@components.EmptyState("clock", "No cron entries", "Cron schedules will appear here when registered")
+		} else {
+			@table.Table() {
+				@table.Header() {
+					@table.Row() {
+						@table.Head() {
+							Name
+						}
+						@table.Head() {
+							Schedule
+						}
+						@table.Head() {
+							Job Name
+						}
+						@table.Head() {
+							Queue
+						}
+						@table.Head() {
+							Status
+						}
+						@table.Head() {
+							Last Run
+						}
+						@table.Head() {
+							Next Run
+						}
+						@table.Head() {
+							Actions
+						}
+					}
+				}
+				@table.Body() {
+					for _, e := range entries {
+						@table.Row(table.RowProps{
+							Class: "cursor-pointer hover:bg-muted/50",
+							Attributes: templ.Attributes{
+								"hx-get":    "/crons/detail?id=" + e.ID.String(),
+								"hx-target": "#content",
+							},
+						}) {
+							@table.Cell() {
+								<span class="font-medium text-sm">{ e.Name }</span>
+							}
+							@table.Cell() {
+								<code class="text-xs bg-muted px-1.5 py-0.5 rounded-sm">{ e.Schedule }</code>
+							}
+							@table.Cell() {
+								<span class="text-sm">{ e.JobName }</span>
+							}
+							@table.Cell() {
+								<code class="text-xs bg-muted px-1 py-0.5 rounded-sm">{ e.Queue }</code>
+							}
+							@table.Cell() {
+								@components.EnabledBadge(e.Enabled)
+							}
+							@table.Cell() {
+								if e.LastRunAt != nil {
+									{{ lastRun := e.LastRunAt.Format("Jan 02 15:04") }}
+									<span class="text-xs text-muted-foreground">{ lastRun }</span>
+								} else {
+									<span class="text-xs text-muted-foreground">Never</span>
+								}
+							}
+							@table.Cell() {
+								if e.NextRunAt != nil {
+									{{ nextRun := e.NextRunAt.Format("Jan 02 15:04") }}
+									<span class="text-xs text-muted-foreground">{ nextRun }</span>
+								} else {
+									<span class="text-xs text-muted-foreground">-</span>
+								}
+							}
+							@table.Cell() {
+								<div class="flex gap-1" onclick="event.stopPropagation()">
+									if e.Enabled {
+										@button.Button(button.Props{
+											Variant: button.VariantOutline,
+											Size:    button.SizeSm,
+											Attributes: templ.Attributes{
+												"hx-post":    "/v1/crons/" + e.ID.String() + "/disable",
+												"hx-target":  "#content",
+												"hx-confirm": "Disable cron schedule '" + e.Name + "'?",
+											},
+										}) {
+											Disable
+										}
+									} else {
+										@button.Button(button.Props{
+											Variant: button.VariantOutline,
+											Size:    button.SizeSm,
+											Attributes: templ.Attributes{
+												"hx-post":    "/v1/crons/" + e.ID.String() + "/enable",
+												"hx-target":  "#content",
+												"hx-confirm": "Enable cron schedule '" + e.Name + "'?",
+											},
+										}) {
+											Enable
+										}
+									}
+									@button.Button(button.Props{
+										Variant: button.VariantOutline,
+										Size:    button.SizeSm,
+										Attributes: templ.Attributes{
+											"hx-get":    "/crons/detail?id=" + e.ID.String(),
+											"hx-target": "#content",
+										},
+									}) {
+										View
+									}
+								</div>
+							}
+						}
+					}
+				}
+			}
+		}
+	</div>
+}

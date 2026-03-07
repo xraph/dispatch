@@ -3,8 +3,6 @@ package client_test
 import (
 	"context"
 	"encoding/json"
-	"io"
-	"log/slog"
 	"net/http/httptest"
 	"strings"
 	"testing"
@@ -20,12 +18,14 @@ import (
 	"github.com/xraph/dispatch/job"
 	"github.com/xraph/dispatch/store/memory"
 	"github.com/xraph/dispatch/workflow"
+
+	log "github.com/xraph/go-utils/log"
 )
 
 // ── Test Helpers ──────────────────────────────────────
 
-func testLogger() *slog.Logger {
-	return slog.New(slog.NewTextHandler(io.Discard, nil))
+func testLogger() log.Logger {
+	return log.NewNoopLogger()
 }
 
 // setupClientTest creates a full Forge app with DWP routes on an httptest

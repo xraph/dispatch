@@ -5,8 +5,9 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
-	"log/slog"
 	"strings"
+
+	log "github.com/xraph/go-utils/log"
 
 	"github.com/xraph/grove"
 	"github.com/xraph/grove/drivers/sqlitedriver"
@@ -36,14 +37,14 @@ var (
 type Store struct {
 	db     *grove.DB
 	sdb    *sqlitedriver.SqliteDB
-	logger *slog.Logger
+	logger log.Logger
 }
 
 // Option configures the Store.
 type Option func(*Store)
 
 // WithLogger sets the logger for the store.
-func WithLogger(logger *slog.Logger) Option {
+func WithLogger(logger log.Logger) Option {
 	return func(s *Store) {
 		s.logger = logger
 	}
@@ -55,7 +56,7 @@ func New(db *grove.DB, opts ...Option) *Store {
 	s := &Store{
 		db:     db,
 		sdb:    sqlitedriver.Unwrap(db),
-		logger: slog.Default(),
+		logger: log.NewNoopLogger(),
 	}
 	for _, opt := range opts {
 		opt(s)

@@ -3,10 +3,11 @@ package stream
 import (
 	"context"
 	"encoding/json"
-	"log/slog"
 	"sync"
 	"sync/atomic"
 	"time"
+
+	log "github.com/xraph/go-utils/log"
 
 	"github.com/xraph/dispatch/ext"
 	"github.com/xraph/dispatch/id"
@@ -43,7 +44,7 @@ const DefaultCredits int64 = 1000
 // via topic-based pub/sub.
 type Broker struct {
 	topics *TopicRegistry
-	logger *slog.Logger
+	logger log.Logger
 
 	// Subscriber management.
 	subscribers sync.Map // subscriberID → *Subscriber
@@ -71,7 +72,7 @@ func WithDefaultCredits(credits int64) BrokerOption {
 }
 
 // NewBroker creates a new stream broker.
-func NewBroker(logger *slog.Logger, opts ...BrokerOption) *Broker {
+func NewBroker(logger log.Logger, opts ...BrokerOption) *Broker {
 	b := &Broker{
 		topics:         NewTopicRegistry(),
 		logger:         logger,

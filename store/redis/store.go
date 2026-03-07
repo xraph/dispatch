@@ -5,10 +5,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log/slog"
 	"time"
 
 	goredis "github.com/redis/go-redis/v9"
+
+	log "github.com/xraph/go-utils/log"
 
 	"github.com/xraph/grove/kv"
 	"github.com/xraph/grove/kv/drivers/redisdriver"
@@ -35,7 +36,7 @@ var (
 type Option func(*Store)
 
 // WithLogger sets a custom logger.
-func WithLogger(l *slog.Logger) Option {
+func WithLogger(l log.Logger) Option {
 	return func(s *Store) { s.logger = l }
 }
 
@@ -44,7 +45,7 @@ func WithLogger(l *slog.Logger) Option {
 type Store struct {
 	kv     *kv.Store
 	rdb    goredis.UniversalClient
-	logger *slog.Logger
+	logger log.Logger
 }
 
 // New creates a new Redis KV-backed store. The caller owns the KV store
@@ -53,7 +54,7 @@ func New(store *kv.Store, opts ...Option) *Store {
 	s := &Store{
 		kv:     store,
 		rdb:    redisdriver.UnwrapClient(store),
-		logger: slog.Default(),
+		logger: log.NewNoopLogger(),
 	}
 	for _, o := range opts {
 		o(s)

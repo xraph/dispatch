@@ -1,0 +1,7 @@
+package components
+
+templ FooterAPIDocsLink(href string) {
+	<a href={ templ.SafeURL(href) } class="text-xs text-muted-foreground hover:text-foreground transition-colors">
+		API Documentation
+	</a>
+}

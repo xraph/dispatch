@@ -1,4 +1,4 @@
-.PHONY: help build run test clean fmt lint lint-fix vet tidy deps install dev hot check coverage b r t c f l lf v check-deps
+.PHONY: help build run test clean fmt lint lint-fix vet tidy deps install dev hot check coverage b r t c f l lf v check-deps templ templ-watch
 
 # Default target
 .DEFAULT_GOAL := help
@@ -53,6 +53,10 @@ help:
 	@echo "  make docs           - Serve documentation locally"
 	@echo "  make docs-build     - Build documentation"
 	@echo ""
+	@echo "$(GREEN)Code Generation:$(NC)"
+	@echo "  make templ        - Generate templ files"
+	@echo "  make templ-watch  - Watch and regenerate templ files on change"
+	@echo ""
 	@echo "$(GREEN)Other:$(NC)"
 	@echo "  make all            - Run check, test, and build"
 	@echo "  make help (h)       - Show this help message"
@@ -100,7 +104,7 @@ clean c:
 fmt f:
 	@echo "$(BLUE)Formatting code...$(NC)"
 	@gofmt -s -w .
-	@command -v goimports >/dev/null 2>&1 && goimports -w -local github.com/xraph/ctrlplane . || echo "$(YELLOW)goimports not found, skipping (run: go install golang.org/x/tools/cmd/goimports@latest)$(NC)"
+	@command -v goimports >/dev/null 2>&1 && goimports -w -local github.com/xraph/dispatch . || echo "$(YELLOW)goimports not found, skipping (run: go install golang.org/x/tools/cmd/goimports@latest)$(NC)"
 	@echo "$(GREEN)✓ Formatting complete$(NC)"
 
 ## lint (l): Run linter
@@ -178,6 +182,8 @@ deps:
 	@go install github.com/cosmtrek/air@latest
 	@echo "Installing golangci-lint..."
 	@command -v golangci-lint >/dev/null 2>&1 || curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/master/install.sh | sh -s -- -b $(shell go env GOPATH)/bin
+	@echo "Installing templ..."
+	@go install github.com/a-h/templ/cmd/templ@latest
 	@echo "$(GREEN)✓ Development dependencies installed$(NC)"
 
 ## check-deps: Check if required tools are installed
@@ -186,6 +192,7 @@ check-deps:
 	@command -v goimports >/dev/null 2>&1 && echo "$(GREEN)✓ goimports$(NC)" || echo "$(YELLOW)✗ goimports (run: make deps)$(NC)"
 	@command -v golangci-lint >/dev/null 2>&1 && echo "$(GREEN)✓ golangci-lint$(NC)" || echo "$(YELLOW)✗ golangci-lint (run: make deps)$(NC)"
 	@command -v air >/dev/null 2>&1 && echo "$(GREEN)✓ air$(NC)" || echo "$(YELLOW)✗ air (run: make deps)$(NC)"
+	@command -v templ >/dev/null 2>&1 && echo "$(GREEN)✓ templ$(NC)" || echo "$(YELLOW)✗ templ (run: make deps)$(NC)"
 
 ## mod-download: Download modules
 mod-download:
@@ -210,8 +217,21 @@ docs-build:
 	@cd docs && pnpm install && pnpm build
 	@echo "$(GREEN)✓ Documentation built$(NC)"
 
-## all: Run check, test, and build
-all: check test build
+## templ: Generate templ files
+templ:
+	@echo "$(BLUE)Generating templ files...$(NC)"
+	@command -v templ >/dev/null 2>&1 || { echo "$(RED)templ not found. Install: go install github.com/a-h/templ/cmd/templ@latest$(NC)"; exit 1; }
+	templ generate ./dashboard/...
+	@echo "$(GREEN)✓ Templ generation complete$(NC)"
+
+## templ-watch: Watch and regenerate templ files
+templ-watch:
+	@echo "$(BLUE)Watching templ files...$(NC)"
+	@command -v templ >/dev/null 2>&1 || { echo "$(RED)templ not found. Install: go install github.com/a-h/templ/cmd/templ@latest$(NC)"; exit 1; }
+	templ generate --watch ./dashboard/...
+
+## all: Run templ generate, check, test, and build
+all: templ check test build
 	@echo "$(GREEN)✓ All tasks complete$(NC)"
 
 # Short aliases

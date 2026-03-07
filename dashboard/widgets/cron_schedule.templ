@@ -1,0 +1,54 @@
+package widgets
+
+import (
+	"github.com/xraph/dispatch/cron"
+	"github.com/xraph/forgeui/components/card"
+	"github.com/xraph/forgeui/components/badge"
+	"github.com/xraph/forgeui/components/button"
+)
+
+templ CronScheduleWidget(entries []*cron.Entry) {
+	@card.Card(card.Props{Class: "rounded-sm"}) {
+		@card.Content() {
+			if len(entries) == 0 {
+				<p class="text-sm text-muted-foreground text-center py-4">No cron schedules configured</p>
+			} else {
+				<div class="space-y-2">
+					for _, e := range entries {
+						<div class="flex items-center justify-between py-1.5 border-b last:border-0">
+							<div class="flex items-center gap-2">
+								<span class="text-sm font-medium">{ e.Name }</span>
+								<code class="text-xs bg-muted px-1.5 py-0.5 rounded-sm">{ e.Schedule }</code>
+							</div>
+							<div class="flex items-center gap-2">
+								if e.NextRunAt != nil {
+									{{ next := e.NextRunAt.Format("Jan 02 15:04") }}
+									<span class="text-xs text-muted-foreground">next: { next }</span>
+								}
+								if e.Enabled {
+									@badge.Badge(badge.Props{Variant: badge.VariantDefault}) {
+										Active
+									}
+								} else {
+									@badge.Badge(badge.Props{Variant: badge.VariantSecondary}) {
+										Disabled
+									}
+								}
+								@button.Button(button.Props{
+									Variant: button.VariantOutline,
+									Size:    button.SizeSm,
+									Attributes: templ.Attributes{
+										"hx-get":    "/crons/detail?id=" + e.ID.String(),
+										"hx-target": "#content",
+									},
+								}) {
+									View
+								}
+							</div>
+						</div>
+					}
+				</div>
+			}
+		}
+	}
+}
