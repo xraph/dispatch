@@ -154,7 +154,7 @@ func (c *Contributor) renderOverview(ctx context.Context) (templ.Component, erro
 	var recentJobs []*job.Job
 	if jsOK {
 		for _, state := range []job.State{job.StateRunning, job.StateCompleted, job.StateFailed} {
-			jobs, _ := fetchJobsByState(ctx, js, state, 5, 0)
+			jobs, _ := fetchJobsByState(ctx, js, state, 5, 0) //nolint:errcheck // best-effort dashboard data
 			recentJobs = append(recentJobs, jobs...)
 		}
 		if len(recentJobs) > 10 {
@@ -193,11 +193,11 @@ func (c *Contributor) renderJobs(ctx context.Context, params contributor.Params)
 		if err != nil {
 			return components.EmptyState("alert-circle", "Error loading jobs", err.Error()), nil
 		}
-		total, _ = js.CountJobs(ctx, job.CountOpts{State: state, Queue: queueFilter})
+		total, _ = js.CountJobs(ctx, job.CountOpts{State: state, Queue: queueFilter}) //nolint:errcheck // best-effort dashboard data
 	} else {
 		// Fetch from all states.
 		for _, state := range []job.State{job.StateRunning, job.StatePending, job.StateRetrying, job.StateFailed, job.StateCompleted, job.StateCancelled} {
-			items, _ := fetchJobsByState(ctx, js, state, limit, offset)
+			items, _ := fetchJobsByState(ctx, js, state, limit, offset) //nolint:errcheck // best-effort dashboard data
 			jobs = append(jobs, items...)
 		}
 		jc := fetchJobCounts(ctx, js)
@@ -288,8 +288,8 @@ func (c *Contributor) renderWorkflowDetail(ctx context.Context, params contribut
 		return nil, fmt.Errorf("dashboard: resolve workflow run: %w", err)
 	}
 
-	checkpoints, _ := ws.ListCheckpoints(ctx, runID)
-	childRuns, _ := ws.ListChildRuns(ctx, runID)
+	checkpoints, _ := ws.ListCheckpoints(ctx, runID) //nolint:errcheck // best-effort dashboard data
+	childRuns, _ := ws.ListChildRuns(ctx, runID)     //nolint:errcheck // best-effort dashboard data
 
 	return pages.WorkflowDetailPage(r, checkpoints, childRuns), nil
 }
@@ -397,7 +397,7 @@ func (c *Contributor) renderRecentJobsWidget(ctx context.Context) (templ.Compone
 
 	var recentJobs []*job.Job
 	for _, state := range []job.State{job.StateRunning, job.StateCompleted, job.StateFailed} {
-		items, _ := fetchJobsByState(ctx, js, state, 5, 0)
+		items, _ := fetchJobsByState(ctx, js, state, 5, 0) //nolint:errcheck // best-effort dashboard data
 		recentJobs = append(recentJobs, items...)
 	}
 	if len(recentJobs) > 10 {
@@ -435,14 +435,14 @@ func (c *Contributor) renderQueueDetail(ctx context.Context, params contributor.
 	var total int64
 	if jsOK {
 		for _, state := range []job.State{job.StateRunning, job.StatePending, job.StateRetrying, job.StateFailed, job.StateCompleted} {
-			items, _ := js.ListJobsByState(ctx, state, job.ListOpts{
+			items, _ := js.ListJobsByState(ctx, state, job.ListOpts{ //nolint:errcheck // best-effort dashboard data
 				Limit:  limit,
 				Offset: offset,
 				Queue:  name,
 			})
 			jobs = append(jobs, items...)
 		}
-		total, _ = js.CountJobs(ctx, job.CountOpts{Queue: name})
+		total, _ = js.CountJobs(ctx, job.CountOpts{Queue: name}) //nolint:errcheck // best-effort dashboard data
 		if len(jobs) > limit {
 			jobs = jobs[:limit]
 		}
@@ -502,7 +502,7 @@ func (c *Contributor) renderDLQCountWidget(ctx context.Context) (templ.Component
 	}
 	var failedJobs int64
 	if js, ok := resolveJobStore(c.engine); ok {
-		failedJobs, _ = js.CountJobs(ctx, job.CountOpts{State: job.StateFailed})
+		failedJobs, _ = js.CountJobs(ctx, job.CountOpts{State: job.StateFailed}) //nolint:errcheck // best-effort dashboard data
 	}
 	return widgets.DLQCountWidget(dlqCount, failedJobs), nil
 }

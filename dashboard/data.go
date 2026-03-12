@@ -3,7 +3,6 @@ package dashboard
 import (
 	"context"
 	"strconv"
-	"time"
 
 	"github.com/xraph/dispatch/cluster"
 	"github.com/xraph/dispatch/cron"
@@ -50,12 +49,12 @@ type jobCounts struct {
 
 func fetchJobCounts(ctx context.Context, js job.Store) jobCounts {
 	var c jobCounts
-	c.Pending, _ = js.CountJobs(ctx, job.CountOpts{State: job.StatePending})
-	c.Running, _ = js.CountJobs(ctx, job.CountOpts{State: job.StateRunning})
-	c.Completed, _ = js.CountJobs(ctx, job.CountOpts{State: job.StateCompleted})
-	c.Failed, _ = js.CountJobs(ctx, job.CountOpts{State: job.StateFailed})
-	c.Retrying, _ = js.CountJobs(ctx, job.CountOpts{State: job.StateRetrying})
-	c.Cancelled, _ = js.CountJobs(ctx, job.CountOpts{State: job.StateCancelled})
+	c.Pending, _ = js.CountJobs(ctx, job.CountOpts{State: job.StatePending})     //nolint:errcheck // best-effort dashboard data
+	c.Running, _ = js.CountJobs(ctx, job.CountOpts{State: job.StateRunning})     //nolint:errcheck // best-effort dashboard data
+	c.Completed, _ = js.CountJobs(ctx, job.CountOpts{State: job.StateCompleted}) //nolint:errcheck // best-effort dashboard data
+	c.Failed, _ = js.CountJobs(ctx, job.CountOpts{State: job.StateFailed})       //nolint:errcheck // best-effort dashboard data
+	c.Retrying, _ = js.CountJobs(ctx, job.CountOpts{State: job.StateRetrying})   //nolint:errcheck // best-effort dashboard data
+	c.Cancelled, _ = js.CountJobs(ctx, job.CountOpts{State: job.StateCancelled}) //nolint:errcheck // best-effort dashboard data
 	c.Total = c.Pending + c.Running + c.Completed + c.Failed + c.Retrying + c.Cancelled
 	return c
 }
@@ -78,9 +77,9 @@ type workflowCounts struct {
 
 func fetchWorkflowCounts(ctx context.Context, ws workflow.Store) workflowCounts {
 	var c workflowCounts
-	running, _ := ws.ListRuns(ctx, workflow.ListOpts{State: workflow.RunStateRunning, Limit: 0})
-	completed, _ := ws.ListRuns(ctx, workflow.ListOpts{State: workflow.RunStateCompleted, Limit: 0})
-	failed, _ := ws.ListRuns(ctx, workflow.ListOpts{State: workflow.RunStateFailed, Limit: 0})
+	running, _ := ws.ListRuns(ctx, workflow.ListOpts{State: workflow.RunStateRunning, Limit: 0})     //nolint:errcheck // best-effort dashboard data
+	completed, _ := ws.ListRuns(ctx, workflow.ListOpts{State: workflow.RunStateCompleted, Limit: 0}) //nolint:errcheck // best-effort dashboard data
+	failed, _ := ws.ListRuns(ctx, workflow.ListOpts{State: workflow.RunStateFailed, Limit: 0})       //nolint:errcheck // best-effort dashboard data
 	c.Running = len(running)
 	c.Completed = len(completed)
 	c.Failed = len(failed)
@@ -97,7 +96,7 @@ func fetchWorkflowRuns(ctx context.Context, ws workflow.Store, state workflow.Ru
 }
 
 func fetchRecentWorkflowRuns(ctx context.Context, ws workflow.Store, limit int) []*workflow.Run {
-	runs, _ := ws.ListRuns(ctx, workflow.ListOpts{Limit: limit})
+	runs, _ := ws.ListRuns(ctx, workflow.ListOpts{Limit: limit}) //nolint:errcheck // best-effort dashboard data
 	return runs
 }
 
@@ -112,14 +111,14 @@ func fetchDLQEntries(ctx context.Context, ds dlq.Store, queue string, limit, off
 }
 
 func fetchDLQCount(ctx context.Context, ds dlq.Store) int64 {
-	count, _ := ds.CountDLQ(ctx)
+	count, _ := ds.CountDLQ(ctx) //nolint:errcheck // best-effort dashboard data
 	return count
 }
 
 // --- Cron Data ---
 
 func fetchCronEntries(ctx context.Context, cs cron.Store) []*cron.Entry {
-	entries, _ := cs.ListCrons(ctx)
+	entries, _ := cs.ListCrons(ctx) //nolint:errcheck // best-effort dashboard data
 	return entries
 }
 
@@ -211,54 +210,6 @@ func resolveCronStore(eng *engine.Engine) (cron.Store, bool) {
 	return cs, cs != nil
 }
 
-// --- Time Formatting ---
-
-func formatTimeAgo(t time.Time) string {
-	d := time.Since(t)
-	switch {
-	case d < time.Minute:
-		return "just now"
-	case d < time.Hour:
-		m := int(d.Minutes())
-		if m == 1 {
-			return "1m ago"
-		}
-		return strconv.Itoa(m) + "m ago"
-	case d < 24*time.Hour:
-		h := int(d.Hours())
-		if h == 1 {
-			return "1h ago"
-		}
-		return strconv.Itoa(h) + "h ago"
-	default:
-		days := int(d.Hours() / 24)
-		if days == 1 {
-			return "1d ago"
-		}
-		return strconv.Itoa(days) + "d ago"
-	}
-}
-
-func formatDuration(d time.Duration) string {
-	if d == 0 {
-		return "-"
-	}
-	if d < time.Second {
-		return strconv.Itoa(int(d.Milliseconds())) + "ms"
-	}
-	if d < time.Minute {
-		return strconv.FormatFloat(d.Seconds(), 'f', 1, 64) + "s"
-	}
-	return d.Truncate(time.Second).String()
-}
-
-func truncateString(s string, maxLen int) string {
-	if len(s) <= maxLen {
-		return s
-	}
-	return s[:maxLen] + "..."
-}
-
 // --- Cluster / Worker Data ---
 
 func resolveClusterStore(eng *engine.Engine) (cluster.Store, bool) {
@@ -270,12 +221,12 @@ func resolveClusterStore(eng *engine.Engine) (cluster.Store, bool) {
 }
 
 func fetchWorkers(ctx context.Context, cs cluster.Store) []*cluster.Worker {
-	workers, _ := cs.ListWorkers(ctx)
+	workers, _ := cs.ListWorkers(ctx) //nolint:errcheck // best-effort dashboard data
 	return workers
 }
 
 func fetchWorkerByID(ctx context.Context, cs cluster.Store, workerID id.WorkerID) *cluster.Worker {
-	workers, _ := cs.ListWorkers(ctx)
+	workers, _ := cs.ListWorkers(ctx) //nolint:errcheck // best-effort dashboard data
 	for _, w := range workers {
 		if w.ID == workerID {
 			return w
