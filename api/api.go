@@ -60,6 +60,7 @@ func (a *API) registerJobRoutes(router forge.Router) {
 		forge.WithSummary("Get job"),
 		forge.WithDescription("Returns details of a specific job."),
 		forge.WithOperationID("getJob"),
+		forge.WithRequestSchema(GetJobRequest{}),
 		forge.WithResponseSchema(http.StatusOK, "Job details", &job.Job{}),
 		forge.WithErrorResponses(),
 	)
@@ -68,6 +69,7 @@ func (a *API) registerJobRoutes(router forge.Router) {
 		forge.WithSummary("Cancel job"),
 		forge.WithDescription("Cancels a pending or retrying job."),
 		forge.WithOperationID("cancelJob"),
+		forge.WithRequestSchema(CancelJobRequest{}),
 		forge.WithNoContentResponse(),
 		forge.WithErrorResponses(),
 	)
@@ -106,6 +108,7 @@ func (a *API) registerWorkflowRoutes(router forge.Router) {
 		forge.WithSummary("Get workflow run"),
 		forge.WithDescription("Returns details of a specific workflow run."),
 		forge.WithOperationID("getWorkflowRun"),
+		forge.WithRequestSchema(GetWorkflowRunRequest{}),
 		forge.WithResponseSchema(http.StatusOK, "Workflow run details", &workflow.Run{}),
 		forge.WithErrorResponses(),
 	)
@@ -128,6 +131,7 @@ func (a *API) registerDLQRoutes(router forge.Router) {
 		forge.WithSummary("Get DLQ entry"),
 		forge.WithDescription("Returns details of a specific DLQ entry."),
 		forge.WithOperationID("getDLQ"),
+		forge.WithRequestSchema(GetDLQRequest{}),
 		forge.WithResponseSchema(http.StatusOK, "DLQ entry details", &dlq.Entry{}),
 		forge.WithErrorResponses(),
 	)
@@ -135,7 +139,8 @@ func (a *API) registerDLQRoutes(router forge.Router) {
 	_ = g.POST("/dlq/:entryId/replay", a.replayDLQ,
 		forge.WithSummary("Replay DLQ entry"),
 		forge.WithDescription("Re-enqueues a DLQ entry as a new pending job."),
-		forge.WithOperationID("replayDLQ"),
+		forge.WithOperationID("dispatchReplayDLQ"),
+		forge.WithRequestSchema(ReplayDLQRequest{}),
 		forge.WithCreatedResponse(&job.Job{}),
 		forge.WithErrorResponses(),
 	)
@@ -174,6 +179,7 @@ func (a *API) registerCronRoutes(router forge.Router) {
 		forge.WithSummary("Get cron entry"),
 		forge.WithDescription("Returns details of a specific cron entry."),
 		forge.WithOperationID("getCron"),
+		forge.WithRequestSchema(GetCronRequest{}),
 		forge.WithResponseSchema(http.StatusOK, "Cron entry details", &cron.Entry{}),
 		forge.WithErrorResponses(),
 	)
@@ -182,6 +188,7 @@ func (a *API) registerCronRoutes(router forge.Router) {
 		forge.WithSummary("Enable cron entry"),
 		forge.WithDescription("Enables a disabled cron entry."),
 		forge.WithOperationID("enableCron"),
+		forge.WithRequestSchema(EnableCronRequest{}),
 		forge.WithResponseSchema(http.StatusOK, "Enabled cron entry", &cron.Entry{}),
 		forge.WithErrorResponses(),
 	)
@@ -190,6 +197,7 @@ func (a *API) registerCronRoutes(router forge.Router) {
 		forge.WithSummary("Disable cron entry"),
 		forge.WithDescription("Disables a cron entry so it no longer fires."),
 		forge.WithOperationID("disableCron"),
+		forge.WithRequestSchema(DisableCronRequest{}),
 		forge.WithResponseSchema(http.StatusOK, "Disabled cron entry", &cron.Entry{}),
 		forge.WithErrorResponses(),
 	)
@@ -198,6 +206,7 @@ func (a *API) registerCronRoutes(router forge.Router) {
 		forge.WithSummary("Delete cron entry"),
 		forge.WithDescription("Permanently removes a cron entry."),
 		forge.WithOperationID("deleteCron"),
+		forge.WithRequestSchema(DeleteCronRequest{}),
 		forge.WithNoContentResponse(),
 		forge.WithErrorResponses(),
 	)
