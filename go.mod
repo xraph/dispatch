@@ -14,15 +14,15 @@ require (
 	github.com/uptrace/bun/dialect/pgdialect v1.2.16
 	github.com/uptrace/bun/driver/pgdriver v1.2.16
 	github.com/vmihailenco/msgpack/v5 v5.4.1
-	github.com/xraph/forge v1.3.1
-	github.com/xraph/forgeui v1.3.0
-	github.com/xraph/grove v1.3.1
-	github.com/xraph/grove/drivers/mongodriver v1.3.1
-	github.com/xraph/grove/drivers/pgdriver v1.3.1
-	github.com/xraph/grove/drivers/sqlitedriver v1.3.1
-	github.com/xraph/grove/kv v1.3.1
-	github.com/xraph/grove/kv/drivers/redisdriver v1.3.1
-	github.com/xraph/relay v1.3.1
+	github.com/xraph/forge v1.4.0
+	github.com/xraph/forgeui v1.4.0
+	github.com/xraph/grove v1.4.0
+	github.com/xraph/grove/drivers/mongodriver v1.4.0
+	github.com/xraph/grove/drivers/pgdriver v1.4.0
+	github.com/xraph/grove/drivers/sqlitedriver v1.4.0
+	github.com/xraph/grove/kv v1.4.0
+	github.com/xraph/grove/kv/drivers/redisdriver v1.4.0
+	github.com/xraph/relay v1.4.0
 	github.com/xraph/vessel v1.0.0
 	go.jetify.com/typeid/v2 v2.0.0-alpha.3
 	go.mongodb.org/mongo-driver/v2 v2.5.0

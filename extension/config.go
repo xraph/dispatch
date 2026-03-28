@@ -7,7 +7,7 @@ import "github.com/xraph/dispatch"
 // YAML configuration files (under "extensions.dispatch" or "dispatch" keys).
 type Config struct {
 	// BasePath is the URL prefix for all dispatch API routes.
-	BasePath string `default:"/api/dispatch" json:"base_path" mapstructure:"base_path" yaml:"base_path"`
+	BasePath string `default:"/dispatch" json:"base_path" mapstructure:"base_path" yaml:"base_path"`
 
 	// DisableRoutes disables the registration of HTTP routes.
 	// Useful when embedding Dispatch for background processing only.
@@ -47,6 +47,6 @@ type Config struct {
 // DefaultConfig returns a Config with sensible defaults.
 func DefaultConfig() Config {
 	return Config{
-		BasePath: "/api/dispatch",
+		BasePath: "/dispatch",
 	}
 }

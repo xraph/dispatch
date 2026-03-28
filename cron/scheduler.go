@@ -71,8 +71,9 @@ type Scheduler struct {
 	parsedMu sync.RWMutex
 	parsed   map[string]cronlib.Schedule
 
-	stopCh chan struct{}
-	wg     sync.WaitGroup
+	stopCh   chan struct{}
+	stopOnce sync.Once
+	wg       sync.WaitGroup
 }
 
 // NewScheduler creates a Scheduler.
@@ -120,10 +121,14 @@ func (s *Scheduler) Start(_ context.Context) error {
 }
 
 // Stop signals the scheduler to stop and waits for goroutines to finish.
+// It is safe to call Stop multiple times; only the first call closes the
+// stop channel and waits for goroutines.
 func (s *Scheduler) Stop(_ context.Context) error {
-	close(s.stopCh)
-	s.wg.Wait()
-	s.logger.Info("cron scheduler stopped")
+	s.stopOnce.Do(func() {
+		close(s.stopCh)
+		s.wg.Wait()
+		s.logger.Info("cron scheduler stopped")
+	})
 	return nil
 }
 

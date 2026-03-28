@@ -198,7 +198,7 @@ func (e *Extension) init(fapp forge.App) error {
 	if !e.config.DisableRoutes {
 		basePath := e.config.BasePath
 		if basePath == "" {
-			basePath = "/api/dispatch"
+			basePath = "/dispatch"
 		}
 		e.apiHandler.RegisterRoutes(fapp.Router().Group(basePath))
 	}
