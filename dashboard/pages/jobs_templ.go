@@ -20,7 +20,7 @@ import (
 	"github.com/xraph/dispatch/job"
 )
 
-func JobsPage(jobs []*job.Job, stateFilter string, queueFilter string, pg shared.PaginationMeta) templ.Component {
+func JobsPage(jobs []*job.Job, stateFilter string, queueFilter string, nameFilter string, pg shared.PaginationMeta) templ.Component {
 	return templruntime.GeneratedTemplate(func(templ_7745c5c3_Input templruntime.GeneratedComponentInput) (templ_7745c5c3_Err error) {
 		templ_7745c5c3_W, ctx := templ_7745c5c3_Input.Writer, templ_7745c5c3_Input.Context
 		if templ_7745c5c3_CtxErr := ctx.Err(); templ_7745c5c3_CtxErr != nil {
@@ -63,7 +63,7 @@ func JobsPage(jobs []*job.Job, stateFilter string, queueFilter string, pg shared
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
-		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 2, "<div class=\"flex gap-4\"><select name=\"state\" class=\"flex h-10 rounded-sm border border-input bg-background px-3 py-2 text-sm\" hx-get=\"/jobs\" hx-target=\"#content\" hx-trigger=\"change\" hx-push-url=\"true\" hx-include=\"[name='state'],[name='queue']\"><option value=\"\">All States</option> <option value=\"pending\"")
+		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 2, "<div class=\"flex gap-4 flex-wrap\"><select name=\"state\" class=\"flex h-10 rounded-sm border border-input bg-background px-3 py-2 text-sm\" hx-get=\"/jobs\" hx-target=\"#content\" hx-trigger=\"change\" hx-push-url=\"true\" hx-include=\"[name='state'],[name='queue'],[name='name']\"><option value=\"\">All States</option> <option value=\"pending\"")
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
@@ -132,13 +132,30 @@ func JobsPage(jobs []*job.Job, stateFilter string, queueFilter string, pg shared
 			Placeholder: "Filter by queue...",
 			Name:        "queue",
 			Value:       queueFilter,
-			Class:       "max-w-sm rounded-sm",
+			Class:       "max-w-xs rounded-sm",
 			Attributes: templ.Attributes{
 				"hx-get":      "/jobs",
 				"hx-target":   "#content",
 				"hx-trigger":  "input changed delay:300ms",
 				"hx-push-url": "true",
-				"hx-include":  "[name='state'],[name='queue']",
+				"hx-include":  "[name='state'],[name='queue'],[name='name']",
+			},
+		}).Render(ctx, templ_7745c5c3_Buffer)
+		if templ_7745c5c3_Err != nil {
+			return templ_7745c5c3_Err
+		}
+		templ_7745c5c3_Err = input.Input(input.Props{
+			Type:        "search",
+			Placeholder: "Filter by name...",
+			Name:        "name",
+			Value:       nameFilter,
+			Class:       "max-w-xs rounded-sm",
+			Attributes: templ.Attributes{
+				"hx-get":      "/jobs",
+				"hx-target":   "#content",
+				"hx-trigger":  "input changed delay:300ms",
+				"hx-push-url": "true",
+				"hx-include":  "[name='state'],[name='queue'],[name='name']",
 			},
 		}).Render(ctx, templ_7745c5c3_Buffer)
 		if templ_7745c5c3_Err != nil {
@@ -428,7 +445,7 @@ func JobsPage(jobs []*job.Job, stateFilter string, queueFilter string, pg shared
 								var templ_7745c5c3_Var16 string
 								templ_7745c5c3_Var16, templ_7745c5c3_Err = templ.JoinStringErrs(j.Name)
 								if templ_7745c5c3_Err != nil {
-									return templ.Error{Err: templ_7745c5c3_Err, FileName: `dashboard/pages/jobs.templ`, Line: 87, Col: 50}
+									return templ.Error{Err: templ_7745c5c3_Err, FileName: `dashboard/pages/jobs.templ`, Line: 101, Col: 50}
 								}
 								_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var16))
 								if templ_7745c5c3_Err != nil {
@@ -467,7 +484,7 @@ func JobsPage(jobs []*job.Job, stateFilter string, queueFilter string, pg shared
 								var templ_7745c5c3_Var18 string
 								templ_7745c5c3_Var18, templ_7745c5c3_Err = templ.JoinStringErrs(j.Queue)
 								if templ_7745c5c3_Err != nil {
-									return templ.Error{Err: templ_7745c5c3_Err, FileName: `dashboard/pages/jobs.templ`, Line: 90, Col: 71}
+									return templ.Error{Err: templ_7745c5c3_Err, FileName: `dashboard/pages/jobs.templ`, Line: 104, Col: 71}
 								}
 								_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var18))
 								if templ_7745c5c3_Err != nil {
@@ -528,7 +545,7 @@ func JobsPage(jobs []*job.Job, stateFilter string, queueFilter string, pg shared
 								var templ_7745c5c3_Var21 string
 								templ_7745c5c3_Var21, templ_7745c5c3_Err = templ.JoinStringErrs(strconv.Itoa(j.Priority))
 								if templ_7745c5c3_Err != nil {
-									return templ.Error{Err: templ_7745c5c3_Err, FileName: `dashboard/pages/jobs.templ`, Line: 96, Col: 34}
+									return templ.Error{Err: templ_7745c5c3_Err, FileName: `dashboard/pages/jobs.templ`, Line: 110, Col: 34}
 								}
 								_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var21))
 								if templ_7745c5c3_Err != nil {
@@ -563,7 +580,7 @@ func JobsPage(jobs []*job.Job, stateFilter string, queueFilter string, pg shared
 								var templ_7745c5c3_Var23 string
 								templ_7745c5c3_Var23, templ_7745c5c3_Err = templ.JoinStringErrs(fmt.Sprintf("%d/%d", j.RetryCount, j.MaxRetries))
 								if templ_7745c5c3_Err != nil {
-									return templ.Error{Err: templ_7745c5c3_Err, FileName: `dashboard/pages/jobs.templ`, Line: 99, Col: 80}
+									return templ.Error{Err: templ_7745c5c3_Err, FileName: `dashboard/pages/jobs.templ`, Line: 113, Col: 80}
 								}
 								_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var23))
 								if templ_7745c5c3_Err != nil {
@@ -595,21 +612,7 @@ func JobsPage(jobs []*job.Job, stateFilter string, queueFilter string, pg shared
 									}()
 								}
 								ctx = templ.InitializeContext(ctx)
-								created := j.CreatedAt.Format("Jan 02 15:04")
-								templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 41, "<span class=\"text-xs text-muted-foreground\">")
-								if templ_7745c5c3_Err != nil {
-									return templ_7745c5c3_Err
-								}
-								var templ_7745c5c3_Var25 string
-								templ_7745c5c3_Var25, templ_7745c5c3_Err = templ.JoinStringErrs(created)
-								if templ_7745c5c3_Err != nil {
-									return templ.Error{Err: templ_7745c5c3_Err, FileName: `dashboard/pages/jobs.templ`, Line: 103, Col: 61}
-								}
-								_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var25))
-								if templ_7745c5c3_Err != nil {
-									return templ_7745c5c3_Err
-								}
-								templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 42, "</span>")
+								templ_7745c5c3_Err = RelativeTime(j.CreatedAt).Render(ctx, templ_7745c5c3_Buffer)
 								if templ_7745c5c3_Err != nil {
 									return templ_7745c5c3_Err
 								}
@@ -619,11 +622,11 @@ func JobsPage(jobs []*job.Job, stateFilter string, queueFilter string, pg shared
 							if templ_7745c5c3_Err != nil {
 								return templ_7745c5c3_Err
 							}
-							templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 43, " ")
+							templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 41, " ")
 							if templ_7745c5c3_Err != nil {
 								return templ_7745c5c3_Err
 							}
-							templ_7745c5c3_Var26 := templruntime.GeneratedTemplate(func(templ_7745c5c3_Input templruntime.GeneratedComponentInput) (templ_7745c5c3_Err error) {
+							templ_7745c5c3_Var25 := templruntime.GeneratedTemplate(func(templ_7745c5c3_Input templruntime.GeneratedComponentInput) (templ_7745c5c3_Err error) {
 								templ_7745c5c3_W, ctx := templ_7745c5c3_Input.Writer, templ_7745c5c3_Input.Context
 								templ_7745c5c3_Buffer, templ_7745c5c3_IsBuffer := templruntime.GetBuffer(templ_7745c5c3_W)
 								if !templ_7745c5c3_IsBuffer {
@@ -635,7 +638,7 @@ func JobsPage(jobs []*job.Job, stateFilter string, queueFilter string, pg shared
 									}()
 								}
 								ctx = templ.InitializeContext(ctx)
-								templ_7745c5c3_Var27 := templruntime.GeneratedTemplate(func(templ_7745c5c3_Input templruntime.GeneratedComponentInput) (templ_7745c5c3_Err error) {
+								templ_7745c5c3_Var26 := templruntime.GeneratedTemplate(func(templ_7745c5c3_Input templruntime.GeneratedComponentInput) (templ_7745c5c3_Err error) {
 									templ_7745c5c3_W, ctx := templ_7745c5c3_Input.Writer, templ_7745c5c3_Input.Context
 									templ_7745c5c3_Buffer, templ_7745c5c3_IsBuffer := templruntime.GetBuffer(templ_7745c5c3_W)
 									if !templ_7745c5c3_IsBuffer {
@@ -647,7 +650,7 @@ func JobsPage(jobs []*job.Job, stateFilter string, queueFilter string, pg shared
 										}()
 									}
 									ctx = templ.InitializeContext(ctx)
-									templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 44, "View")
+									templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 42, "View")
 									if templ_7745c5c3_Err != nil {
 										return templ_7745c5c3_Err
 									}
@@ -660,13 +663,13 @@ func JobsPage(jobs []*job.Job, stateFilter string, queueFilter string, pg shared
 										"hx-get":    "/jobs/detail?id=" + j.ID.String(),
 										"hx-target": "#content",
 									},
-								}).Render(templ.WithChildren(ctx, templ_7745c5c3_Var27), templ_7745c5c3_Buffer)
+								}).Render(templ.WithChildren(ctx, templ_7745c5c3_Var26), templ_7745c5c3_Buffer)
 								if templ_7745c5c3_Err != nil {
 									return templ_7745c5c3_Err
 								}
 								return nil
 							})
-							templ_7745c5c3_Err = table.Cell().Render(templ.WithChildren(ctx, templ_7745c5c3_Var26), templ_7745c5c3_Buffer)
+							templ_7745c5c3_Err = table.Cell().Render(templ.WithChildren(ctx, templ_7745c5c3_Var25), templ_7745c5c3_Buffer)
 							if templ_7745c5c3_Err != nil {
 								return templ_7745c5c3_Err
 							}
@@ -695,17 +698,17 @@ func JobsPage(jobs []*job.Job, stateFilter string, queueFilter string, pg shared
 			if templ_7745c5c3_Err != nil {
 				return templ_7745c5c3_Err
 			}
-			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 45, " ")
+			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 43, " ")
 			if templ_7745c5c3_Err != nil {
 				return templ_7745c5c3_Err
 			}
-			baseURL := "/jobs?state=" + stateFilter + "&queue=" + queueFilter
+			baseURL := "/jobs?state=" + stateFilter + "&queue=" + queueFilter + "&name=" + nameFilter
 			templ_7745c5c3_Err = Pagination(pg, baseURL).Render(ctx, templ_7745c5c3_Buffer)
 			if templ_7745c5c3_Err != nil {
 				return templ_7745c5c3_Err
 			}
 		}
-		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 46, "</div>")
+		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 44, "</div>")
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}

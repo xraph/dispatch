@@ -3,16 +3,19 @@ package dashboard
 import (
 	"context"
 	"fmt"
+	"io"
 	"strings"
 
 	"github.com/a-h/templ"
 
 	"github.com/xraph/forge/extensions/dashboard/contributor"
 
+	"github.com/xraph/dispatch/cron"
 	"github.com/xraph/dispatch/dashboard/components"
 	"github.com/xraph/dispatch/dashboard/pages"
 	"github.com/xraph/dispatch/dashboard/settings"
 	"github.com/xraph/dispatch/dashboard/widgets"
+	"github.com/xraph/dispatch/dlq"
 	"github.com/xraph/dispatch/engine"
 	"github.com/xraph/dispatch/id"
 	"github.com/xraph/dispatch/job"
@@ -23,15 +26,21 @@ var _ contributor.LocalContributor = (*Contributor)(nil)
 
 // Contributor implements the dashboard LocalContributor interface for dispatch.
 type Contributor struct {
-	manifest *contributor.Manifest
-	engine   *engine.Engine
+	manifest    *contributor.Manifest
+	engine      *engine.Engine
+	apiBasePath string
 }
 
 // New creates a new dispatch dashboard contributor.
-func New(manifest *contributor.Manifest, eng *engine.Engine) *Contributor {
+// apiBasePath is the URL prefix for the dispatch API routes (e.g. "/dispatch").
+func New(manifest *contributor.Manifest, eng *engine.Engine, apiBasePath string) *Contributor {
+	if apiBasePath == "" {
+		apiBasePath = "/dispatch"
+	}
 	return &Contributor{
-		manifest: manifest,
-		engine:   eng,
+		manifest:    manifest,
+		engine:      eng,
+		apiBasePath: apiBasePath,
 	}
 }
 
@@ -50,6 +59,22 @@ func (c *Contributor) RenderPage(ctx context.Context, route string, params contr
 		route = "/"
 	}
 
+	comp, err := c.renderPageRoute(ctx, route, params)
+	if err != nil {
+		return nil, err
+	}
+
+	// Wrap every page in the PathRewriter so bare hx-get paths (e.g. "/crons/detail")
+	// are rewritten to the fully-qualified dashboard extension path at runtime,
+	// and API paths (e.g. "/v1/jobs/...") are prefixed with the API base path.
+	pagesBase := params.BasePath + "/ext/" + c.manifest.Name + "/pages"
+	return templ.ComponentFunc(func(tCtx context.Context, w io.Writer) error {
+		return components.PathRewriter(pagesBase, c.apiBasePath).Render(templ.WithChildren(tCtx, comp), w)
+	}), nil
+}
+
+// renderPageRoute dispatches to the correct page renderer based on the route.
+func (c *Contributor) renderPageRoute(ctx context.Context, route string, params contributor.Params) (templ.Component, error) {
 	switch route {
 	case "/":
 		return c.renderOverview(ctx)
@@ -76,7 +101,7 @@ func (c *Contributor) RenderPage(ctx context.Context, route string, params contr
 	case "/workers/detail":
 		return c.renderWorkerDetail(ctx, params)
 	case "/crons":
-		return c.renderCrons(ctx)
+		return c.renderCrons(ctx, params)
 	case "/crons/detail":
 		return c.renderCronDetail(ctx, params)
 	default:
@@ -180,6 +205,7 @@ func (c *Contributor) renderJobs(ctx context.Context, params contributor.Params)
 
 	stateFilter := params.QueryParams["state"]
 	queueFilter := params.QueryParams["queue"]
+	nameFilter := params.QueryParams["name"]
 	limit := parseIntParam(params.QueryParams, "limit", 20)
 	offset := parseIntParam(params.QueryParams, "offset", 0)
 
@@ -207,8 +233,20 @@ func (c *Contributor) renderJobs(ctx context.Context, params contributor.Params)
 		}
 	}
 
+	// Client-side name filtering.
+	if nameFilter != "" {
+		filtered := make([]*job.Job, 0, len(jobs))
+		lower := strings.ToLower(nameFilter)
+		for _, j := range jobs {
+			if strings.Contains(strings.ToLower(j.Name), lower) {
+				filtered = append(filtered, j)
+			}
+		}
+		jobs = filtered
+	}
+
 	pg := NewPaginationMeta(total, limit, offset)
-	return pages.JobsPage(jobs, stateFilter, queueFilter, pg), nil
+	return pages.JobsPage(jobs, stateFilter, queueFilter, nameFilter, pg), nil
 }
 
 func (c *Contributor) renderJobDetail(ctx context.Context, params contributor.Params) (templ.Component, error) {
@@ -242,6 +280,7 @@ func (c *Contributor) renderWorkflows(ctx context.Context, params contributor.Pa
 	}
 
 	stateFilter := params.QueryParams["state"]
+	nameFilter := params.QueryParams["name"]
 	limit := parseIntParam(params.QueryParams, "limit", 20)
 	offset := parseIntParam(params.QueryParams, "offset", 0)
 
@@ -255,6 +294,18 @@ func (c *Contributor) renderWorkflows(ctx context.Context, params contributor.Pa
 		return components.EmptyState("alert-circle", "Error loading workflows", err.Error()), nil
 	}
 
+	// Client-side name filtering.
+	if nameFilter != "" {
+		filtered := make([]*workflow.Run, 0, len(runs))
+		lower := strings.ToLower(nameFilter)
+		for _, r := range runs {
+			if strings.Contains(strings.ToLower(r.Name), lower) {
+				filtered = append(filtered, r)
+			}
+		}
+		runs = filtered
+	}
+
 	// Get registered workflow names.
 	var names []string
 	if c.engine.WorkflowRunner() != nil && c.engine.WorkflowRunner().Registry() != nil {
@@ -264,7 +315,7 @@ func (c *Contributor) renderWorkflows(ctx context.Context, params contributor.Pa
 	wc := fetchWorkflowCounts(ctx, ws)
 	pg := NewPaginationMeta(int64(wc.Total), limit, offset)
 
-	return pages.WorkflowsPage(runs, names, stateFilter, pg), nil
+	return pages.WorkflowsPage(runs, names, stateFilter, nameFilter, pg), nil
 }
 
 func (c *Contributor) renderWorkflowDetail(ctx context.Context, params contributor.Params) (templ.Component, error) {
@@ -301,6 +352,7 @@ func (c *Contributor) renderDLQ(ctx context.Context, params contributor.Params) 
 	}
 
 	queueFilter := params.QueryParams["queue"]
+	nameFilter := params.QueryParams["name"]
 	limit := parseIntParam(params.QueryParams, "limit", 20)
 	offset := parseIntParam(params.QueryParams, "offset", 0)
 
@@ -309,10 +361,22 @@ func (c *Contributor) renderDLQ(ctx context.Context, params contributor.Params) 
 		return components.EmptyState("alert-circle", "Error loading DLQ", err.Error()), nil
 	}
 
+	// Client-side name filtering.
+	if nameFilter != "" {
+		filtered := make([]*dlq.Entry, 0, len(entries))
+		lower := strings.ToLower(nameFilter)
+		for _, e := range entries {
+			if strings.Contains(strings.ToLower(e.JobName), lower) {
+				filtered = append(filtered, e)
+			}
+		}
+		entries = filtered
+	}
+
 	total := fetchDLQCount(ctx, ds)
 	pg := NewPaginationMeta(total, limit, offset)
 
-	return pages.DLQPage(entries, queueFilter, pg), nil
+	return pages.DLQPage(entries, queueFilter, nameFilter, pg), nil
 }
 
 func (c *Contributor) renderDLQDetail(ctx context.Context, params contributor.Params) (templ.Component, error) {
@@ -339,14 +403,46 @@ func (c *Contributor) renderDLQDetail(ctx context.Context, params contributor.Pa
 	return pages.DLQDetailPage(entry), nil
 }
 
-func (c *Contributor) renderCrons(ctx context.Context) (templ.Component, error) {
+func (c *Contributor) renderCrons(ctx context.Context, params contributor.Params) (templ.Component, error) {
 	cs, ok := resolveCronStore(c.engine)
 	if !ok {
 		return components.EmptyState("database", "No store configured", "The Dispatch dashboard requires a database store."), nil
 	}
 
+	searchFilter := params.QueryParams["search"]
+	limit := parseIntParam(params.QueryParams, "limit", 20)
+	offset := parseIntParam(params.QueryParams, "offset", 0)
+
 	entries := fetchCronEntries(ctx, cs)
-	return pages.CronsPage(entries), nil
+
+	// Client-side search filtering.
+	if searchFilter != "" {
+		filtered := make([]*cron.Entry, 0, len(entries))
+		lower := strings.ToLower(searchFilter)
+		for _, e := range entries {
+			if strings.Contains(strings.ToLower(e.Name), lower) ||
+				strings.Contains(strings.ToLower(e.JobName), lower) {
+				filtered = append(filtered, e)
+			}
+		}
+		entries = filtered
+	}
+
+	total := int64(len(entries))
+
+	// Manual pagination.
+	if offset < len(entries) {
+		end := offset + limit
+		if end > len(entries) {
+			end = len(entries)
+		}
+		entries = entries[offset:end]
+	} else {
+		entries = nil
+	}
+
+	pg := NewPaginationMeta(total, limit, offset)
+	return pages.CronsPage(entries, searchFilter, pg), nil
 }
 
 func (c *Contributor) renderCronDetail(ctx context.Context, params contributor.Params) (templ.Component, error) {

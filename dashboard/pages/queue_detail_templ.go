@@ -45,6 +45,13 @@ func QueueDetailPage(q QueueInfo, jobs []*job.Job, pg shared.PaginationMeta) tem
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
+		templ_7745c5c3_Err = components.Breadcrumb([]components.BreadcrumbItem{
+			{Label: "Queues", Href: "/queues"},
+			{Label: q.Name},
+		}).Render(ctx, templ_7745c5c3_Buffer)
+		if templ_7745c5c3_Err != nil {
+			return templ_7745c5c3_Err
+		}
 		templ_7745c5c3_Var2 := templruntime.GeneratedTemplate(func(templ_7745c5c3_Input templruntime.GeneratedComponentInput) (templ_7745c5c3_Err error) {
 			templ_7745c5c3_W, ctx := templ_7745c5c3_Input.Writer, templ_7745c5c3_Input.Context
 			templ_7745c5c3_Buffer, templ_7745c5c3_IsBuffer := templruntime.GetBuffer(templ_7745c5c3_W)
@@ -211,7 +218,7 @@ func QueueDetailPage(q QueueInfo, jobs []*job.Job, pg shared.PaginationMeta) tem
 				var templ_7745c5c3_Var8 string
 				templ_7745c5c3_Var8, templ_7745c5c3_Err = templ.JoinStringErrs(q.Name)
 				if templ_7745c5c3_Err != nil {
-					return templ.Error{Err: templ_7745c5c3_Err, FileName: `dashboard/pages/queue_detail.templ`, Line: 55, Col: 70}
+					return templ.Error{Err: templ_7745c5c3_Err, FileName: `dashboard/pages/queue_detail.templ`, Line: 59, Col: 70}
 				}
 				_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var8))
 				if templ_7745c5c3_Err != nil {
@@ -224,7 +231,7 @@ func QueueDetailPage(q QueueInfo, jobs []*job.Job, pg shared.PaginationMeta) tem
 				var templ_7745c5c3_Var9 string
 				templ_7745c5c3_Var9, templ_7745c5c3_Err = templ.JoinStringErrs(strconv.Itoa(q.Active))
 				if templ_7745c5c3_Err != nil {
-					return templ.Error{Err: templ_7745c5c3_Err, FileName: `dashboard/pages/queue_detail.templ`, Line: 58, Col: 53}
+					return templ.Error{Err: templ_7745c5c3_Err, FileName: `dashboard/pages/queue_detail.templ`, Line: 62, Col: 53}
 				}
 				_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var9))
 				if templ_7745c5c3_Err != nil {
@@ -238,7 +245,7 @@ func QueueDetailPage(q QueueInfo, jobs []*job.Job, pg shared.PaginationMeta) tem
 					var templ_7745c5c3_Var10 string
 					templ_7745c5c3_Var10, templ_7745c5c3_Err = templ.JoinStringErrs(strconv.Itoa(q.MaxConcurrency))
 					if templ_7745c5c3_Err != nil {
-						return templ.Error{Err: templ_7745c5c3_Err, FileName: `dashboard/pages/queue_detail.templ`, Line: 62, Col: 39}
+						return templ.Error{Err: templ_7745c5c3_Err, FileName: `dashboard/pages/queue_detail.templ`, Line: 66, Col: 39}
 					}
 					_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var10))
 					if templ_7745c5c3_Err != nil {
@@ -258,7 +265,7 @@ func QueueDetailPage(q QueueInfo, jobs []*job.Job, pg shared.PaginationMeta) tem
 					var templ_7745c5c3_Var11 string
 					templ_7745c5c3_Var11, templ_7745c5c3_Err = templ.JoinStringErrs(fmt.Sprintf("%.1f jobs/sec", q.RateLimit))
 					if templ_7745c5c3_Err != nil {
-						return templ.Error{Err: templ_7745c5c3_Err, FileName: `dashboard/pages/queue_detail.templ`, Line: 70, Col: 50}
+						return templ.Error{Err: templ_7745c5c3_Err, FileName: `dashboard/pages/queue_detail.templ`, Line: 74, Col: 50}
 					}
 					_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var11))
 					if templ_7745c5c3_Err != nil {
@@ -282,7 +289,7 @@ func QueueDetailPage(q QueueInfo, jobs []*job.Job, pg shared.PaginationMeta) tem
 					var templ_7745c5c3_Var12 string
 					templ_7745c5c3_Var12, templ_7745c5c3_Err = templ.JoinStringErrs(strconv.Itoa(q.RateBurst))
 					if templ_7745c5c3_Err != nil {
-						return templ.Error{Err: templ_7745c5c3_Err, FileName: `dashboard/pages/queue_detail.templ`, Line: 77, Col: 57}
+						return templ.Error{Err: templ_7745c5c3_Err, FileName: `dashboard/pages/queue_detail.templ`, Line: 81, Col: 57}
 					}
 					_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var12))
 					if templ_7745c5c3_Err != nil {
@@ -672,7 +679,7 @@ func QueueDetailPage(q QueueInfo, jobs []*job.Job, pg shared.PaginationMeta) tem
 										var templ_7745c5c3_Var30 string
 										templ_7745c5c3_Var30, templ_7745c5c3_Err = templ.JoinStringErrs(j.Name)
 										if templ_7745c5c3_Err != nil {
-											return templ.Error{Err: templ_7745c5c3_Err, FileName: `dashboard/pages/queue_detail.templ`, Line: 136, Col: 52}
+											return templ.Error{Err: templ_7745c5c3_Err, FileName: `dashboard/pages/queue_detail.templ`, Line: 140, Col: 52}
 										}
 										_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var30))
 										if templ_7745c5c3_Err != nil {
@@ -733,7 +740,7 @@ func QueueDetailPage(q QueueInfo, jobs []*job.Job, pg shared.PaginationMeta) tem
 										var templ_7745c5c3_Var33 string
 										templ_7745c5c3_Var33, templ_7745c5c3_Err = templ.JoinStringErrs(strconv.Itoa(j.Priority))
 										if templ_7745c5c3_Err != nil {
-											return templ.Error{Err: templ_7745c5c3_Err, FileName: `dashboard/pages/queue_detail.templ`, Line: 142, Col: 36}
+											return templ.Error{Err: templ_7745c5c3_Err, FileName: `dashboard/pages/queue_detail.templ`, Line: 146, Col: 36}
 										}
 										_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var33))
 										if templ_7745c5c3_Err != nil {
@@ -768,7 +775,7 @@ func QueueDetailPage(q QueueInfo, jobs []*job.Job, pg shared.PaginationMeta) tem
 										var templ_7745c5c3_Var35 string
 										templ_7745c5c3_Var35, templ_7745c5c3_Err = templ.JoinStringErrs(fmt.Sprintf("%d/%d", j.RetryCount, j.MaxRetries))
 										if templ_7745c5c3_Err != nil {
-											return templ.Error{Err: templ_7745c5c3_Err, FileName: `dashboard/pages/queue_detail.templ`, Line: 145, Col: 82}
+											return templ.Error{Err: templ_7745c5c3_Err, FileName: `dashboard/pages/queue_detail.templ`, Line: 149, Col: 82}
 										}
 										_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var35))
 										if templ_7745c5c3_Err != nil {
@@ -800,21 +807,7 @@ func QueueDetailPage(q QueueInfo, jobs []*job.Job, pg shared.PaginationMeta) tem
 											}()
 										}
 										ctx = templ.InitializeContext(ctx)
-										created := j.CreatedAt.Format("Jan 02 15:04")
-										templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 44, "<span class=\"text-xs text-muted-foreground\">")
-										if templ_7745c5c3_Err != nil {
-											return templ_7745c5c3_Err
-										}
-										var templ_7745c5c3_Var37 string
-										templ_7745c5c3_Var37, templ_7745c5c3_Err = templ.JoinStringErrs(created)
-										if templ_7745c5c3_Err != nil {
-											return templ.Error{Err: templ_7745c5c3_Err, FileName: `dashboard/pages/queue_detail.templ`, Line: 149, Col: 63}
-										}
-										_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var37))
-										if templ_7745c5c3_Err != nil {
-											return templ_7745c5c3_Err
-										}
-										templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 45, "</span>")
+										templ_7745c5c3_Err = RelativeTime(j.CreatedAt).Render(ctx, templ_7745c5c3_Buffer)
 										if templ_7745c5c3_Err != nil {
 											return templ_7745c5c3_Err
 										}
@@ -824,11 +817,11 @@ func QueueDetailPage(q QueueInfo, jobs []*job.Job, pg shared.PaginationMeta) tem
 									if templ_7745c5c3_Err != nil {
 										return templ_7745c5c3_Err
 									}
-									templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 46, " ")
+									templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 44, " ")
 									if templ_7745c5c3_Err != nil {
 										return templ_7745c5c3_Err
 									}
-									templ_7745c5c3_Var38 := templruntime.GeneratedTemplate(func(templ_7745c5c3_Input templruntime.GeneratedComponentInput) (templ_7745c5c3_Err error) {
+									templ_7745c5c3_Var37 := templruntime.GeneratedTemplate(func(templ_7745c5c3_Input templruntime.GeneratedComponentInput) (templ_7745c5c3_Err error) {
 										templ_7745c5c3_W, ctx := templ_7745c5c3_Input.Writer, templ_7745c5c3_Input.Context
 										templ_7745c5c3_Buffer, templ_7745c5c3_IsBuffer := templruntime.GetBuffer(templ_7745c5c3_W)
 										if !templ_7745c5c3_IsBuffer {
@@ -840,7 +833,7 @@ func QueueDetailPage(q QueueInfo, jobs []*job.Job, pg shared.PaginationMeta) tem
 											}()
 										}
 										ctx = templ.InitializeContext(ctx)
-										templ_7745c5c3_Var39 := templruntime.GeneratedTemplate(func(templ_7745c5c3_Input templruntime.GeneratedComponentInput) (templ_7745c5c3_Err error) {
+										templ_7745c5c3_Var38 := templruntime.GeneratedTemplate(func(templ_7745c5c3_Input templruntime.GeneratedComponentInput) (templ_7745c5c3_Err error) {
 											templ_7745c5c3_W, ctx := templ_7745c5c3_Input.Writer, templ_7745c5c3_Input.Context
 											templ_7745c5c3_Buffer, templ_7745c5c3_IsBuffer := templruntime.GetBuffer(templ_7745c5c3_W)
 											if !templ_7745c5c3_IsBuffer {
@@ -852,7 +845,7 @@ func QueueDetailPage(q QueueInfo, jobs []*job.Job, pg shared.PaginationMeta) tem
 												}()
 											}
 											ctx = templ.InitializeContext(ctx)
-											templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 47, "View")
+											templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 45, "View")
 											if templ_7745c5c3_Err != nil {
 												return templ_7745c5c3_Err
 											}
@@ -865,13 +858,13 @@ func QueueDetailPage(q QueueInfo, jobs []*job.Job, pg shared.PaginationMeta) tem
 												"hx-get":    "/jobs/detail?id=" + j.ID.String(),
 												"hx-target": "#content",
 											},
-										}).Render(templ.WithChildren(ctx, templ_7745c5c3_Var39), templ_7745c5c3_Buffer)
+										}).Render(templ.WithChildren(ctx, templ_7745c5c3_Var38), templ_7745c5c3_Buffer)
 										if templ_7745c5c3_Err != nil {
 											return templ_7745c5c3_Err
 										}
 										return nil
 									})
-									templ_7745c5c3_Err = table.Cell().Render(templ.WithChildren(ctx, templ_7745c5c3_Var38), templ_7745c5c3_Buffer)
+									templ_7745c5c3_Err = table.Cell().Render(templ.WithChildren(ctx, templ_7745c5c3_Var37), templ_7745c5c3_Buffer)
 									if templ_7745c5c3_Err != nil {
 										return templ_7745c5c3_Err
 									}
@@ -900,7 +893,7 @@ func QueueDetailPage(q QueueInfo, jobs []*job.Job, pg shared.PaginationMeta) tem
 					if templ_7745c5c3_Err != nil {
 						return templ_7745c5c3_Err
 					}
-					templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 48, " ")
+					templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 46, " ")
 					if templ_7745c5c3_Err != nil {
 						return templ_7745c5c3_Err
 					}
@@ -922,7 +915,7 @@ func QueueDetailPage(q QueueInfo, jobs []*job.Job, pg shared.PaginationMeta) tem
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
-		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 49, "</div>")
+		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 47, "</div>")
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}

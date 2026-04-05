@@ -11,6 +11,10 @@ import (
 
 templ WorkflowDetailPage(r *workflow.Run, checkpoints []*workflow.Checkpoint, childRuns []*workflow.Run) {
 	<div class="space-y-6">
+		@components.Breadcrumb([]components.BreadcrumbItem{
+			{Label: "Workflows", Href: "/workflows"},
+			{Label: r.Name},
+		})
 		@components.PageHeader(r.Name, "", "Workflow run details") {
 			@button.Button(button.Props{
 				Variant: button.VariantOutline,
@@ -43,6 +47,8 @@ templ WorkflowDetailPage(r *workflow.Run, checkpoints []*workflow.Checkpoint, ch
 						@field("Started At", r.StartedAt.Format("Jan 02, 2006 15:04:05"), false)
 						if r.CompletedAt != nil {
 							@field("Completed At", r.CompletedAt.Format("Jan 02, 2006 15:04:05"), false)
+							{{ duration := r.CompletedAt.Sub(r.StartedAt) }}
+							@field("Duration", formatDuration(duration), false)
 						}
 						if r.ParentRunID != nil {
 							<dt class="text-muted-foreground">Parent Run</dt>
@@ -104,32 +110,38 @@ templ WorkflowDetailPage(r *workflow.Run, checkpoints []*workflow.Checkpoint, ch
 					@card.Title() {
 						Checkpoints
 					}
+					@card.Description() {
+						Step-by-step execution progress
+					}
 				}
 				@card.Content() {
-					@table.Table() {
-						@table.Header() {
-							@table.Row() {
-								@table.Head() {
-									Step
-								}
-								@table.Head() {
-									Data
-								}
-							}
-						}
-						@table.Body() {
-							for _, cp := range checkpoints {
-								@table.Row() {
-									@table.Cell() {
-										<code class="text-xs bg-muted px-1 py-0.5 rounded-sm">{ cp.StepName }</code>
+					<div class="space-y-0">
+						for i, cp := range checkpoints {
+							<div class="flex gap-4 pb-4 last:pb-0">
+								<!-- Step indicator -->
+								<div class="flex flex-col items-center">
+									<div class="w-7 h-7 rounded-full bg-primary text-primary-foreground flex items-center justify-center text-xs font-bold flex-shrink-0">
+										{ strconv.Itoa(i + 1) }
+									</div>
+									if i < len(checkpoints) - 1 {
+										<div class="w-0.5 flex-1 bg-border mt-1"></div>
 									}
-									@table.Cell() {
-										@components.JsonViewer(cp.Data)
+								</div>
+								<!-- Step content -->
+								<div class="flex-1 pb-2">
+									<div class="flex items-center gap-3 mb-1">
+										<code class="text-sm font-medium bg-muted px-2 py-0.5 rounded-sm">{ cp.StepName }</code>
+										<span class="text-xs text-muted-foreground">{ cp.CreatedAt.Format("15:04:05") }</span>
+									</div>
+									if len(cp.Data) > 2 {
+										<div class="mt-2">
+											@components.JsonViewer(cp.Data)
+										</div>
 									}
-								}
-							}
+								</div>
+							</div>
 						}
-					}
+					</div>
 				}
 			}
 		}
@@ -145,13 +157,16 @@ templ WorkflowDetailPage(r *workflow.Run, checkpoints []*workflow.Checkpoint, ch
 						@table.Header() {
 							@table.Row() {
 								@table.Head() {
-									ID
-								}
-								@table.Head() {
 									Name
 								}
 								@table.Head() {
 									State
+								}
+								@table.Head() {
+									Started
+								}
+								@table.Head() {
+									Duration
 								}
 								@table.Head() {
 									Action
@@ -160,15 +175,29 @@ templ WorkflowDetailPage(r *workflow.Run, checkpoints []*workflow.Checkpoint, ch
 						}
 						@table.Body() {
 							for _, child := range childRuns {
-								@table.Row() {
-									@table.Cell() {
-										<code class="text-xs bg-muted px-1 py-0.5 rounded-sm">{ child.ID.String() }</code>
-									}
+								@table.Row(table.RowProps{
+									Class: "cursor-pointer hover:bg-muted/50",
+									Attributes: templ.Attributes{
+										"hx-get":    "/workflows/detail?id=" + child.ID.String(),
+										"hx-target": "#content",
+									},
+								}) {
 									@table.Cell() {
 										<span class="font-medium text-sm">{ child.Name }</span>
 									}
 									@table.Cell() {
 										@components.WorkflowStateBadge(string(child.State))
+									}
+									@table.Cell() {
+										@RelativeTime(child.StartedAt)
+									}
+									@table.Cell() {
+										if child.CompletedAt != nil {
+											{{ duration := child.CompletedAt.Sub(child.StartedAt) }}
+											<span class="text-xs text-muted-foreground font-mono">{ formatDuration(duration) }</span>
+										} else {
+											<span class="text-xs text-muted-foreground">-</span>
+										}
 									}
 									@table.Cell() {
 										@button.Button(button.Props{
@@ -188,12 +217,6 @@ templ WorkflowDetailPage(r *workflow.Run, checkpoints []*workflow.Checkpoint, ch
 					}
 				}
 			}
-		}
-		if r.CompletedAt != nil {
-			<div class="text-sm text-muted-foreground">
-				{{ duration := r.CompletedAt.Sub(r.StartedAt) }}
-				Duration: { duration.String() }
-			</div>
 		}
 	</div>
 }

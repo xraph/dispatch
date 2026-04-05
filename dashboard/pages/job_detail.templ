@@ -9,8 +9,29 @@ import (
 	"github.com/xraph/forgeui/components/separator"
 )
 
+func timelineStepClass(active bool, done bool) string {
+	if done {
+		return "bg-green-500"
+	}
+	if active {
+		return "bg-yellow-500 animate-pulse"
+	}
+	return "bg-muted"
+}
+
+func timelineLineClass(done bool) string {
+	if done {
+		return "bg-green-500"
+	}
+	return "bg-muted"
+}
+
 templ JobDetailPage(j *job.Job) {
 	<div class="space-y-6">
+		@components.Breadcrumb([]components.BreadcrumbItem{
+			{Label: "Jobs", Href: "/jobs"},
+			{Label: j.Name},
+		})
 		@components.PageHeader(j.Name, "", "Job details") {
 			@button.Button(button.Props{
 				Variant: button.VariantOutline,
@@ -33,7 +54,55 @@ templ JobDetailPage(j *job.Job) {
 					Cancel Job
 				}
 			}
+			if j.State == job.StateFailed {
+				@button.Button(button.Props{
+					Variant: button.VariantDefault,
+					Attributes: templ.Attributes{
+						"hx-post":    "/v1/jobs/" + j.ID.String() + "/retry",
+						"hx-target":  "#content",
+						"hx-confirm": "Retry this failed job?",
+					},
+				}) {
+					Retry Job
+				}
+			}
 		}
+		<!-- Job lifecycle timeline -->
+		<div class="rounded-sm border p-4">
+			<div class="flex items-center justify-between gap-0">
+				<!-- Created -->
+				<div class="flex flex-col items-center gap-1">
+					<div class={ "w-3.5 h-3.5 rounded-full flex-shrink-0", timelineStepClass(false, true) }></div>
+					<span class="text-xs text-muted-foreground">Created</span>
+				</div>
+				<div class={ "flex-1 h-0.5", timelineLineClass(j.State != job.StatePending) }></div>
+				<!-- Running -->
+				<div class="flex flex-col items-center gap-1">
+					<div class={ "w-3.5 h-3.5 rounded-full flex-shrink-0", timelineStepClass(j.State == job.StateRunning, j.StartedAt != nil && j.State != job.StateRunning) }></div>
+					<span class="text-xs text-muted-foreground">Running</span>
+				</div>
+				<div class={ "flex-1 h-0.5", timelineLineClass(j.CompletedAt != nil) }></div>
+				<!-- Final state -->
+				<div class="flex flex-col items-center gap-1">
+					if j.State == job.StateFailed {
+						<div class="w-3.5 h-3.5 rounded-full flex-shrink-0 bg-destructive"></div>
+						<span class="text-xs text-destructive font-medium">Failed</span>
+					} else if j.State == job.StateCancelled {
+						<div class="w-3.5 h-3.5 rounded-full flex-shrink-0 bg-muted-foreground"></div>
+						<span class="text-xs text-muted-foreground font-medium">Cancelled</span>
+					} else if j.State == job.StateCompleted {
+						<div class="w-3.5 h-3.5 rounded-full flex-shrink-0 bg-green-500"></div>
+						<span class="text-xs text-green-600 font-medium">Completed</span>
+					} else if j.State == job.StateRetrying {
+						<div class="w-3.5 h-3.5 rounded-full flex-shrink-0 bg-yellow-500 animate-pulse"></div>
+						<span class="text-xs text-yellow-600 font-medium">Retrying</span>
+					} else {
+						<div class="w-3.5 h-3.5 rounded-full flex-shrink-0 bg-muted"></div>
+						<span class="text-xs text-muted-foreground">Done</span>
+					}
+				</div>
+			</div>
+		</div>
 		<div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
 			@card.Card(card.Props{Class: "rounded-sm"}) {
 				@card.Header() {
@@ -102,7 +171,7 @@ templ JobDetailPage(j *job.Job) {
 			@separator.Separator()
 			<div class="text-sm text-muted-foreground">
 				{{ duration := j.CompletedAt.Sub(*j.StartedAt) }}
-				Duration: { duration.String() }
+				Duration: { formatDuration(duration) }
 			</div>
 		}
 	</div>

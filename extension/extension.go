@@ -151,7 +151,7 @@ func (e *Extension) init(fapp forge.App) error {
 
 	logger := e.logger
 	if logger == nil {
-		logger = log.NewNoopLogger()
+		logger = e.App().Logger()
 	}
 
 	// Build dispatcher options.
@@ -459,8 +459,13 @@ func (e *Extension) resolveGroveKV(fapp forge.App) (*kv.Store, error) {
 // LocalContributor that renders dispatch pages, widgets, and settings in the
 // Forge dashboard using templ + ForgeUI.
 func (e *Extension) DashboardContributor() contributor.LocalContributor {
+	basePath := e.config.BasePath
+	if basePath == "" {
+		basePath = "/dispatch"
+	}
 	return dispatchdash.New(
 		dispatchdash.NewManifest(),
 		e.eng,
+		basePath,
 	)
 }

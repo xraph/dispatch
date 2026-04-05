@@ -11,6 +11,10 @@ import (
 
 templ DLQDetailPage(e *dlq.Entry) {
 	<div class="space-y-6">
+		@components.Breadcrumb([]components.BreadcrumbItem{
+			{Label: "Dead Letters", Href: "/dlq"},
+			{Label: e.JobName},
+		})
 		@components.PageHeader(e.JobName, "", "Dead letter queue entry") {
 			@button.Button(button.Props{
 				Variant: button.VariantOutline,
@@ -62,6 +66,9 @@ templ DLQDetailPage(e *dlq.Entry) {
 								@badge.Badge(badge.Props{Variant: badge.VariantDestructive}) {
 									Dead
 								}
+								<span class="text-xs text-muted-foreground ml-2">
+									@RelativeTime(e.FailedAt)
+								</span>
 							}
 						</dd>
 						if e.ScopeAppID != "" {

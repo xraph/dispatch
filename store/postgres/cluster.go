@@ -118,19 +118,18 @@ func (s *Store) AcquireLeadership(ctx context.Context, workerID id.WorkerID, ttl
 	}
 
 	// Step 2: Check if there's already an active leader that isn't us.
-	var activeLeaderID string
-	err = s.pgdb.NewSelect().
-		TableExpr("dispatch_workers").
+	var leader workerModel
+	err = s.pgdb.NewSelect(&leader).
 		Column("id").
 		Where("is_leader = TRUE AND leader_until >= NOW()").
 		Limit(1).
-		Scan(ctx, &activeLeaderID)
+		Scan(ctx)
 	if err != nil {
 		if !isNoRows(err) {
 			return false, fmt.Errorf("dispatch/bun: check leader: %w", err)
 		}
 		// No active leader — proceed to claim.
-	} else if activeLeaderID != wID {
+	} else if leader.ID != wID {
 		return false, nil
 	}
 

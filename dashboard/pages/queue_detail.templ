@@ -13,6 +13,10 @@ import (
 
 templ QueueDetailPage(q QueueInfo, jobs []*job.Job, pg shared.PaginationMeta) {
 	<div class="space-y-6">
+		@components.Breadcrumb([]components.BreadcrumbItem{
+			{Label: "Queues", Href: "/queues"},
+			{Label: q.Name},
+		})
 		@components.PageHeader(q.Name, fmt.Sprintf("%d active", q.Active), "Queue details") {
 			@button.Button(button.Props{
 				Variant: button.VariantOutline,
@@ -145,8 +149,7 @@ templ QueueDetailPage(q QueueInfo, jobs []*job.Job, pg shared.PaginationMeta) {
 										<span class="text-sm">{ fmt.Sprintf("%d/%d", j.RetryCount, j.MaxRetries) }</span>
 									}
 									@table.Cell() {
-										{{ created := j.CreatedAt.Format("Jan 02 15:04") }}
-										<span class="text-xs text-muted-foreground">{ created }</span>
+										@RelativeTime(j.CreatedAt)
 									}
 									@table.Cell() {
 										@button.Button(button.Props{

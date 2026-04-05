@@ -2,9 +2,151 @@ package pages
 
 import (
 	"fmt"
+	"strings"
+	"time"
 	"github.com/xraph/dispatch/dashboard/shared"
 	"github.com/xraph/forgeui/components/button"
 )
+
+// relativeTime returns a human-readable relative time string.
+func relativeTime(t time.Time) string {
+	d := time.Since(t)
+	if d < 0 {
+		d = -d
+		switch {
+		case d < time.Minute:
+			return "in a moment"
+		case d < time.Hour:
+			m := int(d.Minutes())
+			if m == 1 {
+				return "in 1 min"
+			}
+			return fmt.Sprintf("in %dm", m)
+		case d < 24*time.Hour:
+			h := int(d.Hours())
+			if h == 1 {
+				return "in 1 hour"
+			}
+			return fmt.Sprintf("in %dh", h)
+		default:
+			days := int(d.Hours() / 24)
+			if days == 1 {
+				return "in 1 day"
+			}
+			return fmt.Sprintf("in %dd", days)
+		}
+	}
+	switch {
+	case d < time.Minute:
+		return "just now"
+	case d < time.Hour:
+		m := int(d.Minutes())
+		if m == 1 {
+			return "1 min ago"
+		}
+		return fmt.Sprintf("%dm ago", m)
+	case d < 24*time.Hour:
+		h := int(d.Hours())
+		if h == 1 {
+			return "1 hour ago"
+		}
+		return fmt.Sprintf("%dh ago", h)
+	default:
+		days := int(d.Hours() / 24)
+		if days == 1 {
+			return "1 day ago"
+		}
+		return fmt.Sprintf("%dd ago", days)
+	}
+}
+
+// describeCronSchedule returns a human-readable description of a cron expression.
+func describeCronSchedule(schedule string) string {
+	parts := strings.Fields(schedule)
+	if len(parts) != 5 {
+		return schedule
+	}
+	min, hour, dom, mon, dow := parts[0], parts[1], parts[2], parts[3], parts[4]
+
+	// Every minute
+	if min == "*" && hour == "*" && dom == "*" && mon == "*" && dow == "*" {
+		return "Every minute"
+	}
+	// Every N minutes
+	if strings.HasPrefix(min, "*/") && hour == "*" && dom == "*" && mon == "*" && dow == "*" {
+		return "Every " + min[2:] + " minutes"
+	}
+	// Every hour at :MM
+	if hour == "*" && dom == "*" && mon == "*" && dow == "*" {
+		return "Every hour at :" + fmt.Sprintf("%02s", min)
+	}
+	// Every N hours
+	if min == "0" && strings.HasPrefix(hour, "*/") && dom == "*" && mon == "*" && dow == "*" {
+		return "Every " + hour[2:] + " hours"
+	}
+	// Daily at HH:MM
+	if dom == "*" && mon == "*" && dow == "*" {
+		return fmt.Sprintf("Daily at %s:%02s", hour, min)
+	}
+	// Weekdays
+	if dom == "*" && mon == "*" && dow == "1-5" {
+		return fmt.Sprintf("Weekdays at %s:%02s", hour, min)
+	}
+	// Weekends
+	if dom == "*" && mon == "*" && (dow == "0,6" || dow == "6,0") {
+		return fmt.Sprintf("Weekends at %s:%02s", hour, min)
+	}
+	// Specific day of week
+	dayNames := map[string]string{
+		"0": "Sunday", "1": "Monday", "2": "Tuesday", "3": "Wednesday",
+		"4": "Thursday", "5": "Friday", "6": "Saturday", "7": "Sunday",
+	}
+	if dom == "*" && mon == "*" {
+		if name, ok := dayNames[dow]; ok {
+			return fmt.Sprintf("Every %s at %s:%02s", name, hour, min)
+		}
+	}
+	// Monthly
+	if mon == "*" && dow == "*" {
+		return fmt.Sprintf("Monthly on day %s at %s:%02s", dom, hour, min)
+	}
+	return schedule
+}
+
+// formatDuration returns a concise duration string.
+func formatDuration(d time.Duration) string {
+	if d < time.Second {
+		return fmt.Sprintf("%dms", d.Milliseconds())
+	}
+	if d < time.Minute {
+		return fmt.Sprintf("%.1fs", d.Seconds())
+	}
+	if d < time.Hour {
+		m := int(d.Minutes())
+		s := int(d.Seconds()) % 60
+		if s == 0 {
+			return fmt.Sprintf("%dm", m)
+		}
+		return fmt.Sprintf("%dm %ds", m, s)
+	}
+	h := int(d.Hours())
+	m := int(d.Minutes()) % 60
+	return fmt.Sprintf("%dh %dm", h, m)
+}
+
+templ RelativeTime(t time.Time) {
+	{{ formatted := t.Format("Jan 02, 2006 15:04:05") }}
+	{{ relative := relativeTime(t) }}
+	<span class="text-xs text-muted-foreground" title={ formatted }>{ relative }</span>
+}
+
+templ RelativeTimePtr(t *time.Time) {
+	if t != nil {
+		@RelativeTime(*t)
+	} else {
+		<span class="text-xs text-muted-foreground">-</span>
+	}
+}
 
 templ Pagination(pg shared.PaginationMeta, baseURL string) {
 	if pg.TotalPages > 1 {

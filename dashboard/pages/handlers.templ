@@ -23,7 +23,7 @@ templ HandlersPage(jobNames []string, workflowNames []string) {
 						Job Handlers
 					}
 					@card.Description() {
-						Registered job handler definitions
+						Click a handler to view its jobs
 					}
 				}
 				@card.Content() {
@@ -46,7 +46,13 @@ templ HandlersPage(jobNames []string, workflowNames []string) {
 							}
 							@table.Body() {
 								for i, name := range jobNames {
-									@table.Row() {
+									@table.Row(table.RowProps{
+										Class: "cursor-pointer hover:bg-muted/50",
+										Attributes: templ.Attributes{
+											"hx-get":    "/jobs?name=" + name,
+											"hx-target": "#content",
+										},
+									}) {
 										@table.Cell() {
 											<span class="text-xs text-muted-foreground">{ strconv.Itoa(i + 1) }</span>
 										}
@@ -71,7 +77,7 @@ templ HandlersPage(jobNames []string, workflowNames []string) {
 						Workflow Definitions
 					}
 					@card.Description() {
-						Registered workflow handler definitions
+						Click a workflow to view its runs
 					}
 				}
 				@card.Content() {
@@ -94,7 +100,13 @@ templ HandlersPage(jobNames []string, workflowNames []string) {
 							}
 							@table.Body() {
 								for i, name := range workflowNames {
-									@table.Row() {
+									@table.Row(table.RowProps{
+										Class: "cursor-pointer hover:bg-muted/50",
+										Attributes: templ.Attributes{
+											"hx-get":    "/workflows?name=" + name,
+											"hx-target": "#content",
+										},
+									}) {
 										@table.Cell() {
 											<span class="text-xs text-muted-foreground">{ strconv.Itoa(i + 1) }</span>
 										}

@@ -2,6 +2,31 @@ package components
 
 import "github.com/xraph/forgeui/components/badge"
 
+// BreadcrumbItem represents a single breadcrumb segment.
+type BreadcrumbItem struct {
+	Label string
+	Href  string
+}
+
+templ Breadcrumb(items []BreadcrumbItem) {
+	if len(items) > 0 {
+		<nav class="flex items-center gap-1.5 text-sm text-muted-foreground mb-2">
+			for i, item := range items {
+				if i > 0 {
+					<span class="text-muted-foreground/50">/</span>
+				}
+				if item.Href != "" {
+					<a class="hover:text-foreground cursor-pointer transition-colors" hx-get={ item.Href } hx-target="#content">
+						{ item.Label }
+					</a>
+				} else {
+					<span class="text-foreground font-medium">{ item.Label }</span>
+				}
+			}
+		</nav>
+	}
+}
+
 templ PageHeader(title string, count string, description string) {
 	<div class="flex items-center justify-between">
 		<div>

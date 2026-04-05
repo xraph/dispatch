@@ -83,6 +83,40 @@ func (a *API) cancelJob(ctx forge.Context, _ *CancelJobRequest) (*struct{}, erro
 	return nil, ctx.NoContent(http.StatusNoContent)
 }
 
+func (a *API) retryJob(ctx forge.Context, _ *RetryJobRequest) (*struct{}, error) {
+	jobID, err := id.ParseJobID(ctx.Param("jobId"))
+	if err != nil {
+		return nil, forge.BadRequest(fmt.Sprintf("invalid job ID: %v", err))
+	}
+
+	js, ok := a.eng.Dispatcher().Store().(job.Store)
+	if !ok {
+		return nil, fmt.Errorf("store does not implement job.Store")
+	}
+
+	j, err := js.GetJob(ctx.Context(), jobID)
+	if err != nil {
+		return nil, mapStoreError(err)
+	}
+
+	if j.State != job.StateFailed {
+		return nil, forge.BadRequest(fmt.Sprintf("can only retry failed jobs, current state: %s", j.State))
+	}
+
+	now := time.Now().UTC()
+	j.State = job.StatePending
+	j.RetryCount = 0
+	j.LastError = ""
+	j.RunAt = now
+	j.StartedAt = nil
+	j.CompletedAt = nil
+	if updateErr := js.UpdateJob(ctx.Context(), j); updateErr != nil {
+		return nil, fmt.Errorf("retry job: %w", updateErr)
+	}
+
+	return nil, ctx.NoContent(http.StatusNoContent)
+}
+
 func (a *API) jobCounts(ctx forge.Context) error {
 	js, ok := a.eng.Dispatcher().Store().(job.Store)
 	if !ok {

@@ -12,7 +12,7 @@ import (
 )
 
 templ WorkersPage(workers []*cluster.Worker, currentWorkerID id.WorkerID) {
-	<div class="space-y-6">
+	<div class="space-y-6" hx-get="/workers" hx-trigger="every 15s [!document.activeElement || document.activeElement.tagName !== 'INPUT']" hx-target="#content" hx-swap="innerHTML">
 		@components.PageHeader("Workers", strconv.Itoa(len(workers)), "Cluster worker instances")
 		<div class="grid grid-cols-2 lg:grid-cols-4 gap-4">
 			{{ activeCount := 0 }}
@@ -109,8 +109,7 @@ templ WorkersPage(workers []*cluster.Worker, currentWorkerID id.WorkerID) {
 										@workerStateBadge(w.State)
 									}
 									@table.Cell() {
-										{{ seen := w.LastSeen.Format("Jan 02 15:04:05") }}
-										<span class="text-xs text-muted-foreground">{ seen }</span>
+										@RelativeTime(w.LastSeen)
 									}
 									@table.Cell() {
 										if w.IsLeader {

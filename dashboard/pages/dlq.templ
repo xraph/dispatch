@@ -18,9 +18,20 @@ func truncate(s string, max int) string {
 	return s[:max] + "..."
 }
 
-templ DLQPage(entries []*dlq.Entry, queueFilter string, pg shared.PaginationMeta) {
+templ DLQPage(entries []*dlq.Entry, queueFilter string, nameFilter string, pg shared.PaginationMeta) {
 	<div class="space-y-6">
 		@components.PageHeader("Dead Letter Queue", fmt.Sprintf("%d", pg.Total), "Failed jobs that exhausted retries") {
+			@button.Button(button.Props{
+				Variant: button.VariantDefault,
+				Size:    button.SizeSm,
+				Attributes: templ.Attributes{
+					"hx-post":    "/v1/dlq/replay-all",
+					"hx-target":  "#content",
+					"hx-confirm": "Replay all unreplayed DLQ entries as new jobs?",
+				},
+			}) {
+				Replay All
+			}
 			@button.Button(button.Props{
 				Variant: button.VariantDestructive,
 				Size:    button.SizeSm,
@@ -33,19 +44,33 @@ templ DLQPage(entries []*dlq.Entry, queueFilter string, pg shared.PaginationMeta
 				Purge Old Entries
 			}
 		}
-		<div class="flex gap-4">
+		<div class="flex gap-4 flex-wrap">
 			@input.Input(input.Props{
 				Type:        "search",
 				Placeholder: "Filter by queue...",
 				Name:        "queue",
 				Value:       queueFilter,
-				Class:       "max-w-sm rounded-sm",
+				Class:       "max-w-xs rounded-sm",
 				Attributes: templ.Attributes{
 					"hx-get":      "/dlq",
 					"hx-target":   "#content",
 					"hx-trigger":  "input changed delay:300ms",
 					"hx-push-url": "true",
-					"hx-include":  "[name='queue']",
+					"hx-include":  "[name='queue'],[name='name']",
+				},
+			})
+			@input.Input(input.Props{
+				Type:        "search",
+				Placeholder: "Filter by job name...",
+				Name:        "name",
+				Value:       nameFilter,
+				Class:       "max-w-xs rounded-sm",
+				Attributes: templ.Attributes{
+					"hx-get":      "/dlq",
+					"hx-target":   "#content",
+					"hx-trigger":  "input changed delay:300ms",
+					"hx-push-url": "true",
+					"hx-include":  "[name='queue'],[name='name']",
 				},
 			})
 		</div>
@@ -68,7 +93,7 @@ templ DLQPage(entries []*dlq.Entry, queueFilter string, pg shared.PaginationMeta
 							Retries
 						}
 						@table.Head() {
-							Failed At
+							Failed
 						}
 						@table.Head() {
 							Status
@@ -100,8 +125,7 @@ templ DLQPage(entries []*dlq.Entry, queueFilter string, pg shared.PaginationMeta
 								<span class="text-sm">{ fmt.Sprintf("%d/%d", e.RetryCount, e.MaxRetries) }</span>
 							}
 							@table.Cell() {
-								{{ failedAt := e.FailedAt.Format("Jan 02 15:04") }}
-								<span class="text-xs text-muted-foreground">{ failedAt }</span>
+								@RelativeTime(e.FailedAt)
 							}
 							@table.Cell() {
 								if e.ReplayedAt != nil {
@@ -130,7 +154,7 @@ templ DLQPage(entries []*dlq.Entry, queueFilter string, pg shared.PaginationMeta
 					}
 				}
 			}
-			{{ baseURL := "/dlq?queue=" + queueFilter }}
+			{{ baseURL := "/dlq?queue=" + queueFilter + "&name=" + nameFilter }}
 			@Pagination(pg, baseURL)
 		}
 	</div>

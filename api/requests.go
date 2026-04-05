@@ -25,6 +25,11 @@ type CancelJobRequest struct {
 	JobID string `path:"jobId" description:"Job ID"`
 }
 
+// RetryJobRequest is the request for retrying a failed job.
+type RetryJobRequest struct {
+	JobID string `path:"jobId" description:"Job ID"`
+}
+
 // JobCountsResponse contains job counts by state.
 type JobCountsResponse struct {
 	Pending   int64 `json:"pending"`
@@ -80,6 +85,12 @@ type ReplayDLQRequest struct {
 // PurgeDLQResponse contains the number of entries purged.
 type PurgeDLQResponse struct {
 	Purged int64 `json:"purged"`
+}
+
+// ReplayAllDLQResponse contains the number of entries replayed.
+type ReplayAllDLQResponse struct {
+	Replayed int64 `json:"replayed"`
+	Errors   int64 `json:"errors"`
 }
 
 // DLQCountResponse contains the DLQ entry count.

@@ -74,6 +74,15 @@ func (a *API) registerJobRoutes(router forge.Router) {
 		forge.WithErrorResponses(),
 	)
 
+	_ = g.POST("/jobs/:jobId/retry", a.retryJob,
+		forge.WithSummary("Retry job"),
+		forge.WithDescription("Retries a failed job by resetting it to pending state."),
+		forge.WithOperationID("retryJob"),
+		forge.WithRequestSchema(RetryJobRequest{}),
+		forge.WithNoContentResponse(),
+		forge.WithErrorResponses(),
+	)
+
 	_ = g.GET("/jobs/counts", a.jobCounts,
 		forge.WithSummary("Job counts"),
 		forge.WithDescription("Returns job counts grouped by state."),
@@ -142,6 +151,14 @@ func (a *API) registerDLQRoutes(router forge.Router) {
 		forge.WithOperationID("dispatchReplayDLQ"),
 		forge.WithRequestSchema(ReplayDLQRequest{}),
 		forge.WithCreatedResponse(&job.Job{}),
+		forge.WithErrorResponses(),
+	)
+
+	_ = g.POST("/dlq/replay-all", a.replayAllDLQ,
+		forge.WithSummary("Replay all DLQ entries"),
+		forge.WithDescription("Re-enqueues all unreplayed DLQ entries as new pending jobs."),
+		forge.WithOperationID("replayAllDLQ"),
+		forge.WithResponseSchema(http.StatusOK, "Replay result", ReplayAllDLQResponse{}),
 		forge.WithErrorResponses(),
 	)
 

@@ -54,6 +54,28 @@ func (a *API) replayDLQ(ctx forge.Context, _ *ReplayDLQRequest) (*job.Job, error
 	return j, ctx.JSON(http.StatusCreated, j)
 }
 
+func (a *API) replayAllDLQ(ctx forge.Context) error {
+	store := a.eng.DLQService().DLQStore()
+	entries, err := store.ListDLQ(ctx.Context(), dlq.ListOpts{Limit: 1000})
+	if err != nil {
+		return fmt.Errorf("list dlq for replay-all: %w", err)
+	}
+
+	var replayed, errCount int64
+	for _, entry := range entries {
+		if entry.ReplayedAt != nil {
+			continue // already replayed
+		}
+		if _, replayErr := a.eng.DLQService().Replay(ctx.Context(), entry.ID); replayErr != nil {
+			errCount++
+		} else {
+			replayed++
+		}
+	}
+
+	return ctx.JSON(http.StatusOK, ReplayAllDLQResponse{Replayed: replayed, Errors: errCount})
+}
+
 func (a *API) purgeDLQ(ctx forge.Context) error {
 	// Purge entries older than 30 days.
 	before := time.Now().UTC().Add(-30 * 24 * time.Hour)

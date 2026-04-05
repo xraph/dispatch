@@ -11,17 +11,17 @@ import (
 	"github.com/xraph/forgeui/components/table"
 )
 
-templ JobsPage(jobs []*job.Job, stateFilter string, queueFilter string, pg shared.PaginationMeta) {
+templ JobsPage(jobs []*job.Job, stateFilter string, queueFilter string, nameFilter string, pg shared.PaginationMeta) {
 	<div class="space-y-6">
 		@components.PageHeader("Jobs", fmt.Sprintf("%d", pg.Total), "Manage background jobs") {
 		}
-		<div class="flex gap-4">
+		<div class="flex gap-4 flex-wrap">
 			<select name="state" class="flex h-10 rounded-sm border border-input bg-background px-3 py-2 text-sm"
 				hx-get="/jobs"
 				hx-target="#content"
 				hx-trigger="change"
 				hx-push-url="true"
-				hx-include="[name='state'],[name='queue']">
+				hx-include="[name='state'],[name='queue'],[name='name']">
 				<option value="">All States</option>
 				<option value="pending" selected?={ stateFilter == "pending" }>Pending</option>
 				<option value="running" selected?={ stateFilter == "running" }>Running</option>
@@ -35,13 +35,27 @@ templ JobsPage(jobs []*job.Job, stateFilter string, queueFilter string, pg share
 				Placeholder: "Filter by queue...",
 				Name:        "queue",
 				Value:       queueFilter,
-				Class:       "max-w-sm rounded-sm",
+				Class:       "max-w-xs rounded-sm",
 				Attributes: templ.Attributes{
 					"hx-get":      "/jobs",
 					"hx-target":   "#content",
 					"hx-trigger":  "input changed delay:300ms",
 					"hx-push-url": "true",
-					"hx-include":  "[name='state'],[name='queue']",
+					"hx-include":  "[name='state'],[name='queue'],[name='name']",
+				},
+			})
+			@input.Input(input.Props{
+				Type:        "search",
+				Placeholder: "Filter by name...",
+				Name:        "name",
+				Value:       nameFilter,
+				Class:       "max-w-xs rounded-sm",
+				Attributes: templ.Attributes{
+					"hx-get":      "/jobs",
+					"hx-target":   "#content",
+					"hx-trigger":  "input changed delay:300ms",
+					"hx-push-url": "true",
+					"hx-include":  "[name='state'],[name='queue'],[name='name']",
 				},
 			})
 		</div>
@@ -99,8 +113,7 @@ templ JobsPage(jobs []*job.Job, stateFilter string, queueFilter string, pg share
 								<span class="text-sm">{ fmt.Sprintf("%d/%d", j.RetryCount, j.MaxRetries) }</span>
 							}
 							@table.Cell() {
-								{{ created := j.CreatedAt.Format("Jan 02 15:04") }}
-								<span class="text-xs text-muted-foreground">{ created }</span>
+								@RelativeTime(j.CreatedAt)
 							}
 							@table.Cell() {
 								@button.Button(button.Props{
@@ -118,7 +131,7 @@ templ JobsPage(jobs []*job.Job, stateFilter string, queueFilter string, pg share
 					}
 				}
 			}
-			{{ baseURL := "/jobs?state=" + stateFilter + "&queue=" + queueFilter }}
+			{{ baseURL := "/jobs?state=" + stateFilter + "&queue=" + queueFilter + "&name=" + nameFilter }}
 			@Pagination(pg, baseURL)
 		}
 	</div>

@@ -12,6 +12,10 @@ import (
 
 templ WorkerDetailPage(w *cluster.Worker, currentWorkerID id.WorkerID) {
 	<div class="space-y-6">
+		@components.Breadcrumb([]components.BreadcrumbItem{
+			{Label: "Workers", Href: "/workers"},
+			{Label: w.Hostname},
+		})
 		@components.PageHeader(w.Hostname, "", "Worker details") {
 			@button.Button(button.Props{
 				Variant: button.VariantOutline,
@@ -75,8 +79,9 @@ templ WorkerDetailPage(w *cluster.Worker, currentWorkerID id.WorkerID) {
 							<dd class="font-medium font-mono">{ leaderUntil }</dd>
 						}
 						<dt class="text-muted-foreground">Last Seen</dt>
-						{{ lastSeen := w.LastSeen.Format("Jan 02, 2006 15:04:05") }}
-						<dd class="font-medium font-mono">{ lastSeen }</dd>
+						<dd>
+							@RelativeTime(w.LastSeen)
+						</dd>
 						<dt class="text-muted-foreground">Created At</dt>
 						{{ createdAt := w.CreatedAt.Format("Jan 02, 2006 15:04:05") }}
 						<dd class="font-medium font-mono">{ createdAt }</dd>
@@ -98,9 +103,11 @@ templ WorkerDetailPage(w *cluster.Worker, currentWorkerID id.WorkerID) {
 					} else {
 						<div class="flex flex-wrap gap-2">
 							for _, q := range w.Queues {
-								@badge.Badge(badge.Props{Variant: badge.VariantOutline}) {
-									{ q }
-								}
+								<a class="cursor-pointer" hx-get={ "/queues/detail?name=" + q } hx-target="#content">
+									@badge.Badge(badge.Props{Variant: badge.VariantOutline}) {
+										{ q }
+									}
+								</a>
 							}
 						</div>
 					}

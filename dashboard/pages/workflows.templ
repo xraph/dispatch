@@ -6,10 +6,11 @@ import (
 	"github.com/xraph/dispatch/dashboard/shared"
 	"github.com/xraph/dispatch/dashboard/components"
 	"github.com/xraph/forgeui/components/button"
+	"github.com/xraph/forgeui/components/input"
 	"github.com/xraph/forgeui/components/table"
 )
 
-templ WorkflowsPage(runs []*workflow.Run, registeredNames []string, stateFilter string, pg shared.PaginationMeta) {
+templ WorkflowsPage(runs []*workflow.Run, registeredNames []string, stateFilter string, nameFilter string, pg shared.PaginationMeta) {
 	<div class="space-y-6">
 		@components.PageHeader("Workflow Runs", fmt.Sprintf("%d", pg.Total), "View workflow execution history") {
 		}
@@ -19,12 +20,26 @@ templ WorkflowsPage(runs []*workflow.Run, registeredNames []string, stateFilter 
 				hx-target="#content"
 				hx-trigger="change"
 				hx-push-url="true"
-				hx-include="[name='state']">
+				hx-include="[name='state'],[name='name']">
 				<option value="">All States</option>
 				<option value="running" selected?={ stateFilter == "running" }>Running</option>
 				<option value="completed" selected?={ stateFilter == "completed" }>Completed</option>
 				<option value="failed" selected?={ stateFilter == "failed" }>Failed</option>
 			</select>
+			@input.Input(input.Props{
+				Type:        "search",
+				Placeholder: "Filter by name...",
+				Name:        "name",
+				Value:       nameFilter,
+				Class:       "max-w-sm rounded-sm",
+				Attributes: templ.Attributes{
+					"hx-get":      "/workflows",
+					"hx-target":   "#content",
+					"hx-trigger":  "input changed delay:300ms",
+					"hx-push-url": "true",
+					"hx-include":  "[name='state'],[name='name']",
+				},
+			})
 		</div>
 		if len(registeredNames) > 0 {
 			<div class="flex flex-wrap gap-2">
@@ -41,9 +56,6 @@ templ WorkflowsPage(runs []*workflow.Run, registeredNames []string, stateFilter 
 				@table.Header() {
 					@table.Row() {
 						@table.Head() {
-							ID
-						}
-						@table.Head() {
 							Name
 						}
 						@table.Head() {
@@ -53,7 +65,7 @@ templ WorkflowsPage(runs []*workflow.Run, registeredNames []string, stateFilter 
 							Started
 						}
 						@table.Head() {
-							Completed
+							Duration
 						}
 						@table.Head() {
 							Action
@@ -70,22 +82,18 @@ templ WorkflowsPage(runs []*workflow.Run, registeredNames []string, stateFilter 
 							},
 						}) {
 							@table.Cell() {
-								<code class="text-xs bg-muted px-1 py-0.5 rounded-sm">{ r.ID.String() }</code>
-							}
-							@table.Cell() {
 								<span class="font-medium text-sm">{ r.Name }</span>
 							}
 							@table.Cell() {
 								@components.WorkflowStateBadge(string(r.State))
 							}
 							@table.Cell() {
-								{{ started := r.StartedAt.Format("Jan 02 15:04") }}
-								<span class="text-xs text-muted-foreground">{ started }</span>
+								@RelativeTime(r.StartedAt)
 							}
 							@table.Cell() {
 								if r.CompletedAt != nil {
-									{{ completed := r.CompletedAt.Format("Jan 02 15:04") }}
-									<span class="text-xs text-muted-foreground">{ completed }</span>
+									{{ duration := r.CompletedAt.Sub(r.StartedAt) }}
+									<span class="text-xs text-muted-foreground font-mono">{ formatDuration(duration) }</span>
 								} else {
 									<span class="text-xs text-muted-foreground">-</span>
 								}
@@ -106,7 +114,7 @@ templ WorkflowsPage(runs []*workflow.Run, registeredNames []string, stateFilter 
 					}
 				}
 			}
-			{{ baseURL := "/workflows?state=" + stateFilter }}
+			{{ baseURL := "/workflows?state=" + stateFilter + "&name=" + nameFilter }}
 			@Pagination(pg, baseURL)
 		}
 	</div>

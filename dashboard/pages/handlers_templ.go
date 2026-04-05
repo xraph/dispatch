@@ -128,7 +128,7 @@ func HandlersPage(jobNames []string, workflowNames []string) templ.Component {
 						}()
 					}
 					ctx = templ.InitializeContext(ctx)
-					templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 6, "Registered job handler definitions")
+					templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 6, "Click a handler to view its jobs")
 					if templ_7745c5c3_Err != nil {
 						return templ_7745c5c3_Err
 					}
@@ -336,7 +336,7 @@ func HandlersPage(jobNames []string, workflowNames []string) templ.Component {
 										var templ_7745c5c3_Var16 string
 										templ_7745c5c3_Var16, templ_7745c5c3_Err = templ.JoinStringErrs(strconv.Itoa(i + 1))
 										if templ_7745c5c3_Err != nil {
-											return templ.Error{Err: templ_7745c5c3_Err, FileName: `dashboard/pages/handlers.templ`, Line: 51, Col: 76}
+											return templ.Error{Err: templ_7745c5c3_Err, FileName: `dashboard/pages/handlers.templ`, Line: 57, Col: 76}
 										}
 										_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var16))
 										if templ_7745c5c3_Err != nil {
@@ -375,7 +375,7 @@ func HandlersPage(jobNames []string, workflowNames []string) templ.Component {
 										var templ_7745c5c3_Var18 string
 										templ_7745c5c3_Var18, templ_7745c5c3_Err = templ.JoinStringErrs(name)
 										if templ_7745c5c3_Err != nil {
-											return templ.Error{Err: templ_7745c5c3_Err, FileName: `dashboard/pages/handlers.templ`, Line: 54, Col: 51}
+											return templ.Error{Err: templ_7745c5c3_Err, FileName: `dashboard/pages/handlers.templ`, Line: 60, Col: 51}
 										}
 										_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var18))
 										if templ_7745c5c3_Err != nil {
@@ -437,7 +437,13 @@ func HandlersPage(jobNames []string, workflowNames []string) templ.Component {
 									}
 									return nil
 								})
-								templ_7745c5c3_Err = table.Row().Render(templ.WithChildren(ctx, templ_7745c5c3_Var14), templ_7745c5c3_Buffer)
+								templ_7745c5c3_Err = table.Row(table.RowProps{
+									Class: "cursor-pointer hover:bg-muted/50",
+									Attributes: templ.Attributes{
+										"hx-get":    "/jobs?name=" + name,
+										"hx-target": "#content",
+									},
+								}).Render(templ.WithChildren(ctx, templ_7745c5c3_Var14), templ_7745c5c3_Buffer)
 								if templ_7745c5c3_Err != nil {
 									return templ_7745c5c3_Err
 								}
@@ -529,7 +535,7 @@ func HandlersPage(jobNames []string, workflowNames []string) templ.Component {
 						}()
 					}
 					ctx = templ.InitializeContext(ctx)
-					templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 23, "Registered workflow handler definitions")
+					templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 23, "Click a workflow to view its runs")
 					if templ_7745c5c3_Err != nil {
 						return templ_7745c5c3_Err
 					}
@@ -737,7 +743,7 @@ func HandlersPage(jobNames []string, workflowNames []string) templ.Component {
 										var templ_7745c5c3_Var35 string
 										templ_7745c5c3_Var35, templ_7745c5c3_Err = templ.JoinStringErrs(strconv.Itoa(i + 1))
 										if templ_7745c5c3_Err != nil {
-											return templ.Error{Err: templ_7745c5c3_Err, FileName: `dashboard/pages/handlers.templ`, Line: 99, Col: 76}
+											return templ.Error{Err: templ_7745c5c3_Err, FileName: `dashboard/pages/handlers.templ`, Line: 111, Col: 76}
 										}
 										_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var35))
 										if templ_7745c5c3_Err != nil {
@@ -776,7 +782,7 @@ func HandlersPage(jobNames []string, workflowNames []string) templ.Component {
 										var templ_7745c5c3_Var37 string
 										templ_7745c5c3_Var37, templ_7745c5c3_Err = templ.JoinStringErrs(name)
 										if templ_7745c5c3_Err != nil {
-											return templ.Error{Err: templ_7745c5c3_Err, FileName: `dashboard/pages/handlers.templ`, Line: 102, Col: 51}
+											return templ.Error{Err: templ_7745c5c3_Err, FileName: `dashboard/pages/handlers.templ`, Line: 114, Col: 51}
 										}
 										_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var37))
 										if templ_7745c5c3_Err != nil {
@@ -838,7 +844,13 @@ func HandlersPage(jobNames []string, workflowNames []string) templ.Component {
 									}
 									return nil
 								})
-								templ_7745c5c3_Err = table.Row().Render(templ.WithChildren(ctx, templ_7745c5c3_Var33), templ_7745c5c3_Buffer)
+								templ_7745c5c3_Err = table.Row(table.RowProps{
+									Class: "cursor-pointer hover:bg-muted/50",
+									Attributes: templ.Attributes{
+										"hx-get":    "/workflows?name=" + name,
+										"hx-target": "#content",
+									},
+								}).Render(templ.WithChildren(ctx, templ_7745c5c3_Var33), templ_7745c5c3_Buffer)
 								if templ_7745c5c3_Err != nil {
 									return templ_7745c5c3_Err
 								}

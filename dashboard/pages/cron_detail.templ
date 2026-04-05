@@ -9,6 +9,10 @@ import (
 
 templ CronDetailPage(e *cron.Entry) {
 	<div class="space-y-6">
+		@components.Breadcrumb([]components.BreadcrumbItem{
+			{Label: "Cron", Href: "/crons"},
+			{Label: e.Name},
+		})
 		@components.PageHeader(e.Name, "", "Cron schedule details") {
 			@button.Button(button.Props{
 				Variant: button.VariantOutline,
@@ -65,6 +69,7 @@ templ CronDetailPage(e *cron.Entry) {
 						@field("Cron ID", e.ID.String(), true)
 						@field("Name", e.Name, false)
 						@field("Schedule", e.Schedule, true)
+						@field("Description", describeCronSchedule(e.Schedule), false)
 						@field("Job Name", e.JobName, false)
 						@field("Queue", e.Queue, true)
 						<dt class="text-muted-foreground">Status</dt>
@@ -72,12 +77,20 @@ templ CronDetailPage(e *cron.Entry) {
 							@components.EnabledBadge(e.Enabled)
 						</dd>
 						if e.LastRunAt != nil {
-							@field("Last Run", e.LastRunAt.Format("Jan 02, 2006 15:04:05"), false)
+							<dt class="text-muted-foreground">Last Run</dt>
+							<dd class="flex items-center gap-2">
+								<span class="font-medium">{ e.LastRunAt.Format("Jan 02, 2006 15:04:05") }</span>
+								@RelativeTime(*e.LastRunAt)
+							</dd>
 						} else {
 							@field("Last Run", "Never", false)
 						}
 						if e.NextRunAt != nil {
-							@field("Next Run", e.NextRunAt.Format("Jan 02, 2006 15:04:05"), false)
+							<dt class="text-muted-foreground">Next Run</dt>
+							<dd class="flex items-center gap-2">
+								<span class="font-medium">{ e.NextRunAt.Format("Jan 02, 2006 15:04:05") }</span>
+								@RelativeTime(*e.NextRunAt)
+							</dd>
 						} else {
 							@field("Next Run", "-", false)
 						}
