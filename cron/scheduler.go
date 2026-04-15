@@ -71,9 +71,11 @@ type Scheduler struct {
 	parsedMu sync.RWMutex
 	parsed   map[string]cronlib.Schedule
 
-	stopCh   chan struct{}
-	stopOnce sync.Once
-	wg       sync.WaitGroup
+	stopCh     chan struct{}
+	cancelCtx  context.Context
+	cancelFunc context.CancelFunc
+	stopOnce   sync.Once
+	wg         sync.WaitGroup
 }
 
 // NewScheduler creates a Scheduler.
@@ -110,6 +112,7 @@ func NewScheduler(
 
 // Start launches the leader election and cron tick goroutines.
 func (s *Scheduler) Start(_ context.Context) error {
+	s.cancelCtx, s.cancelFunc = context.WithCancel(context.Background())
 	s.wg.Add(2)
 	go s.leaderLoop()
 	go s.tickLoop()
@@ -126,6 +129,9 @@ func (s *Scheduler) Start(_ context.Context) error {
 func (s *Scheduler) Stop(_ context.Context) error {
 	s.stopOnce.Do(func() {
 		close(s.stopCh)
+		if s.cancelFunc != nil {
+			s.cancelFunc()
+		}
 		s.wg.Wait()
 		s.logger.Info("cron scheduler stopped")
 	})
@@ -154,7 +160,7 @@ func (s *Scheduler) leaderLoop() {
 }
 
 func (s *Scheduler) tryLeadership() {
-	ctx := context.Background()
+	ctx := s.cancelCtx
 
 	// Try to renew first (cheap if already leader).
 	renewed, err := s.clusterStore.RenewLeadership(ctx, s.workerID, s.leaderTTL)
@@ -195,7 +201,7 @@ func (s *Scheduler) tickLoop() {
 }
 
 func (s *Scheduler) tick() {
-	ctx := context.Background()
+	ctx := s.cancelCtx
 
 	// Check if we are the leader.
 	leader, err := s.clusterStore.GetLeader(ctx)

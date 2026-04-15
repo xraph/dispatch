@@ -43,6 +43,8 @@ type Pool struct {
 	queueManager QueueManager
 
 	stopCh     chan struct{}
+	cancelCtx  context.Context    // Cancelled on Stop to interrupt in-flight store operations
+	cancelFunc context.CancelFunc // Cancels cancelCtx
 	wg         sync.WaitGroup
 	mu         sync.Mutex
 	running    bool
@@ -125,6 +127,7 @@ func (p *Pool) Start(_ context.Context) error {
 		return nil
 	}
 	p.running = true
+	p.cancelCtx, p.cancelFunc = context.WithCancel(context.Background())
 
 	p.logger.Info("worker pool starting",
 		log.String("worker_id", p.workerID.String()),
@@ -165,8 +168,11 @@ func (p *Pool) Stop(ctx context.Context) error {
 
 	p.logger.Info("worker pool stopping", log.String("worker_id", p.workerID.String()))
 
-	// Signal all workers to stop.
+	// Signal all workers to stop and cancel in-flight store operations.
 	close(p.stopCh)
+	if p.cancelFunc != nil {
+		p.cancelFunc()
+	}
 
 	// Wait for completion or context deadline.
 	done := make(chan struct{})
@@ -195,11 +201,16 @@ func (p *Pool) dequeueLoop() {
 		select {
 		case <-p.stopCh:
 			return
+		case <-p.cancelCtx.Done():
+			return
 		default:
 		}
 
-		jobs, err := p.store.DequeueJobs(context.Background(), p.queues, 1)
+		jobs, err := p.store.DequeueJobs(p.cancelCtx, p.queues, 1)
 		if err != nil {
+			if p.cancelCtx.Err() != nil {
+				return // Clean exit during shutdown
+			}
 			p.logger.Error("dequeue error", log.String("error", err.Error()))
 			p.sleep()
 			continue
@@ -217,7 +228,10 @@ func (p *Pool) dequeueLoop() {
 			// Rate limited — return the job to pending with a small delay.
 			j.State = job.StatePending
 			j.RunAt = time.Now().Add(p.pollInterval)
-			if updateErr := p.store.UpdateJob(context.Background(), j); updateErr != nil {
+			if updateErr := p.store.UpdateJob(p.cancelCtx, j); updateErr != nil {
+				if p.cancelCtx.Err() != nil {
+					return
+				}
 				p.logger.Error("failed to re-enqueue rate-limited job",
 					log.String("job_id", j.ID.String()),
 					log.String("error", updateErr.Error()),
@@ -227,9 +241,9 @@ func (p *Pool) dequeueLoop() {
 			continue
 		}
 
-		p.extensions.EmitJobStarted(context.Background(), j)
+		p.extensions.EmitJobStarted(p.cancelCtx, j)
 
-		ctx, cancel := context.WithCancel(context.Background())
+		ctx, cancel := context.WithCancel(p.cancelCtx)
 		p.trackJob(j.ID.String(), cancel)
 
 		execErr := p.executor.Execute(ctx, j)
@@ -282,7 +296,7 @@ func (p *Pool) sendHeartbeats() {
 			p.logger.Warn("heartbeat: invalid job id", log.String("job_id", jobIDStr))
 			continue
 		}
-		if err := p.store.HeartbeatJob(context.Background(), parsedID, p.workerID); err != nil {
+		if err := p.store.HeartbeatJob(p.cancelCtx, parsedID, p.workerID); err != nil {
 			p.logger.Warn("heartbeat failed",
 				log.String("job_id", jobIDStr),
 				log.String("error", err.Error()),
@@ -309,7 +323,7 @@ func (p *Pool) reaperLoop() {
 }
 
 func (p *Pool) reapStaleJobs() {
-	stale, err := p.store.ReapStaleJobs(context.Background(), p.staleJobThreshold)
+	stale, err := p.store.ReapStaleJobs(p.cancelCtx, p.staleJobThreshold)
 	if err != nil {
 		p.logger.Error("reap stale jobs error", log.String("error", err.Error()))
 		return
@@ -322,7 +336,7 @@ func (p *Pool) reapStaleJobs() {
 		j.HeartbeatAt = nil
 		j.StartedAt = nil
 
-		if updateErr := p.store.UpdateJob(context.Background(), j); updateErr != nil {
+		if updateErr := p.store.UpdateJob(p.cancelCtx, j); updateErr != nil {
 			p.logger.Error("reap: failed to reset stale job",
 				log.String("job_id", j.ID.String()),
 				log.String("error", updateErr.Error()),
@@ -341,6 +355,7 @@ func (p *Pool) sleep() {
 	select {
 	case <-time.After(p.pollInterval):
 	case <-p.stopCh:
+	case <-p.cancelCtx.Done():
 	}
 }
 
