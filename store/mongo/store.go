@@ -83,6 +83,9 @@ func (s *Store) DB() *grove.DB {
 }
 
 // Migrate creates indexes for all dispatch collections.
+//
+// CreateMany is itself idempotent — mongo silently no-ops indexes that already
+// exist with matching specs — so this is safe to call on every boot.
 func (s *Store) Migrate(ctx context.Context) error {
 	indexes := migrationIndexes()
 
@@ -199,6 +202,16 @@ func migrationIndexes() map[string][]mongod.IndexModel {
 				{Key: "state", Value: 1},
 				{Key: "last_seen", Value: 1},
 			}},
+			// Partial unique index lets AcquireLeadership rely on the index
+			// itself to enforce single-leader (any conflicting write returns
+			// E11000), reducing the election from 3 round-trips to 2.
+			{
+				Keys: bson.D{{Key: "is_leader", Value: 1}},
+				Options: options.Index().
+					SetName("dispatch_workers_unique_leader").
+					SetUnique(true).
+					SetPartialFilterExpression(bson.M{"is_leader": true}),
+			},
 		},
 	}
 }

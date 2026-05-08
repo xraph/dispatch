@@ -1,6 +1,8 @@
 package extension
 
 import (
+	"time"
+
 	log "github.com/xraph/go-utils/log"
 
 	"github.com/xraph/dispatch"
@@ -24,6 +26,70 @@ func WithStore(s dispatch.Storer) ExtOption {
 func WithConcurrency(n int) ExtOption {
 	return func(e *Extension) {
 		e.dispatchOpts = append(e.dispatchOpts, dispatch.WithConcurrency(n))
+	}
+}
+
+// WithPollInterval overrides the worker poll interval (default 1s).
+// Increase to reduce constant driver-pool pressure when running
+// against a single shared mongo / postgres node.
+func WithPollInterval(d time.Duration) ExtOption {
+	return func(e *Extension) {
+		e.dispatchOpts = append(e.dispatchOpts, dispatch.WithPollInterval(d))
+	}
+}
+
+// WithHeartbeatInterval overrides the running-job heartbeat cadence
+// (default 10s).
+func WithHeartbeatInterval(d time.Duration) ExtOption {
+	return func(e *Extension) {
+		e.dispatchOpts = append(e.dispatchOpts, dispatch.WithHeartbeatInterval(d))
+	}
+}
+
+// WithStaleJobThreshold overrides the no-heartbeat threshold and the
+// matching reaper cadence (default 30s).
+func WithStaleJobThreshold(d time.Duration) ExtOption {
+	return func(e *Extension) {
+		e.dispatchOpts = append(e.dispatchOpts, dispatch.WithStaleJobThreshold(d))
+	}
+}
+
+// WithWorkerStoreCallTimeout caps a single worker store roundtrip
+// (default 5s). Pass a negative duration to disable bounding (test-only).
+func WithWorkerStoreCallTimeout(d time.Duration) ExtOption {
+	return func(e *Extension) {
+		e.dispatchOpts = append(e.dispatchOpts, dispatch.WithWorkerStoreCallTimeout(d))
+	}
+}
+
+// WithCronTickInterval overrides the scheduler tick cadence (default 1s).
+func WithCronTickInterval(d time.Duration) ExtOption {
+	return func(e *Extension) {
+		e.dispatchOpts = append(e.dispatchOpts, dispatch.WithCronTickInterval(d))
+	}
+}
+
+// WithCronLeaderTTL overrides the leader election TTL (default 15s).
+// Renewal happens at half this interval.
+func WithCronLeaderTTL(d time.Duration) ExtOption {
+	return func(e *Extension) {
+		e.dispatchOpts = append(e.dispatchOpts, dispatch.WithCronLeaderTTL(d))
+	}
+}
+
+// WithCronLockTTL overrides the per-entry distributed-lock TTL
+// (default 30s).
+func WithCronLockTTL(d time.Duration) ExtOption {
+	return func(e *Extension) {
+		e.dispatchOpts = append(e.dispatchOpts, dispatch.WithCronLockTTL(d))
+	}
+}
+
+// WithCronStoreCallTimeout caps a single cron-scheduler store roundtrip
+// (default 5s). Pass a negative duration to disable.
+func WithCronStoreCallTimeout(d time.Duration) ExtOption {
+	return func(e *Extension) {
+		e.dispatchOpts = append(e.dispatchOpts, dispatch.WithCronStoreCallTimeout(d))
 	}
 }
 

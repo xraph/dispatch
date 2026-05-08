@@ -23,6 +23,17 @@ type QueueManager interface {
 	Release(queue, tenantID string)
 }
 
+// defaultStoreCallTimeout caps how long a single store roundtrip
+// (DequeueJobs, HeartbeatJob, ReapStaleJobs, UpdateJob) is allowed
+// to run before the worker abandons it. Without this, a slow Mongo /
+// Postgres session selection would let dequeue calls stack on the
+// shared driver pool until every connection is checked out — which
+// is exactly the cascade that produces "context deadline exceeded"
+// floods at boot. 5 seconds is generous enough for a healthy
+// roundtrip and tight enough that 10 workers polling every second
+// can't pile up more than 50 in-flight calls at once.
+const defaultStoreCallTimeout = 5 * time.Second
+
 // Pool manages a set of concurrent worker goroutines that poll for
 // jobs and execute them through the Executor.
 type Pool struct {
@@ -38,6 +49,13 @@ type Pool struct {
 	// Heartbeat / reaper configuration.
 	heartbeatInterval time.Duration
 	staleJobThreshold time.Duration
+
+	// storeCallTimeout caps how long a single store call (dequeue,
+	// heartbeat, reap, update) may hold a driver-pool connection
+	// before being abandoned. Zero means use defaultStoreCallTimeout;
+	// negative disables the timeout (legacy behaviour, only useful
+	// for tests that don't want their fakes wrapped in a deadline).
+	storeCallTimeout time.Duration
 
 	// Queue manager (optional).
 	queueManager QueueManager
@@ -87,6 +105,14 @@ func WithStaleJobThreshold(d time.Duration) PoolOption {
 // concurrency control.
 func WithQueueManager(m QueueManager) PoolOption {
 	return func(p *Pool) { p.queueManager = m }
+}
+
+// WithStoreCallTimeout caps a single store roundtrip. Pass a positive
+// duration to override defaultStoreCallTimeout, zero to leave the
+// default in place, or a negative value to disable the timeout
+// entirely. Disabling is only intended for unit tests.
+func WithStoreCallTimeout(d time.Duration) PoolOption {
+	return func(p *Pool) { p.storeCallTimeout = d }
 }
 
 // NewPool creates a worker pool.
@@ -193,6 +219,21 @@ func (p *Pool) Stop(ctx context.Context) error {
 	return nil
 }
 
+// callCtx wraps p.cancelCtx with the configured per-call timeout so a
+// stalled driver session can't pin a pool connection indefinitely.
+// Returns the unwrapped cancelCtx + a no-op cancel when the timeout
+// is disabled (negative) so callers can use defer cancel() uniformly.
+func (p *Pool) callCtx() (context.Context, context.CancelFunc) {
+	if p.storeCallTimeout < 0 {
+		return p.cancelCtx, func() {}
+	}
+	d := p.storeCallTimeout
+	if d == 0 {
+		d = defaultStoreCallTimeout
+	}
+	return context.WithTimeout(p.cancelCtx, d)
+}
+
 // dequeueLoop is run by each worker goroutine.
 func (p *Pool) dequeueLoop() {
 	defer p.wg.Done()
@@ -206,7 +247,9 @@ func (p *Pool) dequeueLoop() {
 		default:
 		}
 
-		jobs, err := p.store.DequeueJobs(p.cancelCtx, p.queues, 1)
+		dqCtx, dqCancel := p.callCtx()
+		jobs, err := p.store.DequeueJobs(dqCtx, p.queues, 1)
+		dqCancel()
 		if err != nil {
 			if p.cancelCtx.Err() != nil {
 				return // Clean exit during shutdown
@@ -228,7 +271,10 @@ func (p *Pool) dequeueLoop() {
 			// Rate limited — return the job to pending with a small delay.
 			j.State = job.StatePending
 			j.RunAt = time.Now().Add(p.pollInterval)
-			if updateErr := p.store.UpdateJob(p.cancelCtx, j); updateErr != nil {
+			updCtx, updCancel := p.callCtx()
+			updateErr := p.store.UpdateJob(updCtx, j)
+			updCancel()
+			if updateErr != nil {
 				if p.cancelCtx.Err() != nil {
 					return
 				}
@@ -296,7 +342,10 @@ func (p *Pool) sendHeartbeats() {
 			p.logger.Warn("heartbeat: invalid job id", log.String("job_id", jobIDStr))
 			continue
 		}
-		if err := p.store.HeartbeatJob(p.cancelCtx, parsedID, p.workerID); err != nil {
+		hbCtx, hbCancel := p.callCtx()
+		err := p.store.HeartbeatJob(hbCtx, parsedID, p.workerID)
+		hbCancel()
+		if err != nil {
 			p.logger.Warn("heartbeat failed",
 				log.String("job_id", jobIDStr),
 				log.String("error", err.Error()),
@@ -323,7 +372,9 @@ func (p *Pool) reaperLoop() {
 }
 
 func (p *Pool) reapStaleJobs() {
-	stale, err := p.store.ReapStaleJobs(p.cancelCtx, p.staleJobThreshold)
+	reapCtx, reapCancel := p.callCtx()
+	stale, err := p.store.ReapStaleJobs(reapCtx, p.staleJobThreshold)
+	reapCancel()
 	if err != nil {
 		p.logger.Error("reap stale jobs error", log.String("error", err.Error()))
 		return
@@ -336,7 +387,10 @@ func (p *Pool) reapStaleJobs() {
 		j.HeartbeatAt = nil
 		j.StartedAt = nil
 
-		if updateErr := p.store.UpdateJob(p.cancelCtx, j); updateErr != nil {
+		updCtx, updCancel := p.callCtx()
+		updateErr := p.store.UpdateJob(updCtx, j)
+		updCancel()
+		if updateErr != nil {
 			p.logger.Error("reap: failed to reset stale job",
 				log.String("job_id", j.ID.String()),
 				log.String("error", updateErr.Error()),

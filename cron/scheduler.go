@@ -24,6 +24,15 @@ type Emitter interface {
 	EmitCronFired(ctx context.Context, entryName string, jobID id.JobID)
 }
 
+// defaultStoreCallTimeout caps how long a single store roundtrip
+// (GetLeader, RenewLeadership, ListCrons, AcquireCronLock, …) is
+// allowed to run before the scheduler abandons it. Without this, a
+// stalled driver session could pin a connection from the shared
+// pool until either side reset it — and with a 1s tick interval the
+// scheduler would queue up faster than the pool could free
+// connections.
+const defaultStoreCallTimeout = 5 * time.Second
+
 // SchedulerOption configures a Scheduler.
 type SchedulerOption func(*Scheduler)
 
@@ -40,6 +49,13 @@ func WithLockTTL(d time.Duration) SchedulerOption {
 // WithLeaderTTL sets the TTL for leader election.
 func WithLeaderTTL(d time.Duration) SchedulerOption {
 	return func(s *Scheduler) { s.leaderTTL = d }
+}
+
+// WithSchedulerStoreCallTimeout caps a single store roundtrip. Pass a
+// positive duration to override defaultStoreCallTimeout, zero to keep
+// the default, or negative to disable the timeout (test-only).
+func WithSchedulerStoreCallTimeout(d time.Duration) SchedulerOption {
+	return func(s *Scheduler) { s.storeCallTimeout = d }
 }
 
 // cronParser supports standard 5-field cron and descriptors like "@every 30s".
@@ -63,9 +79,10 @@ type Scheduler struct {
 	workerID     id.WorkerID
 	logger       log.Logger
 
-	tickInterval time.Duration
-	lockTTL      time.Duration
-	leaderTTL    time.Duration
+	tickInterval     time.Duration
+	lockTTL          time.Duration
+	leaderTTL        time.Duration
+	storeCallTimeout time.Duration
 
 	// parsedSchedules caches parsed cron expressions.
 	parsedMu sync.RWMutex
@@ -159,11 +176,25 @@ func (s *Scheduler) leaderLoop() {
 	}
 }
 
-func (s *Scheduler) tryLeadership() {
-	ctx := s.cancelCtx
+// callCtx wraps s.cancelCtx with the configured per-call timeout so a
+// stalled driver session can't hold a pool connection beyond the
+// scheduler's own tick budget. Mirrors worker.Pool.callCtx.
+func (s *Scheduler) callCtx() (context.Context, context.CancelFunc) {
+	if s.storeCallTimeout < 0 {
+		return s.cancelCtx, func() {}
+	}
+	d := s.storeCallTimeout
+	if d == 0 {
+		d = defaultStoreCallTimeout
+	}
+	return context.WithTimeout(s.cancelCtx, d)
+}
 
+func (s *Scheduler) tryLeadership() {
 	// Try to renew first (cheap if already leader).
-	renewed, err := s.clusterStore.RenewLeadership(ctx, s.workerID, s.leaderTTL)
+	renewCtx, renewCancel := s.callCtx()
+	renewed, err := s.clusterStore.RenewLeadership(renewCtx, s.workerID, s.leaderTTL)
+	renewCancel()
 	if err != nil {
 		s.logger.Warn("leadership renew error", log.String("error", err.Error()))
 		return
@@ -173,7 +204,9 @@ func (s *Scheduler) tryLeadership() {
 	}
 
 	// Not leader yet; try to acquire.
-	acquired, err := s.clusterStore.AcquireLeadership(ctx, s.workerID, s.leaderTTL)
+	acqCtx, acqCancel := s.callCtx()
+	acquired, err := s.clusterStore.AcquireLeadership(acqCtx, s.workerID, s.leaderTTL)
+	acqCancel()
 	if err != nil {
 		s.logger.Warn("leadership acquire error", log.String("error", err.Error()))
 		return
@@ -201,10 +234,13 @@ func (s *Scheduler) tickLoop() {
 }
 
 func (s *Scheduler) tick() {
-	ctx := s.cancelCtx
-
-	// Check if we are the leader.
-	leader, err := s.clusterStore.GetLeader(ctx)
+	// Check if we are the leader. Bound the call so a stalled GetLeader
+	// doesn't hold a pool connection past the next tick — without the
+	// timeout, slow drivers turn the 1s tickInterval into a connection
+	// pile-up.
+	getCtx, getCancel := s.callCtx()
+	leader, err := s.clusterStore.GetLeader(getCtx)
+	getCancel()
 	if err != nil {
 		s.logger.Warn("get leader error", log.String("error", err.Error()))
 		return
@@ -214,7 +250,9 @@ func (s *Scheduler) tick() {
 	}
 
 	// List all cron entries.
-	entries, err := s.cronStore.ListCrons(ctx)
+	listCtx, listCancel := s.callCtx()
+	entries, err := s.cronStore.ListCrons(listCtx)
+	listCancel()
 	if err != nil {
 		s.logger.Error("list crons error", log.String("error", err.Error()))
 		return
@@ -228,13 +266,15 @@ func (s *Scheduler) tick() {
 		if entry.NextRunAt == nil || entry.NextRunAt.After(now) {
 			continue
 		}
-		s.fireEntry(ctx, entry, now)
+		s.fireEntry(s.cancelCtx, entry, now)
 	}
 }
 
 func (s *Scheduler) fireEntry(ctx context.Context, entry *Entry, now time.Time) {
-	// Acquire per-entry lock.
-	acquired, err := s.cronStore.AcquireCronLock(ctx, entry.ID, s.workerID, s.lockTTL)
+	// Acquire per-entry lock under a bounded subcontext.
+	acqCtx, acqCancel := s.callCtx()
+	acquired, err := s.cronStore.AcquireCronLock(acqCtx, entry.ID, s.workerID, s.lockTTL)
+	acqCancel()
 	if err != nil {
 		s.logger.Error("acquire cron lock error",
 			log.String("cron_id", entry.ID.String()),
@@ -251,14 +291,19 @@ func (s *Scheduler) fireEntry(ctx context.Context, entry *Entry, now time.Time) 
 	if entry.Queue != "" {
 		enqOpts = append(enqOpts, job.WithQueue(entry.Queue))
 	}
-	jobID, enqErr := s.enqueue(ctx, entry.JobName, entry.Payload, enqOpts...)
+	enqCtx, enqCancel := s.callCtx()
+	jobID, enqErr := s.enqueue(enqCtx, entry.JobName, entry.Payload, enqOpts...)
+	enqCancel()
 	if enqErr != nil {
 		s.logger.Error("cron enqueue error",
 			log.String("cron_name", entry.Name),
 			log.String("job_name", entry.JobName),
 			log.String("error", enqErr.Error()),
 		)
-		if relErr := s.cronStore.ReleaseCronLock(ctx, entry.ID, s.workerID); relErr != nil {
+		relCtx, relCancel := s.callCtx()
+		relErr := s.cronStore.ReleaseCronLock(relCtx, entry.ID, s.workerID)
+		relCancel()
+		if relErr != nil {
 			s.logger.Error("release cron lock error",
 				log.String("cron_id", entry.ID.String()),
 				log.String("error", relErr.Error()),
@@ -268,7 +313,10 @@ func (s *Scheduler) fireEntry(ctx context.Context, entry *Entry, now time.Time) 
 	}
 
 	// Update LastRunAt.
-	if updateErr := s.cronStore.UpdateCronLastRun(ctx, entry.ID, now); updateErr != nil {
+	lrCtx, lrCancel := s.callCtx()
+	updateErr := s.cronStore.UpdateCronLastRun(lrCtx, entry.ID, now)
+	lrCancel()
+	if updateErr != nil {
 		s.logger.Error("update cron last run error",
 			log.String("cron_id", entry.ID.String()),
 			log.String("error", updateErr.Error()),
@@ -286,7 +334,10 @@ func (s *Scheduler) fireEntry(ctx context.Context, entry *Entry, now time.Time) 
 	} else {
 		next := sched.Next(now)
 		entry.NextRunAt = &next
-		if updateErr := s.cronStore.UpdateCronEntry(ctx, entry); updateErr != nil {
+		nrCtx, nrCancel := s.callCtx()
+		updateErr := s.cronStore.UpdateCronEntry(nrCtx, entry)
+		nrCancel()
+		if updateErr != nil {
 			s.logger.Error("update cron next run error",
 				log.String("cron_id", entry.ID.String()),
 				log.String("error", updateErr.Error()),
@@ -295,7 +346,10 @@ func (s *Scheduler) fireEntry(ctx context.Context, entry *Entry, now time.Time) 
 	}
 
 	// Release lock.
-	if relErr := s.cronStore.ReleaseCronLock(ctx, entry.ID, s.workerID); relErr != nil {
+	relCtx, relCancel := s.callCtx()
+	relErr := s.cronStore.ReleaseCronLock(relCtx, entry.ID, s.workerID)
+	relCancel()
+	if relErr != nil {
 		s.logger.Error("release cron lock error",
 			log.String("cron_id", entry.ID.String()),
 			log.String("error", relErr.Error()),

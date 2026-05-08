@@ -2,6 +2,7 @@ package dispatch
 
 import (
 	"context"
+	"time"
 
 	log "github.com/xraph/go-utils/log"
 )
@@ -136,6 +137,87 @@ func WithLogger(l log.Logger) Option {
 func WithStore(s Storer) Option {
 	return func(d *Dispatcher) error {
 		d.store = s
+		return nil
+	}
+}
+
+// WithPollInterval sets how often each worker polls for new jobs.
+// Lower values reduce job pickup latency at the cost of constant
+// driver-pool pressure. Default 1s.
+func WithPollInterval(d time.Duration) Option {
+	return func(disp *Dispatcher) error {
+		disp.config.PollInterval = d
+		return nil
+	}
+}
+
+// WithHeartbeatInterval sets how often running jobs send heartbeats.
+// Default 10s. Set to 0 to disable heartbeats entirely (workers won't
+// extend lease on long-running jobs).
+func WithHeartbeatInterval(d time.Duration) Option {
+	return func(disp *Dispatcher) error {
+		disp.config.HeartbeatInterval = d
+		return nil
+	}
+}
+
+// WithStaleJobThreshold sets how long without a heartbeat before a
+// job is considered stale and reaped. Default 30s. The reaper runs
+// at this interval too, so larger values reduce the reap query rate.
+// Set to 0 to disable stale-job reaping entirely.
+func WithStaleJobThreshold(d time.Duration) Option {
+	return func(disp *Dispatcher) error {
+		disp.config.StaleJobThreshold = d
+		return nil
+	}
+}
+
+// WithWorkerStoreCallTimeout caps a single worker store roundtrip.
+// Bounds how long a stalled driver session can hold a pool connection
+// before the worker abandons it. Default 5s; negative disables (test-only).
+func WithWorkerStoreCallTimeout(d time.Duration) Option {
+	return func(disp *Dispatcher) error {
+		disp.config.WorkerStoreCallTimeout = d
+		return nil
+	}
+}
+
+// WithCronTickInterval sets how often the cron scheduler checks for
+// due entries. Default 1s. Bump to 5–10s when running against a
+// shared single-node mongo / postgres to reduce constant GetLeader
+// + ListCrons traffic.
+func WithCronTickInterval(d time.Duration) Option {
+	return func(disp *Dispatcher) error {
+		disp.config.CronTickInterval = d
+		return nil
+	}
+}
+
+// WithCronLeaderTTL sets the leader-election lock TTL. The leader
+// loop renews at half this interval, so 15s = renew every 7.5s.
+// Default 15s.
+func WithCronLeaderTTL(d time.Duration) Option {
+	return func(disp *Dispatcher) error {
+		disp.config.CronLeaderTTL = d
+		return nil
+	}
+}
+
+// WithCronLockTTL sets the per-entry distributed lock TTL fired
+// around each cron entry execution. Default 30s.
+func WithCronLockTTL(d time.Duration) Option {
+	return func(disp *Dispatcher) error {
+		disp.config.CronLockTTL = d
+		return nil
+	}
+}
+
+// WithCronStoreCallTimeout caps a single cron-scheduler store
+// roundtrip (GetLeader, RenewLeadership, ListCrons, Acquire/Release
+// lock, Update entry). Default 5s; negative disables (test-only).
+func WithCronStoreCallTimeout(d time.Duration) Option {
+	return func(disp *Dispatcher) error {
+		disp.config.CronStoreCallTimeout = d
 		return nil
 	}
 }

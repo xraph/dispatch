@@ -2,7 +2,9 @@ package mongo
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"sync"
 	"time"
 
 	"go.mongodb.org/mongo-driver/v2/bson"
@@ -27,51 +29,105 @@ func (s *Store) EnqueueJob(ctx context.Context, j *job.Job) error {
 }
 
 // DequeueJobs atomically claims up to limit pending jobs from the given
-// queues. Uses FindOneAndUpdate for atomic claim to prevent double-delivery.
+// queues. Each claim is a FindOneAndUpdate (atomic per-doc), but for limit > 1
+// the claims are issued in parallel so wall-clock cost stays close to a single
+// round-trip even on a slow connection.
 func (s *Store) DequeueJobs(ctx context.Context, queues []string, limit int) ([]*job.Job, error) {
-	t := now()
-	col := s.mdb.Collection(colJobs)
-	jobs := make([]*job.Job, 0, limit)
-
-	for i := 0; i < limit; i++ {
-		filter := bson.M{
-			"state":  bson.M{"$in": []string{string(job.StatePending), string(job.StateRetrying)}},
-			"queue":  bson.M{"$in": queues},
-			"run_at": bson.M{"$lte": t},
+	if limit <= 0 {
+		return nil, nil
+	}
+	if limit == 1 {
+		j, err := s.dequeueOne(ctx, queues, now())
+		if err != nil || j == nil {
+			return nil, err
 		}
-
-		update := bson.M{
-			"$set": bson.M{
-				"state":      string(job.StateRunning),
-				"started_at": t,
-				"updated_at": t,
-			},
-		}
-
-		opts := options.FindOneAndUpdate().
-			SetReturnDocument(options.After).
-			SetSort(bson.D{
-				{Key: "priority", Value: -1},
-				{Key: "run_at", Value: 1},
-			})
-
-		var m jobModel
-		err := col.FindOneAndUpdate(ctx, filter, update, opts).Decode(&m)
-		if err != nil {
-			if isNoDocuments(err) {
-				break
-			}
-			return nil, fmt.Errorf("dispatch/mongo: dequeue jobs: %w", err)
-		}
-
-		j, convErr := fromJobModel(&m)
-		if convErr != nil {
-			return nil, fmt.Errorf("dispatch/mongo: dequeue convert: %w", convErr)
-		}
-		jobs = append(jobs, j)
+		return []*job.Job{j}, nil
 	}
 
+	t := now()
+	results := make([]*job.Job, limit)
+	errsCh := make(chan error, limit)
+	var wg sync.WaitGroup
+
+	// Once one worker hits ErrNoDocuments the queue is empty; cancel the rest
+	// to avoid pointless round-trips against an empty queue.
+	cctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	for i := 0; i < limit; i++ {
+		i := i
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			j, err := s.dequeueOne(cctx, queues, t)
+			if err != nil {
+				errsCh <- err
+				return
+			}
+			if j == nil {
+				cancel()
+				return
+			}
+			results[i] = j
+		}()
+	}
+	wg.Wait()
+	close(errsCh)
+
+	for err := range errsCh {
+		if err != nil && !errors.Is(err, context.Canceled) {
+			return nil, err
+		}
+	}
+
+	jobs := make([]*job.Job, 0, limit)
+	for _, j := range results {
+		if j != nil {
+			jobs = append(jobs, j)
+		}
+	}
 	return jobs, nil
+}
+
+// dequeueOne claims a single job atomically. Returns (nil, nil) when no
+// claimable job exists. Wrapped in withRetry so transient network blips
+// don't bubble up as dequeue errors.
+func (s *Store) dequeueOne(ctx context.Context, queues []string, t time.Time) (*job.Job, error) {
+	col := s.mdb.Collection(colJobs)
+	filter := bson.M{
+		"state":  bson.M{"$in": []string{string(job.StatePending), string(job.StateRetrying)}},
+		"queue":  bson.M{"$in": queues},
+		"run_at": bson.M{"$lte": t},
+	}
+	update := bson.M{
+		"$set": bson.M{
+			"state":      string(job.StateRunning),
+			"started_at": t,
+			"updated_at": t,
+		},
+	}
+	opts := options.FindOneAndUpdate().
+		SetReturnDocument(options.After).
+		SetSort(bson.D{
+			{Key: "priority", Value: -1},
+			{Key: "run_at", Value: 1},
+		})
+
+	var m jobModel
+	err := withRetry(ctx, defaultRetry, func(ctx context.Context) error {
+		return col.FindOneAndUpdate(ctx, filter, update, opts).Decode(&m)
+	})
+	if err != nil {
+		if isNoDocuments(err) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("dispatch/mongo: dequeue jobs: %w", err)
+	}
+	j, convErr := fromJobModel(&m)
+	if convErr != nil {
+		return nil, fmt.Errorf("dispatch/mongo: dequeue convert: %w", convErr)
+	}
+	return j, nil
 }
 
 // GetJob retrieves a job by ID.

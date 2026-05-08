@@ -287,6 +287,11 @@ func Build(d *dispatch.Dispatcher, opts ...Option) (*Engine, error) {
 		worker.WithHeartbeatInterval(config.HeartbeatInterval),
 		worker.WithStaleJobThreshold(config.StaleJobThreshold),
 	}
+	// Per-call timeout. Zero leaves the worker package's
+	// defaultStoreCallTimeout in place; non-zero overrides it.
+	if config.WorkerStoreCallTimeout != 0 {
+		poolOpts = append(poolOpts, worker.WithStoreCallTimeout(config.WorkerStoreCallTimeout))
+	}
 
 	// Create queue manager if queue configs were provided.
 	if len(eng.queueConfigs) > 0 {
@@ -316,7 +321,23 @@ func Build(d *dispatch.Dispatcher, opts ...Option) (*Engine, error) {
 		}
 		return j.ID, nil
 	}
-	eng.scheduler = cron.NewScheduler(cs, cls, enqueueFunc, eng.extensions, eng.pool.WorkerID(), logger)
+	// Translate dispatch.Config cron tunables into scheduler options.
+	// Zero values leave the scheduler's own defaults in place; only
+	// non-zero values override.
+	var schedOpts []cron.SchedulerOption
+	if config.CronTickInterval > 0 {
+		schedOpts = append(schedOpts, cron.WithTickInterval(config.CronTickInterval))
+	}
+	if config.CronLeaderTTL > 0 {
+		schedOpts = append(schedOpts, cron.WithLeaderTTL(config.CronLeaderTTL))
+	}
+	if config.CronLockTTL > 0 {
+		schedOpts = append(schedOpts, cron.WithLockTTL(config.CronLockTTL))
+	}
+	if config.CronStoreCallTimeout != 0 {
+		schedOpts = append(schedOpts, cron.WithSchedulerStoreCallTimeout(config.CronStoreCallTimeout))
+	}
+	eng.scheduler = cron.NewScheduler(cs, cls, enqueueFunc, eng.extensions, eng.pool.WorkerID(), logger, schedOpts...)
 
 	// Register this worker in the cluster store.
 	hostname, hostnameErr := os.Hostname()
