@@ -26,6 +26,14 @@ type Store interface {
 	// the given threshold, indicating they may have crashed.
 	ReapDeadWorkers(ctx context.Context, threshold time.Duration) ([]*Worker, error)
 
+	// DeleteStaleWorkers removes worker rows whose last-seen timestamp is
+	// older than the given threshold. Returns the number of rows deleted.
+	// Used at startup to clear out rows from prior instances that died
+	// without deregistering — without this, a stale leader row blocks the
+	// partial-unique leader index and prevents the new instance from ever
+	// claiming leadership.
+	DeleteStaleWorkers(ctx context.Context, threshold time.Duration) (int64, error)
+
 	// AcquireLeadership attempts to become the cluster leader.
 	// Returns true if this worker is now leader. The leadership
 	// expires after ttl if not renewed.

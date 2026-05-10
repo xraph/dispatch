@@ -137,6 +137,40 @@ func (s *Store) ListWorkers(ctx context.Context) ([]*cluster.Worker, error) {
 	return workers, nil
 }
 
+// DeleteStaleWorkers removes worker entries whose last-seen timestamp is
+// older than the threshold. Returns the number of workers deleted.
+func (s *Store) DeleteStaleWorkers(ctx context.Context, threshold time.Duration) (int64, error) {
+	cutoff := now().Add(-threshold)
+
+	ids, err := s.rdb.SMembers(ctx, workerIDsKey).Result()
+	if err != nil {
+		return 0, fmt.Errorf("dispatch/redis: delete stale smembers: %w", err)
+	}
+
+	var deleted int64
+	for _, wID := range ids {
+		var e workerEntity
+		if getErr := s.getEntity(ctx, workerKey(wID), &e); getErr != nil {
+			// Orphaned set member without a backing entity — treat as
+			// stale and remove from the index.
+			if isNotFound(getErr) {
+				_ = s.rdb.SRem(ctx, workerIDsKey, wID).Err()
+				deleted++
+			}
+			continue
+		}
+		if e.LastSeen.Before(cutoff) {
+			pipe := s.rdb.TxPipeline()
+			pipe.Del(ctx, workerKey(wID))
+			pipe.SRem(ctx, workerIDsKey, wID)
+			if _, execErr := pipe.Exec(ctx); execErr == nil {
+				deleted++
+			}
+		}
+	}
+	return deleted, nil
+}
+
 // ReapDeadWorkers returns workers whose last-seen timestamp is older than the threshold.
 func (s *Store) ReapDeadWorkers(ctx context.Context, threshold time.Duration) ([]*cluster.Worker, error) {
 	cutoff := now().Add(-threshold)

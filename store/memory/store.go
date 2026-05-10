@@ -802,6 +802,23 @@ func (m *Store) ReapDeadWorkers(_ context.Context, threshold time.Duration) ([]*
 	return dead, nil
 }
 
+// DeleteStaleWorkers removes worker entries whose last-seen timestamp is older
+// than the given threshold. Returns the number of entries removed.
+func (m *Store) DeleteStaleWorkers(_ context.Context, threshold time.Duration) (int64, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	cutoff := time.Now().UTC().Add(-threshold)
+	var n int64
+	for id, w := range m.workers {
+		if w.LastSeen.Before(cutoff) {
+			delete(m.workers, id)
+			n++
+		}
+	}
+	return n, nil
+}
+
 // AcquireLeadership attempts to become the cluster leader.
 func (m *Store) AcquireLeadership(_ context.Context, workerID id.WorkerID, ttl time.Duration) (bool, error) {
 	m.mu.Lock()

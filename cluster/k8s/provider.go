@@ -164,6 +164,31 @@ func (p *Provider) ReapDeadWorkers(ctx context.Context, threshold time.Duration)
 	return dead, nil
 }
 
+// DeleteStaleWorkers removes dispatch annotations from pods whose last-seen
+// is older than threshold. The pods themselves are owned by Kubernetes and
+// are not deleted here — only the dispatch metadata is cleared, so a fresh
+// instance can re-register without colliding with stale leadership state.
+func (p *Provider) DeleteStaleWorkers(ctx context.Context, threshold time.Duration) (int64, error) {
+	all, err := p.ListWorkers(ctx)
+	if err != nil {
+		return 0, err
+	}
+	cutoff := time.Now().UTC().Add(-threshold)
+	var n int64
+	for _, w := range all {
+		if !w.LastSeen.Before(cutoff) {
+			continue
+		}
+		if err := p.DeregisterWorker(ctx, w.ID); err != nil {
+			// Log-and-continue: a single annotation strip failure
+			// shouldn't block sweeping the rest.
+			continue
+		}
+		n++
+	}
+	return n, nil
+}
+
 // ──────────────────────────────────────────────────
 // Leadership (Lease API)
 // ──────────────────────────────────────────────────

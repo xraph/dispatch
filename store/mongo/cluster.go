@@ -161,6 +161,32 @@ func (s *Store) ReapDeadWorkers(ctx context.Context, threshold time.Duration) ([
 	return workers, nil
 }
 
+// DeleteStaleWorkers removes worker rows whose last-seen timestamp is older
+// than the threshold. Used at startup to evict rows from previous instances
+// that crashed before deregistering. Without this, a stale row with
+// is_leader=true blocks the partial-unique leader index and the new
+// instance can't claim leadership until mongo's TTL sweeper catches up.
+func (s *Store) DeleteStaleWorkers(ctx context.Context, threshold time.Duration) (int64, error) {
+	cutoff := now().Add(-threshold)
+	col := s.mdb.Collection(colWorkers)
+
+	var deleted int64
+	err := withRetry(ctx, defaultRetry, func(ctx context.Context) error {
+		res, e := col.DeleteMany(ctx, bson.M{
+			"last_seen": bson.M{"$lt": cutoff},
+		})
+		if e != nil {
+			return e
+		}
+		deleted = res.DeletedCount
+		return nil
+	})
+	if err != nil {
+		return 0, fmt.Errorf("dispatch/mongo: delete stale workers: %w", err)
+	}
+	return deleted, nil
+}
+
 // AcquireLeadership attempts to become the cluster leader.
 //
 // Relies on the partial unique index on is_leader=true (created by Migrate)

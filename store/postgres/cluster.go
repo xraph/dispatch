@@ -79,6 +79,19 @@ func (s *Store) ListWorkers(ctx context.Context) ([]*cluster.Worker, error) {
 	return workers, nil
 }
 
+// DeleteStaleWorkers removes worker rows whose last-seen timestamp is older
+// than the given threshold. Returns the number of rows deleted.
+func (s *Store) DeleteStaleWorkers(ctx context.Context, threshold time.Duration) (int64, error) {
+	res, err := s.pgdb.NewDelete((*workerModel)(nil)).
+		Where("last_seen < NOW() - ?::interval", threshold.String()).
+		Exec(ctx)
+	if err != nil {
+		return 0, fmt.Errorf("dispatch/bun: delete stale workers: %w", err)
+	}
+	n, _ := res.RowsAffected()
+	return n, nil
+}
+
 // ReapDeadWorkers returns workers whose last-seen timestamp is older than
 // the given threshold.
 func (s *Store) ReapDeadWorkers(ctx context.Context, threshold time.Duration) ([]*cluster.Worker, error) {

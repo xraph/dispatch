@@ -13,6 +13,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"time"
 
 	"github.com/xraph/forge"
 	"github.com/xraph/forge/extensions/dashboard"
@@ -236,6 +237,37 @@ func (e *Extension) Start(ctx context.Context) error {
 			if err := store.Migrate(ctx); err != nil {
 				return fmt.Errorf("dispatch: migration failed: %w", err)
 			}
+		}
+	}
+
+	// Sweep stale workers from prior instances. On a hard kill (SIGKILL,
+	// pod restart, OOM), the previous worker's row stays in the cluster
+	// store with is_leader possibly still set; the partial-unique index
+	// then prevents the new instance from claiming leadership until
+	// mongo's TTL sweeper runs (up to 60s). Doing the sweep ourselves
+	// closes that gap immediately. The threshold is generous (max of
+	// 5 minutes or 5×heartbeat) so we never evict a live worker that's
+	// just slow to heartbeat during a cold start.
+	if cls := e.eng.ClusterStore(); cls != nil {
+		hb := e.eng.Dispatcher().Config().HeartbeatInterval
+		threshold := 5 * hb
+		if threshold < 5*time.Minute {
+			threshold = 5 * time.Minute
+		}
+		logger := e.logger
+		if logger == nil {
+			logger = e.App().Logger()
+		}
+		if n, err := cls.DeleteStaleWorkers(ctx, threshold); err != nil {
+			// Non-fatal: leader election will retry once mongo settles
+			// and the TTL sweeper will eventually catch up.
+			if logger != nil {
+				logger.Warn("dispatch: stale worker sweep failed",
+					log.String("error", err.Error()))
+			}
+		} else if n > 0 && logger != nil {
+			logger.Info("dispatch: swept stale workers at startup",
+				log.Int64("count", n))
 		}
 	}
 

@@ -212,6 +212,20 @@ func migrationIndexes() map[string][]mongod.IndexModel {
 					SetUnique(true).
 					SetPartialFilterExpression(bson.M{"is_leader": true}),
 			},
+			// TTL index. Worker docs whose last_seen falls behind the
+			// expireAfterSeconds window get auto-deleted by mongo's TTL
+			// sweeper. Set generously (5 minutes) so a transient
+			// heartbeat hiccup doesn't evict a live worker; the
+			// startup sweep in DeleteStaleWorkers handles the more
+			// aggressive immediate cleanup. Live workers heartbeat
+			// every HeartbeatInterval (default 10s) which keeps their
+			// last_seen well within the window.
+			{
+				Keys: bson.D{{Key: "last_seen", Value: 1}},
+				Options: options.Index().
+					SetName("dispatch_workers_last_seen_ttl").
+					SetExpireAfterSeconds(int32(300)),
+			},
 		},
 	}
 }
