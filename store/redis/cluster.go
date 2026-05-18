@@ -154,8 +154,9 @@ func (s *Store) DeleteStaleWorkers(ctx context.Context, threshold time.Duration)
 			// Orphaned set member without a backing entity — treat as
 			// stale and remove from the index.
 			if isNotFound(getErr) {
-				_ = s.rdb.SRem(ctx, workerIDsKey, wID).Err()
-				deleted++
+				if remErr := s.rdb.SRem(ctx, workerIDsKey, wID).Err(); remErr == nil {
+					deleted++
+				}
 			}
 			continue
 		}

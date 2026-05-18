@@ -88,7 +88,10 @@ func (s *Store) DeleteStaleWorkers(ctx context.Context, threshold time.Duration)
 	if err != nil {
 		return 0, fmt.Errorf("dispatch/bun: delete stale workers: %w", err)
 	}
-	n, _ := res.RowsAffected()
+	n, err := res.RowsAffected()
+	if err != nil {
+		return 0, fmt.Errorf("dispatch/bun: delete stale workers rows affected: %w", err)
+	}
 	return n, nil
 }
 
