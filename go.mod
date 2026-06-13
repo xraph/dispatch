@@ -195,7 +195,3 @@ require (
 	modernc.org/sqlite v1.46.1 // indirect
 	nhooyr.io/websocket v1.8.17 // indirect
 )
-
-replace github.com/xraph/grove => ../grove
-
-replace github.com/xraph/grove/drivers/pgdriver => ../grove/drivers/pgdriver
