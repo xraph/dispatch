@@ -13,6 +13,12 @@ type Config struct {
 	// PollInterval is how often to poll for new jobs.
 	PollInterval time.Duration
 
+	// MaxPollInterval caps the fetcher's idle backoff. When polls come
+	// back empty the interval doubles from PollInterval up to this value,
+	// so an idle dispatcher does not hit the store every PollInterval.
+	// In-process enqueues wake the fetcher immediately. Default 30s.
+	MaxPollInterval time.Duration
+
 	// ShutdownTimeout is the maximum time to wait for graceful shutdown.
 	ShutdownTimeout time.Duration
 
@@ -31,15 +37,21 @@ type Config struct {
 	WorkerStoreCallTimeout time.Duration
 
 	// CronTickInterval controls how often the cron scheduler checks
-	// for due entries. Default 1s. Production deployments running
-	// against a single mongo / postgres should bump this to 5–10s
-	// — every tick costs at least a GetLeader call against the
-	// shared driver pool.
+	// for due entries. Default 1s. Ticks run against in-memory
+	// leadership and cron-list caches, so they cost no store traffic
+	// between refreshes.
 	CronTickInterval time.Duration
 
 	// CronLeaderTTL is the TTL for the cron leader election lock.
-	// Default 15s. The leader loop renews at half this interval.
+	// Default 60s. The leader loop renews at half this interval;
+	// failover after a leader crash takes up to the TTL.
 	CronLeaderTTL time.Duration
+
+	// CronRefreshInterval is how often the cron leader re-lists entries
+	// from the store. Between refreshes ticks run against an in-memory
+	// cache; in-process registrations invalidate it immediately.
+	// Default 30s.
+	CronRefreshInterval time.Duration
 
 	// CronLockTTL is the per-entry distributed lock TTL fired around
 	// each cron entry execution. Default 30s.
@@ -57,6 +69,7 @@ func DefaultConfig() Config {
 		Concurrency:       10,
 		Queues:            []string{"default"},
 		PollInterval:      1 * time.Second,
+		MaxPollInterval:   30 * time.Second,
 		ShutdownTimeout:   30 * time.Second,
 		HeartbeatInterval: 10 * time.Second,
 		StaleJobThreshold: 30 * time.Second,

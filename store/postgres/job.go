@@ -20,6 +20,7 @@ func (s *Store) EnqueueJob(ctx context.Context, j *job.Job) error {
 		}
 		return fmt.Errorf("dispatch/bun: enqueue job: %w", err)
 	}
+	s.notifyWake(ctx)
 	return nil
 }
 
@@ -159,14 +160,15 @@ func (s *Store) HeartbeatJob(ctx context.Context, jobID id.JobID, _ id.WorkerID)
 	return nil
 }
 
-// ReapStaleJobs returns running jobs whose last heartbeat is older than
-// the given threshold.
+// ReapStaleJobs returns running jobs whose last heartbeat — or, for jobs
+// whose worker died before the first heartbeat, whose start time — is older
+// than the given threshold.
 func (s *Store) ReapStaleJobs(ctx context.Context, threshold time.Duration) ([]*job.Job, error) {
 	var models []jobModel
 	err := s.pgdb.NewSelect(&models).
 		Where("state = 'running'").
-		Where("heartbeat_at IS NOT NULL").
-		Where("heartbeat_at < NOW() - ?::interval", threshold.String()).
+		Where("COALESCE(heartbeat_at, started_at) IS NOT NULL").
+		Where("COALESCE(heartbeat_at, started_at) < NOW() - ?::interval", threshold.String()).
 		Scan(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("dispatch/bun: reap stale jobs: %w", err)

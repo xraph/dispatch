@@ -235,8 +235,9 @@ func (m *Store) HeartbeatJob(_ context.Context, jobID id.JobID, _ id.WorkerID) e
 	return nil
 }
 
-// ReapStaleJobs returns running jobs whose last heartbeat is older than
-// the given threshold.
+// ReapStaleJobs returns running jobs whose last heartbeat — or, for jobs
+// whose worker died before the first heartbeat, whose start time — is older
+// than the given threshold.
 func (m *Store) ReapStaleJobs(_ context.Context, threshold time.Duration) ([]*job.Job, error) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
@@ -247,7 +248,9 @@ func (m *Store) ReapStaleJobs(_ context.Context, threshold time.Duration) ([]*jo
 		if j.State != job.StateRunning {
 			continue
 		}
-		if j.HeartbeatAt != nil && j.HeartbeatAt.Before(cutoff) {
+		expired := (j.HeartbeatAt != nil && j.HeartbeatAt.Before(cutoff)) ||
+			(j.HeartbeatAt == nil && j.StartedAt != nil && j.StartedAt.Before(cutoff))
+		if expired {
 			cp := *j
 			stale = append(stale, &cp)
 		}

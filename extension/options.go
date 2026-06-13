@@ -38,6 +38,15 @@ func WithPollInterval(d time.Duration) ExtOption {
 	}
 }
 
+// WithMaxPollInterval caps the worker fetcher's idle backoff (default 30s).
+// Empty polls double the poll interval from PollInterval up to this value;
+// new work or an in-process enqueue resets it.
+func WithMaxPollInterval(d time.Duration) ExtOption {
+	return func(e *Extension) {
+		e.dispatchOpts = append(e.dispatchOpts, dispatch.WithMaxPollInterval(d))
+	}
+}
+
 // WithHeartbeatInterval overrides the running-job heartbeat cadence
 // (default 10s).
 func WithHeartbeatInterval(d time.Duration) ExtOption {
@@ -69,11 +78,20 @@ func WithCronTickInterval(d time.Duration) ExtOption {
 	}
 }
 
-// WithCronLeaderTTL overrides the leader election TTL (default 15s).
+// WithCronLeaderTTL overrides the leader election TTL (default 60s).
 // Renewal happens at half this interval.
 func WithCronLeaderTTL(d time.Duration) ExtOption {
 	return func(e *Extension) {
 		e.dispatchOpts = append(e.dispatchOpts, dispatch.WithCronLeaderTTL(d))
+	}
+}
+
+// WithCronRefreshInterval overrides how often the cron leader re-lists
+// entries from the store (default 30s). In-process registrations
+// invalidate the cache immediately.
+func WithCronRefreshInterval(d time.Duration) ExtOption {
+	return func(e *Extension) {
+		e.dispatchOpts = append(e.dispatchOpts, dispatch.WithCronRefreshInterval(d))
 	}
 }
 

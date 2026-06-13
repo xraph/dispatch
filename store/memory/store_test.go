@@ -1126,3 +1126,38 @@ func TestClusterLeadership(t *testing.T) {
 		t.Fatal("expected worker 2 renewal to fail")
 	}
 }
+
+// TestReapStaleJobs_OrphanNilHeartbeat covers the crashed-worker window: a
+// job claimed (running, started_at set) whose worker died before the first
+// heartbeat has heartbeat_at == nil and must still be reaped once its start
+// time passes the threshold. A freshly claimed job must not be.
+func TestReapStaleJobs_OrphanNilHeartbeat(t *testing.T) {
+	t.Parallel()
+	s := New()
+	ctx := context.Background()
+
+	orphan := newJob("orphan", "default", job.StateRunning, 0)
+	started := time.Now().UTC().Add(-time.Minute)
+	orphan.StartedAt = &started
+	if err := s.EnqueueJob(ctx, orphan); err != nil {
+		t.Fatal(err)
+	}
+
+	fresh := newJob("fresh", "default", job.StateRunning, 0)
+	now := time.Now().UTC()
+	fresh.StartedAt = &now
+	if err := s.EnqueueJob(ctx, fresh); err != nil {
+		t.Fatal(err)
+	}
+
+	stale, err := s.ReapStaleJobs(ctx, 30*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(stale) != 1 {
+		t.Fatalf("expected 1 orphaned stale job, got %d", len(stale))
+	}
+	if stale[0].ID.String() != orphan.ID.String() {
+		t.Fatalf("reaped wrong job: %s", stale[0].Name)
+	}
+}

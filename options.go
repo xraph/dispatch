@@ -151,6 +151,16 @@ func WithPollInterval(d time.Duration) Option {
 	}
 }
 
+// WithMaxPollInterval caps the worker fetcher's idle backoff. Empty polls
+// double the poll interval from PollInterval up to this value; new work or
+// an in-process enqueue resets it. Default 30s.
+func WithMaxPollInterval(d time.Duration) Option {
+	return func(disp *Dispatcher) error {
+		disp.config.MaxPollInterval = d
+		return nil
+	}
+}
+
 // WithHeartbeatInterval sets how often running jobs send heartbeats.
 // Default 10s. Set to 0 to disable heartbeats entirely (workers won't
 // extend lease on long-running jobs).
@@ -183,9 +193,8 @@ func WithWorkerStoreCallTimeout(d time.Duration) Option {
 }
 
 // WithCronTickInterval sets how often the cron scheduler checks for
-// due entries. Default 1s. Bump to 5–10s when running against a
-// shared single-node mongo / postgres to reduce constant GetLeader
-// + ListCrons traffic.
+// due entries. Default 1s. Ticks run against in-memory leadership and
+// cron-list caches, so they cost no store traffic between refreshes.
 func WithCronTickInterval(d time.Duration) Option {
 	return func(disp *Dispatcher) error {
 		disp.config.CronTickInterval = d
@@ -194,11 +203,21 @@ func WithCronTickInterval(d time.Duration) Option {
 }
 
 // WithCronLeaderTTL sets the leader-election lock TTL. The leader
-// loop renews at half this interval, so 15s = renew every 7.5s.
-// Default 15s.
+// loop renews at half this interval, so 60s = renew every 30s.
+// Default 60s; failover after a leader crash takes up to the TTL.
 func WithCronLeaderTTL(d time.Duration) Option {
 	return func(disp *Dispatcher) error {
 		disp.config.CronLeaderTTL = d
+		return nil
+	}
+}
+
+// WithCronRefreshInterval sets how often the cron leader re-lists entries
+// from the store. Between refreshes ticks run against an in-memory cache;
+// in-process registrations invalidate it immediately. Default 30s.
+func WithCronRefreshInterval(d time.Duration) Option {
+	return func(disp *Dispatcher) error {
+		disp.config.CronRefreshInterval = d
 		return nil
 	}
 }

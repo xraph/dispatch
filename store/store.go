@@ -15,6 +15,18 @@ import (
 	"github.com/xraph/dispatch/workflow"
 )
 
+// WakeNotifier is an optional store capability: backends that can push
+// new-work signals (e.g. Postgres LISTEN/NOTIFY) implement it so worker
+// pools on other instances wake immediately instead of waiting out their
+// idle poll backoff. Polling remains the correctness mechanism — a missed
+// wake only costs poll latency.
+type WakeNotifier interface {
+	// StartWakeListener subscribes to the backend's wake signal and calls
+	// wake for every notification until stop is invoked. Implementations
+	// must survive connection loss by re-subscribing internally.
+	StartWakeListener(ctx context.Context, wake func()) (stop func(), err error)
+}
+
 // Store is the aggregate persistence interface.
 // Each subsystem store is a composable interface — same pattern as ControlPlane.
 // A single backend (postgres, bun, sqlite, etc.) implements all of them.

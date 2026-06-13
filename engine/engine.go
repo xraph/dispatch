@@ -33,6 +33,7 @@ import (
 	"github.com/xraph/dispatch/observability"
 	"github.com/xraph/dispatch/queue"
 	"github.com/xraph/dispatch/scope"
+	"github.com/xraph/dispatch/store"
 	"github.com/xraph/dispatch/stream"
 	"github.com/xraph/dispatch/worker"
 	"github.com/xraph/dispatch/workflow"
@@ -88,6 +89,10 @@ type Engine struct {
 	cronStore    cron.Store
 	clusterStore cluster.Store
 	scheduler    *cron.Scheduler
+
+	// wakeStop terminates the store wake listener (store.WakeNotifier);
+	// nil when the store has no push capability.
+	wakeStop func()
 
 	// Stream broker (real-time event pub/sub).
 	broker       *stream.Broker
@@ -171,44 +176,44 @@ func WithStreamBroker(opts ...stream.BrokerOption) Option {
 // The Dispatcher's store must implement job.Store.
 func Build(d *dispatch.Dispatcher, opts ...Option) (*Engine, error) {
 	logger := d.Logger()
-	store := d.Store()
+	st := d.Store()
 
-	if store == nil {
+	if st == nil {
 		return nil, dispatch.ErrNoStore
 	}
 
 	// Type-assert the store to get the job.Store interface.
-	js, ok := store.(job.Store)
+	js, ok := st.(job.Store)
 	if !ok {
 		return nil, fmt.Errorf("dispatch: store does not implement job.Store")
 	}
 
 	// Type-assert the store to get the dlq.Store interface.
-	ds, ok := store.(dlq.Store)
+	ds, ok := st.(dlq.Store)
 	if !ok {
 		return nil, fmt.Errorf("dispatch: store does not implement dlq.Store")
 	}
 
 	// Type-assert the store to get the workflow.Store interface.
-	ws, ok := store.(workflow.Store)
+	ws, ok := st.(workflow.Store)
 	if !ok {
 		return nil, fmt.Errorf("dispatch: store does not implement workflow.Store")
 	}
 
 	// Type-assert the store to get the event.Store interface.
-	es, ok := store.(event.Store)
+	es, ok := st.(event.Store)
 	if !ok {
 		return nil, fmt.Errorf("dispatch: store does not implement event.Store")
 	}
 
 	// Type-assert the store to get the cron.Store interface.
-	cs, ok := store.(cron.Store)
+	cs, ok := st.(cron.Store)
 	if !ok {
 		return nil, fmt.Errorf("dispatch: store does not implement cron.Store")
 	}
 
 	// Type-assert the store to get the cluster.Store interface.
-	cls, ok := store.(cluster.Store)
+	cls, ok := st.(cluster.Store)
 	if !ok {
 		return nil, fmt.Errorf("dispatch: store does not implement cluster.Store")
 	}
@@ -287,6 +292,9 @@ func Build(d *dispatch.Dispatcher, opts ...Option) (*Engine, error) {
 		worker.WithHeartbeatInterval(config.HeartbeatInterval),
 		worker.WithStaleJobThreshold(config.StaleJobThreshold),
 	}
+	if config.MaxPollInterval > 0 {
+		poolOpts = append(poolOpts, worker.WithMaxPollInterval(config.MaxPollInterval))
+	}
 	// Per-call timeout. Zero leaves the worker package's
 	// defaultStoreCallTimeout in place; non-zero overrides it.
 	if config.WorkerStoreCallTimeout != 0 {
@@ -330,6 +338,9 @@ func Build(d *dispatch.Dispatcher, opts ...Option) (*Engine, error) {
 	}
 	if config.CronLeaderTTL > 0 {
 		schedOpts = append(schedOpts, cron.WithLeaderTTL(config.CronLeaderTTL))
+	}
+	if config.CronRefreshInterval > 0 {
+		schedOpts = append(schedOpts, cron.WithCronRefreshInterval(config.CronRefreshInterval))
 	}
 	if config.CronLockTTL > 0 {
 		schedOpts = append(schedOpts, cron.WithLockTTL(config.CronLockTTL))
@@ -412,6 +423,12 @@ func (eng *Engine) EnqueueRaw(ctx context.Context, name string, payload []byte, 
 		return nil, err
 	}
 
+	// Nudge the local worker pool so in-process enqueues are picked up
+	// immediately instead of waiting out the idle poll backoff.
+	if eng.pool != nil {
+		eng.pool.Wake()
+	}
+
 	eng.extensions.EmitJobEnqueued(ctx, j)
 	return j, nil
 }
@@ -436,11 +453,36 @@ func (eng *Engine) Start(ctx context.Context) error {
 		return fmt.Errorf("start cron scheduler: %w", err)
 	}
 
-	return eng.d.Start(ctx)
+	if err := eng.d.Start(ctx); err != nil {
+		return err
+	}
+
+	// Stores that support push notifications (store.WakeNotifier, e.g.
+	// Postgres LISTEN/NOTIFY) wake the worker pool on cross-instance
+	// enqueues so jobs are picked up without waiting out the idle poll
+	// backoff. Best-effort: polling remains the correctness mechanism.
+	if wn, ok := eng.jobStore.(store.WakeNotifier); ok {
+		stop, err := wn.StartWakeListener(ctx, eng.pool.Wake)
+		if err != nil {
+			eng.logger.Warn("wake listener unavailable; relying on polling",
+				log.String("error", err.Error()),
+			)
+		} else {
+			eng.wakeStop = stop
+		}
+	}
+
+	return nil
 }
 
 // Stop gracefully shuts down the engine.
 func (eng *Engine) Stop(ctx context.Context) error {
+	// Stop the store wake listener first; it only reduces poll latency.
+	if eng.wakeStop != nil {
+		eng.wakeStop()
+		eng.wakeStop = nil
+	}
+
 	// Deregister this worker from the cluster.
 	if err := eng.clusterStore.DeregisterWorker(ctx, eng.pool.WorkerID()); err != nil {
 		eng.logger.Warn("failed to deregister worker", log.String("error", err.Error()))
@@ -529,6 +571,12 @@ func RegisterCron[T any](ctx context.Context, eng *Engine, def *cron.Definition[
 			return nil
 		}
 		return fmt.Errorf("register cron %q: %w", def.Name, err)
+	}
+
+	// The scheduler caches its cron list; make the new entry visible
+	// before the next scheduled refresh.
+	if eng.scheduler != nil {
+		eng.scheduler.InvalidateCronCache()
 	}
 
 	eng.logger.Info("cron registered",

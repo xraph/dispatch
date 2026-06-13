@@ -131,6 +131,7 @@ func (s *Store) EnqueueJob(ctx context.Context, j *job.Job) error {
 	if err != nil {
 		return fmt.Errorf("dispatch/redis: enqueue job indexes: %w", err)
 	}
+	s.notifyWake(ctx)
 	return nil
 }
 
@@ -302,7 +303,12 @@ func (s *Store) ReapStaleJobs(ctx context.Context, threshold time.Duration) ([]*
 		if job.State(e.State) != job.StateRunning {
 			continue
 		}
-		if e.HeartbeatAt != nil && e.HeartbeatAt.Before(cutoff) {
+		// A nil heartbeat with an old start time is a worker that died
+		// before its first heartbeat; reap it too or it stays running
+		// forever.
+		expired := (e.HeartbeatAt != nil && e.HeartbeatAt.Before(cutoff)) ||
+			(e.HeartbeatAt == nil && e.StartedAt != nil && e.StartedAt.Before(cutoff))
+		if expired {
 			j, convErr := fromJobEntity(&e)
 			if convErr != nil {
 				continue

@@ -34,8 +34,9 @@ type QueueManager interface {
 // can't pile up more than 50 in-flight calls at once.
 const defaultStoreCallTimeout = 5 * time.Second
 
-// Pool manages a set of concurrent worker goroutines that poll for
-// jobs and execute them through the Executor.
+// Pool manages a set of concurrent worker goroutines fed by a single
+// fetcher that polls the store for jobs and executes them through the
+// Executor.
 type Pool struct {
 	store        job.Store
 	executor     *Executor
@@ -43,8 +44,15 @@ type Pool struct {
 	concurrency  int
 	queues       []string
 	pollInterval time.Duration
-	workerID     id.WorkerID
-	logger       log.Logger
+
+	// maxPollInterval caps the fetcher's idle backoff. Empty polls double
+	// the poll interval from pollInterval up to this value so an idle pool
+	// doesn't issue a dequeue (a write command on MongoDB, an UPDATE on
+	// SQL) every pollInterval. Dequeued work or Wake resets the cadence.
+	maxPollInterval time.Duration
+
+	workerID id.WorkerID
+	logger   log.Logger
 
 	// Heartbeat / reaper configuration.
 	heartbeatInterval time.Duration
@@ -61,6 +69,9 @@ type Pool struct {
 	queueManager QueueManager
 
 	stopCh     chan struct{}
+	wakeCh     chan struct{}      // nudges the fetcher out of its idle backoff
+	jobCh      chan *job.Job      // hand-off from the fetcher to the workers
+	slots      chan struct{}      // free-worker tokens; capacity == concurrency
 	cancelCtx  context.Context    // Cancelled on Stop to interrupt in-flight store operations
 	cancelFunc context.CancelFunc // Cancels cancelCtx
 	wg         sync.WaitGroup
@@ -86,6 +97,12 @@ func WithPoolQueues(queues []string) PoolOption {
 // WithPollInterval sets how often workers poll for new jobs.
 func WithPollInterval(d time.Duration) PoolOption {
 	return func(p *Pool) { p.pollInterval = d }
+}
+
+// WithMaxPollInterval caps the fetcher's idle backoff. Empty polls double
+// the poll interval up to this value; dequeued work or Wake resets it.
+func WithMaxPollInterval(d time.Duration) PoolOption {
+	return func(p *Pool) { p.maxPollInterval = d }
 }
 
 // WithHeartbeatInterval sets how often the pool sends heartbeats for
@@ -124,21 +141,37 @@ func NewPool(
 	opts ...PoolOption,
 ) *Pool {
 	p := &Pool{
-		store:        store,
-		executor:     executor,
-		extensions:   extensions,
-		concurrency:  10,
-		queues:       []string{"default"},
-		pollInterval: time.Second,
-		workerID:     id.NewWorkerID(),
-		logger:       logger,
-		stopCh:       make(chan struct{}),
-		activeJobs:   make(map[string]context.CancelFunc),
+		store:           store,
+		executor:        executor,
+		extensions:      extensions,
+		concurrency:     10,
+		queues:          []string{"default"},
+		pollInterval:    time.Second,
+		maxPollInterval: 30 * time.Second,
+		workerID:        id.NewWorkerID(),
+		logger:          logger,
+		stopCh:          make(chan struct{}),
+		wakeCh:          make(chan struct{}, 1),
+		activeJobs:      make(map[string]context.CancelFunc),
 	}
 	for _, opt := range opts {
 		opt(p)
 	}
+	if p.maxPollInterval < p.pollInterval {
+		p.maxPollInterval = p.pollInterval
+	}
 	return p
+}
+
+// Wake nudges the fetcher to poll for jobs immediately, resetting any idle
+// backoff. It is non-blocking and safe to call from any goroutine, including
+// before Start. Call it after enqueuing a job in-process so the job is
+// picked up without waiting out the idle poll interval.
+func (p *Pool) Wake() {
+	select {
+	case p.wakeCh <- struct{}{}:
+	default:
+	}
 }
 
 // WorkerID returns the pool's unique worker identifier.
@@ -161,10 +194,23 @@ func (p *Pool) Start(_ context.Context) error {
 		log.Any("queues", p.queues),
 	)
 
+	// One fetcher claims jobs in batches sized to the free worker slots;
+	// concurrency worker goroutines execute them. A single poller issues
+	// one DequeueJobs call per cycle instead of `concurrency` concurrent
+	// calls, which kept idle pools writing to the store every second and
+	// could exhaust the shared driver pool on its own.
+	p.jobCh = make(chan *job.Job)
+	p.slots = make(chan struct{}, p.concurrency)
+	for range p.concurrency {
+		p.slots <- struct{}{}
+	}
+
 	for range p.concurrency {
 		p.wg.Add(1)
-		go p.dequeueLoop()
+		go p.workerLoop()
 	}
+	p.wg.Add(1)
+	go p.fetchLoop()
 
 	// Launch heartbeat goroutine if configured.
 	if p.heartbeatInterval > 0 {
@@ -234,8 +280,161 @@ func (p *Pool) callCtx() (context.Context, context.CancelFunc) {
 	return context.WithTimeout(p.cancelCtx, d)
 }
 
-// dequeueLoop is run by each worker goroutine.
-func (p *Pool) dequeueLoop() {
+// fetchLoop is the single poller. Each cycle it reserves every free worker
+// slot, dequeues at most that many jobs in ONE store call, and hands them to
+// workers. Empty polls back off exponentially up to maxPollInterval; Wake or
+// dequeued work resets the cadence to pollInterval.
+func (p *Pool) fetchLoop() {
+	defer p.wg.Done()
+
+	interval := p.pollInterval
+
+	for {
+		// Block until at least one worker is free so we never claim a job
+		// we cannot immediately run, then grab the remaining free slots
+		// for the batch.
+		select {
+		case <-p.stopCh:
+			return
+		case <-p.cancelCtx.Done():
+			return
+		case <-p.slots:
+		}
+		held := 1
+		for held < p.concurrency {
+			select {
+			case <-p.slots:
+				held++
+				continue
+			default:
+			}
+			break
+		}
+
+		dqCtx, dqCancel := p.callCtx()
+		jobs, err := p.store.DequeueJobs(dqCtx, p.queues, held)
+		dqCancel()
+		if err != nil {
+			p.releaseSlots(held)
+			if p.cancelCtx.Err() != nil {
+				return // Clean exit during shutdown
+			}
+			p.logger.Error("dequeue error", log.String("error", err.Error()))
+			// Back off on errors too; hot-spinning at pollInterval only
+			// piles onto a struggling store.
+			interval = min(interval*2, p.maxPollInterval)
+			woken, ok := p.wait(interval)
+			if !ok {
+				return
+			}
+			if woken {
+				interval = p.pollInterval
+			}
+			continue
+		}
+
+		for _, j := range jobs {
+			// Check queue/tenant rate limit and concurrency.
+			if p.queueManager != nil && !p.queueManager.Acquire(j.Queue, j.ScopeOrgID) {
+				p.requeueRateLimited(j)
+				continue
+			}
+
+			select {
+			case p.jobCh <- j:
+				held-- // The worker now owns this slot.
+			case <-p.stopCh:
+				p.requeueUndispatched(j)
+				p.releaseSlots(held)
+				return
+			case <-p.cancelCtx.Done():
+				p.requeueUndispatched(j)
+				p.releaseSlots(held)
+				return
+			}
+		}
+		p.releaseSlots(held)
+
+		if len(jobs) > 0 {
+			// There may be more ready work; poll again immediately.
+			interval = p.pollInterval
+			continue
+		}
+
+		interval = min(interval*2, p.maxPollInterval)
+		woken, ok := p.wait(interval)
+		if !ok {
+			return
+		}
+		if woken {
+			interval = p.pollInterval
+		}
+	}
+}
+
+// wait blocks for d, a Wake nudge, or shutdown. woken reports a Wake nudge
+// (the caller should reset its backoff); ok is false when the pool is
+// stopping.
+func (p *Pool) wait(d time.Duration) (woken, ok bool) {
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+	select {
+	case <-p.stopCh:
+		return false, false
+	case <-p.cancelCtx.Done():
+		return false, false
+	case <-p.wakeCh:
+		return true, true
+	case <-timer.C:
+		return false, true
+	}
+}
+
+// releaseSlots returns n unused worker tokens. Token conservation (one per
+// idle worker in the channel, one per job in flight, the rest held briefly
+// by the fetcher) keeps this from ever blocking.
+func (p *Pool) releaseSlots(n int) {
+	for range n {
+		p.slots <- struct{}{}
+	}
+}
+
+// requeueRateLimited returns a job the queue manager refused to pending
+// with a small delay.
+func (p *Pool) requeueRateLimited(j *job.Job) {
+	j.State = job.StatePending
+	j.RunAt = time.Now().Add(p.pollInterval)
+	updCtx, updCancel := p.callCtx()
+	updateErr := p.store.UpdateJob(updCtx, j)
+	updCancel()
+	if updateErr != nil && p.cancelCtx.Err() == nil {
+		p.logger.Error("failed to re-enqueue rate-limited job",
+			log.String("job_id", j.ID.String()),
+			log.String("error", updateErr.Error()),
+		)
+	}
+}
+
+// requeueUndispatched best-effort returns a claimed-but-not-started job to
+// pending during shutdown so it isn't stranded in the running state with no
+// heartbeat. Uses a fresh context: the pool's own contexts are already done.
+func (p *Pool) requeueUndispatched(j *job.Job) {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	j.State = job.StatePending
+	j.RunAt = time.Now().UTC()
+	j.StartedAt = nil
+	if err := p.store.UpdateJob(ctx, j); err != nil {
+		p.logger.Warn("failed to return undispatched job to pending",
+			log.String("job_id", j.ID.String()),
+			log.String("error", err.Error()),
+		)
+	}
+}
+
+// workerLoop executes jobs handed off by the fetcher, returning its slot
+// token after each job.
+func (p *Pool) workerLoop() {
 	defer p.wg.Done()
 
 	for {
@@ -244,70 +443,34 @@ func (p *Pool) dequeueLoop() {
 			return
 		case <-p.cancelCtx.Done():
 			return
-		default:
+		case j := <-p.jobCh:
+			p.runJob(j)
+			p.slots <- struct{}{}
 		}
+	}
+}
 
-		dqCtx, dqCancel := p.callCtx()
-		jobs, err := p.store.DequeueJobs(dqCtx, p.queues, 1)
-		dqCancel()
-		if err != nil {
-			if p.cancelCtx.Err() != nil {
-				return // Clean exit during shutdown
-			}
-			p.logger.Error("dequeue error", log.String("error", err.Error()))
-			p.sleep()
-			continue
-		}
+func (p *Pool) runJob(j *job.Job) {
+	p.extensions.EmitJobStarted(p.cancelCtx, j)
 
-		if len(jobs) == 0 {
-			p.sleep()
-			continue
-		}
+	ctx, cancel := context.WithCancel(p.cancelCtx)
+	p.trackJob(j.ID.String(), cancel)
 
-		j := jobs[0]
+	execErr := p.executor.Execute(ctx, j)
+	if execErr != nil {
+		p.logger.Debug("job execution failed",
+			log.String("job_id", j.ID.String()),
+			log.String("job_name", j.Name),
+			log.String("error", execErr.Error()),
+		)
+	}
 
-		// Check queue/tenant rate limit and concurrency.
-		if p.queueManager != nil && !p.queueManager.Acquire(j.Queue, j.ScopeOrgID) {
-			// Rate limited — return the job to pending with a small delay.
-			j.State = job.StatePending
-			j.RunAt = time.Now().Add(p.pollInterval)
-			updCtx, updCancel := p.callCtx()
-			updateErr := p.store.UpdateJob(updCtx, j)
-			updCancel()
-			if updateErr != nil {
-				if p.cancelCtx.Err() != nil {
-					return
-				}
-				p.logger.Error("failed to re-enqueue rate-limited job",
-					log.String("job_id", j.ID.String()),
-					log.String("error", updateErr.Error()),
-				)
-			}
-			p.sleep()
-			continue
-		}
+	p.untrackJob(j.ID.String())
+	cancel()
 
-		p.extensions.EmitJobStarted(p.cancelCtx, j)
-
-		ctx, cancel := context.WithCancel(p.cancelCtx)
-		p.trackJob(j.ID.String(), cancel)
-
-		execErr := p.executor.Execute(ctx, j)
-		if execErr != nil {
-			p.logger.Debug("job execution failed",
-				log.String("job_id", j.ID.String()),
-				log.String("job_name", j.Name),
-				log.String("error", execErr.Error()),
-			)
-		}
-
-		p.untrackJob(j.ID.String())
-		cancel()
-
-		// Release the queue/tenant slot.
-		if p.queueManager != nil {
-			p.queueManager.Release(j.Queue, j.ScopeOrgID)
-		}
+	// Release the queue/tenant slot.
+	if p.queueManager != nil {
+		p.queueManager.Release(j.Queue, j.ScopeOrgID)
 	}
 }
 
@@ -380,6 +543,7 @@ func (p *Pool) reapStaleJobs() {
 		return
 	}
 
+	reset := 0
 	for _, j := range stale {
 		j.State = job.StatePending
 		j.RunAt = time.Now().UTC()
@@ -398,18 +562,17 @@ func (p *Pool) reapStaleJobs() {
 			continue
 		}
 
+		reset++
 		p.logger.Info("reaped stale job",
 			log.String("job_id", j.ID.String()),
 			log.String("job_name", j.Name),
 		)
 	}
-}
 
-func (p *Pool) sleep() {
-	select {
-	case <-time.After(p.pollInterval):
-	case <-p.stopCh:
-	case <-p.cancelCtx.Done():
+	// The reset jobs are pending again; wake the fetcher so they are
+	// retried now rather than after the idle poll backoff.
+	if reset > 0 {
+		p.Wake()
 	}
 }
 

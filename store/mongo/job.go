@@ -36,6 +36,30 @@ func (s *Store) DequeueJobs(ctx context.Context, queues []string, limit int) ([]
 	if limit <= 0 {
 		return nil, nil
 	}
+
+	// Probe with a cheap indexed read before claiming. findAndModify is a
+	// write command even when it matches nothing, so without this gate
+	// idle pollers generate constant write traffic (collection write
+	// locks, profiler noise, billed write ops). The FindOneAndUpdate
+	// claims below remain the atomic gatekeepers; losing the race after a
+	// positive probe just yields an empty batch.
+	probeCol := s.mdb.Collection(colJobs)
+	probeFilter := bson.M{
+		"state":  bson.M{"$in": []string{string(job.StatePending), string(job.StateRetrying)}},
+		"queue":  bson.M{"$in": queues},
+		"run_at": bson.M{"$lte": now()},
+	}
+	probeOpts := options.FindOne().SetProjection(bson.M{"_id": 1})
+	probeErr := withRetry(ctx, defaultRetry, func(ctx context.Context) error {
+		return probeCol.FindOne(ctx, probeFilter, probeOpts).Err()
+	})
+	if probeErr != nil {
+		if isNoDocuments(probeErr) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("dispatch/mongo: dequeue probe: %w", probeErr)
+	}
+
 	if limit == 1 {
 		j, err := s.dequeueOne(ctx, queues, now())
 		if err != nil || j == nil {
@@ -237,9 +261,17 @@ func (s *Store) ReapStaleJobs(ctx context.Context, threshold time.Duration) ([]*
 	cutoff := now().Add(-threshold)
 	col := s.mdb.Collection(colJobs)
 
+	// Reap on heartbeat age — or, for workers that died before their first
+	// heartbeat (heartbeat_at still null), on start-time age.
 	filter := bson.M{
-		"state":        string(job.StateRunning),
-		"heartbeat_at": bson.M{"$ne": nil, "$lt": cutoff},
+		"state": string(job.StateRunning),
+		"$or": bson.A{
+			bson.M{"heartbeat_at": bson.M{"$ne": nil, "$lt": cutoff}},
+			bson.M{
+				"heartbeat_at": nil,
+				"started_at":   bson.M{"$ne": nil, "$lt": cutoff},
+			},
+		},
 	}
 
 	cursor, err := col.Find(ctx, filter)

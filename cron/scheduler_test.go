@@ -3,6 +3,7 @@ package cron_test
 import (
 	"context"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -394,5 +395,150 @@ func TestParseSchedule(t *testing.T) {
 	_, err = cron.ParseSchedule("not-a-cron")
 	if err == nil {
 		t.Error("expected error for invalid cron expression")
+	}
+}
+
+// countingStore wraps the memory store and counts leadership / cron list
+// store calls so tests can assert on idle traffic.
+type countingStore struct {
+	*memory.Store
+	getLeader atomic.Int32
+	renew     atomic.Int32
+	acquire   atomic.Int32
+	listCrons atomic.Int32
+}
+
+func (c *countingStore) GetLeader(ctx context.Context) (*cluster.Worker, error) {
+	c.getLeader.Add(1)
+	return c.Store.GetLeader(ctx)
+}
+
+func (c *countingStore) RenewLeadership(ctx context.Context, w id.WorkerID, ttl time.Duration) (bool, error) {
+	c.renew.Add(1)
+	return c.Store.RenewLeadership(ctx, w, ttl)
+}
+
+func (c *countingStore) AcquireLeadership(ctx context.Context, w id.WorkerID, ttl time.Duration) (bool, error) {
+	c.acquire.Add(1)
+	return c.Store.AcquireLeadership(ctx, w, ttl)
+}
+
+func (c *countingStore) ListCrons(ctx context.Context) ([]*cron.Entry, error) {
+	c.listCrons.Add(1)
+	return c.Store.ListCrons(ctx)
+}
+
+// TestScheduler_LeaderTickAvoidsStoreReads locks in the leadership and cron
+// list caches: a leader ticking every 10ms must consult its in-memory lease
+// instead of issuing GetLeader + ListCrons reads on every tick.
+func TestScheduler_LeaderTickAvoidsStoreReads(t *testing.T) {
+	cs := &countingStore{Store: memory.New()}
+	workerID := id.NewWorkerID()
+	spy := &enqueueSpy{}
+
+	sched := cron.NewScheduler(
+		cs, cs, spy.Fn(), &stubEmitter{}, workerID, nil,
+		cron.WithTickInterval(10*time.Millisecond),
+		cron.WithLeaderTTL(10*time.Second),
+		cron.WithCronRefreshInterval(10*time.Second),
+	)
+
+	if err := sched.Start(context.Background()); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	time.Sleep(500 * time.Millisecond) // ~50 ticks
+	if err := sched.Stop(context.Background()); err != nil {
+		t.Fatalf("stop: %v", err)
+	}
+
+	// Initial election needs a read (and possibly one renew probe); steady
+	// state must not add one per tick.
+	if got := cs.getLeader.Load(); got > 3 {
+		t.Errorf("GetLeader calls = %d, want <= 3 (leadership cached between renewals)", got)
+	}
+	if got := cs.listCrons.Load(); got > 3 {
+		t.Errorf("ListCrons calls = %d, want <= 3 (cron list cached)", got)
+	}
+}
+
+// TestScheduler_NonLeaderIdleIssuesNoWrites verifies a follower does not
+// issue write attempts (renew/acquire) while another worker holds a live
+// lease — followers only read.
+func TestScheduler_NonLeaderIdleIssuesNoWrites(t *testing.T) {
+	cs := &countingStore{Store: memory.New()}
+	ctx := context.Background()
+
+	other := id.NewWorkerID()
+	w := &cluster.Worker{
+		ID:        other,
+		Hostname:  "other-host",
+		State:     cluster.WorkerActive,
+		LastSeen:  time.Now().UTC(),
+		CreatedAt: time.Now().UTC(),
+	}
+	if err := cs.RegisterWorker(ctx, w); err != nil {
+		t.Fatalf("RegisterWorker: %v", err)
+	}
+	// Go through the embedded store directly so this setup acquisition is
+	// not counted by the wrapper's write-attempt counters.
+	if ok, err := cs.Store.AcquireLeadership(ctx, other, 30*time.Second); err != nil || !ok {
+		t.Fatalf("other AcquireLeadership: ok=%v err=%v", ok, err)
+	}
+
+	spy := &enqueueSpy{}
+	sched := cron.NewScheduler(
+		cs, cs, spy.Fn(), &stubEmitter{}, id.NewWorkerID(), nil,
+		cron.WithTickInterval(10*time.Millisecond),
+		cron.WithLeaderTTL(200*time.Millisecond), // leadership cycle every 100ms
+	)
+
+	if err := sched.Start(ctx); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	time.Sleep(500 * time.Millisecond) // ~5 leadership cycles
+	if err := sched.Stop(ctx); err != nil {
+		t.Fatalf("stop: %v", err)
+	}
+
+	if got := cs.renew.Load() + cs.acquire.Load(); got != 0 {
+		t.Errorf("follower issued %d leadership write attempts, want 0 (read-gated election)", got)
+	}
+	if got := cs.getLeader.Load(); got == 0 {
+		t.Error("follower never checked the leader; expected periodic GetLeader reads")
+	}
+}
+
+// TestScheduler_InvalidateCronCacheRefreshes verifies entries registered
+// after the initial list are picked up promptly once the cache is
+// invalidated, even with a long refresh interval.
+func TestScheduler_InvalidateCronCacheRefreshes(t *testing.T) {
+	cs := &countingStore{Store: memory.New()}
+	spy := &enqueueSpy{}
+
+	sched := cron.NewScheduler(
+		cs, cs, spy.Fn(), &stubEmitter{}, id.NewWorkerID(), nil,
+		cron.WithTickInterval(10*time.Millisecond),
+		cron.WithLeaderTTL(10*time.Second),
+		cron.WithCronRefreshInterval(time.Hour),
+	)
+
+	if err := sched.Start(context.Background()); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	defer func() { _ = sched.Stop(context.Background()) }()
+
+	// Let the scheduler become leader and take its initial (empty) list.
+	time.Sleep(100 * time.Millisecond)
+
+	registerDueEntry(t, cs.Store, "late-entry", "late-job")
+	sched.InvalidateCronCache()
+
+	deadline := time.After(2 * time.Second)
+	for spy.Count() == 0 {
+		select {
+		case <-deadline:
+			t.Fatal("entry registered after startup never fired; cache invalidation broken")
+		case <-time.After(10 * time.Millisecond):
+		}
 	}
 }

@@ -171,15 +171,15 @@ func (s *Store) HeartbeatJob(ctx context.Context, jobID id.JobID, _ id.WorkerID)
 	return nil
 }
 
-// ReapStaleJobs returns running jobs whose last heartbeat is older than
-// the given threshold.
+// ReapStaleJobs returns running jobs whose last heartbeat — or, for jobs
+// whose worker died before the first heartbeat, whose start time — is older
+// than the given threshold.
 func (s *Store) ReapStaleJobs(ctx context.Context, threshold time.Duration) ([]*job.Job, error) {
 	cutoff := time.Now().UTC().Add(-threshold)
 	var models []jobModel
 	err := s.sdb.NewSelect(&models).
 		Where("state = 'running'").
-		Where("heartbeat_at IS NOT NULL").
-		Where("heartbeat_at < ?", cutoff).
+		Where("(heartbeat_at IS NOT NULL AND heartbeat_at < ?) OR (heartbeat_at IS NULL AND started_at IS NOT NULL AND started_at < ?)", cutoff, cutoff).
 		Scan(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("dispatch/sqlite: reap stale jobs: %w", err)
