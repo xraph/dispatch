@@ -2,6 +2,8 @@ package worker
 
 import (
 	"context"
+	"errors"
+	"strings"
 	"sync"
 	"time"
 
@@ -11,6 +13,29 @@ import (
 	"github.com/xraph/dispatch/id"
 	"github.com/xraph/dispatch/job"
 )
+
+// isTransientStoreErr reports whether err is a transient store failure —
+// a context deadline / cancellation, typically connection-pool
+// starvation while the shared DB is under load — rather than a genuine
+// fault. The pool's background loops (reaper, heartbeat) are
+// self-healing: they retry on the next tick, so callers log these at
+// WARN instead of ERROR to avoid a false-alarm flood when the store is
+// merely slow for a few seconds.
+func isTransientStoreErr(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+		return true
+	}
+	// The driver may format the deadline/timeout without wrapping the
+	// sentinel (e.g. "pgdriver: query: context deadline exceeded"), so
+	// fall back to a message probe.
+	msg := err.Error()
+	return strings.Contains(msg, "context deadline exceeded") ||
+		strings.Contains(msg, "context canceled") ||
+		strings.Contains(msg, "timeout")
+}
 
 // QueueManager controls per-queue and per-tenant rate limiting and
 // concurrency. The worker pool calls Acquire before executing a dequeued
@@ -539,7 +564,14 @@ func (p *Pool) reapStaleJobs() {
 	stale, err := p.store.ReapStaleJobs(reapCtx, p.staleJobThreshold)
 	reapCancel()
 	if err != nil {
-		p.logger.Error("reap stale jobs error", log.String("error", err.Error()))
+		// Reaping is self-healing — the next tick retries — so a
+		// transient store timeout (pool contention under load) is a
+		// WARN, not a hard error.
+		if isTransientStoreErr(err) {
+			p.logger.Warn("reap stale jobs transient error", log.String("error", err.Error()))
+		} else {
+			p.logger.Error("reap stale jobs error", log.String("error", err.Error()))
+		}
 		return
 	}
 

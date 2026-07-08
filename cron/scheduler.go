@@ -2,6 +2,8 @@ package cron
 
 import (
 	"context"
+	"errors"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -14,6 +16,29 @@ import (
 	"github.com/xraph/dispatch/id"
 	"github.com/xraph/dispatch/job"
 )
+
+// isTransientStoreErr reports whether err is a transient store failure —
+// a context deadline / cancellation, typically connection-pool
+// starvation while the shared DB is under load — rather than a genuine
+// fault. The scheduler's loops are self-healing (they fall back to the
+// cached state and retry on the next tick), so callers log these at WARN
+// instead of ERROR to avoid a false-alarm flood when the store is merely
+// slow for a few seconds.
+func isTransientStoreErr(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+		return true
+	}
+	// The driver may format the deadline/timeout without wrapping the
+	// sentinel (e.g. "pgdriver: query: context deadline exceeded"), so
+	// fall back to a message probe.
+	msg := err.Error()
+	return strings.Contains(msg, "context deadline exceeded") ||
+		strings.Contains(msg, "context canceled") ||
+		strings.Contains(msg, "timeout")
+}
 
 // EnqueueFunc is the callback the scheduler uses to enqueue jobs.
 // This breaks the import cycle: the engine provides the implementation.
@@ -348,8 +373,15 @@ func (s *Scheduler) cronEntries() []*Entry {
 	entries, err := s.cronStore.ListCrons(listCtx)
 	listCancel()
 	if err != nil {
-		s.logger.Error("list crons error", log.String("error", err.Error()))
-		return s.cronCache // Stale entries beat skipping the tick.
+		// Stale entries beat skipping the tick either way; a transient
+		// store timeout (pool contention) is expected under load and
+		// self-heals next tick, so don't log it as a hard error.
+		if isTransientStoreErr(err) {
+			s.logger.Warn("list crons transient error", log.String("error", err.Error()))
+		} else {
+			s.logger.Error("list crons error", log.String("error", err.Error()))
+		}
+		return s.cronCache
 	}
 
 	s.cronCache = entries
