@@ -17,12 +17,12 @@ require (
 	github.com/vmihailenco/msgpack/v5 v5.4.1
 	github.com/xraph/forge v1.8.0
 	github.com/xraph/forgeui v1.4.1
-	github.com/xraph/grove v1.5.7
-	github.com/xraph/grove/drivers/mongodriver v1.5.7
-	github.com/xraph/grove/drivers/pgdriver v1.5.7
-	github.com/xraph/grove/drivers/sqlitedriver v1.5.7
-	github.com/xraph/grove/kv v1.5.7
-	github.com/xraph/grove/kv/drivers/redisdriver v1.5.7
+	github.com/xraph/grove v1.5.9
+	github.com/xraph/grove/drivers/mongodriver v1.5.9
+	github.com/xraph/grove/drivers/pgdriver v1.5.9
+	github.com/xraph/grove/drivers/sqlitedriver v1.5.9
+	github.com/xraph/grove/kv v1.5.9
+	github.com/xraph/grove/kv/drivers/redisdriver v1.5.9
 	github.com/xraph/relay v1.5.5
 	github.com/xraph/vessel v1.0.2
 	go.jetify.com/typeid/v2 v2.0.0-alpha.3
