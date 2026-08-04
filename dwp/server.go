@@ -82,13 +82,13 @@ func (s *Server) handleWebSocket(ctx forge.Context, conn forge.Connection) error
 	var authFrame Frame
 	if err := json.Unmarshal(authData, &authFrame); err != nil {
 		//nolint:errcheck // best-effort error response before disconnect
-		conn.WriteJSON(NewErrorFrame("", ErrCodeBadRequest, "invalid auth frame"))
+		_ = conn.WriteJSON(NewErrorFrame("", ErrCodeBadRequest, "invalid auth frame"))
 		return fmt.Errorf("dwp: unmarshal auth frame: %w", err)
 	}
 
 	if authFrame.Method != MethodAuth {
 		//nolint:errcheck // best-effort error response before disconnect
-		conn.WriteJSON(NewErrorFrame(authFrame.ID, ErrCodeBadRequest, "first frame must be auth"))
+		_ = conn.WriteJSON(NewErrorFrame(authFrame.ID, ErrCodeBadRequest, "first frame must be auth"))
 		return fmt.Errorf("dwp: expected auth frame, got %q", authFrame.Method)
 	}
 
@@ -97,7 +97,7 @@ func (s *Server) handleWebSocket(ctx forge.Context, conn forge.Connection) error
 	if len(authFrame.Data) > 0 {
 		if err := json.Unmarshal(authFrame.Data, &authReq); err != nil {
 			//nolint:errcheck // best-effort error response before disconnect
-			conn.WriteJSON(NewErrorFrame(authFrame.ID, ErrCodeBadRequest, "invalid auth data"))
+			_ = conn.WriteJSON(NewErrorFrame(authFrame.ID, ErrCodeBadRequest, "invalid auth data"))
 			return err
 		}
 	}
@@ -110,7 +110,7 @@ func (s *Server) handleWebSocket(ctx forge.Context, conn forge.Connection) error
 	identity, authErr := s.auth.Authenticate(ctx.Context(), token)
 	if authErr != nil {
 		//nolint:errcheck // best-effort error response before disconnect
-		conn.WriteJSON(NewErrorFrame(authFrame.ID, ErrCodeUnauthorized, "authentication failed"))
+		_ = conn.WriteJSON(NewErrorFrame(authFrame.ID, ErrCodeUnauthorized, "authentication failed"))
 		return fmt.Errorf("dwp: auth failed: %w", authErr)
 	}
 

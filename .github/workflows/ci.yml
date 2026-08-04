@@ -12,72 +12,19 @@ concurrency:
 
 permissions:
   contents: read
+  # required by go-ci.yml's gosec SARIF upload
+  security-events: write
 
 jobs:
   # ─── Go Build & Test ────────────────────────────────────────────────
-  go:
-    name: Go
-    runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        go-version: ["1.26"]
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v6
-
-      - name: Set up Go ${{ matrix.go-version }}
-        uses: actions/setup-go@v6
-        with:
-          go-version: ${{ matrix.go-version }}
-          cache: true
-          cache-dependency-path: go.sum
-
-      - name: Download modules
-        run: go mod download
-
-      - name: Verify module tidy
-        run: |
-          go mod tidy
-          git diff --exit-code go.mod go.sum
-
-      - name: Build
-        run: go build ./...
-
-      - name: Test
-        run: go test -race -count=1 -coverprofile=coverage.out ./...
-
-      - name: Upload coverage
-        if: github.event_name == 'pull_request'
-        uses: actions/upload-artifact@v6
-        with:
-          name: coverage-go${{ matrix.go-version }}
-          path: coverage.out
-          retention-days: 7
-
-  # ─── Lint ───────────────────────────────────────────────────────────
-  lint:
-    name: Lint
-    runs-on: ubuntu-latest
-    needs: go
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v6
-
-      - name: Set up Go
-        uses: actions/setup-go@v6
-        with:
-          go-version: "1.26"
-          cache: true
-          cache-dependency-path: go.sum
-
-      - name: golangci-lint
-        uses: golangci/golangci-lint-action@v9
-        with:
-          version: latest
-          args: --timeout 10m
+  # test, lint, verify and security now come from the shared workflow. It
+  # probes for Makefile targets per step and falls back to the plain go
+  # commands these jobs used to run inline.
+  ci:
+    uses: xraph/workflows/.github/workflows/go-ci.yml@v1
+    with:
+      go-versions: '["1.26"]'
+      os: '["ubuntu-latest"]'
 
   # ─── Format Check ──────────────────────────────────────────────────
   format:
@@ -91,7 +38,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v6
         with:
-          go-version: "1.26"
+          go-version-file: go.mod
           cache: true
           cache-dependency-path: go.sum
 
@@ -132,7 +79,7 @@ jobs:
 
       - name: Get pnpm store directory
         shell: bash
-        run: echo "STORE_PATH=$(pnpm store path --silent)" >> $GITHUB_ENV
+        run: echo "STORE_PATH=$(pnpm store path --silent)" >> "$GITHUB_ENV"
 
       - name: Cache pnpm
         uses: actions/cache@v5
