@@ -77,9 +77,9 @@ and §5 names the two seams the third-party case will use.
 
 ## 3. Package layout
 
-`exec` must be a leaf. It may depend on `id`, `scope`, and the root `dispatch` package,
-never on `job` — so that `job.Options` can later carry execution options without a cycle,
-exactly as `artifact` is positioned in track A.
+`exec` must be a leaf. It may depend on `id`, `scope`, `resource`, and the root `dispatch`
+package, never on `job` — so that `job.Options` can carry execution options without a
+cycle, exactly as `artifact` is positioned in track A and `resource` in track B.
 
 ```
 exec/               leaf: Executor, Request, Result, Status, Usage,
@@ -135,11 +135,12 @@ type Request struct {
     Deadline    time.Time
     Fingerprint string            // registry fingerprint; see §5
 
-    InputDir    string            // staged, read-only (track A)
-    OutputDir   string            // handler writes here
-    Inputs      []InputSlot       // declared name → relative path within InputDir
+    InputDir     string           // staged, read-only (track A)
+    OutputDir    string           // handler writes here
+    Inputs       []InputSlot      // declared name → relative path within InputDir
+    PriorOutputs []PriorOutput    // committed by earlier attempts; see §6
 
-    Resources   Resources         // track B
+    Resources   resource.Spec     // track B, already resolved at enqueue
     ScopeAppID  string            // for labels and logs; never a credential
     ScopeOrgID  string
     Env         map[string]string // non-secret only; see §6
@@ -424,15 +425,48 @@ possibly-compromised child reported.
 ### Outputs
 
 Track A keeps outputs imperative — `art.Create(ctx, "page-317.png")` — so dynamic fan-out
-works. Out-of-process, the accessor the shim installs is a **local** implementation:
+works. `artifact.Accessor.Create` returns a concrete `*artifact.CommitWriter`
+(`artifact/service.go:350`), not an interface, so the shim does not reimplement the
+accessor. It constructs a **real `*artifact.Service`** over two local pieces:
 
-- `art.Path(name)` resolves a declared input inside `InputDir`
-- `art.Open(name)` opens that file
-- `art.Create(ctx, name, opts...)` creates a file in `OutputDir` and returns a writer
-- `Commit` closes the file, hashes it, and appends an entry to a local manifest
+- a `localfs` `artifact.Backend` rooted at `OutputDir`, whose `Create` opens a file and
+  whose `Open` reads one
+- an in-memory `artifact.Store`, the same shape `artifact/artifacttest` already provides
 
-No backend, no network, no credentials. The handler code from track A §6 is unchanged and
-unaware of which side of the boundary it is on.
+The handler therefore runs against the genuine `artifact.Service` code path — `Create`,
+`Commit`, `IfAbsent`, `Existing` all behave exactly as in-process — while every byte lands
+in a directory and every row lands in a map that dies with the process. No backend
+credential, no network, no database. The handler code from track A §6 is unchanged and
+cannot tell which side of the boundary it is on, which is the property that makes the
+rungs interchangeable.
+
+The in-memory rows are not the record of truth. They exist so `Commit` can return a `Ref`
+and so `Existing` can answer. The manifest the shim reports in `Result.Outputs` is a
+*claim*, which the worker verifies rather than trusts (below).
+
+**Resumption across the boundary.** `Existing` and `IfAbsent` are track A's resumption
+seam and track D's foundation: a retried PDF splitter skips the 316 pages it already
+rendered. In-process this works because `FindExisting` queries links on
+`(owner_kind, owner_id, name)` across attempts. A shim with an in-memory store has no
+prior attempts and would silently re-render all 316 pages — a performance cliff that no
+test would catch, since the output is still correct.
+
+So the worker resolves them before launch. `Request.PriorOutputs` carries the links an
+earlier attempt committed:
+
+```go
+type PriorOutput struct {
+    Name string
+    Ref  artifact.Ref
+}
+```
+
+The shim seeds its in-memory store with these, and `Existing` answers correctly.
+`art.Open` on such a ref still fails, because reading a prior output's *bytes* would
+require a backend credential; a handler that needs to read one must declare it as an
+input. That restriction is stated rather than worked around: it is the same boundary the
+whole design rests on, and a handler that only needs to know "did I already do this?" —
+which is what resumption asks — is unaffected.
 
 Committing those files to the artifact plane happens outside:
 
@@ -629,25 +663,47 @@ recommended over same-namespace execution.
 
 ### Resources are track B's input
 
+Track B's §9 defines this contract, and track C consumes it rather than restating it.
+Track C **resolves nothing**: the spec is resolved at enqueue, written to the job row, and
+read from the execution context.
+
 ```go
-type Resources struct {
-    CPUMillis      int64
-    MemoryBytes    int64
-    EphemeralBytes int64
-    GPUCount       int64
-    GPUClass       string
+// package resource (track B)
+type Spec struct {
+    Requests Set      // map[string]int64, canonical units
+    Limits   Set
+    Class    string   // C maps to priorityClassName / nodeSelector / runtimeClassName
 }
 
-type ResourceResolver interface {
-    Resolve(ctx context.Context, j *job.Job) (Resources, error)
-}
+func SpecFrom(ctx context.Context) (Spec, bool)
 ```
 
-Track C ships `exec.StaticResolver`, reading per-definition options and falling back to
-configured defaults. Track B replaces the implementation; nothing in `exec/k8s` changes.
-Requests and limits are derived by a configurable ratio, defaulting to requests == limits
-for memory (Guaranteed QoS, so the sandbox is not the first thing evicted under node
-pressure) and a burstable ratio for CPU.
+Because core guarantees canonical units, translation in `exec/k8s` is mechanical and is
+the only place `corev1` is imported:
+
+| Key | Kubernetes |
+|---|---|
+| `cpu` (millicores) | `resource.NewMilliQuantity(v, DecimalSI)` |
+| `memory` (bytes) | `resource.NewQuantity(v, BinarySI)` |
+| `disk` (bytes) | `ephemeral-storage` |
+| `gpu` (milli-devices) | `nvidia.com/gpu`, **rounded up to whole devices** |
+| custom | extended-resource name, via a C-side mapping table |
+
+A `Spec` with empty `Limits` produces a pod with requests only (Burstable QoS); setting
+`Limits` equal to `Requests` for memory is track B's declaration to make, not track C's
+default to impose.
+
+**The reverse direction — C supplies B's sampler.** Track C implements
+`resource.Sampler`, and pod-per-job is exactly what makes `quality = "exact"` achievable:
+the job owns its cgroup, so `memory.peak`, `cpu.stat`, and the `memory.events` `oom_kill`
+delta describe that job and nothing else. This is also what lets an OOM be attributed to
+the job that caused it rather than taking the whole worker down with it. The loop closes:
+B sizes the sandbox, and the sandbox produces the measurement that sizes it better next
+time.
+
+`Result.Usage` is therefore not a parallel measurement system. It is the transport that
+carries a sample from inside the boundary to the `resource.Sampler` registration outside
+it.
 
 ---
 
@@ -980,7 +1036,9 @@ Each phase is independently useful and independently testable.
    groups, the kill ladder, constructed environments, and stdio streaming. The first real
    containment, and the first time `job.WithTimeout` actually stops work.
 3. **cgroups and usage.** cgroup v2 limits and `Usage` reporting on Linux, degrading to
-   rlimits elsewhere. Track B's measurement feed begins here.
+   rlimits elsewhere, plus the `resource.Sampler` implementation that carries
+   `memory.peak`, `cpu.stat`, and the `memory.events` `oom_kill` delta back to track B.
+   This is where the B↔C loop closes.
 4. **OCI.** `exec/oci` driving `runc`/`crun`, bundle generation, namespaces, seccomp.
 5. **Kubernetes.** `exec/k8s` — Job-per-task, shared informers, the three-container pod,
    adoption, reclaim, event-based diagnosis.
