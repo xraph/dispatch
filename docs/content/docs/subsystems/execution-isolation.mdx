@@ -106,9 +106,15 @@ only changes what becomes available to definitions that ask for it.
 ## Registering a mixed set
 
 `job.Registrable` lets definitions with different payload types share one
-slice, since Go forbids a generic method that would otherwise unify them:
+slice, since Go forbids a generic method that would otherwise unify them.
+`SendEmail` below declares no isolation, so it stays in the worker process
+alongside the isolated `Tessellate` from above:
 
 ```go
+var SendEmail = job.NewDefinition("send.email",
+    func(ctx context.Context, in EmailInput) error { return nil },
+)
+
 var defs []job.Registrable = []job.Registrable{Tessellate, SendEmail}
 
 if err := engine.RegisterAll(eng, defs...); err != nil {
