@@ -215,53 +215,8 @@ func (s *Store) EnqueueJob(ctx context.Context, j *job.Job) error {
 	return nil
 }
 
-// DequeueJobs atomically pops up to limit jobs from the given queues.
-func (s *Store) DequeueJobs(ctx context.Context, queues []string, limit int) ([]*job.Job, error) {
-	t := now()
-	var jobs []*job.Job
-
-	for _, q := range queues {
-		if len(jobs) >= limit {
-			break
-		}
-		remaining := limit - len(jobs)
-		qk := queueKey(q)
-
-		// Pop from sorted set (lowest score = highest priority + earliest RunAt).
-		members, err := s.rdb.ZPopMin(ctx, qk, int64(remaining)).Result()
-		if err != nil {
-			return nil, fmt.Errorf("dispatch/redis: dequeue zpopmin: %w", err)
-		}
-
-		for _, z := range members {
-			jID, ok := z.Member.(string)
-			if !ok {
-				continue
-			}
-
-			key := jobKey(jID)
-			var e jobEntity
-			if getErr := s.getEntity(ctx, key, &e); getErr != nil {
-				continue // skip missing
-			}
-
-			// Update state to running.
-			e.State = string(job.StateRunning)
-			e.StartedAt = &t
-			e.UpdatedAt = t
-			if setErr := s.setEntity(ctx, key, &e); setErr != nil {
-				return nil, fmt.Errorf("dispatch/redis: dequeue update: %w", setErr)
-			}
-
-			j, convErr := fromJobEntity(&e)
-			if convErr != nil {
-				return nil, convErr
-			}
-			jobs = append(jobs, j)
-		}
-	}
-	return jobs, nil
-}
+// DequeueJobs lives in dequeue.go, where the fit predicate and the claim
+// are documented together.
 
 // GetJob retrieves a job by ID.
 func (s *Store) GetJob(ctx context.Context, jobID id.JobID) (*job.Job, error) {

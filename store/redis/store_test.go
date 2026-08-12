@@ -156,7 +156,7 @@ func TestJobStore_DequeueJobs(t *testing.T) {
 	}
 
 	// Dequeue 2 -- should get highest priority first.
-	dequeued, err := s.DequeueJobs(ctx, []string{"default"}, 2)
+	dequeued, err := s.DequeueJobs(ctx, job.DequeueOpts{Queues: []string{"default"}, Limit: 2})
 	if err != nil {
 		t.Fatalf("dequeue: %v", err)
 	}
@@ -171,7 +171,7 @@ func TestJobStore_DequeueJobs(t *testing.T) {
 	}
 
 	// Dequeue remaining -- should get 1 job.
-	remaining, err := s.DequeueJobs(ctx, []string{"default"}, 10)
+	remaining, err := s.DequeueJobs(ctx, job.DequeueOpts{Queues: []string{"default"}, Limit: 10})
 	if err != nil {
 		t.Fatalf("dequeue remaining: %v", err)
 	}
