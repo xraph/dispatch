@@ -107,3 +107,22 @@ func TestRegistry_AddReplacesSameName(t *testing.T) {
 		t.Errorf("Select() = %q, want %q", got.Name(), "subprocess")
 	}
 }
+
+func TestRegistry_SelectTieBreaksByName(t *testing.T) {
+	// Two executors at the same level: the choice must be deterministic,
+	// because Go randomises map iteration and a job must not land on a
+	// different isolation rung from one run to the next.
+	r := exec.NewRegistry(fakeExecutor{name: "inprocess", level: exec.LevelNone})
+	r.Add(fakeExecutor{name: "zeta", level: exec.LevelProcess})
+	r.Add(fakeExecutor{name: "alpha", level: exec.LevelProcess})
+
+	for range 20 {
+		got, err := r.Select(exec.NewPolicy(exec.Isolate(exec.LevelProcess)))
+		if err != nil {
+			t.Fatalf("Select() error = %v", err)
+		}
+		if got.Name() != "alpha" {
+			t.Fatalf("Select() = %q, want %q", got.Name(), "alpha")
+		}
+	}
+}
