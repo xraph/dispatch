@@ -115,7 +115,18 @@ func (r *Runner) terminalFor(j *job.Job) (middleware.Handler, error) {
 	return func(ctx context.Context) error {
 		res, runErr := executor.Run(ctx, r.request(j, policy))
 		if runErr != nil {
-			return runErr
+			// Run reserves its error return for launch failures: the handler
+			// never ran, so the retry budget must not pay for it.
+			//
+			// An invalid request is the exception. It is a caller programming
+			// error that will fail identically on every attempt, and since a
+			// launch failure never increments RetryCount it would requeue
+			// forever. Fail it permanently instead.
+			if errors.Is(runErr, exec.ErrInvalidRequest) {
+				return fmt.Errorf("%w: %w", dispatch.ErrPermanent, runErr)
+			}
+
+			return &exec.Error{Status: exec.StatusLaunchFailed, Msg: runErr.Error()}
 		}
 
 		return res.Err()

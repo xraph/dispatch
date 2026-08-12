@@ -3,6 +3,7 @@ package worker_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 	"time"
 
@@ -150,6 +151,58 @@ func TestRunner_LaunchFailureDoesNotConsumeRetries(t *testing.T) {
 	}
 	if store.updates == 0 {
 		t.Error("the job was never persisted")
+	}
+}
+
+func TestRunner_RunErrorIsTreatedAsLaunchFailure(t *testing.T) {
+	reg := job.NewRegistry()
+	job.NewDefinition("test.job",
+		func(context.Context, struct{}) error { return nil },
+		job.WithExecution(exec.Isolate(exec.LevelProcess)),
+	).Register(reg)
+
+	rec := &recordingExecutor{err: errors.New("image pull backoff")}
+	executors := exec.NewRegistry(inproc.New(reg))
+	executors.Add(rec)
+
+	runner, store := newTestRunner(t, reg, executors)
+
+	j := &job.Job{ID: id.NewJobID(), Name: "test.job", MaxRetries: 3}
+	err := runner.Execute(context.Background(), j)
+	if err == nil {
+		t.Fatal("Execute() = nil, want a failure")
+	}
+	if j.RetryCount != 0 {
+		t.Errorf("RetryCount = %d, want 0 — a raw Run error is a launch failure", j.RetryCount)
+	}
+	if j.State != job.StatePending && j.State != job.StateRetrying {
+		t.Errorf("State = %q, want the job requeued", j.State)
+	}
+	if store.updates == 0 {
+		t.Error("the job was never persisted")
+	}
+}
+
+func TestRunner_RunErrorWrappingInvalidRequestGoesToDLQ(t *testing.T) {
+	reg := job.NewRegistry()
+	job.NewDefinition("test.job",
+		func(context.Context, struct{}) error { return nil },
+		job.WithExecution(exec.Isolate(exec.LevelProcess)),
+	).Register(reg)
+
+	rec := &recordingExecutor{err: fmt.Errorf("bad: %w", exec.ErrInvalidRequest)}
+	executors := exec.NewRegistry(inproc.New(reg))
+	executors.Add(rec)
+
+	runner, _ := newTestRunner(t, reg, executors)
+
+	j := &job.Job{ID: id.NewJobID(), Name: "test.job", MaxRetries: 3}
+	err := runner.Execute(context.Background(), j)
+	if err == nil {
+		t.Fatal("Execute() = nil, want a failure")
+	}
+	if j.State != job.StateFailed {
+		t.Errorf("State = %q, want %q — an invalid request must not requeue forever", j.State, job.StateFailed)
 	}
 }
 
