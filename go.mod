@@ -11,9 +11,6 @@ require (
 	github.com/testcontainers/testcontainers-go/modules/mongodb v0.42.0
 	github.com/testcontainers/testcontainers-go/modules/postgres v0.42.0
 	github.com/testcontainers/testcontainers-go/modules/redis v0.42.0
-	github.com/uptrace/bun v1.2.16
-	github.com/uptrace/bun/dialect/pgdialect v1.2.16
-	github.com/uptrace/bun/driver/pgdriver v1.2.16
 	github.com/vmihailenco/msgpack/v5 v5.4.1
 	github.com/xraph/forge v1.8.0
 	github.com/xraph/forgeui v1.4.1
@@ -26,6 +23,7 @@ require (
 	github.com/xraph/relay v1.5.5
 	github.com/xraph/trove v1.5.0
 	github.com/xraph/vessel v1.0.2
+	github.com/zeebo/blake3 v0.2.4
 	go.jetify.com/typeid/v2 v2.0.0-alpha.3
 	go.mongodb.org/mongo-driver/v2 v2.5.0
 	go.opentelemetry.io/otel v1.41.0
@@ -162,7 +160,6 @@ require (
 	github.com/dustin/go-humanize v1.0.1 // indirect
 	github.com/gofrs/uuid/v5 v5.3.2 // indirect
 	github.com/grpc-ecosystem/grpc-gateway/v2 v2.28.0 // indirect
-	github.com/jinzhu/inflection v1.0.0 // indirect
 	github.com/klauspost/cpuid/v2 v2.0.12 // indirect
 	github.com/mdelapenya/tlscert v0.2.0 // indirect
 	github.com/moby/moby/api v1.54.1 // indirect
@@ -172,16 +169,13 @@ require (
 	github.com/prometheus/client_model v0.6.2 // indirect
 	github.com/prometheus/common v0.66.1 // indirect
 	github.com/prometheus/procfs v0.16.1 // indirect
-	github.com/puzpuzpuz/xsync/v3 v3.5.1 // indirect
 	github.com/remyoudompheng/bigfft v0.0.0-20230129092748-24d4a6f8daec // indirect
 	github.com/santhosh-tekuri/jsonschema/v6 v6.0.2 // indirect
-	github.com/tmthrgd/go-hex v0.0.0-20190904060850-447a3041c3bc // indirect
 	github.com/vmihailenco/tagparser/v2 v2.0.0 // indirect
 	github.com/xdg-go/pbkdf2 v1.0.0 // indirect
 	github.com/xdg-go/scram v1.2.0 // indirect
 	github.com/xdg-go/stringprep v1.0.4 // indirect
 	github.com/youmark/pkcs8 v0.0.0-20240726163527-a2c0da244d78 // indirect
-	github.com/zeebo/blake3 v0.2.4 // indirect
 	go.opentelemetry.io/otel/exporters/jaeger v1.17.0 // indirect
 	go.opentelemetry.io/otel/exporters/otlp/otlptrace v1.40.0 // indirect
 	go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracehttp v1.40.0 // indirect
@@ -191,7 +185,6 @@ require (
 	google.golang.org/genproto/googleapis/api v0.0.0-20260209200024-4cfbd4190f57 // indirect
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20260209200024-4cfbd4190f57 // indirect
 	google.golang.org/grpc v1.79.1 // indirect
-	mellium.im/sasl v0.3.2 // indirect
 	modernc.org/libc v1.68.0 // indirect
 	modernc.org/mathutil v1.7.1 // indirect
 	modernc.org/memory v1.11.0 // indirect
