@@ -3,6 +3,8 @@ package storetest
 import (
 	"context"
 	"errors"
+	"fmt"
+	"sync"
 	"testing"
 	"time"
 
@@ -49,6 +51,9 @@ func RunLeaseSuite(t *testing.T, newStore func(t *testing.T) LeaseStore) {
 	})
 	t.Run("ReclaimIsExclusive", func(t *testing.T) {
 		testReclaimIsExclusive(t, newStore(t))
+	})
+	t.Run("ReclaimIsExclusiveUnderConcurrency", func(t *testing.T) {
+		testReclaimIsExclusiveUnderConcurrency(t, newStore(t))
 	})
 	t.Run("LeaseTTLRoundTrips", func(t *testing.T) {
 		testLeaseTTLRoundTrips(t, newStore(t))
@@ -343,6 +348,70 @@ func testReclaimIsExclusive(t *testing.T, s LeaseStore) {
 	}
 	if Contains(second, j.ID) {
 		t.Errorf("second reclaim took %s again — reclamation is not exclusive", j.ID)
+	}
+}
+
+func testReclaimIsExclusiveUnderConcurrency(t *testing.T, s LeaseStore) {
+	ctx := context.Background()
+	const (
+		queue      = "lease-concurrent"
+		jobCount   = 20
+		reclaimers = 4
+	)
+
+	mine := make(map[id.JobID]bool, jobCount)
+	for i := range jobCount {
+		j := RunningJob(fmt.Sprintf("concurrent-%d", i), queue, 0)
+		if err := s.EnqueueJob(ctx, j); err != nil {
+			t.Fatalf("enqueue: %v", err)
+		}
+		mine[j.ID] = true
+	}
+
+	var (
+		mu     sync.Mutex
+		claims = make(map[id.JobID]int)
+		wg     sync.WaitGroup
+	)
+	errCh := make(chan error, reclaimers)
+
+	for range reclaimers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+
+			got, err := s.ReclaimExpiredLeases(ctx, jobCount)
+			if err != nil {
+				errCh <- err
+
+				return
+			}
+
+			mu.Lock()
+			defer mu.Unlock()
+			for _, j := range got {
+				claims[j.ID]++
+			}
+		}()
+	}
+
+	wg.Wait()
+	close(errCh)
+	for err := range errCh {
+		t.Fatalf("concurrent ReclaimExpiredLeases: %v", err)
+	}
+
+	// The invariant, not a timing guess: a job handed to two reclaimers
+	// would be run by two workers. A correct backend never violates this,
+	// so a correct backend never flakes here. A select-then-update backend
+	// violates it whenever two scans overlap.
+	for jobID := range mine {
+		switch n := claims[jobID]; {
+		case n == 0:
+			t.Errorf("job %s was never claimed", jobID)
+		case n > 1:
+			t.Errorf("job %s claimed %d times, want exactly 1 — reclamation is not atomic", jobID, n)
+		}
 	}
 }
 
