@@ -119,6 +119,9 @@ func (p *Pool) offeredCustomKeys() []string {
 // only costs one requeue and the next poll retries, so the fetcher should
 // never stall longer than the cadence it would have waited anyway.
 //
+// ctx is the budget for the WHOLE batch, not for this job — see
+// admissionBudget. Each successive job gets whatever is left of it.
+//
 // A failure is reachable in normal operation even though the store already
 // applied a fit predicate. Dequeue matches custom resources by key only,
 // never by quantity, so a worker offering "fpga" can legitimately claim a
@@ -126,22 +129,46 @@ func (p *Pool) offeredCustomKeys() []string {
 // because the budget was computed before the claim and another job may
 // have been admitted since. The returned error names the dimensions that
 // did not fit, which is what the requeue path logs.
-func (p *Pool) admit(j *job.Job) (resource.Lease, error) {
+func (p *Pool) admit(ctx context.Context, j *job.Job) (resource.Lease, error) {
 	if p.resources == nil {
 		return nil, nil
 	}
 
-	ctx, cancel := context.WithTimeout(p.cancelCtx, p.admitTimeout())
-	defer cancel()
-
 	return p.resources.Acquire(ctx, j.ID.String(), j.Resources)
 }
 
-// admitTimeout bounds how long admission may spend reclaiming for one
-// job. A non-positive poll interval would expire the context before
-// Acquire's first iteration, degrading it back into the TryAcquire
-// behaviour that cannot redeem the disk budget, so it floors at
-// something small rather than at zero.
+// admissionBudget bounds how long the fetcher may spend reclaiming for
+// one batch of claimed jobs.
+//
+// One budget for the batch, not one per job. Per job, the worst case is
+// batch size × deadline, and both terms are independently tunable: a
+// concurrency of 20 with a 5s poll interval is a 100s stall against a
+// 30s stale-job threshold — the reaper would start reclaiming jobs this
+// fetcher is still holding, in running state and not yet heartbeating.
+// Sharing one deadline makes the worst case the deadline itself, whatever
+// the batch size.
+//
+// Spending the budget does not poison the rest of the batch. Acquire only
+// consults the context when a request does NOT fit; anything that fits is
+// granted outright, expired context or not. So an exhausted budget stops
+// the fetcher WAITING, and no more than that: the jobs behind the one
+// that burned it are still admitted if there is room, and requeued as
+// misfits if there is not — which is a correct, already-tested outcome.
+//
+// It mirrors callCtx: no manager or no jobs means no budget to spend, and
+// the caller still gets a cancel func so it can defer uniformly.
+func (p *Pool) admissionBudget(batch int) (context.Context, context.CancelFunc) {
+	if p.resources == nil || batch == 0 {
+		return p.cancelCtx, func() {}
+	}
+
+	return context.WithTimeout(p.cancelCtx, p.admitTimeout())
+}
+
+// admitTimeout is the admission budget's duration. A non-positive poll
+// interval would expire the context before Acquire's first iteration,
+// degrading it back into the TryAcquire behaviour that cannot redeem the
+// disk budget, so it floors at something small rather than at zero.
 func (p *Pool) admitTimeout() time.Duration {
 	if p.pollInterval > 0 {
 		return p.pollInterval

@@ -432,6 +432,12 @@ func (p *Pool) fetchLoop() {
 		// never reaches the blocking hand-off that used to do the pacing.
 		dispatched := 0
 
+		// One reclaim budget for the whole batch. Per job it would be
+		// batch size × the deadline, and the fetcher spends that stall
+		// holding claimed jobs that are already in running state and not
+		// yet heartbeating.
+		admitCtx, admitCancel := p.admissionBudget(len(jobs))
+
 		for _, j := range jobs {
 			// Check queue/tenant rate limit and concurrency.
 			if p.queueManager != nil && !p.queueManager.Acquire(j.Queue, j.ScopeOrgID) {
@@ -442,7 +448,7 @@ func (p *Pool) fetchLoop() {
 			// Reserve local capacity between the claim and the hand-off,
 			// so no job reaches a worker without the resources it declared
 			// already accounted for.
-			lease, admitErr := p.admit(j)
+			lease, admitErr := p.admit(admitCtx, j)
 			if admitErr != nil {
 				p.releaseQueueSlot(j)
 				p.requeueLocalMisfit(j, admitErr)
@@ -459,31 +465,55 @@ func (p *Pool) fetchLoop() {
 			case <-p.stopCh:
 				p.abandon(a)
 				p.releaseSlots(held)
+				admitCancel()
+
 				return
 			case <-p.cancelCtx.Done():
 				p.abandon(a)
 				p.releaseSlots(held)
+				admitCancel()
+
 				return
 			}
 		}
+
+		admitCancel()
 		p.releaseSlots(held)
 
-		if dispatched > 0 {
-			// There may be more ready work; poll again immediately.
+		// Three cadences, because a poll has three outcomes and only one
+		// of them paces itself.
+		switch {
+		case dispatched > 0:
+			// Something went through the blocking hand-off, which throttles
+			// this loop to the rate work completes. There may be more ready
+			// work behind it, so poll again immediately.
 			interval = p.pollInterval
+
 			continue
+
+		case len(jobs) > 0:
+			// Rows came back and none could be dispatched: rate limited, or
+			// too big for what is free. Those return instantly, so the fast
+			// path above would spin the claim/requeue cycle as fast as the
+			// store can serve it — 713 dequeues in 500ms on the regression
+			// test, an UpdateJob on each, against a backlog nothing can run.
+			//
+			// The idle backoff below is the wrong pace too, and worse: the
+			// store returns the queue head, so a batch of unrunnable jobs is
+			// re-claimed a Limit at a time, and backing off exponentially
+			// leaves a runnable job sitting behind them for the whole ramp
+			// (8.5s in that same test, against 94ms at this cadence). The
+			// refused rows only clear by being claimed and pushed forward,
+			// so the loop has to keep claiming — just not faster than it was
+			// configured to poll.
+			interval = p.pollInterval
+
+		default:
+			// Nothing ready at all. Back off; only a Wake or real work
+			// resets the cadence.
+			interval = min(interval*2, p.maxPollInterval)
 		}
 
-		// A batch that dispatched nothing paces like an empty one, even
-		// though the store returned rows. The immediate re-poll above is
-		// only safe when something went through the blocking hand-off,
-		// which is what throttles the loop to the rate work completes.
-		// A rate-limited or unadmittable job returns instantly, so
-		// treating its batch as productive spins the claim/requeue cycle
-		// as fast as the store can serve it — thousands of dequeues and
-		// an UpdateJob each, against a backlog nothing can run.
-
-		interval = min(interval*2, p.maxPollInterval)
 		woken, ok := p.wait(interval)
 		if !ok {
 			return

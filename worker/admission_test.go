@@ -164,7 +164,7 @@ func TestLeaseReleasedAfterExecution(t *testing.T) {
 
 		j := newResourceJob("panicker", resource.Set{resource.Memory: gib})
 
-		lease, err := h.pool.admit(j)
+		lease, err := h.admitOne(j)
 		if err != nil {
 			t.Fatalf("admit refused a job that fits: %v", err)
 		}
@@ -262,7 +262,7 @@ func TestAdmitReclaimsDiskBeforeRefusing(t *testing.T) {
 	// refuse this against the 40 GiB that is free right now.
 	j := newResourceJob("staging-hog", resource.Set{resource.Disk: 100 * gib})
 
-	lease, err := h.pool.admit(j)
+	lease, err := h.admitOne(j)
 	if err != nil {
 		t.Fatalf("admit refused a job the dequeue budget promised: %v", err)
 	}
@@ -282,26 +282,163 @@ func TestAdmitReclaimsDiskBeforeRefusing(t *testing.T) {
 	}
 }
 
-// TestAdmitRefusesWhatNoEvictionCanFree is the other side: reclamation
-// is bounded by what is actually reclaimable, so a job larger than
-// capacity is refused immediately rather than waited on.
-func TestAdmitRefusesWhatNoEvictionCanFree(t *testing.T) {
+// TestAdmitRefusesLargerThanCapacityImmediately covers the cheap
+// refusal: a want bigger than the whole worker short-circuits in Acquire
+// before it waits at all, so the permanently-impossible case never costs
+// the admission deadline.
+//
+// Note what this does NOT prove: because it short-circuits, it never
+// reaches the deadline path. TestAdmitRefusalIsBounded is the guard for
+// that.
+func TestAdmitRefusesLargerThanCapacityImmediately(t *testing.T) {
 	mgr := resource.NewManager(resource.Set{resource.Disk: 10 * gib})
-	h := newHarness(t, mgr, true)
+	h := newHarness(t, mgr, true, WithPollInterval(2*time.Second))
 
 	j := newResourceJob("too-big", resource.Set{resource.Disk: 40 * gib})
 
 	start := time.Now()
 
-	if _, err := h.pool.admit(j); err == nil {
+	if _, err := h.admitOne(j); err == nil {
 		t.Fatal("admit accepted a job larger than total capacity")
 	}
 
-	// Acquire fails a want that exceeds capacity before it waits at all,
-	// so this must not have burned the admission deadline.
-	if elapsed := time.Since(start); elapsed > h.pool.admitTimeout() {
+	// The deadline is 2s here precisely so that waiting would be obvious.
+	if elapsed := time.Since(start); elapsed > 500*time.Millisecond {
 		t.Errorf("admit blocked for %v on an impossible job; want an immediate refusal", elapsed)
 	}
+}
+
+// TestAdmitRefusalIsBounded exercises the deadline itself: a want that
+// fits the worker's capacity but not its free capacity, with nothing
+// reclaimable to cover the gap, must give up at the deadline instead of
+// waiting for a running job to finish.
+//
+// The reclaimer is wedged rather than absent, so the refusal goes the
+// long way round — reclaim is attempted, frees nothing, and the wait is
+// what ends it.
+func TestAdmitRefusalIsBounded(t *testing.T) {
+	mgr := resource.NewManager(resource.Set{resource.Disk: 100 * gib})
+
+	// 80 GiB held by something that is not a reclaimer: a running job.
+	// Nothing can take this back within the deadline.
+	running, ok := mgr.TryAcquire("job-running", resource.Set{resource.Disk: 80 * gib})
+	if !ok {
+		t.Fatal("setup: running job did not fit")
+	}
+
+	defer running.Release()
+
+	cache, err := resourcetest.NewFakeReclaimer(mgr, resource.Disk, gib, 5)
+	if err != nil {
+		t.Fatalf("disk reclaimer: %v", err)
+	}
+
+	cache.SetError(errBoom) // the evictor is wedged
+	mgr.RegisterReclaimer(resource.Disk, cache)
+
+	const deadline = 120 * time.Millisecond
+
+	h := newHarness(t, mgr, true, WithPollInterval(deadline))
+
+	// 15 GiB free, 5 GiB stuck behind a broken evictor, 30 GiB wanted.
+	j := newResourceJob("wont-fit-yet", resource.Set{resource.Disk: 30 * gib})
+
+	start := time.Now()
+	_, admitErr := h.admitOne(j)
+	elapsed := time.Since(start)
+
+	if admitErr == nil {
+		t.Fatal("admit granted a lease no eviction could cover")
+	}
+
+	if cache.Calls() == 0 {
+		t.Error("admit never attempted reclamation")
+	}
+
+	if elapsed < deadline {
+		t.Errorf("admit gave up after %v, before the %v deadline; it is not waiting at all", elapsed, deadline)
+	}
+
+	if elapsed > 4*deadline {
+		t.Errorf("admit blocked for %v against a %v deadline", elapsed, deadline)
+	}
+
+	// A refusal must leave nothing behind.
+	if free := mgr.Free()[resource.Disk]; free != 15*gib {
+		t.Errorf("free disk after a refusal = %d, want %d", free, 15*gib)
+	}
+}
+
+// TestAdmissionBudgetIsPerBatchNotPerJob pins the fetcher's worst-case
+// stall.
+//
+// Per job, a batch costs batch size × deadline, and the fetcher spends
+// that stall holding jobs the store has already marked running and that
+// nobody is heartbeating yet. Concurrency 20 with a 5s poll interval
+// would be a 100s stall against a 30s stale-job threshold — the reaper
+// reclaiming jobs the fetcher still has in hand. One budget for the batch
+// makes the worst case the deadline, whatever the batch size.
+func TestAdmissionBudgetIsPerBatchNotPerJob(t *testing.T) {
+	mgr := resource.NewManager(resource.Set{resource.Disk: 100 * gib})
+
+	running, ok := mgr.TryAcquire("job-running", resource.Set{resource.Disk: 80 * gib})
+	if !ok {
+		t.Fatal("setup: running job did not fit")
+	}
+
+	defer running.Release()
+
+	cache, err := resourcetest.NewFakeReclaimer(mgr, resource.Disk, gib, 5)
+	if err != nil {
+		t.Fatalf("disk reclaimer: %v", err)
+	}
+
+	cache.SetError(errBoom)
+	mgr.RegisterReclaimer(resource.Disk, cache)
+
+	const deadline = 120 * time.Millisecond
+
+	h := newHarness(t, mgr, true, WithPollInterval(deadline))
+
+	// Four jobs that each have to wait out the budget.
+	batch := make([]*job.Job, 0, 4)
+	for range 4 {
+		batch = append(batch, newResourceJob("wont-fit-yet", resource.Set{resource.Disk: 30 * gib}))
+	}
+
+	ctx, cancel := h.pool.admissionBudget(len(batch))
+	defer cancel()
+
+	start := time.Now()
+
+	for i, j := range batch {
+		if _, admitErr := h.pool.admit(ctx, j); admitErr == nil {
+			t.Fatalf("job %d was admitted against a full worker", i)
+		}
+	}
+
+	elapsed := time.Since(start)
+
+	t.Logf("4 unadmittable jobs under one %v budget took %v", deadline, elapsed)
+
+	// Per job this is 4 × 120ms = 480ms. Shared, the first job spends the
+	// budget and the other three fail on the expired context immediately.
+	if elapsed > 2*deadline {
+		t.Errorf("batch admission took %v against a %v budget; the deadline is being spent per job",
+			elapsed, deadline)
+	}
+
+	// The spent budget must not poison the batch: Acquire only consults
+	// the context when a request does not fit, so a job with room is still
+	// admitted after the budget is gone.
+	small := newResourceJob("fits-anyway", resource.Set{resource.Disk: gib})
+
+	lease, admitErr := h.pool.admit(ctx, small)
+	if admitErr != nil {
+		t.Fatalf("a job that fits was refused on an expired batch budget: %v", admitErr)
+	}
+
+	lease.Release()
 }
 
 // TestPoolPacesUnfittableBacklog pins the pacing of a batch that
@@ -342,11 +479,82 @@ func TestPoolPacesUnfittableBacklog(t *testing.T) {
 
 	t.Logf("DequeueJobs calls in 500ms against a 60-job unfittable backlog = %d", calls)
 
-	// Paced: 10ms doubling to a 50ms cap is ~12 polls in 500ms. Reverting
-	// the fix on this exact test measures 713. The bound is loose enough
-	// to survive a slow CI box and still an order of magnitude below it.
+	// One poll per 10ms pollInterval is ~50 in 500ms, and the cadence caps
+	// it there by construction. Reverting the fix on this exact test
+	// measures 713 — the loop polling as fast as the store can answer.
 	if calls > 60 {
-		t.Errorf("DequeueJobs calls in 500ms = %d, want <= 60; a batch that dispatched nothing is not backing off", calls)
+		t.Errorf("DequeueJobs calls in 500ms = %d, want <= 60; a batch that dispatched nothing is not being paced", calls)
+	}
+}
+
+// TestPoolRunsRunnableJobBehindUnfittableBacklog is the other half of the
+// pacing contract, and the reason a refused batch is paced at the poll
+// interval rather than handed to the idle backoff.
+//
+// The store returns the queue head, so an unrunnable backlog is re-claimed
+// a Limit at a time and only clears by being claimed. Backing off
+// exponentially between those claims strands a job the worker CAN run
+// behind jobs it cannot, for the whole ramp — measured at 8.5s with a 2s
+// cap, against ~94ms at the poll cadence. That is a worse failure than the
+// spin it would be fixing.
+func TestPoolRunsRunnableJobBehindUnfittableBacklog(t *testing.T) {
+	mgr := resource.NewManager(resource.Set{resource.Memory: 8 * gib, "fpga": 1})
+	h := newHarness(t, mgr, true,
+		WithPoolConcurrency(2),
+		WithMaxPollInterval(2*time.Second),
+	)
+
+	var ran atomic.Bool
+
+	job.RegisterDefinition(h.registry, job.NewDefinition("never-fits",
+		func(_ context.Context, _ struct{}) error { return nil }))
+	job.RegisterDefinition(h.registry, job.NewDefinition("fits",
+		func(_ context.Context, _ struct{}) error {
+			ran.Store(true)
+
+			return nil
+		}))
+
+	// A backlog of jobs this worker can never run, all sorting ahead of
+	// what comes next by RunAt.
+	for range 20 {
+		j := newResourceJob("never-fits", resource.Set{"fpga": 4})
+		if err := h.store.EnqueueJob(context.Background(), j); err != nil {
+			t.Fatalf("enqueue: %v", err)
+		}
+	}
+
+	h.start()
+	time.Sleep(200 * time.Millisecond) // let the loop settle into the backlog
+
+	good := newResourceJob("fits", resource.Set{resource.Memory: gib})
+	if err := h.store.EnqueueJob(context.Background(), good); err != nil {
+		t.Fatalf("enqueue: %v", err)
+	}
+
+	start := time.Now()
+	h.pool.Wake()
+
+	deadline := time.Now().Add(3 * time.Second)
+	for !ran.Load() && time.Now().Before(deadline) {
+		time.Sleep(2 * time.Millisecond)
+	}
+
+	elapsed := time.Since(start)
+
+	h.stop()
+
+	t.Logf("runnable job ran %v after Wake, behind a 20-job unfittable backlog", elapsed)
+
+	if !ran.Load() {
+		t.Fatal("a runnable job never ran; it is stuck behind the unfittable backlog")
+	}
+
+	// Draining 20 misfits two at a time at a 10ms cadence is ~100ms. One
+	// second is far past that and far under the 2s cap a single backed-off
+	// wait would have cost.
+	if elapsed > time.Second {
+		t.Errorf("runnable job took %v to run; the refused backlog is being paced by the idle backoff", elapsed)
 	}
 }
 
@@ -445,7 +653,7 @@ func TestAbandonReturnsEverything(t *testing.T) {
 		t.Fatal("queue manager refused")
 	}
 
-	lease, err := h.pool.admit(claimed[0])
+	lease, err := h.admitOne(claimed[0])
 	if err != nil {
 		t.Fatalf("admit: %v", err)
 	}
@@ -514,7 +722,7 @@ func TestRequeueLocalMisfitDuringShutdownUsesFreshContext(t *testing.T) {
 	// through it would fail.
 	h.pool.cancelFunc()
 
-	_, admitErr := h.pool.admit(claimed[0])
+	_, admitErr := h.admitOne(claimed[0])
 	if admitErr == nil {
 		t.Fatal("admit succeeded against a cancelled pool context with no free capacity")
 	}
@@ -727,6 +935,15 @@ func newHarness(t *testing.T, mgr resource.Manager, withRecover bool, extra ...P
 	t.Cleanup(h.stop)
 
 	return h
+}
+
+// admitOne admits a single job under a one-job admission budget, the way
+// the fetcher would for a batch of one.
+func (h *leaseHarness) admitOne(j *job.Job) (resource.Lease, error) {
+	ctx, cancel := h.pool.admissionBudget(1)
+	defer cancel()
+
+	return h.pool.admit(ctx, j)
 }
 
 func (h *leaseHarness) start() {
