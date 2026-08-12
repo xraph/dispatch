@@ -4,6 +4,7 @@ import (
 	"time"
 
 	"github.com/xraph/dispatch/id"
+	"github.com/xraph/dispatch/resource"
 )
 
 // WorkerState represents the lifecycle state of a worker.
@@ -22,11 +23,15 @@ const (
 
 // Worker represents a Dispatch worker instance in a distributed cluster.
 type Worker struct {
-	ID          id.WorkerID       `json:"id"`
-	Hostname    string            `json:"hostname"`
-	Queues      []string          `json:"queues"`
-	Concurrency int               `json:"concurrency"`
-	State       WorkerState       `json:"state"`
+	ID          id.WorkerID `json:"id"`
+	Hostname    string      `json:"hostname"`
+	Queues      []string    `json:"queues"`
+	Concurrency int         `json:"concurrency"`
+	State       WorkerState `json:"state"`
+	// Capacity is what this worker can run at once. It is advisory:
+	// empty means unknown, which disables the enqueue-time unschedulable
+	// check rather than rejecting everything.
+	Capacity    resource.Set      `json:"capacity,omitempty"`
 	IsLeader    bool              `json:"is_leader"`
 	LeaderUntil *time.Time        `json:"leader_until,omitempty"`
 	LastSeen    time.Time         `json:"last_seen"`
