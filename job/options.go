@@ -1,6 +1,10 @@
 package job
 
-import "time"
+import (
+	"time"
+
+	"github.com/xraph/dispatch/artifact"
+)
 
 // Options configures per-job behavior such as retries, queue, and priority.
 type Options struct {
@@ -18,6 +22,12 @@ type Options struct {
 
 	// RunAt schedules the job for future execution. Zero means immediate.
 	RunAt time.Time
+
+	// Inputs declares the artifacts this job consumes. Declaring them,
+	// rather than burying refs in the opaque payload, is what lets the
+	// engine size the job before scheduling it, validate bindings at
+	// enqueue, and stage the bytes before the handler runs.
+	Inputs []artifact.InputSpec
 }
 
 // DefaultOptions returns Options with sensible defaults.
@@ -65,5 +75,15 @@ func WithTimeout(d time.Duration) Option {
 func WithRunAt(t time.Time) Option {
 	return func(o *Options) {
 		o.RunAt = t
+	}
+}
+
+// WithArtifactInputs declares the artifact inputs a job consumes.
+//
+// The engine validates every binding against these declarations at
+// enqueue and stages the declared inputs before the handler runs.
+func WithArtifactInputs(specs ...artifact.InputSpec) Option {
+	return func(o *Options) {
+		o.Inputs = append(o.Inputs, specs...)
 	}
 }

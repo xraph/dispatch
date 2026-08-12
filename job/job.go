@@ -46,4 +46,10 @@ type Job struct {
 	CompletedAt *time.Time    `json:"completed_at,omitempty"`
 	HeartbeatAt *time.Time    `json:"heartbeat_at,omitempty"`
 	Timeout     time.Duration `json:"timeout,omitempty"`
+
+	// ArtifactBindings carries the encoded map of declared input names to
+	// artifact refs. It travels with the job because Payload is opaque to
+	// the engine: bindings placed inside it would be invisible to the
+	// scheduler and to the staging middleware.
+	ArtifactBindings []byte `json:"artifact_bindings,omitempty"`
 }
