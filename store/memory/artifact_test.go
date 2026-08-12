@@ -9,5 +9,5 @@ import (
 )
 
 func TestArtifactStoreConformance(t *testing.T) {
-	artifacttest.RunStoreSuite(t, func() artifact.Store { return memory.New() })
+	artifacttest.RunStoreSuite(t, func(*testing.T) artifact.Store { return memory.New() })
 }

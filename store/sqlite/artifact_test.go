@@ -11,7 +11,7 @@ import (
 // against SQLite. Each subtest gets its own in-memory database because
 // the suite asserts absolute row counts.
 func TestArtifactStoreConformance(t *testing.T) {
-	artifacttest.RunStoreSuite(t, func() artifact.Store {
+	artifacttest.RunStoreSuite(t, func(t *testing.T) artifact.Store {
 		return openSqliteStore(t)
 	})
 }

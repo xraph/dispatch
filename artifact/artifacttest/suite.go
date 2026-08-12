@@ -13,7 +13,14 @@ import (
 
 // RunStoreSuite exercises the artifact.Store contract. newStore must
 // return a fresh, empty store on every call.
-func RunStoreSuite(t *testing.T, newStore func() artifact.Store) {
+//
+// newStore receives the subtest's *testing.T, not the parent's. Backends
+// that stand up a container or open a database per store must register
+// teardown on that T so it runs when the subtest ends; closing over the
+// parent T instead would hold every subtest's resources open until the
+// whole suite finished, and would turn a setup t.Fatalf into a FailNow
+// on a parent test.
+func RunStoreSuite(t *testing.T, newStore func(t *testing.T) artifact.Store) {
 	t.Helper()
 
 	tests := []struct {
@@ -38,7 +45,7 @@ func RunStoreSuite(t *testing.T, newStore func() artifact.Store) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			tt.fn(t, newStore())
+			tt.fn(t, newStore(t))
 		})
 	}
 }

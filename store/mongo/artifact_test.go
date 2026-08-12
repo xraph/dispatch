@@ -42,7 +42,7 @@ func TestArtifactStoreConformance(t *testing.T) {
 
 	db := client.Database(testDBName)
 
-	artifacttest.RunStoreSuite(t, func() artifact.Store {
+	artifacttest.RunStoreSuite(t, func(t *testing.T) artifact.Store {
 		for _, col := range []string{"dispatch_artifact_links", "dispatch_artifacts"} {
 			if _, derr := db.Collection(col).DeleteMany(ctx, bson.M{}); derr != nil {
 				t.Fatalf("clear %s: %v", col, derr)
