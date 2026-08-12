@@ -13,63 +13,62 @@ import (
 	"github.com/xraph/dispatch/job"
 )
 
-// Both scripts below decode the stored job blob with cjson, mutate a
-// handful of fields, and re-encode the whole thing. That round trip is a
-// documented cjson hazard in general: Lua tables can't distinguish an
-// empty JSON array from an empty JSON object, absent keys and JSON null
-// aren't always preserved the way they went in, and every JSON number
-// becomes a Lua (double-precision) number, which can silently lose
-// precision for large integers.
+// Both scripts below decode the stored job blob with cjson, but only to
+// CHECK three scalar fields (state, worker_id, lease_epoch) — never to
+// mutate and re-encode it. That split exists because of a bug found in
+// review: an earlier version of this file had each script decode the
+// whole blob, mutate a few fields in Lua, and cjson.encode the result
+// back. That looked safe on paper — jobEntity has no slice/map fields, so
+// the classic cjson empty-array/empty-object ambiguity never applied, and
+// every *time.Time field is a string, not a number — and it was still
+// wrong. cjson represents every JSON number as a Lua double, and Redis's
+// cjson renders a double that large in scientific notation on encode
+// (`9999999999999999` came back as `1e+16`). encoding/json then refuses
+// to parse that back into an int64 at all on the next read — not a
+// rounding error, a hard unmarshal failure — for Timeout or LeaseTTL past
+// 2^53ns (~104 days), on every renewal or reclaim that touched the row,
+// whether or not it cared about those fields. See
+// TestLeaseLargeDurationRoundTrip for the reproduction, and note that in
+// ReclaimExpiredLeases specifically, that unmarshal error aborted the
+// whole scan, abandoning every other expired job the call had already
+// found before it ever reached the queue re-add.
 //
-// None of that is reachable for jobEntity as it stands. There are no
-// slice- or map-typed fields in the JSON this store persists for a job —
-// Payload is a []byte, which encoding/json always renders as a base64
-// string, not an array — so the empty-array/empty-object ambiguity has
-// nothing to attach to. Every *time.Time field is a string (RFC3339Nano)
-// once marshaled, not a number, so no precision is at risk there either.
-// omitempty fields (StartedAt, CompletedAt, HeartbeatAt, LeaseExpiresAt)
-// are absent, not null, when unset; cjson.decode leaves an absent JSON
-// key absent from the Lua table, and encoding a table that never had the
-// key set re-omits it — absence round-trips as absence, matching Go's
-// omitempty semantics on the way back through fromJobEntity. The one
-// caveat worth naming: Timeout and LeaseTTL are int64 nanosecond
-// durations, and Lua's float64 numbers stop representing integers
-// exactly past 2^53 (~104 days in nanoseconds). A job timeout or lease
-// TTL longer than that would round on every renewal or reclaim that
-// touches it. That's an accepted, narrow limitation — every realistic
-// timeout and lease TTL in this system is minutes to hours — not a
-// silent risk to the fields these scripts actually exist to protect.
+// The fix: Go now owns all serialization. RenewLease and
+// ReclaimExpiredLeases each read the current entity, compute the fully
+// updated entity in Go, and json.Marshal it themselves — the same path
+// every other write in this store already uses. The script's job shrinks
+// to being the compare-and-set: decode just enough to check
+// state/worker_id/lease_epoch against what the caller expects, and if
+// they match, SET the pre-built blob Go handed it. cjson.encode is never
+// called by either script now, so no field can be reshaped by it — the
+// whole corruption class is closed, not just the two fields that
+// happened to trip it first.
 //
-// The alternative considered was having Go serialize the full updated
-// entity via encoding/json and have Lua only check-then-blind-SET that
-// pre-built blob, skipping cjson entirely. That was rejected: it trades
-// this narrow, bounded risk for a much wider one. Go's read and the
-// script's write would be two separate round trips apart, and anything
-// that writes this job's entity in between — a heartbeat, a plain
-// UpdateJob call — without going through this store's lease-aware paths
-// would be silently discarded by the blind SET, because neither of those
-// paths touches lease_epoch and so wouldn't be caught by the epoch check
-// the script still has to do. Keeping the decode-mutate-encode shape
-// means the GET inside the script is the freshest possible read of the
-// row, taken atomically with the SET that follows it, so there is no
-// window for a concurrent writer to lose a field this way at all.
+// That fix has its own tradeoff, and it is deliberate, not overlooked.
+// Between Go's read and the script's SET there is a real window — a full
+// round trip — during which some other writer could change a field on
+// this same job that the lease check doesn't cover. UpdateJob is the
+// concrete example: it doesn't touch lease_epoch, so the epoch check
+// inside these scripts would still pass, and the blind SET would
+// overwrite whatever UpdateJob just wrote with Go's now-stale copy of
+// that field. The epoch check makes the *lease* compare-and-set atomic;
+// it does not make every write to the row serialize with every other
+// write. Nothing in this codebase calls UpdateJob concurrently with
+// RenewLease or ReclaimExpiredLeases on the same job today — that needs a
+// lease-aware pool loop, which is later work — so this window is
+// currently unreachable, not closed. A full-blob compare-and-swap
+// (checking the entire previous blob byte-for-byte, not just three
+// fields, before the SET) would close it, but was rejected: it would
+// make renewal fail on any unrelated concurrent write, including
+// perfectly legitimate ones, and a spurious ErrLeaseLost is exactly what
+// makes a pool cancel a perfectly healthy running job. Narrow and
+// currently-unreachable beats wrong and load-bearing.
 
 // renewLeaseScript extends a lease only when the caller still holds it.
 //
-// The rest of this store reads a job, mutates it in Go, and writes it
-// back. That is fine for last-write-wins fields and useless for an epoch
-// check: two callers can both read epoch 3 and both write "renewed" —
-// there is no compare in a plain SET. Lua runs atomically inside Redis,
-// so the compare and the set cannot be interleaved by anything, including
-// another renewal, a reclaim, or a plain UpdateJob. That is the only
-// reason the fencing guarantee holds here at all.
-//
-// This script decodes the stored blob, checks three fields, mutates
-// three fields, and re-encodes the whole thing (see the file-level
-// comment above for why that round trip through cjson is safe for this
-// schema). KEYS[1] job key. ARGV[1] worker id, ARGV[2] expected epoch,
-// ARGV[3] lease_expires_at (RFC3339Nano, unquoted), ARGV[4] now
-// (RFC3339Nano, unquoted), used for both heartbeat_at and updated_at.
+// KEYS[1] job key. ARGV[1] worker id, ARGV[2] expected epoch, ARGV[3] the
+// complete updated entity, pre-serialized by Go (see the file comment
+// above for why Lua never re-serializes it itself).
 // Returns 1 on renewal, 0 when the lease is no longer held.
 var renewLeaseScript = goredis.NewScript(`
 local raw = redis.call('GET', KEYS[1])
@@ -86,10 +85,7 @@ end
 if tostring(j.lease_epoch) ~= ARGV[2] then
   return 0
 end
-j.lease_expires_at = ARGV[3]
-j.heartbeat_at = ARGV[4]
-j.updated_at = ARGV[4]
-redis.call('SET', KEYS[1], cjson.encode(j))
+redis.call('SET', KEYS[1], ARGV[3])
 return 1
 `)
 
@@ -98,20 +94,16 @@ return 1
 //
 // Reclamation does not need to re-derive "is the lease expired" inside
 // Lua: that decision was already made correctly in Go, using real
-// time.Time comparison (job.Lease.IsExpired), before this script was
-// ever called. Doing an equivalent comparison here in Lua would mean
-// comparing two RFC3339Nano strings with '>' — fragile, since Go trims
-// trailing zeros from the fractional seconds and a naive assumption
-// that these strings sort chronologically is exactly the kind of thing
-// that looks right in every manual test and breaks on one timestamp in
-// a billion. This script instead re-verifies only equality: still
-// running, still at the epoch Go observed. That is enough to make the
-// claim exclusive — if another caller (or a fresh grant) already moved
-// the job, the epoch or state check fails and this caller loses,
-// cleanly, without ever comparing a timestamp.
+// time.Time comparison (job.Lease.IsExpired), before this script was ever
+// called. This script re-verifies only equality — still running, still at
+// the epoch Go observed — which is enough to make the claim exclusive: if
+// another caller (or a fresh grant) already moved the job, the epoch or
+// state check fails and this caller loses, cleanly.
 //
-// KEYS[1] job key. ARGV[1] expected epoch, ARGV[2] now (RFC3339Nano,
-// unquoted), used for run_at and updated_at.
+// KEYS[1] job key. ARGV[1] expected epoch, ARGV[2] the complete
+// pending-state entity, pre-serialized by Go with lease_epoch already
+// incremented and evict_count already incremented (see the file comment
+// above for why Lua never mutates or re-serializes it itself).
 // Returns 1 when this caller took the job, 0 when someone else did (or
 // the job moved out of running between Go's read and this script).
 var reclaimScript = goredis.NewScript(`
@@ -126,16 +118,7 @@ end
 if tostring(j.lease_epoch) ~= ARGV[1] then
   return 0
 end
-j.state = 'pending'
-j.run_at = ARGV[2]
-j.updated_at = ARGV[2]
-j.worker_id = ''
-j.started_at = nil
-j.heartbeat_at = nil
-j.lease_expires_at = nil
-j.lease_epoch = j.lease_epoch + 1
-j.evict_count = (j.evict_count or 0) + 1
-redis.call('SET', KEYS[1], cjson.encode(j))
+redis.call('SET', KEYS[1], ARGV[2])
 return 1
 `)
 
@@ -207,6 +190,13 @@ func (s *Store) DequeueLeased(
 }
 
 // RenewLease extends the lease only if the caller still holds it.
+//
+// Go reads the current entity, mutates only the lease/heartbeat fields,
+// and serializes the whole thing with encoding/json — the same path
+// every other write in this store uses. The script's only job is the
+// compare-and-set: verify state/worker_id/lease_epoch still match what
+// this read saw, and if so, SET the blob Go built. See the file comment
+// above for the ABA tradeoff this introduces and why it's accepted.
 func (s *Store) RenewLease(
 	ctx context.Context,
 	jobID id.JobID,
@@ -214,14 +204,32 @@ func (s *Store) RenewLease(
 	epoch int,
 	leaseUntil time.Time,
 ) error {
+	key := jobKey(jobID.String())
+
+	var e jobEntity
+	if getErr := s.getEntity(ctx, key, &e); getErr != nil {
+		if isNotFound(getErr) {
+			return job.ErrLeaseLost
+		}
+		return fmt.Errorf("dispatch/redis: renew lease get: %w", getErr)
+	}
+
 	t := now()
+	until := leaseUntil.UTC()
+	e.LeaseExpiresAt = &until
+	e.HeartbeatAt = &t
+	e.UpdatedAt = t
+
+	blob, marshalErr := json.Marshal(&e)
+	if marshalErr != nil {
+		return fmt.Errorf("dispatch/redis: renew lease marshal: %w", marshalErr)
+	}
 
 	res, err := renewLeaseScript.Run(ctx, s.rdb,
-		[]string{jobKey(jobID.String())},
+		[]string{key},
 		workerID.String(),
 		epoch,
-		redisTime(leaseUntil),
-		redisTime(t),
+		blob,
 	).Int64()
 	if err != nil && !errors.Is(err, goredis.Nil) {
 		return fmt.Errorf("dispatch/redis: renew lease: %w", err)
@@ -238,11 +246,12 @@ func (s *Store) RenewLease(
 //
 // Reclamation walks the job-id set rather than a sorted index, matching
 // ReapStaleJobs — there is no secondary index of running-with-expired-
-// lease jobs in this backend. Each candidate is filtered here in Go
-// using real time.Time comparison, then claimed through reclaimScript,
-// keyed on the epoch this call observed, so two pools scanning
-// concurrently cannot both take it: whichever script call runs second
-// sees an epoch (or state) that no longer matches and backs off.
+// lease jobs in this backend. Each candidate is filtered here in Go using
+// real time.Time comparison, the pending-state entity is computed in Go,
+// and claimExpired does the compare-and-set: keyed on the epoch this call
+// observed, so two pools scanning concurrently cannot both take the same
+// job — whichever script call runs second sees an epoch (or state) that
+// no longer matches and backs off.
 func (s *Store) ReclaimExpiredLeases(ctx context.Context, limit int) ([]*job.Job, error) {
 	t := now()
 
@@ -275,7 +284,28 @@ func (s *Store) ReclaimExpiredLeases(ctx context.Context, limit int) ([]*job.Job
 			continue
 		}
 
-		after, claimed, claimErr := s.claimExpired(ctx, jID, e.LeaseEpoch, t)
+		expectedEpoch := e.LeaseEpoch
+
+		// The pending-state entity, computed entirely in Go. Lua only
+		// checks state/lease_epoch against expectedEpoch and blind-SETs
+		// this blob — see the file comment above for why.
+		after := e
+		after.State = string(job.StatePending)
+		after.RunAt = t
+		after.UpdatedAt = t
+		after.WorkerID = ""
+		after.StartedAt = nil
+		after.HeartbeatAt = nil
+		after.LeaseExpiresAt = nil
+		after.LeaseEpoch = expectedEpoch + 1
+		after.EvictCount++
+
+		blob, marshalErr := json.Marshal(&after)
+		if marshalErr != nil {
+			return nil, fmt.Errorf("dispatch/redis: reclaim marshal: %w", marshalErr)
+		}
+
+		claimed, claimErr := s.claimExpired(ctx, jID, expectedEpoch, blob)
 		if claimErr != nil {
 			return nil, claimErr
 		}
@@ -297,7 +327,7 @@ func (s *Store) ReclaimExpiredLeases(ctx context.Context, limit int) ([]*job.Job
 			return nil, fmt.Errorf("dispatch/redis: reclaim requeue: %w", zErr)
 		}
 
-		j, convErr := fromJobEntity(after)
+		j, convErr := fromJobEntity(&after)
 		if convErr != nil {
 			continue
 		}
@@ -307,46 +337,29 @@ func (s *Store) ReclaimExpiredLeases(ctx context.Context, limit int) ([]*job.Job
 	return reclaimed, nil
 }
 
-// claimExpired atomically resets one expired job to pending, reporting
-// whether this caller was the one that took it. On success it returns
-// the entity as it now stands in the store, read fresh after the claim
-// rather than reconstructed from the pre-claim read, so callers never
-// see a copy that is stale in any field the claim did not touch.
-func (s *Store) claimExpired(ctx context.Context, jID string, epoch int, t time.Time) (*jobEntity, bool, error) {
+// claimExpired atomically SETs one expired job's pre-built pending-state
+// blob, but only if it is still running at the expected epoch, reporting
+// whether this caller was the one that took it.
+//
+// There is deliberately no re-read after the claim. Go already knows
+// exactly what the row now says, because Go built the blob it just wrote.
+// An earlier version of this function re-read the entity after a
+// successful claim — which meant decoding whatever cjson.encode had just
+// produced, and that was precisely the step that turned a large Timeout
+// or LeaseTTL into a scientific-notation string encoding/json couldn't
+// parse. Because that failure happened inside ReclaimExpiredLeases' loop,
+// it aborted the whole scan and abandoned every other expired job already
+// found. Go no longer needs to ask Redis what the row says; it already
+// knows, because it wrote it.
+func (s *Store) claimExpired(ctx context.Context, jID string, epoch int, blob []byte) (bool, error) {
 	res, err := reclaimScript.Run(ctx, s.rdb,
 		[]string{jobKey(jID)},
 		epoch,
-		redisTime(t),
+		blob,
 	).Int64()
 	if err != nil && !errors.Is(err, goredis.Nil) {
-		return nil, false, fmt.Errorf("dispatch/redis: reclaim claim: %w", err)
-	}
-	if res != 1 {
-		return nil, false, nil
+		return false, fmt.Errorf("dispatch/redis: reclaim claim: %w", err)
 	}
 
-	var after jobEntity
-	if getErr := s.getEntity(ctx, jobKey(jID), &after); getErr != nil {
-		return nil, false, fmt.Errorf("dispatch/redis: reclaim reread: %w", getErr)
-	}
-
-	return &after, true, nil
-}
-
-// redisTime renders a timestamp exactly the way encoding/json renders a
-// time.Time field: RFC3339Nano, UTC, trailing fractional zeros trimmed.
-// Lua writes this string as the field's raw value (json.Marshal quotes
-// it; Lua's cjson.encode will add the quotes for us), so a value written
-// by a script round-trips through fromJobEntity identically to a value
-// written by setEntity.
-func redisTime(t time.Time) string {
-	b, err := json.Marshal(t.UTC())
-	if err != nil {
-		// time.Time.MarshalJSON only fails for years outside [0,9999],
-		// which cannot occur for a lease deadline computed from time.Now.
-		return t.UTC().Format(time.RFC3339Nano)
-	}
-
-	// json.Marshal quotes the string; Lua wants the raw value.
-	return string(b[1 : len(b)-1])
+	return res == 1, nil
 }
