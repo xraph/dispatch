@@ -289,5 +289,89 @@ func init() {
 				return err
 			},
 		},
+
+		// 006: Create artifacts and artifact links tables.
+		&migrate.Migration{
+			Name:    "create_artifacts_tables",
+			Version: "20260811120000",
+			Up: func(ctx context.Context, exec migrate.Executor) error {
+				if _, err := exec.Exec(ctx, `
+					CREATE TABLE IF NOT EXISTS dispatch_artifacts (
+						id              TEXT PRIMARY KEY,
+						backend         TEXT NOT NULL,
+						bucket          TEXT NOT NULL,
+						key             TEXT NOT NULL,
+						size            INTEGER NOT NULL DEFAULT 0,
+						content_hash    TEXT,
+						content_type    TEXT,
+						lifecycle       TEXT NOT NULL,
+						scope_app_id    TEXT,
+						scope_org_id    TEXT,
+						expires_at      TEXT,
+						created_at      TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+						deleted_at      TEXT
+					)`); err != nil {
+					return err
+				}
+
+				// Partial unique index rather than a table constraint: a
+				// purged key must be reusable, so only live rows collide.
+				if _, err := exec.Exec(ctx, `
+					CREATE UNIQUE INDEX IF NOT EXISTS uq_dispatch_artifacts_key
+						ON dispatch_artifacts (backend, bucket, key)
+						WHERE deleted_at IS NULL`); err != nil {
+					return err
+				}
+
+				if _, err := exec.Exec(ctx, `
+					CREATE INDEX IF NOT EXISTS idx_dispatch_artifacts_sweep
+						ON dispatch_artifacts (lifecycle, created_at)
+						WHERE deleted_at IS NULL`); err != nil {
+					return err
+				}
+
+				if _, err := exec.Exec(ctx, `
+					CREATE INDEX IF NOT EXISTS idx_dispatch_artifacts_purge
+						ON dispatch_artifacts (deleted_at)
+						WHERE deleted_at IS NOT NULL`); err != nil {
+					return err
+				}
+
+				if _, err := exec.Exec(ctx, `
+					CREATE TABLE IF NOT EXISTS dispatch_artifact_links (
+						artifact_id     TEXT NOT NULL REFERENCES dispatch_artifacts(id) ON DELETE CASCADE,
+						owner_kind      TEXT NOT NULL,
+						owner_id        TEXT NOT NULL,
+						name            TEXT NOT NULL,
+						attempt         INTEGER NOT NULL DEFAULT 0,
+						role            TEXT NOT NULL,
+						created_at      TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+						PRIMARY KEY (artifact_id, owner_kind, owner_id, name, attempt)
+					)`); err != nil {
+					return err
+				}
+
+				if _, err := exec.Exec(ctx, `
+					CREATE INDEX IF NOT EXISTS idx_dispatch_artifact_links_owner
+						ON dispatch_artifact_links (owner_kind, owner_id)`); err != nil {
+					return err
+				}
+
+				_, err := exec.Exec(ctx, `
+					CREATE INDEX IF NOT EXISTS idx_dispatch_artifact_links_artifact
+						ON dispatch_artifact_links (artifact_id)`)
+
+				return err
+			},
+			Down: func(ctx context.Context, exec migrate.Executor) error {
+				if _, err := exec.Exec(ctx, `DROP TABLE IF EXISTS dispatch_artifact_links`); err != nil {
+					return err
+				}
+
+				_, err := exec.Exec(ctx, `DROP TABLE IF EXISTS dispatch_artifacts`)
+
+				return err
+			},
+		},
 	)
 }
