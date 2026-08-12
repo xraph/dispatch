@@ -8,6 +8,7 @@ import (
 	"sync"
 
 	"github.com/xraph/dispatch/artifact"
+	"github.com/xraph/dispatch/exec"
 	"github.com/xraph/dispatch/resource"
 )
 
@@ -54,6 +55,11 @@ type Registry struct {
 	// resources holds each job's resource declaration, for the same
 	// reason: enqueue works from a job name and a payload.
 	resources map[string]ResourceDecl
+
+	// policies holds each job's execution declaration. The worker needs
+	// it keyed by name for the same reason inputs are: at execution time
+	// the typed definition is long gone.
+	policies map[string]exec.Policy
 }
 
 // NewRegistry creates an empty job registry.
@@ -62,6 +68,7 @@ func NewRegistry() *Registry {
 		handlers:  make(map[string]HandlerFunc),
 		inputs:    make(map[string][]artifact.InputSpec),
 		resources: make(map[string]ResourceDecl),
+		policies:  make(map[string]exec.Policy),
 	}
 }
 
@@ -105,6 +112,12 @@ func RegisterDefinition[T any](r *Registry, def *Definition[T]) {
 	if !decl.IsZero() {
 		r.resources[def.Name] = decl
 	}
+
+	// Unlike inputs and resources, the policy is stored unconditionally:
+	// DefaultOptions gives every definition a non-zero grace period, so a
+	// zero-guard here would never skip anything and would only obscure
+	// intent.
+	r.policies[def.Name] = def.Opts.Execution
 }
 
 // Resources returns the resource declaration for a job, or the zero
@@ -122,6 +135,20 @@ func (r *Registry) Resources(name string) ResourceDecl {
 	decl.Limits = decl.Limits.Clone()
 
 	return decl
+}
+
+// Policy returns the execution declaration for a job. An unregistered name
+// yields a default policy rather than a zero one, so callers always get a
+// usable grace period.
+func (r *Registry) Policy(name string) exec.Policy {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	if p, ok := r.policies[name]; ok {
+		return p
+	}
+
+	return exec.NewPolicy()
 }
 
 // Inputs returns the artifact declarations for a job, or nil when it

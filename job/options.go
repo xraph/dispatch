@@ -4,6 +4,7 @@ import (
 	"time"
 
 	"github.com/xraph/dispatch/artifact"
+	"github.com/xraph/dispatch/exec"
 	"github.com/xraph/dispatch/resource"
 )
 
@@ -59,6 +60,11 @@ type Options struct {
 	// ResourceClass is an opaque scheduling class the isolation backend
 	// interprets. Core never reads it.
 	ResourceClass string
+
+	// Execution declares the minimum isolation this job's handler
+	// requires. The zero value runs in-process, which is what every
+	// existing definition gets.
+	Execution exec.Policy
 }
 
 // DefaultOptions returns Options with sensible defaults.
@@ -68,6 +74,7 @@ func DefaultOptions() Options {
 		Queue:      "default",
 		Priority:   0,
 		Timeout:    5 * time.Minute,
+		Execution:  exec.NewPolicy(),
 	}
 }
 
@@ -182,5 +189,19 @@ func WithLeaseTTL(d time.Duration) Option {
 		if d > 0 {
 			o.LeaseTTL = d
 		}
+	}
+}
+
+// WithExecution declares the isolation this job's handler requires.
+//
+// It mirrors WithArtifactInputs: the exec package builds the value and
+// job adapts it, which is what keeps exec a leaf that never imports job.
+func WithExecution(opts ...exec.PolicyOption) Option {
+	return func(o *Options) {
+		p := o.Execution
+		for _, opt := range opts {
+			opt(&p)
+		}
+		o.Execution = p
 	}
 }
