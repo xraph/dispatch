@@ -28,6 +28,14 @@
 //   - Requirements are built with resource.Set literals or nil, so a
 //     non-nil empty Set is never round-tripped through a backend here.
 //
+// Run RunDequeueSuite with `go test -race`. ClaimIsAtomicUnderConcurrency
+// is the case that proves the fit predicate did not cost the claim its
+// atomicity, and without -race it is only probabilistic: a realistic
+// mutant that drops atomicity (select-then-update as two statements
+// instead of one) was caught in just 6 of 20 runs under `go test` alone.
+// -race is the configuration where the interleaving that double-claims a
+// job reliably triggers the detector instead of getting lucky.
+//
 // The package depends only on job, resource, id, and the root package. It
 // must never import a store backend: the backends import this, not the
 // reverse.

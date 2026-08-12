@@ -62,6 +62,7 @@ func RunDequeueSuite(t *testing.T, newStore func(t *testing.T) job.Store) {
 			testPreferHashesSortWithinPriorityBand,
 		},
 		{"ReservedForRestrictsToOneJob", testReservedForRestrictsToOneJob},
+		{"NonPositiveLimitClaimsNothing", testNonPositiveLimitClaimsNothing},
 		{"ClaimIsAtomicUnderConcurrency", testClaimIsAtomicUnderConcurrency},
 	}
 
@@ -830,6 +831,35 @@ func testReservedForRestrictsToOneJob(t *testing.T, s job.Store) {
 
 	wantExactly(t, none)
 	wantStillClaimable(t, s, queue, "first", "third")
+}
+
+// testNonPositiveLimitClaimsNothing pins the controller ruling on Limit
+// <= 0: it claims NOTHING, not "unlimited".
+//
+// A worker computes its Limit from free capacity, so a Limit of zero means
+// it has zero free slots right now. Reading zero as unlimited would hand
+// that exhausted worker the entire queue instead of the empty result its
+// own accounting asked for — a worker with no room claiming everything is
+// strictly worse than a worker that briefly polls too conservatively.
+// Postgres and SQLite already emit `LIMIT 0` and claim nothing; every
+// other backend must agree, including the negative case, which a caller
+// should never send but a store must still handle safely rather than
+// looping or claiming without bound.
+func testNonPositiveLimitClaimsNothing(t *testing.T, s job.Store) {
+	const queue = "fit-non-positive-limit"
+
+	only := newFitJob("only", queue, nil, withRunAtOffset(0))
+
+	mustEnqueue(t, s, only)
+
+	zero := mustDequeue(t, s, job.DequeueOpts{Queues: []string{queue}, Limit: 0})
+	wantExactly(t, zero)
+
+	negative := mustDequeue(t, s, job.DequeueOpts{Queues: []string{queue}, Limit: -1})
+	wantExactly(t, negative)
+
+	// The job was never claimed by either call above.
+	wantStillClaimable(t, s, queue, "only")
 }
 
 // testClaimIsAtomicUnderConcurrency proves the predicate did not cost the

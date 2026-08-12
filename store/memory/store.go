@@ -127,14 +127,26 @@ func (m *Store) EnqueueJob(_ context.Context, j *job.Job) error {
 	return nil
 }
 
-// DequeueJobs atomically claims up to limit pending jobs from the given
-// queues, sets them to running, and returns them.
-func (m *Store) DequeueJobs(_ context.Context, queues []string, limit int) ([]*job.Job, error) {
+// DequeueJobs atomically claims up to opts.Limit ready jobs from
+// opts.Queues that fit opts, sets them to running, and returns them
+// ordered by priority descending, then locality-preferred first, then
+// RunAt ascending.
+//
+// A non-positive Limit claims nothing: a worker computing zero free slots
+// must claim zero jobs, matching the SQL backends' `LIMIT 0` behavior
+// rather than reading zero as "unlimited". The fit predicate itself is
+// job.DequeueOpts.Allows / Less, not reimplemented here, so this store
+// stays the reference the SQL backends are checked against.
+func (m *Store) DequeueJobs(_ context.Context, opts job.DequeueOpts) ([]*job.Job, error) {
+	if opts.Limit <= 0 {
+		return nil, nil
+	}
+
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	queueSet := make(map[string]struct{}, len(queues))
-	for _, q := range queues {
+	queueSet := make(map[string]struct{}, len(opts.Queues))
+	for _, q := range opts.Queues {
 		queueSet[q] = struct{}{}
 	}
 
@@ -154,19 +166,26 @@ func (m *Store) DequeueJobs(_ context.Context, queues []string, limit int) ([]*j
 				continue
 			}
 		}
+		// IsUnbounded skips the fit predicate entirely: a caller not
+		// using the resource model claims everything, including jobs
+		// declaring custom resources. This must be evaluated as part of
+		// the claim below, never applied after — a job that does not fit
+		// stays pending and untouched.
+		if !opts.IsUnbounded() && !opts.Allows(j) {
+			continue
+		}
 		candidates = append(candidates, j)
 	}
 
-	// Sort: priority DESC, RunAt ASC.
+	// Order, then truncate: priority DESC, then locality-preferred before
+	// not (a tiebreak strictly within a priority band, never above it),
+	// then RunAt ASC.
 	sort.Slice(candidates, func(i, k int) bool {
-		if candidates[i].Priority != candidates[k].Priority {
-			return candidates[i].Priority > candidates[k].Priority
-		}
-		return candidates[i].RunAt.Before(candidates[k].RunAt)
+		return opts.Less(candidates[i], candidates[k])
 	})
 
-	if limit > 0 && len(candidates) > limit {
-		candidates = candidates[:limit]
+	if len(candidates) > opts.Limit {
+		candidates = candidates[:opts.Limit]
 	}
 
 	result := make([]*job.Job, len(candidates))

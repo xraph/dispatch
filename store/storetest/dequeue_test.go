@@ -63,9 +63,17 @@ func (r *referenceStore) EnqueueJob(_ context.Context, j *job.Job) error {
 
 // DequeueJobs selects, orders, limits, and only then claims — the order
 // the contract requires.
+//
+// A non-positive Limit claims nothing: it counts eligible jobs only, and
+// zero of them may ever be claimed, matching the SQL backends' `LIMIT 0`
+// rather than reading zero as unlimited.
 func (r *referenceStore) DequeueJobs(_ context.Context, opts job.DequeueOpts) ([]*job.Job, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+
+	if opts.Limit <= 0 {
+		return nil, nil
+	}
 
 	queues := make(map[string]struct{}, len(opts.Queues))
 	for _, q := range opts.Queues {
@@ -102,7 +110,7 @@ func (r *referenceStore) DequeueJobs(_ context.Context, opts job.DequeueOpts) ([
 		return opts.Less(candidates[a], candidates[b])
 	})
 
-	if opts.Limit > 0 && len(candidates) > opts.Limit {
+	if len(candidates) > opts.Limit {
 		candidates = candidates[:opts.Limit]
 	}
 
