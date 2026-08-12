@@ -219,6 +219,20 @@ func (p *Pool) Start(_ context.Context) error {
 		log.Any("queues", p.queues),
 	)
 
+	// Sweep sandboxes this worker left behind across a restart before it
+	// takes new work. In-process reclaim is a no-op; an out-of-process rung
+	// would otherwise keep orphaned children or pods alive indefinitely.
+	// Best effort by design: a rung that cannot sweep must not stop the
+	// pool from running the jobs it can still execute.
+	if p.executor != nil {
+		if err := p.executor.Reclaim(p.cancelCtx, p.workerID); err != nil {
+			p.logger.Warn("executor reclaim failed",
+				log.String("worker_id", p.workerID.String()),
+				log.String("error", err.Error()),
+			)
+		}
+	}
+
 	// One fetcher claims jobs in batches sized to the free worker slots;
 	// concurrency worker goroutines execute them. A single poller issues
 	// one DequeueJobs call per cycle instead of `concurrency` concurrent

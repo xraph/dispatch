@@ -593,7 +593,32 @@ func (eng *Engine) Stop(ctx context.Context) error {
 		eng.logger.Error("cron scheduler stop error", log.String("error", err.Error()))
 	}
 
-	return eng.d.Stop(ctx)
+	stopErr := eng.d.Stop(ctx)
+
+	// Close the executors last. The dispatcher stop above drains the worker
+	// pool, so no attempt is still running through a rung when its resources
+	// go away. In-process Close is a no-op; an out-of-process rung releases
+	// its clients and child processes here or leaks them.
+	eng.closeExecutors()
+
+	return stopErr
+}
+
+// closeExecutors releases every configured executor's resources, logging
+// failures rather than propagating them: shutdown continues regardless.
+func (eng *Engine) closeExecutors() {
+	if eng.executors == nil {
+		return
+	}
+
+	for _, e := range eng.executors.Executors() {
+		if err := e.Close(); err != nil {
+			eng.logger.Warn("executor close failed",
+				log.String("executor", e.Name()),
+				log.String("error", err.Error()),
+			)
+		}
+	}
 }
 
 // Extensions returns the extension registry.

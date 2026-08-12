@@ -25,11 +25,16 @@ type Executor interface {
 	// dead sandbox without inspecting error text.
 	Run(ctx context.Context, req *Request) (*Result, error)
 
-	// Reclaim releases sandboxes this worker leaked across a restart. It
-	// runs once when the pool starts, and on the leader's behalf for
-	// workers the cluster has declared dead.
+	// Reclaim releases sandboxes this worker leaked across a restart. The
+	// pool calls it once at startup, for every registered executor, and a
+	// failure is logged rather than fatal.
+	//
+	// A later phase runs the same sweep on the leader's behalf for workers
+	// the cluster has declared dead; that caller does not exist yet.
 	Reclaim(ctx context.Context, workerID id.WorkerID) error
 
-	// Close releases the executor's own resources.
+	// Close releases the executor's own resources. The engine calls it for
+	// every registered executor when it stops, after the pool has finished
+	// its in-flight attempts.
 	Close() error
 }
