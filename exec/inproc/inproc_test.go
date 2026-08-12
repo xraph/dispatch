@@ -3,9 +3,11 @@ package inproc_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 	"time"
 
+	"github.com/xraph/dispatch"
 	"github.com/xraph/dispatch/exec"
 	"github.com/xraph/dispatch/exec/inproc"
 	"github.com/xraph/dispatch/id"
@@ -70,6 +72,63 @@ func TestExecutor_Run(t *testing.T) {
 				t.Errorf("HandlerErr = %q, want %q", res.HandlerErr, tt.wantErrMsg)
 			}
 		})
+	}
+}
+
+func TestExecutor_RunKeepsTheHandlerErrorWhole(t *testing.T) {
+	// In-process there is no boundary to lose the chain at, so the Result
+	// carries the handler's error itself. Without this, errors.Is against
+	// dispatch.ErrPermanent — and against any sentinel an extension owns —
+	// stops matching the moment a job is routed through an executor.
+	sentinel := errors.New("upstream gone")
+
+	r := job.NewRegistry()
+	job.NewDefinition("test.job", func(context.Context, payload) error {
+		return fmt.Errorf("fetch: %w", sentinel)
+	}).Register(r)
+
+	res, err := inproc.New(r).Run(context.Background(), &exec.Request{
+		JobID: id.NewJobID(),
+		Name:  "test.job",
+	})
+	if err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	if !errors.Is(res.Cause, sentinel) {
+		t.Errorf("errors.Is(Cause, sentinel) = false, want true (Cause = %v)", res.Cause)
+	}
+	if res.Permanent {
+		t.Error("Permanent = true for an ordinary handler error, want false")
+	}
+	if !errors.Is(res.Err(), sentinel) {
+		t.Errorf("errors.Is(Err(), sentinel) = false, want true (Err() = %v)", res.Err())
+	}
+}
+
+func TestExecutor_RunFlagsPermanentFailures(t *testing.T) {
+	// The flag is what an out-of-process rung will have to send instead of
+	// an error chain, so the in-process rung computes it too and the worker
+	// reads permanence one way for every rung.
+	r := job.NewRegistry()
+	job.NewDefinition("test.job", func(context.Context, payload) error {
+		return fmt.Errorf("malformed payload: %w", dispatch.ErrPermanent)
+	}).Register(r)
+
+	res, err := inproc.New(r).Run(context.Background(), &exec.Request{
+		JobID: id.NewJobID(),
+		Name:  "test.job",
+	})
+	if err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	if !res.Permanent {
+		t.Error("Permanent = false for an error wrapping dispatch.ErrPermanent, want true")
+	}
+	if !errors.Is(res.Err(), dispatch.ErrPermanent) {
+		t.Errorf("errors.Is(Err(), ErrPermanent) = false, want true (Err() = %v)", res.Err())
+	}
+	if got, want := res.Err().Error(), "malformed payload: dispatch: permanent failure"; got != want {
+		t.Errorf("Err() = %q, want %q — the handler's own text, unframed", got, want)
 	}
 }
 

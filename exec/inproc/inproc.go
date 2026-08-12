@@ -2,8 +2,10 @@ package inproc
 
 import (
 	"context"
+	"errors"
 	"time"
 
+	"github.com/xraph/dispatch"
 	"github.com/xraph/dispatch/exec"
 	"github.com/xraph/dispatch/id"
 	"github.com/xraph/dispatch/job"
@@ -57,6 +59,16 @@ func (e *Executor) Run(ctx context.Context, req *exec.Request) (*exec.Result, er
 	if err != nil {
 		res.Status = exec.StatusHandlerError
 		res.HandlerErr = err.Error()
+		// The handler ran here, so its error chain is still intact: keep it
+		// whole rather than flattening it to a string, or errors.Is against
+		// dispatch.ErrPermanent — and against every sentinel an extension
+		// owns — would stop matching the moment a job is routed through an
+		// executor.
+		res.Cause = err
+		// Also set the flag an out-of-process rung would have to send in
+		// the chain's place, so the worker reads permanence the same way
+		// whichever rung produced the Result.
+		res.Permanent = errors.Is(err, dispatch.ErrPermanent)
 	}
 
 	return res, nil

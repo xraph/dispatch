@@ -63,6 +63,21 @@ type Result struct {
 
 	// Outputs lists the artifacts the sandbox claims to have written.
 	Outputs []OutputFile
+
+	// Permanent means retrying cannot change the outcome, so the job skips
+	// its remaining attempts. This is the wire-visible half of permanence:
+	// a rung that ran the handler in another process cannot send back a Go
+	// error chain, but it can send back this flag.
+	Permanent bool
+
+	// Cause is the handler's own error, kept whole. It exists so an
+	// in-process attempt loses nothing: errors.Is and errors.As against a
+	// caller's sentinels keep working through the exec layer.
+	//
+	// It is deliberately not serialised — an error chain does not survive a
+	// process boundary — which is why Permanent exists alongside it. A rung
+	// that marshals a Result leaves this nil and sets Permanent instead.
+	Cause error `json:"-"`
 }
 
 // Err converts a Result into the error the worker propagates. It returns
@@ -73,10 +88,12 @@ func (r *Result) Err() error {
 	}
 
 	return &Error{
-		Status:   r.Status,
-		Msg:      r.HandlerErr,
-		ExitCode: r.ExitCode,
-		Signal:   r.Signal,
+		Status:    r.Status,
+		Msg:       r.HandlerErr,
+		ExitCode:  r.ExitCode,
+		Signal:    r.Signal,
+		Permanent: r.Permanent,
+		Cause:     r.Cause,
 	}
 }
 
@@ -87,10 +104,30 @@ type Error struct {
 	Msg      string
 	ExitCode int
 	Signal   int
+
+	// Permanent means the job must not be retried, however the attempt was
+	// carried. The worker treats it exactly as it treats an error wrapping
+	// dispatch.ErrPermanent.
+	Permanent bool
+
+	// Cause is the handler's own error when the attempt ran in this
+	// process. It is what errors.Is and errors.As reach through Unwrap.
+	Cause error
 }
 
 // Error implements the error interface.
+//
+// When a cause survived — an in-process attempt — the handler's own text is
+// returned verbatim. The job's LastError, its DLQ entry, and the worker's
+// logs then read exactly as they did before execution isolation existed,
+// and the exec framing is not stacked on top of an error the caller already
+// understands. Only a failure with no cause to speak for it, which is every
+// out-of-process shape, is rendered with the status.
 func (e *Error) Error() string {
+	if e.Cause != nil {
+		return e.Cause.Error()
+	}
+
 	switch {
 	case e.Msg != "":
 		return fmt.Sprintf("dispatch/exec: %s: %s", e.Status, e.Msg)
@@ -103,8 +140,27 @@ func (e *Error) Error() string {
 	}
 }
 
-// Unwrap returns the sentinel for this error's status, so errors.Is works.
-func (e *Error) Unwrap() error {
+// Unwrap returns the status sentinel together with the handler's own error
+// when one survived, so errors.Is reaches ErrHandler and errors.Is/errors.As
+// reach the caller's own sentinels and error types through the same value.
+//
+// The multi-error form (Go 1.20) is what lets both hold at once. Returning
+// only the sentinel would silently destroy user error identity for every
+// in-process attempt, and dispatch.ErrPermanent with it.
+func (e *Error) Unwrap() []error {
+	var errs []error
+	if sentinel := e.sentinel(); sentinel != nil {
+		errs = append(errs, sentinel)
+	}
+	if e.Cause != nil {
+		errs = append(errs, e.Cause)
+	}
+
+	return errs
+}
+
+// sentinel maps the status onto its package-level error value.
+func (e *Error) sentinel() error {
 	switch e.Status {
 	case StatusHandlerError:
 		return ErrHandler

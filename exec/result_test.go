@@ -2,6 +2,7 @@ package exec_test
 
 import (
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -80,6 +81,77 @@ func TestResult_Err(t *testing.T) {
 				t.Errorf("Err() = %q, want it to contain %q", err.Error(), tt.wantText)
 			}
 		})
+	}
+}
+
+func TestResult_ErrPreservesTheCause(t *testing.T) {
+	// The point of Cause: an in-process attempt must lose nothing. A rung
+	// that flattened the handler's error to a string would break every
+	// errors.Is and errors.As an extension or the worker performs on it.
+	sentinel := errors.New("upstream unavailable")
+	cause := fmt.Errorf("fetch config: %w", sentinel)
+
+	err := (&exec.Result{
+		Status:     exec.StatusHandlerError,
+		HandlerErr: cause.Error(),
+		Cause:      cause,
+	}).Err()
+
+	if !errors.Is(err, sentinel) {
+		t.Errorf("errors.Is(%v, sentinel) = false, want true", err)
+	}
+	if !errors.Is(err, exec.ErrHandler) {
+		t.Errorf("errors.Is(%v, ErrHandler) = false, want true — the status sentinel must still match", err)
+	}
+	// The handler's own text, with no exec framing: this is what lands in
+	// job.LastError, the DLQ entry, and the logs.
+	if got, want := err.Error(), cause.Error(); got != want {
+		t.Errorf("Error() = %q, want %q", got, want)
+	}
+
+	// errors.As has to reach a caller's own error type through the same
+	// value, since that is how extensions inspect a failure.
+	var target *typedError
+	typed := &typedError{field: "name"}
+	err = (&exec.Result{Status: exec.StatusHandlerError, Cause: fmt.Errorf("wrapped: %w", typed)}).Err()
+	if !errors.As(err, &target) {
+		t.Fatalf("errors.As(%v, **typedError) = false, want true", err)
+	}
+	if target.field != "name" {
+		t.Errorf("target.field = %q, want %q", target.field, "name")
+	}
+}
+
+// typedError is a caller-defined error type, standing in for the ones an
+// extension matches with errors.As.
+type typedError struct{ field string }
+
+func (e *typedError) Error() string { return "invalid field " + e.field }
+
+func TestResult_ErrCarriesPermanence(t *testing.T) {
+	// Permanent is the wire-visible signal: a rung that ran the handler in
+	// another process cannot send back an error chain, so this flag is how
+	// it declines the retry schedule.
+	err := (&exec.Result{
+		Status:     exec.StatusHandlerError,
+		HandlerErr: "malformed input",
+		Permanent:  true,
+	}).Err()
+
+	var execErr *exec.Error
+	if !errors.As(err, &execErr) {
+		t.Fatalf("errors.As(%v, **exec.Error) = false, want true", err)
+	}
+	if !execErr.Permanent {
+		t.Error("Error.Permanent = false, want true")
+	}
+
+	notPermanent := (&exec.Result{Status: exec.StatusHandlerError, HandlerErr: "transient"}).Err()
+	if !errors.As(notPermanent, &execErr) {
+		t.Fatalf("errors.As(%v, **exec.Error) = false, want true", notPermanent)
+	}
+	if execErr.Permanent {
+		t.Error("Error.Permanent = true for a plain handler error, want false")
 	}
 }
 
