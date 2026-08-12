@@ -7,6 +7,7 @@ import (
 	"os"
 	"testing"
 
+	"github.com/xraph/dispatch"
 	"github.com/xraph/dispatch/artifact"
 	"github.com/xraph/dispatch/artifact/artifacttest"
 	"github.com/xraph/dispatch/artifact/cache"
@@ -220,6 +221,40 @@ func TestMiddlewareDeletedInputFailsFast(t *testing.T) {
 	err := mw(ctx, j, func(context.Context) error { return nil })
 	if !errors.Is(err, artifact.ErrNotFound) {
 		t.Fatalf("staging a deleted input = %v, want ErrNotFound", err)
+	}
+}
+
+// TestMiddlewareDeniedInput is the deleted-input test's sibling. The input
+// exists but cannot be read, which is just as permanent.
+//
+// Before the backend classified permission failures this error reached the
+// executor carrying no artifact sentinel at all. It now arrives classified.
+// Acting on it is still the executor's to do: handleFailure counts retries
+// without consulting the error, so neither this nor a deleted input fails
+// fast yet.
+func TestMiddlewareDeniedInput(t *testing.T) {
+	ctx := context.Background()
+	h := newHarness(t, 1<<20)
+	h.backend.Put("models", "secret.ifc", []byte("classified"))
+	h.backend.DenyOpen = true
+
+	mw := staging.Middleware(h.svc, h.cache,
+		specsFor(artifact.Input("model", artifact.Required)))
+
+	j := newJob()
+	if serr := staging.SetBindings(j, staging.Bindings{
+		"model": {ID: id.NewArtifactID(), Bucket: "models", Key: "secret.ifc"},
+	}); serr != nil {
+		t.Fatalf("SetBindings: %v", serr)
+	}
+
+	err := mw(ctx, j, func(context.Context) error { return nil })
+	if !errors.Is(err, dispatch.ErrPermanent) {
+		t.Fatalf("staging a forbidden input = %v, want ErrPermanent", err)
+	}
+
+	if !errors.Is(err, artifact.ErrPermissionDenied) {
+		t.Fatalf("staging a forbidden input = %v, want ErrPermissionDenied", err)
 	}
 }
 

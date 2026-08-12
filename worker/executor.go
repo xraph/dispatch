@@ -5,11 +5,13 @@ package worker
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
 	log "github.com/xraph/go-utils/log"
 
+	"github.com/xraph/dispatch"
 	"github.com/xraph/dispatch/backoff"
 	"github.com/xraph/dispatch/dlq"
 	"github.com/xraph/dispatch/ext"
@@ -100,9 +102,28 @@ func (e *Executor) handleSuccess(ctx context.Context, j *job.Job, now time.Time,
 }
 
 // handleFailure increments the retry counter and either retries or sends to DLQ.
+//
+// A failure marked dispatch.ErrPermanent skips the remaining attempts. The
+// retry schedule exists to outlast a transient fault, and spending it on a
+// condition that cannot change wastes worker time proportional to the backoff
+// curve: a job whose input was deleted would otherwise rediscover that the
+// object is still gone once per attempt, minutes to hours apart, before
+// arriving at the same dead letter queue it could have reached immediately.
 func (e *Executor) handleFailure(ctx context.Context, j *job.Job, handlerErr error, now time.Time) error {
 	j.RetryCount++
 	j.LastError = handlerErr.Error()
+
+	if errors.Is(handlerErr, dispatch.ErrPermanent) {
+		e.logger.Info("job failed permanently, skipping remaining retries",
+			log.String("job_id", j.ID.String()),
+			log.String("job_name", j.Name),
+			log.Int("retry_count", j.RetryCount),
+			log.Int("max_retries", j.MaxRetries),
+			log.String("error", handlerErr.Error()),
+		)
+
+		return e.sendToDLQ(ctx, j, handlerErr)
+	}
 
 	if j.RetryCount <= j.MaxRetries {
 		return e.scheduleRetry(ctx, j, now)
@@ -163,7 +184,9 @@ func (e *Executor) sendToDLQ(ctx context.Context, j *job.Job, handlerErr error) 
 	e.extensions.EmitJobFailed(ctx, j, handlerErr)
 	e.extensions.EmitJobDLQ(ctx, j, handlerErr)
 
-	e.logger.Warn("job moved to DLQ after exhausting retries",
+	// Not always "after exhausting retries" any more: a permanent failure
+	// arrives here on its first attempt.
+	e.logger.Warn("job moved to DLQ",
 		log.String("job_id", j.ID.String()),
 		log.String("job_name", j.Name),
 		log.Int("retry_count", j.RetryCount),

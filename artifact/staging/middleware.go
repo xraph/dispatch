@@ -7,6 +7,7 @@ import (
 
 	log "github.com/xraph/go-utils/log"
 
+	"github.com/xraph/dispatch"
 	"github.com/xraph/dispatch/artifact"
 	"github.com/xraph/dispatch/artifact/cache"
 	"github.com/xraph/dispatch/job"
@@ -138,9 +139,11 @@ func stageInputs(
 
 		path, hash, rel, err := c.Stage(ctx, ref)
 		if err != nil {
-			// Preserve ErrNotFound so the executor fails the job fast
-			// rather than retrying a fetch that can never succeed.
-			if errors.Is(err, artifact.ErrNotFound) {
+			// Preserve the permanent classification so the executor fails
+			// the job fast rather than retrying a fetch that can never
+			// succeed. A deleted input and one we are not authorized to
+			// read are equally hopeless.
+			if errors.Is(err, dispatch.ErrPermanent) {
 				return nil, release, fmt.Errorf("stage input %q: %w", spec.Name, err)
 			}
 

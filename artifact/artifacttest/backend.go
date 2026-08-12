@@ -18,6 +18,12 @@ type Backend struct {
 	// single-flight test observe concurrent stagers colliding.
 	DelayOpen time.Duration
 
+	// DenyOpen makes Open fail with ErrPermissionDenied even when the
+	// object is present. It exists so tests can cover a permanent failure
+	// that is not a missing object: those two must be retried the same
+	// way, which is to say not at all.
+	DenyOpen bool
+
 	mu      sync.Mutex
 	objects map[string][]byte
 
@@ -80,6 +86,10 @@ func (b *Backend) Open(ctx context.Context, ref artifact.Ref) (io.ReadCloser, er
 		case <-ctx.Done():
 			return nil, ctx.Err()
 		}
+	}
+
+	if b.DenyOpen {
+		return nil, artifact.ErrPermissionDenied
 	}
 
 	b.mu.Lock()

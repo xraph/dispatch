@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"strings"
 	"sync"
 	"time"
 
@@ -58,42 +57,36 @@ func New(t *trovelib.Trove, opts ...Option) *Backend {
 // Name identifies this backend.
 func (b *Backend) Name() string { return b.name }
 
-// translate maps Trove's not-found conditions onto the artifact plane's.
+// translate maps Trove's permanent failures onto the artifact plane's.
 //
 // This distinction is load-bearing. Callers use
-// errors.Is(err, artifact.ErrNotFound) to tell a permanently missing
-// object — which must fail the job immediately — from a transient backend
+// errors.Is(err, artifact.ErrPermanent) to tell a failure that can never
+// succeed, which must fail the job immediately, from a transient backend
 // failure, which should be retried with backoff. Getting it wrong means a
 // deleted input burns every retry before reaching the DLQ.
 //
-// Trove's own sentinels are checked first. Not every driver wraps them
-// though: memdriver, for one, returns a bare fmt.Errorf. The substring
-// fallback compensates so the fail-fast path still works on those
-// drivers. Remove it once every Trove driver wraps a sentinel.
+// Only conditions Trove classifies are translated. Everything else,
+// including a quota or rate limit, stays as it is and is retried: a quota
+// may be granted later, and an error Trove has not classified is assumed
+// transient, because dead-lettering a transient failure throws away work
+// that would have succeeded.
+//
+// The underlying error is wrapped rather than replaced, so the driver's
+// own message survives into the DLQ entry and errors.Is still reaches the
+// Trove sentinel underneath for diagnostics.
 func translate(err error) error {
 	switch {
 	case err == nil:
 		return nil
-	case errors.Is(err, trovelib.ErrNotFound),
-		errors.Is(err, trovelib.ErrObjectNotFound),
-		errors.Is(err, trovelib.ErrBucketNotFound):
-		return artifact.ErrNotFound
-	case looksLikeNotFound(err):
-		return fmt.Errorf("%w: %s", artifact.ErrNotFound, err.Error())
+	case errors.Is(err, trovelib.ErrNotFound):
+		// ErrObjectNotFound and ErrBucketNotFound unwrap to ErrNotFound,
+		// so this one case covers all three.
+		return fmt.Errorf("%w: %w", artifact.ErrNotFound, err)
+	case errors.Is(err, trovelib.ErrPermissionDenied):
+		return fmt.Errorf("%w: %w", artifact.ErrPermissionDenied, err)
 	default:
 		return err
 	}
-}
-
-// looksLikeNotFound is the fallback for drivers that do not wrap a Trove
-// sentinel. It is deliberately narrow.
-func looksLikeNotFound(err error) bool {
-	msg := strings.ToLower(err.Error())
-
-	return strings.Contains(msg, "not found") ||
-		strings.Contains(msg, "no such key") ||
-		strings.Contains(msg, "nosuchkey") ||
-		strings.Contains(msg, "does not exist")
 }
 
 // Open returns a reader over the object's bytes.
@@ -155,11 +148,15 @@ func (b *Backend) Delete(ctx context.Context, ref artifact.Ref) error {
 		return nil
 	}
 
-	if errors.Is(translate(err), artifact.ErrNotFound) {
+	terr := translate(err)
+	if errors.Is(terr, artifact.ErrNotFound) {
 		return nil
 	}
 
-	return fmt.Errorf("trove: delete %s/%s: %w", ref.Bucket, ref.Key, err)
+	// Return the translated error, not the raw one: a delete refused for
+	// permissions is permanent, and the sweeper would otherwise retry it
+	// on every pass forever.
+	return fmt.Errorf("trove: delete %s/%s: %w", ref.Bucket, ref.Key, terr)
 }
 
 // PresignGet returns a time-limited read URL when the underlying driver

@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/xraph/dispatch"
 	"github.com/xraph/dispatch/artifact"
 	"github.com/xraph/dispatch/artifact/artifacttest"
 	"github.com/xraph/dispatch/artifact/cache"
@@ -131,6 +132,37 @@ func TestStageMissingObjectIsPermanent(t *testing.T) {
 		artifact.Ref{Bucket: "models", Key: "absent"})
 	if !errors.Is(err, artifact.ErrNotFound) {
 		t.Fatalf("Stage(missing) = %v, want ErrNotFound (permanent, so the job fails fast)", err)
+	}
+}
+
+// TestStageDeniedObjectIsPermanent covers the permanent failure that is not a
+// missing object. The object is present; the backend just will not hand it
+// over, and retrying cannot change that.
+//
+// This pins propagation, not the retry decision: the executor does not yet
+// consult the classification (see worker/executor.go handleFailure), so
+// nothing fails fast at runtime today. What this guarantees is that the
+// classification survives the cache layer intact and is there to act on.
+func TestStageDeniedObjectIsPermanent(t *testing.T) {
+	c, b := newCache(t, 1<<20)
+	b.Put("models", "secret.ifc", []byte("classified"))
+	b.DenyOpen = true
+
+	_, _, _, err := c.Stage(context.Background(),
+		artifact.Ref{Bucket: "models", Key: "secret.ifc"})
+
+	if !errors.Is(err, dispatch.ErrPermanent) {
+		t.Fatalf("Stage(denied) = %v, want ErrPermanent (so the job fails fast)", err)
+	}
+
+	if !errors.Is(err, artifact.ErrPermissionDenied) {
+		t.Fatalf("Stage(denied) = %v, want ErrPermissionDenied", err)
+	}
+
+	// Reporting a forbidden object as missing would send an operator
+	// looking for a deleted file that is sitting right there.
+	if errors.Is(err, artifact.ErrNotFound) {
+		t.Fatalf("Stage(denied) reported as not found: %v", err)
 	}
 }
 

@@ -17,6 +17,7 @@ import (
 
 	log "github.com/xraph/go-utils/log"
 
+	"github.com/xraph/dispatch"
 	"github.com/xraph/dispatch/artifact"
 	"github.com/xraph/dispatch/id"
 )
@@ -277,10 +278,12 @@ func (c *Cache) download(ctx context.Context, ref artifact.Ref, coord string) (*
 
 	rc, err := c.backend.Open(ctx, ref)
 	if err != nil {
-		if errors.Is(err, artifact.ErrNotFound) {
-			// Preserve the sentinel: staging a deleted input is permanent,
-			// and the executor must fail fast rather than retry.
-			return nil, fmt.Errorf("stage %s/%s: %w", ref.Bucket, ref.Key, artifact.ErrNotFound)
+		if errors.Is(err, dispatch.ErrPermanent) {
+			// Preserve the classification: staging an input that is gone,
+			// or that we may not read, is permanent, and the executor must
+			// fail fast rather than retry. Wrap rather than replace, so the
+			// specific sentinel and the backend's message both survive.
+			return nil, fmt.Errorf("stage %s/%s: %w", ref.Bucket, ref.Key, err)
 		}
 
 		return nil, fmt.Errorf("dispatch/artifact/cache: open %s/%s: %w", ref.Bucket, ref.Key, err)

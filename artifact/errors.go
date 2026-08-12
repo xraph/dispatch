@@ -1,12 +1,39 @@
 package artifact
 
-import "errors"
+import (
+	"errors"
 
+	"github.com/xraph/dispatch"
+)
+
+// Both permanent sentinels below unwrap to dispatch.ErrPermanent, so the
+// executor sends a job that hits one straight to the dead letter queue
+// instead of retrying it. A caller chooses how precisely to match:
+//
+//	errors.Is(err, artifact.ErrNotFound)  // the object is gone
+//	errors.Is(err, dispatch.ErrPermanent) // don't retry -- also true
+//
+// Match dispatch.ErrPermanent when the question is whether to retry, and
+// the specific sentinel when the answer changes what you do. Code that asks
+// "is this missing" in order to decide "should I retry" is asking the wrong
+// question: a permission failure is just as permanent, and answering it
+// with a retry loop wastes the same budget a deleted input would.
 var (
 	// ErrNotFound means the artifact or its underlying object does not
-	// exist. Staging treats this as permanent: retrying a fetch of
-	// something that no longer exists cannot succeed.
-	ErrNotFound = errors.New("dispatch/artifact: not found")
+	// exist. Retrying a fetch of something that no longer exists cannot
+	// succeed, so it unwraps to dispatch.ErrPermanent.
+	ErrNotFound error = &categoryError{
+		msg:    "dispatch/artifact: not found",
+		parent: dispatch.ErrPermanent,
+	}
+
+	// ErrPermissionDenied means the backend refused the operation as
+	// unauthorized. Nothing changes until the credentials or the backend's
+	// access policy do, so it unwraps to dispatch.ErrPermanent too.
+	ErrPermissionDenied error = &categoryError{
+		msg:    "dispatch/artifact: permission denied",
+		parent: dispatch.ErrPermanent,
+	}
 
 	// ErrExists means an artifact already exists for this owner, name,
 	// and a prior attempt. Create with IfAbsent returns it so a retried
@@ -34,3 +61,16 @@ var (
 	// definition does not declare.
 	ErrUndeclared = errors.New("dispatch/artifact: binding has no matching declaration")
 )
+
+// categoryError is a sentinel that belongs to a broader category, so that
+// errors.Is matches both the specific sentinel and its parent. errors.New
+// cannot express this because it produces a leaf with nothing to unwrap.
+type categoryError struct {
+	msg    string
+	parent error
+}
+
+func (e *categoryError) Error() string { return e.msg }
+
+// Unwrap returns the broader category this sentinel belongs to.
+func (e *categoryError) Unwrap() error { return e.parent }
