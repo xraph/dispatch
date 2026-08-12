@@ -3,6 +3,7 @@ package sqlite
 import (
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/xraph/grove"
@@ -14,6 +15,7 @@ import (
 	"github.com/xraph/dispatch/event"
 	"github.com/xraph/dispatch/id"
 	"github.com/xraph/dispatch/job"
+	"github.com/xraph/dispatch/resource"
 	"github.com/xraph/dispatch/workflow"
 )
 
@@ -46,9 +48,103 @@ type jobModel struct {
 	LeaseExpiresAt *time.Time `grove:"lease_expires_at"`
 	LeaseTTL       int64      `grove:"lease_ttl,notnull,default:0"`
 	EvictCount     int        `grove:"evict_count,notnull,default:0"`
+
+	// The four canonical dimensions get real scalar columns because the
+	// dequeue predicate compares them and must behave identically across
+	// five backends; JSON comparison semantics are not portable. They are
+	// derived from Resources by toJobModel -- the caller never sets them
+	// directly.
+	ReqCPUMilli    int64  `grove:"req_cpu_milli,notnull,default:0"`
+	ReqMemoryBytes int64  `grove:"req_memory_bytes,notnull,default:0"`
+	ReqDiskBytes   int64  `grove:"req_disk_bytes,notnull,default:0"`
+	ReqGPUMilli    int64  `grove:"req_gpu_milli,notnull,default:0"`
+	ReqCustomKeys  string `grove:"req_custom_keys,notnull,default:''"`
+
+	// ResourceRequests and ResourceLimits are the full-fidelity JSON copy
+	// of Resources / ResourceLimits, including custom keys the scalar
+	// columns above do not carry. fromJobModel reads Resources back from
+	// here, not from the scalars. SQLite has no JSONB type, so these are
+	// plain TEXT columns; *string rather than []byte or string so a NULL
+	// column (undeclared job) round-trips as nil instead of an empty
+	// string, mirroring encodeSet's NULL-for-zero-Set contract.
+	ResourceRequests *string `grove:"resource_requests"`
+	ResourceLimits   *string `grove:"resource_limits"`
+	ResourceClass    string  `grove:"resource_class,notnull,default:''"`
+	InputBytes       int64   `grove:"input_bytes,notnull,default:0"`
+	PrimaryInputHash string  `grove:"primary_input_hash"`
 }
 
-func toJobModel(j *job.Job) *jobModel {
+// CustomKeySep delimits the custom-resource key list. The list is stored
+// as a delimited string rather than an array so every backend can express
+// the containment test in its own idiom without a schema translation.
+//
+// This constant and the three functions below intentionally duplicate
+// store/postgres's copy of the same logic (encodeSet/decodeSet operate on
+// *string here instead of []byte because SQLite has no JSONB type, but the
+// encoding rules -- zero Set -> NULL, leading/trailing separator on custom
+// keys -- must stay identical). Each copy is pinned by its own package's
+// TestEncodeCustomKeys / TestEncodeDecodeSetRoundTrip in models_test.go, so
+// a change to one that silently drifts from the other still passes its own
+// suite; catching cross-package drift needs a human diffing the two test
+// files (or, once store/redis and store/mongo need this too, extracting
+// this into the resource package -- see the Task 11 report for why that
+// wasn't done here without a ruling).
+const CustomKeySep = ","
+
+// encodeSet marshals a resource Set for the JSON column. A zero Set
+// stores NULL rather than "{}", so an undeclared job is indistinguishable
+// from one written before this migration.
+func encodeSet(s resource.Set) (*string, error) {
+	if s.IsZero() {
+		return nil, nil
+	}
+
+	b, err := json.Marshal(s)
+	if err != nil {
+		return nil, err
+	}
+
+	js := string(b)
+	return &js, nil
+}
+
+// decodeSet unmarshals the JSON column, treating NULL and empty as unset.
+func decodeSet(s *string) (resource.Set, error) {
+	if s == nil || *s == "" {
+		return nil, nil
+	}
+
+	var set resource.Set
+	if err := json.Unmarshal([]byte(*s), &set); err != nil {
+		return nil, err
+	}
+
+	return set, nil
+}
+
+// encodeCustomKeys renders the custom keys as a delimited string with a
+// leading and trailing separator, so a containment test can match on
+// ",fpga," and never partially match ",fpga-large,".
+func encodeCustomKeys(s resource.Set) string {
+	keys := s.CustomKeys()
+	if len(keys) == 0 {
+		return ""
+	}
+
+	return CustomKeySep + strings.Join(keys, CustomKeySep) + CustomKeySep
+}
+
+func toJobModel(j *job.Job) (*jobModel, error) {
+	reqJSON, err := encodeSet(j.Resources)
+	if err != nil {
+		return nil, fmt.Errorf("dispatch/sqlite: marshal job resources: %w", err)
+	}
+
+	limitsJSON, err := encodeSet(j.ResourceLimits)
+	if err != nil {
+		return nil, fmt.Errorf("dispatch/sqlite: marshal job resource limits: %w", err)
+	}
+
 	return &jobModel{
 		ID:          j.ID.String(),
 		Name:        j.Name,
@@ -74,13 +170,34 @@ func toJobModel(j *job.Job) *jobModel {
 		LeaseExpiresAt: j.LeaseExpiresAt,
 		LeaseTTL:       j.LeaseTTL.Nanoseconds(),
 		EvictCount:     j.EvictCount,
-	}
+
+		ReqCPUMilli:      j.Resources[resource.CPU],
+		ReqMemoryBytes:   j.Resources[resource.Memory],
+		ReqDiskBytes:     j.Resources[resource.Disk],
+		ReqGPUMilli:      j.Resources[resource.GPU],
+		ReqCustomKeys:    encodeCustomKeys(j.Resources),
+		ResourceRequests: reqJSON,
+		ResourceLimits:   limitsJSON,
+		ResourceClass:    j.ResourceClass,
+		InputBytes:       j.InputBytes,
+		PrimaryInputHash: j.PrimaryInputHash,
+	}, nil
 }
 
 func fromJobModel(m *jobModel) (*job.Job, error) {
 	parsedID, err := id.ParseJobID(m.ID)
 	if err != nil {
 		return nil, fmt.Errorf("dispatch/sqlite: parse job id %q: %w", m.ID, err)
+	}
+
+	resources, err := decodeSet(m.ResourceRequests)
+	if err != nil {
+		return nil, fmt.Errorf("dispatch/sqlite: unmarshal job resources: %w", err)
+	}
+
+	limits, err := decodeSet(m.ResourceLimits)
+	if err != nil {
+		return nil, fmt.Errorf("dispatch/sqlite: unmarshal job resource limits: %w", err)
 	}
 
 	j := &job.Job{
@@ -109,6 +226,12 @@ func fromJobModel(m *jobModel) (*job.Job, error) {
 		LeaseExpiresAt: m.LeaseExpiresAt,
 		LeaseTTL:       time.Duration(m.LeaseTTL),
 		EvictCount:     m.EvictCount,
+
+		Resources:        resources,
+		ResourceLimits:   limits,
+		ResourceClass:    m.ResourceClass,
+		InputBytes:       m.InputBytes,
+		PrimaryInputHash: m.PrimaryInputHash,
 	}
 
 	if m.WorkerID != "" {

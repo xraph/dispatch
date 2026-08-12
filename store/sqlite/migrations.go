@@ -413,5 +413,71 @@ func init() {
 				return nil
 			},
 		},
+
+		// Resource model columns for resource-aware scheduling. See the
+		// postgres migration of the same name for why the four canonical
+		// dimensions get real scalar columns alongside the JSON copy.
+		//
+		// Every column defaults to zero or empty, so rows written before
+		// this migration remain dequeueable by every worker during a
+		// rolling deploy.
+		&migrate.Migration{
+			Name:    "job_resource_columns",
+			Version: "20260812130000",
+			Up: func(ctx context.Context, exec migrate.Executor) error {
+				stmts := []string{
+					`ALTER TABLE dispatch_jobs ADD COLUMN req_cpu_milli INTEGER NOT NULL DEFAULT 0`,
+					`ALTER TABLE dispatch_jobs ADD COLUMN req_memory_bytes INTEGER NOT NULL DEFAULT 0`,
+					`ALTER TABLE dispatch_jobs ADD COLUMN req_disk_bytes INTEGER NOT NULL DEFAULT 0`,
+					`ALTER TABLE dispatch_jobs ADD COLUMN req_gpu_milli INTEGER NOT NULL DEFAULT 0`,
+					`ALTER TABLE dispatch_jobs ADD COLUMN req_custom_keys TEXT NOT NULL DEFAULT ''`,
+					// No JSONB in SQLite: plain TEXT columns hold the
+					// full-fidelity JSON copy that fromJobModel reads
+					// Resources/ResourceLimits back from.
+					`ALTER TABLE dispatch_jobs ADD COLUMN resource_requests TEXT`,
+					`ALTER TABLE dispatch_jobs ADD COLUMN resource_limits TEXT`,
+					`ALTER TABLE dispatch_jobs ADD COLUMN resource_class TEXT NOT NULL DEFAULT ''`,
+					`ALTER TABLE dispatch_jobs ADD COLUMN input_bytes INTEGER NOT NULL DEFAULT 0`,
+					`ALTER TABLE dispatch_jobs ADD COLUMN primary_input_hash TEXT`,
+					// SQLite has no INCLUDE clause for a covering index,
+					// so the scalar columns the dequeue predicate reads
+					// go directly in the key list instead.
+					`CREATE INDEX IF NOT EXISTS idx_dispatch_jobs_dequeue_res
+						ON dispatch_jobs (queue, priority DESC, run_at ASC,
+						                  req_cpu_milli, req_memory_bytes,
+						                  req_disk_bytes, req_gpu_milli)
+						WHERE state IN ('pending', 'retrying')`,
+				}
+				for _, stmt := range stmts {
+					if _, err := exec.Exec(ctx, stmt); err != nil {
+						return err
+					}
+				}
+
+				return nil
+			},
+			Down: func(ctx context.Context, exec migrate.Executor) error {
+				stmts := []string{
+					`DROP INDEX IF EXISTS idx_dispatch_jobs_dequeue_res`,
+					`ALTER TABLE dispatch_jobs DROP COLUMN req_cpu_milli`,
+					`ALTER TABLE dispatch_jobs DROP COLUMN req_memory_bytes`,
+					`ALTER TABLE dispatch_jobs DROP COLUMN req_disk_bytes`,
+					`ALTER TABLE dispatch_jobs DROP COLUMN req_gpu_milli`,
+					`ALTER TABLE dispatch_jobs DROP COLUMN req_custom_keys`,
+					`ALTER TABLE dispatch_jobs DROP COLUMN resource_requests`,
+					`ALTER TABLE dispatch_jobs DROP COLUMN resource_limits`,
+					`ALTER TABLE dispatch_jobs DROP COLUMN resource_class`,
+					`ALTER TABLE dispatch_jobs DROP COLUMN input_bytes`,
+					`ALTER TABLE dispatch_jobs DROP COLUMN primary_input_hash`,
+				}
+				for _, stmt := range stmts {
+					if _, err := exec.Exec(ctx, stmt); err != nil {
+						return err
+					}
+				}
+
+				return nil
+			},
+		},
 	)
 }
