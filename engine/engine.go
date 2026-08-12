@@ -34,6 +34,7 @@ import (
 	mw "github.com/xraph/dispatch/middleware"
 	"github.com/xraph/dispatch/observability"
 	"github.com/xraph/dispatch/queue"
+	"github.com/xraph/dispatch/resource"
 	"github.com/xraph/dispatch/scope"
 	"github.com/xraph/dispatch/store"
 	"github.com/xraph/dispatch/stream"
@@ -105,6 +106,13 @@ type Engine struct {
 	artifacts     *artifact.Service
 	artifactCache *cache.Cache
 
+	// Resource model (optional; zero values mean no requirements and no
+	// capacity check, which is exactly today's behaviour).
+	estimator       resource.Estimator
+	resourceDefault resource.Set
+	queueResources  map[string]resource.Set
+	workerCapacity  resource.Set
+
 	// Queue subsystem.
 	queueConfigs []queue.Config
 	queueManager *queue.Manager
@@ -147,6 +155,37 @@ func WithQueueConfig(configs ...queue.Config) Option {
 	return func(eng *Engine) {
 		eng.queueConfigs = append(eng.queueConfigs, configs...)
 	}
+}
+
+// WithEstimator installs the resource estimator consulted at enqueue.
+//
+// The estimator sits above a definition's static declaration and below
+// a per-enqueue override. It receives the declaration in the request and
+// may return it unchanged, so installing one is an explicit opt-in to
+// letting inference override declaration. An estimator that errors is
+// ignored: it must never fail an enqueue.
+func WithEstimator(e resource.Estimator) Option {
+	return func(eng *Engine) { eng.estimator = e }
+}
+
+// WithResourceDefaults sets the fleet-wide default requirement and any
+// per-queue overrides. Both are the lowest-precedence sources, below a
+// definition's own declaration.
+func WithResourceDefaults(global resource.Set, perQueue map[string]resource.Set) Option {
+	return func(eng *Engine) {
+		eng.resourceDefault = global
+		eng.queueResources = perQueue
+	}
+}
+
+// WithWorkerCapacity declares this process's worker capacity.
+//
+// It is also the floor for the unschedulable check: a job needing more
+// than the largest known capacity is rejected at enqueue rather than
+// pending forever. Leaving it unset in a single-process engine disables
+// that check, which is correct — there is nothing to compare against.
+func WithWorkerCapacity(c resource.Set) Option {
+	return func(eng *Engine) { eng.workerCapacity = c }
 }
 
 // WithTracerProvider sets a custom OTel TracerProvider for the engine.
@@ -366,6 +405,7 @@ func Build(d *dispatch.Dispatcher, opts ...Option) (*Engine, error) {
 		Hostname:    hostname,
 		Queues:      config.Queues,
 		Concurrency: config.Concurrency,
+		Capacity:    eng.workerCapacity.Clone(),
 		State:       cluster.WorkerActive,
 		LastSeen:    time.Now().UTC(),
 		CreatedAt:   time.Now().UTC(),
@@ -442,6 +482,13 @@ func (eng *Engine) EnqueueRaw(ctx context.Context, name string, payload []byte, 
 	}
 
 	if err := eng.applyBindings(ctx, j, jobOpts.Bindings); err != nil {
+		return nil, err
+	}
+
+	// After applyBindings, so the bindings this reads are already
+	// validated; before EnqueueJob, so an unschedulable job never
+	// reaches the store.
+	if err := eng.resolveResources(ctx, j, jobOpts); err != nil {
 		return nil, err
 	}
 
