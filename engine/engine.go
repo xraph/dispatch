@@ -28,6 +28,7 @@ import (
 	"github.com/xraph/dispatch/cron"
 	"github.com/xraph/dispatch/dlq"
 	"github.com/xraph/dispatch/event"
+	"github.com/xraph/dispatch/exec"
 	"github.com/xraph/dispatch/ext"
 	"github.com/xraph/dispatch/id"
 	"github.com/xraph/dispatch/job"
@@ -122,6 +123,13 @@ type Engine struct {
 	// metricFactory is the go-utils MetricFactory for engine-level metrics.
 	// nil means use gu.NewMetricsCollector default.
 	metricFactory gu.MetricFactory
+
+	// executors is the registry job attempts are dispatched through. It
+	// always has the in-process executor as its default.
+	executors *exec.Registry
+	// extraExecutors accumulates executors added via WithExecutor until
+	// buildExecutors assembles them into executors.
+	extraExecutors []exec.Executor
 }
 
 // Option configures an Engine.
@@ -282,6 +290,11 @@ func Build(d *dispatch.Dispatcher, opts ...Option) (*Engine, error) {
 		opt(eng)
 	}
 
+	// Assemble the executor registry now that WithExecutor options have
+	// populated extraExecutors, and before any definition is registered
+	// or the runner is built, since both consult it.
+	eng.buildExecutors()
+
 	// Create stream broker if enabled (must be before pool so events flow).
 	if eng.enableBroker {
 		eng.broker = stream.NewBroker(logger, eng.brokerOpts...)
@@ -333,9 +346,12 @@ func Build(d *dispatch.Dispatcher, opts ...Option) (*Engine, error) {
 	allMws = append(allMws, defaultMws...)
 	allMws = append(allMws, eng.mws...)
 
-	// Create executor and pool.
+	// Create runner and pool.
 	config := d.Config()
-	executor := worker.NewExecutor(eng.registry, eng.extensions, eng.jobStore, eng.dlqService, eng.bo, logger, allMws...)
+	runner := worker.NewRunner(
+		eng.registry, eng.extensions, eng.jobStore, eng.dlqService,
+		eng.bo, eng.executors, logger, allMws...,
+	)
 
 	poolOpts := []worker.PoolOption{
 		worker.WithPoolConcurrency(config.Concurrency),
@@ -361,7 +377,7 @@ func Build(d *dispatch.Dispatcher, opts ...Option) (*Engine, error) {
 
 	eng.pool = worker.NewPool(
 		eng.jobStore,
-		executor,
+		runner,
 		eng.extensions,
 		logger,
 		poolOpts...,
@@ -433,10 +449,14 @@ func Register[T any](eng *Engine, def *job.Definition[T]) {
 }
 
 // RegisterChecked registers a definition and validates its artifact
-// declarations, so a job that could never be staged fails here rather
-// than on every worker that picks it up.
+// declarations and execution policy, so a job that could never be staged
+// or could never be isolated as it requires fails here rather than on
+// every worker that picks it up.
 func RegisterChecked[T any](eng *Engine, def *job.Definition[T]) error {
 	if err := eng.ValidateArtifactInputs(def.Name, def.Opts.Inputs); err != nil {
+		return err
+	}
+	if err := eng.checkExecutionPolicy(def.Name, def.Opts.Execution); err != nil {
 		return err
 	}
 
