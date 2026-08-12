@@ -142,9 +142,9 @@ func (s *Store) FindArtifactByKey(ctx context.Context, backend, bucket, key stri
 func (s *Store) UpdateArtifact(ctx context.Context, a *artifact.Artifact) error {
 	res, err := s.pgdb.NewRaw(`
 		UPDATE dispatch_artifacts
-		SET size = ?, content_hash = ?, content_type = ?, expires_at = ?
-		WHERE id = ?`,
-		a.Size, a.ContentHash, a.ContentType, a.ExpiresAt, a.ID.String(),
+		SET size = $1, content_hash = $2, content_type = $3, expires_at = $4
+		WHERE id = $5`,
+		a.Size, nullString(a.ContentHash), nullString(a.ContentType), a.ExpiresAt, a.ID.String(),
 	).Exec(ctx)
 	if err != nil {
 		return fmt.Errorf("dispatch/postgres: update artifact: %w", err)
@@ -271,12 +271,12 @@ func (s *Store) ListArtifactsByOwner(
 	query := `
 		SELECT DISTINCT a.* FROM dispatch_artifacts a
 		JOIN dispatch_artifact_links l ON l.artifact_id = a.id
-		WHERE l.owner_kind = ? AND l.owner_id = ? AND a.deleted_at IS NULL`
+		WHERE l.owner_kind = $1 AND l.owner_id = $2 AND a.deleted_at IS NULL`
 
 	args := []any{string(owner.Kind), owner.ID}
 
 	if role != "" {
-		query += ` AND l.role = ?`
+		query += ` AND l.role = $3`
 
 		args = append(args, string(role))
 	}
@@ -329,7 +329,7 @@ const eligibleEphemeralSQL = `
 			WHEN a.expires_at IS NOT NULL THEN a.expires_at <= NOW()
 			ELSE MAX(
 				COALESCE(j.completed_at, j.updated_at, r.completed_at, r.updated_at, l.created_at)
-			) + make_interval(secs => ?) <= NOW()
+			) + make_interval(secs => $1::double precision) <= NOW()
 		END
 	)`
 
@@ -344,7 +344,7 @@ func (s *Store) SweepEphemeral(
 	}
 
 	selectSQL := eligibleEphemeralSQL + `
-	LIMIT ?`
+	LIMIT $2`
 
 	if opts.DryRun {
 		var models []artifactModel
@@ -405,12 +405,12 @@ func (s *Store) SweepOrphans(
 		    SELECT a.id FROM dispatch_artifacts a
 		    WHERE a.lifecycle = 'ephemeral'
 		      AND a.deleted_at IS NULL
-		      AND a.created_at < ?
+		      AND a.created_at < $1
 		      AND NOT EXISTS (
 		        SELECT 1 FROM dispatch_artifact_links l WHERE l.artifact_id = a.id
 		      )
 		    ORDER BY a.created_at ASC
-		    LIMIT ?
+		    LIMIT $2
 		  )
 		RETURNING *`
 
@@ -436,9 +436,9 @@ func (s *Store) ListPurgeable(
 	query := `
 		SELECT * FROM dispatch_artifacts
 		WHERE deleted_at IS NOT NULL
-		  AND deleted_at + make_interval(secs => ?) <= NOW()
+		  AND deleted_at + make_interval(secs => $1::double precision) <= NOW()
 		ORDER BY deleted_at ASC
-		LIMIT ?`
+		LIMIT $2`
 
 	if err := s.pgdb.NewRaw(query, grace.Seconds(), limit).Scan(ctx, &models); err != nil {
 		return nil, fmt.Errorf("dispatch/postgres: list purgeable: %w", err)
@@ -450,7 +450,7 @@ func (s *Store) ListPurgeable(
 // PurgeArtifact hard-deletes an artifact. Links cascade.
 func (s *Store) PurgeArtifact(ctx context.Context, artifactID id.ArtifactID) error {
 	_, err := s.pgdb.NewRaw(
-		`DELETE FROM dispatch_artifacts WHERE id = ?`, artifactID.String(),
+		`DELETE FROM dispatch_artifacts WHERE id = $1`, artifactID.String(),
 	).Exec(ctx)
 	if err != nil {
 		return fmt.Errorf("dispatch/postgres: purge artifact: %w", err)
