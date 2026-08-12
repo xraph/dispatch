@@ -20,6 +20,12 @@ type Options struct {
 	// Timeout is the maximum duration a job may run before being cancelled.
 	Timeout time.Duration
 
+	// LeaseTTL is how long this job's lease survives without renewal.
+	// Zero means the worker pool's default. Set it above the expected gap
+	// between heartbeats, not above the expected runtime — a lease is a
+	// liveness window, not a time limit.
+	LeaseTTL time.Duration
+
 	// RunAt schedules the job for future execution. Zero means immediate.
 	RunAt time.Time
 
@@ -90,5 +96,20 @@ func WithRunAt(t time.Time) Option {
 func WithArtifactInputs(specs ...artifact.InputSpec) Option {
 	return func(o *Options) {
 		o.Inputs = append(o.Inputs, specs...)
+	}
+}
+
+// WithLeaseTTL sets how long this job's lease survives without renewal.
+//
+// A lease TTL is a liveness window, not a time limit: it should be a small
+// multiple of the heartbeat interval regardless of how long the work takes.
+// Non-positive durations are ignored, because a zero TTL would expire the
+// lease the instant it was granted and the job would be reclaimed before
+// its first heartbeat.
+func WithLeaseTTL(d time.Duration) Option {
+	return func(o *Options) {
+		if d > 0 {
+			o.LeaseTTL = d
+		}
 	}
 }

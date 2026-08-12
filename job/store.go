@@ -58,3 +58,59 @@ type Store interface {
 	// CountJobs returns the number of jobs matching the given options.
 	CountJobs(ctx context.Context, opts CountOpts) (int64, error)
 }
+
+// LeaseStore is the opt-in lease capability.
+//
+// It is deliberately not part of Store. A backend that implements Store
+// alone keeps compiling and keeps behaving exactly as it does today,
+// reaped on the pool's single global threshold. A backend that also
+// implements LeaseStore gets per-definition lease TTLs, epoch fencing,
+// and atomic reclamation. This mirrors the capability idiom the artifact
+// backend already uses for RangeReader and Presigner.
+//
+// Every method takes an absolute leaseUntil rather than a TTL. If the
+// store computed now+ttl it would need per-dialect interval arithmetic
+// over a nanosecond integer — and SQLite, Mongo, and Redis have no
+// interval type at all. Passing a timestamp means every backend only
+// writes a value, and lease policy lives in one place.
+type LeaseStore interface {
+	// DequeueLeased claims up to limit ready jobs, sets them running,
+	// assigns workerID, increments lease_epoch, and sets lease_expires_at
+	// to leaseUntil. The returned jobs carry the epoch they were granted.
+	//
+	// leaseUntil is a short initial grant that only has to survive until
+	// the holder's first renewal; the renewal then extends it using the
+	// job's own LeaseTTL.
+	DequeueLeased(
+		ctx context.Context,
+		queues []string,
+		limit int,
+		workerID id.WorkerID,
+		leaseUntil time.Time,
+	) ([]*Job, error)
+
+	// RenewLease extends the lease to leaseUntil, but only if the job is
+	// still running, still assigned to workerID, and still at epoch.
+	//
+	// It returns ErrLeaseLost when that condition does not hold. That
+	// return is the entire fencing mechanism: a worker that was reclaimed
+	// while paused learns it no longer owns the job within one heartbeat
+	// interval, instead of continuing to write for hours.
+	RenewLease(
+		ctx context.Context,
+		jobID id.JobID,
+		workerID id.WorkerID,
+		epoch int,
+		leaseUntil time.Time,
+	) error
+
+	// ReclaimExpiredLeases returns to pending every running job whose
+	// lease has expired, clearing the worker assignment, incrementing
+	// lease_epoch to fence the previous holder, and incrementing
+	// evict_count. RetryCount is never touched — a lost lease is
+	// infrastructure, not a handler failure.
+	//
+	// The claim and the read are one atomic statement, so two pools
+	// reclaiming concurrently cannot both take the same job.
+	ReclaimExpiredLeases(ctx context.Context, limit int) ([]*Job, error)
+}

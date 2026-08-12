@@ -52,4 +52,28 @@ type Job struct {
 	// the engine: bindings placed inside it would be invisible to the
 	// scheduler and to the staging middleware.
 	ArtifactBindings []byte `json:"artifact_bindings,omitempty"`
+
+	// LeaseEpoch is the fencing token for the current lease. It increments
+	// on every grant and every reclamation. A worker holding a stale epoch
+	// has its writes rejected with ErrLeaseLost.
+	LeaseEpoch int `json:"lease_epoch"`
+
+	// LeaseExpiresAt is when the current lease lapses if not renewed.
+	// Nil means no lease is held.
+	LeaseExpiresAt *time.Time `json:"lease_expires_at,omitempty"`
+
+	// LeaseTTL is how long each renewal extends the lease for this job,
+	// copied from the definition at enqueue. Zero means the pool's default.
+	//
+	// This is what makes per-definition thresholds work: a 30-second job
+	// and a six-hour job carry different values on their own rows, so one
+	// reclaim query serves both.
+	LeaseTTL time.Duration `json:"lease_ttl,omitempty"`
+
+	// EvictCount is how many times this job has lost a worker to
+	// infrastructure — a reclaimed lease, or later a graceful drain. It is
+	// deliberately separate from RetryCount: a preempted job has not
+	// failed, and charging preemptions to the retry budget would send a
+	// healthy job to the DLQ having never once errored.
+	EvictCount int `json:"evict_count"`
 }
