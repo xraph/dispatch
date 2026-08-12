@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"go.mongodb.org/mongo-driver/v2/bson"
+	mongod "go.mongodb.org/mongo-driver/v2/mongo"
 	"go.mongodb.org/mongo-driver/v2/mongo/options"
 
 	"github.com/xraph/dispatch"
@@ -28,76 +29,175 @@ func (s *Store) EnqueueJob(ctx context.Context, j *job.Job) error {
 	return nil
 }
 
-// DequeueJobs atomically claims up to limit pending jobs from the given
-// queues. Each claim is a FindOneAndUpdate (atomic per-doc), but for limit > 1
-// the claims are issued in parallel so wall-clock cost stays close to a single
-// round-trip even on a slow connection.
+// maxDequeueRounds bounds the read-then-claim retry below.
 //
-// A future resource-aware predicate belongs in dequeueOne's filter below.
-// See that filter's comment for the null-vs-absent trap it must avoid.
-func (s *Store) DequeueJobs(ctx context.Context, queues []string, limit int) ([]*job.Job, error) {
-	if limit <= 0 {
+// A round claims nothing only when every candidate it read was taken by a
+// competing claimer in between. Returning an empty batch then would be a
+// lie a drain loop believes — storetest's concurrency case has each
+// claimer stop on the first empty result — so a contended round is
+// retried rather than reported. The bound keeps a pathological loser
+// terminating instead of spinning.
+const maxDequeueRounds = 8
+
+// DequeueJobs atomically claims up to opts.Limit ready jobs from
+// opts.Queues that fit opts, sets them to running, and returns them
+// ordered by priority descending, then locality-preferred first, then
+// RunAt ascending.
+//
+// Mongo has no statement that can order, limit, and claim many documents
+// in one shot, so the claim is composed of two parts:
+//
+//   - one ordered candidate read, which applies the fit predicate, the
+//     full contract ordering, and the limit — order THEN truncate,
+//     server-side, over the whole eligible set;
+//   - one FindOneAndUpdate per candidate, keyed by _id and carrying the
+//     SAME fit predicate plus the state and run_at guards. findAndModify
+//     is atomic per document, so two workers racing for one job produce
+//     exactly one winner; the loser's call matches nothing and it simply
+//     gets no job, never a second claim of the same one.
+//
+// The read is also the write gate the previous probe provided: when it
+// finds no candidate, not a single write command is sent. A job that does
+// not fit is never written to — the predicate is a conjunct of the
+// claiming update itself, not a filter over claimed documents.
+func (s *Store) DequeueJobs(ctx context.Context, opts job.DequeueOpts) ([]*job.Job, error) {
+	// A worker computing zero free slots must claim zero jobs, never the
+	// whole queue. Matches the SQL backends' LIMIT 0.
+	if opts.Limit <= 0 {
 		return nil, nil
 	}
 
-	// Probe with a cheap indexed read before claiming. findAndModify is a
-	// write command even when it matches nothing, so without this gate
-	// idle pollers generate constant write traffic (collection write
-	// locks, profiler noise, billed write ops). The FindOneAndUpdate
-	// claims below remain the atomic gatekeepers; losing the race after a
-	// positive probe just yields an empty batch.
-	probeCol := s.mdb.Collection(colJobs)
-	probeFilter := bson.M{
-		"state":  bson.M{"$in": []string{string(job.StatePending), string(job.StateRetrying)}},
-		"queue":  bson.M{"$in": queues},
-		"run_at": bson.M{"$lte": now()},
-	}
-	probeOpts := options.FindOne().SetProjection(bson.M{"_id": 1})
-	probeErr := withRetry(ctx, defaultRetry, func(ctx context.Context) error {
-		return probeCol.FindOne(ctx, probeFilter, probeOpts).Err()
-	})
-	if probeErr != nil {
-		if isNoDocuments(probeErr) {
-			return nil, nil
-		}
-		return nil, fmt.Errorf("dispatch/mongo: dequeue probe: %w", probeErr)
-	}
+	for range maxDequeueRounds {
+		t := now()
 
-	if limit == 1 {
-		j, err := s.dequeueOne(ctx, queues, now())
-		if err != nil || j == nil {
+		ids, err := s.dequeueCandidates(ctx, opts, t)
+		if err != nil {
 			return nil, err
 		}
-		return []*job.Job{j}, nil
+
+		if len(ids) == 0 {
+			return nil, nil
+		}
+
+		jobs, err := s.claimCandidates(ctx, opts, ids, t)
+		if err != nil {
+			return nil, err
+		}
+
+		if len(jobs) > 0 {
+			return jobs, nil
+		}
 	}
 
-	t := now()
-	results := make([]*job.Job, limit)
-	errsCh := make(chan error, limit)
+	return nil, nil
+}
+
+// dequeueCandidates returns the _ids of the top opts.Limit eligible jobs,
+// already in contract order.
+//
+// Ordering happens BEFORE truncation and on the server, over every
+// eligible document — not over an arbitrary slice of them. That is the
+// whole reason the candidates are read rather than letting N independent
+// FindOneAndUpdates each pick their own document: with a locality term
+// they could not, because Mongo's findAndModify sort takes field paths
+// only and locality is a computed predicate.
+func (s *Store) dequeueCandidates(
+	ctx context.Context,
+	opts job.DequeueOpts,
+	t time.Time,
+) ([]string, error) {
+	pipeline := mongod.Pipeline{
+		bson.D{{Key: "$match", Value: dequeueFilter(opts, t)}},
+	}
+
+	sortDoc := bson.D{{Key: "priority", Value: -1}}
+
+	// Locality is applied whenever PreferHashes is non-empty, including
+	// on otherwise-unbounded opts: IsUnbounded governs FILTERING only.
+	// And it ranks strictly BELOW priority — above it, a steady stream of
+	// locally staged low-priority work would starve the high-priority job
+	// the pool exists to run first.
+	if hashes := preferredHashes(opts); len(hashes) > 0 {
+		pipeline = append(pipeline, bson.D{{Key: "$addFields", Value: bson.M{
+			preferredField: preferredExpr(hashes),
+		}}})
+
+		sortDoc = append(sortDoc, bson.E{Key: preferredField, Value: -1})
+	}
+
+	sortDoc = append(sortDoc, bson.E{Key: "run_at", Value: 1})
+
+	pipeline = append(pipeline,
+		// $sort immediately followed by $limit is coalesced into a
+		// bounded top-k sort, so the locality term — which no index can
+		// serve — still costs memory proportional to the limit, not to
+		// the size of the pending queue.
+		bson.D{{Key: "$sort", Value: sortDoc}},
+		bson.D{{Key: "$limit", Value: int64(opts.Limit)}},
+		bson.D{{Key: "$project", Value: bson.M{"_id": 1}}},
+	)
+
+	var rows []struct {
+		ID string `bson:"_id"`
+	}
+
+	err := withRetry(ctx, defaultRetry, func(ctx context.Context) error {
+		cursor, aggErr := s.mdb.Collection(colJobs).Aggregate(ctx, pipeline)
+		if aggErr != nil {
+			return aggErr
+		}
+		defer cursor.Close(ctx)
+
+		rows = rows[:0]
+
+		return cursor.All(ctx, &rows)
+	})
+	if err != nil {
+		return nil, fmt.Errorf("dispatch/mongo: dequeue candidates: %w", err)
+	}
+
+	ids := make([]string, 0, len(rows))
+	for _, r := range rows {
+		ids = append(ids, r.ID)
+	}
+
+	return ids, nil
+}
+
+// claimCandidates claims each candidate in parallel and returns the ones
+// it won, still in candidate order.
+//
+// Order is preserved by writing each result into its candidate's slot and
+// compacting afterwards, never by appending in completion order — the
+// claims race each other, so completion order is arbitrary.
+func (s *Store) claimCandidates(
+	ctx context.Context,
+	opts job.DequeueOpts,
+	ids []string,
+	t time.Time,
+) ([]*job.Job, error) {
+	results := make([]*job.Job, len(ids))
+	errsCh := make(chan error, len(ids))
+
 	var wg sync.WaitGroup
 
-	// Once one worker hits ErrNoDocuments the queue is empty; cancel the rest
-	// to avoid pointless round-trips against an empty queue.
-	cctx, cancel := context.WithCancel(ctx)
-	defer cancel()
-
-	for i := 0; i < limit; i++ {
-		i := i
+	for i, jobID := range ids {
 		wg.Add(1)
+
 		go func() {
 			defer wg.Done()
-			j, err := s.dequeueOne(cctx, queues, t)
+
+			j, err := s.claimOne(ctx, opts, jobID, t)
 			if err != nil {
 				errsCh <- err
+
 				return
 			}
-			if j == nil {
-				cancel()
-				return
-			}
+
 			results[i] = j
 		}()
 	}
+
 	wg.Wait()
 	close(errsCh)
 
@@ -107,37 +207,34 @@ func (s *Store) DequeueJobs(ctx context.Context, queues []string, limit int) ([]
 		}
 	}
 
-	jobs := make([]*job.Job, 0, limit)
+	jobs := make([]*job.Job, 0, len(ids))
+
 	for _, j := range results {
 		if j != nil {
 			jobs = append(jobs, j)
 		}
 	}
+
 	return jobs, nil
 }
 
-// dequeueOne claims a single job atomically. Returns (nil, nil) when no
-// claimable job exists. Wrapped in withRetry so transient network blips
-// don't bubble up as dequeue errors.
-func (s *Store) dequeueOne(ctx context.Context, queues []string, t time.Time) (*job.Job, error) {
-	col := s.mdb.Collection(colJobs)
-	filter := bson.M{
-		"state":  bson.M{"$in": []string{string(job.StatePending), string(job.StateRetrying)}},
-		"queue":  bson.M{"$in": queues},
-		"run_at": bson.M{"$lte": t},
-	}
-	// When a resource-aware clause is added here: "no resource
-	// requirement" must NOT be tested with {"resource_requests":
-	// {"$exists": false}} alone. EnqueueJob (grove's NewInsert) writes
-	// a zero Set's resource_requests as an explicit BSON null -- key
-	// present, value null -- while UpdateJob (raw ReplaceOne) drops the
-	// key entirely; $exists:false only matches the latter, so it would
-	// silently miss most undeclared jobs (every one still on its
-	// original EnqueueJob-written document). Use a plain equality test,
-	// {"resource_requests": nil} -- Mongo's null-equality semantics
-	// already match a missing field too, so this one clause covers both
-	// write paths with no $or needed. Verified empirically, not assumed.
-	// See the field comment on jobModel.ResourceRequests in models.go.
+// claimOne atomically claims one candidate. It returns (nil, nil) when
+// the document no longer matches — claimed by someone else, or no longer
+// eligible — which is a lost race, not an error.
+//
+// The filter is the FULL dequeue filter with _id pinned, not just the
+// _id: the fit predicate must be evaluated as part of the claim, so a job
+// that does not fit is never written to even if it somehow reached the
+// candidate list.
+func (s *Store) claimOne(
+	ctx context.Context,
+	opts job.DequeueOpts,
+	jobID string,
+	t time.Time,
+) (*job.Job, error) {
+	filter := dequeueFilter(opts, t)
+	filter["_id"] = jobID
+
 	update := bson.M{
 		"$set": bson.M{
 			"state":      string(job.StateRunning),
@@ -145,27 +242,29 @@ func (s *Store) dequeueOne(ctx context.Context, queues []string, t time.Time) (*
 			"updated_at": t,
 		},
 	}
-	opts := options.FindOneAndUpdate().
-		SetReturnDocument(options.After).
-		SetSort(bson.D{
-			{Key: "priority", Value: -1},
-			{Key: "run_at", Value: 1},
-		})
+
+	updateOpts := options.FindOneAndUpdate().SetReturnDocument(options.After)
 
 	var m jobModel
+
 	err := withRetry(ctx, defaultRetry, func(ctx context.Context) error {
-		return col.FindOneAndUpdate(ctx, filter, update, opts).Decode(&m)
+		return s.mdb.Collection(colJobs).
+			FindOneAndUpdate(ctx, filter, update, updateOpts).
+			Decode(&m)
 	})
 	if err != nil {
 		if isNoDocuments(err) {
 			return nil, nil
 		}
+
 		return nil, fmt.Errorf("dispatch/mongo: dequeue jobs: %w", err)
 	}
+
 	j, convErr := fromJobModel(&m)
 	if convErr != nil {
 		return nil, fmt.Errorf("dispatch/mongo: dequeue convert: %w", convErr)
 	}
+
 	return j, nil
 }
 

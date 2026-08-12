@@ -113,7 +113,7 @@ func TestDequeueJobsIdleIssuesNoWriteCommands(t *testing.T) {
 	}
 
 	for range 5 {
-		jobs, err := s.DequeueJobs(ctx, []string{"default"}, 4)
+		jobs, err := s.DequeueJobs(ctx, job.DequeueOpts{Queues: []string{"default"}, Limit: 4})
 		if err != nil {
 			t.Fatalf("dequeue: %v", err)
 		}
@@ -149,7 +149,7 @@ func TestDequeueJobsClaimsPendingJob(t *testing.T) {
 		t.Fatalf("enqueue: %v", err)
 	}
 
-	jobs, err := s.DequeueJobs(ctx, []string{"default"}, 4)
+	jobs, err := s.DequeueJobs(ctx, job.DequeueOpts{Queues: []string{"default"}, Limit: 4})
 	if err != nil {
 		t.Fatalf("dequeue: %v", err)
 	}

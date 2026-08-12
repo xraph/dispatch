@@ -80,9 +80,15 @@ type jobModel struct {
 	//     zero Set drops the key entirely; the key is ABSENT.
 	// Both are "never {}" and both decode back to a nil Set, so reads
 	// are unaffected. A query written directly against Mongo, though,
-	// must not test for only one shape -- see dequeueOne's filter
-	// comment in job.go for the specific trap (a plain equality test
-	// against null already covers both; $exists:false alone does not).
+	// must not test for only one shape: a plain equality test against
+	// null covers both, $exists:false covers only the ReplaceOne one,
+	// and a type-bracketed range operator covers neither. All three are
+	// asserted against real documents by
+	// TestUndeclaredJobMatchesNullEqualityOnBothWritePaths.
+	//
+	// The dequeue fit predicate sidesteps the asymmetry entirely by
+	// comparing the scalar fields above, which both write paths always
+	// emit -- see dequeueFilter in dequeue.go.
 	ResourceRequests resource.Set `grove:"resource_requests" bson:"resource_requests,omitempty"`
 	ResourceLimits   resource.Set `grove:"resource_limits"   bson:"resource_limits,omitempty"`
 	ResourceClass    string       `grove:"resource_class,notnull,default:''" bson:"resource_class"`

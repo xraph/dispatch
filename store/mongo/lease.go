@@ -15,8 +15,12 @@ import (
 // DequeueLeased claims up to limit ready jobs and grants each a lease.
 //
 // Mongo cannot update-and-return many documents atomically, so this loops
-// FindOneAndUpdate exactly as DequeueJobs does. Each iteration is its own
-// atomic claim, which is what keeps two workers from taking one job.
+// FindOneAndUpdate, each iteration its own atomic claim — which is what
+// keeps two workers from taking one job.
+//
+// It deliberately does NOT carry the resource-aware fit predicate or the
+// locality ordering that DequeueJobs gained: LeaseStore takes queues and
+// a limit, not DequeueOpts. Widening the lease path is its own change.
 func (s *Store) DequeueLeased(
 	ctx context.Context,
 	queues []string,
