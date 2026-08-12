@@ -12,6 +12,7 @@ import (
 	"github.com/xraph/dispatch/ext"
 	"github.com/xraph/dispatch/id"
 	"github.com/xraph/dispatch/job"
+	"github.com/xraph/dispatch/resource"
 )
 
 // isTransientStoreErr reports whether err is a transient store failure —
@@ -93,16 +94,26 @@ type Pool struct {
 	// Queue manager (optional).
 	queueManager QueueManager
 
+	// resources admits jobs against this worker's real capacity. Nil
+	// disables the resource model entirely: the pool offers no budget at
+	// dequeue and takes no lease, which is exactly how it behaved before
+	// the model existed.
+	resources resource.Manager
+
+	// customKeys are the custom resource keys this worker advertises,
+	// overriding the keys derived from the manager's capacity.
+	customKeys []string
+
 	stopCh     chan struct{}
 	wakeCh     chan struct{}      // nudges the fetcher out of its idle backoff
-	jobCh      chan *job.Job      // hand-off from the fetcher to the workers
+	jobCh      chan admitted      // hand-off from the fetcher to the workers
 	slots      chan struct{}      // free-worker tokens; capacity == concurrency
 	cancelCtx  context.Context    // Cancelled on Stop to interrupt in-flight store operations
 	cancelFunc context.CancelFunc // Cancels cancelCtx
 	wg         sync.WaitGroup
 	mu         sync.Mutex
 	running    bool
-	activeJobs map[string]context.CancelFunc
+	activeJobs map[string]*inflight
 	activeMu   sync.Mutex
 }
 
@@ -149,6 +160,37 @@ func WithQueueManager(m QueueManager) PoolOption {
 	return func(p *Pool) { p.queueManager = m }
 }
 
+// WithResourceManager makes the pool resource-aware.
+//
+// With a manager installed the fetcher offers its free capacity as the
+// dequeue budget, so the store never hands this worker a job it cannot
+// run, and every claimed job holds a lease for as long as it executes.
+// Without one the pool passes an unbounded DequeueOpts and takes no
+// leases — every backend skips its fit predicate and behaviour is
+// identical to a pool that predates the resource model.
+func WithResourceManager(m resource.Manager) PoolOption {
+	return func(p *Pool) { p.resources = m }
+}
+
+// WithWorkerCustomKeys sets the custom resource keys this worker offers
+// at dequeue, overriding the keys derived from the resource manager's
+// capacity.
+//
+// The derived default is usually what you want; this exists to narrow
+// it, so a worker draining a device can stop attracting work for it
+// without being reconfigured. Keep the list a subset of the manager's
+// custom capacity: dequeue matches custom resources by key and never by
+// quantity, so a key advertised here that the manager has no capacity
+// for will pass the store's filter and then be refused locally, and the
+// job will bounce back to pending on every attempt.
+//
+// Setting this without a resource manager makes the dequeue bounded on
+// its own, which is a deliberate opt-in: the worker then claims only
+// jobs whose custom keys it offers, with no quantity accounting at all.
+func WithWorkerCustomKeys(keys []string) PoolOption {
+	return func(p *Pool) { p.customKeys = keys }
+}
+
 // WithStoreCallTimeout caps a single store roundtrip. Pass a positive
 // duration to override defaultStoreCallTimeout, zero to leave the
 // default in place, or a negative value to disable the timeout
@@ -177,7 +219,7 @@ func NewPool(
 		logger:          logger,
 		stopCh:          make(chan struct{}),
 		wakeCh:          make(chan struct{}, 1),
-		activeJobs:      make(map[string]context.CancelFunc),
+		activeJobs:      make(map[string]*inflight),
 	}
 	for _, opt := range opts {
 		opt(p)
@@ -238,7 +280,7 @@ func (p *Pool) Start(_ context.Context) error {
 	// one DequeueJobs call per cycle instead of `concurrency` concurrent
 	// calls, which kept idle pools writing to the store every second and
 	// could exhaust the shared driver pool on its own.
-	p.jobCh = make(chan *job.Job)
+	p.jobCh = make(chan admitted)
 	p.slots = make(chan struct{}, p.concurrency)
 	for range p.concurrency {
 		p.slots <- struct{}{}
@@ -351,15 +393,16 @@ func (p *Pool) fetchLoop() {
 		}
 
 		dqCtx, dqCancel := p.callCtx()
-		// Deliberately unbudgeted: these opts are IsUnbounded, so every
-		// backend skips the fit predicate and the pool claims exactly what
-		// it claimed before DequeueOpts existed. Wiring the real budget —
-		// the resource manager's free capacity, the offered custom keys,
-		// and the locally staged input hashes — is Task 19's job, not a
-		// side effect of widening the store interface.
+		// The budget is recomputed every cycle rather than cached: jobs
+		// finish and reclaimers evict between polls, and a stale ceiling
+		// would either strand work or admit work this worker cannot run.
+		// With no resource manager configured both fields are empty, the
+		// opts are IsUnbounded, and every backend skips its fit predicate.
 		jobs, err := p.store.DequeueJobs(dqCtx, job.DequeueOpts{
-			Queues: p.queues,
-			Limit:  held,
+			Queues:     p.queues,
+			Limit:      held,
+			Budget:     p.dequeueBudget(),
+			CustomKeys: p.offeredCustomKeys(),
 		})
 		dqCancel()
 		if err != nil {
@@ -388,15 +431,28 @@ func (p *Pool) fetchLoop() {
 				continue
 			}
 
+			// Reserve local capacity between the claim and the hand-off,
+			// so no job reaches a worker without the resources it declared
+			// already accounted for.
+			lease, fits := p.admit(j)
+			if !fits {
+				p.releaseQueueSlot(j)
+				p.requeueLocalMisfit(j)
+
+				continue
+			}
+
+			a := admitted{job: j, lease: lease}
+
 			select {
-			case p.jobCh <- j:
+			case p.jobCh <- a:
 				held-- // The worker now owns this slot.
 			case <-p.stopCh:
-				p.requeueUndispatched(j)
+				p.abandon(a)
 				p.releaseSlots(held)
 				return
 			case <-p.cancelCtx.Done():
-				p.requeueUndispatched(j)
+				p.abandon(a)
 				p.releaseSlots(held)
 				return
 			}
@@ -480,8 +536,9 @@ func (p *Pool) requeueUndispatched(j *job.Job) {
 	}
 }
 
-// workerLoop executes jobs handed off by the fetcher, returning its slot
-// token after each job.
+// workerLoop executes jobs handed off by the fetcher. The slot token is
+// returned by runJob's own defer, not here, so it comes back on every
+// exit path the attempt can take.
 func (p *Pool) workerLoop() {
 	defer p.wg.Done()
 
@@ -491,18 +548,25 @@ func (p *Pool) workerLoop() {
 			return
 		case <-p.cancelCtx.Done():
 			return
-		case j := <-p.jobCh:
-			p.runJob(j)
-			p.slots <- struct{}{}
+		case a := <-p.jobCh:
+			p.runJob(a)
 		}
 	}
 }
 
-func (p *Pool) runJob(j *job.Job) {
+func (p *Pool) runJob(a admitted) {
+	// Everything this attempt holds — the worker slot, the queue/tenant
+	// token, and the resource lease — comes back through this one defer,
+	// so a handler that panics past a pool with no Recover middleware
+	// cannot leave capacity spoken for by a job that is no longer running.
+	defer p.finishJob(a)
+
+	j := a.job
+
 	p.extensions.EmitJobStarted(p.cancelCtx, j)
 
 	ctx, cancel := context.WithCancel(p.cancelCtx)
-	p.trackJob(j.ID.String(), cancel)
+	p.trackJob(j.ID.String(), cancel, a.lease)
 
 	execErr := p.executor.Execute(ctx, j)
 	if execErr != nil {
@@ -511,14 +575,6 @@ func (p *Pool) runJob(j *job.Job) {
 			log.String("job_name", j.Name),
 			log.String("error", execErr.Error()),
 		)
-	}
-
-	p.untrackJob(j.ID.String())
-	cancel()
-
-	// Release the queue/tenant slot.
-	if p.queueManager != nil {
-		p.queueManager.Release(j.Queue, j.ScopeOrgID)
 	}
 }
 
@@ -631,23 +687,34 @@ func (p *Pool) reapStaleJobs() {
 	}
 }
 
-func (p *Pool) trackJob(jobID string, cancel context.CancelFunc) {
+func (p *Pool) trackJob(jobID string, cancel context.CancelFunc, lease resource.Lease) {
 	p.activeMu.Lock()
-	p.activeJobs[jobID] = cancel
+	p.activeJobs[jobID] = &inflight{cancel: cancel, lease: lease}
 	p.activeMu.Unlock()
 }
 
-func (p *Pool) untrackJob(jobID string) {
+// untrackJob removes and returns the in-flight record, or nil if the job
+// was never tracked. The caller owns the record's cancel func from here.
+func (p *Pool) untrackJob(jobID string) *inflight {
 	p.activeMu.Lock()
+	defer p.activeMu.Unlock()
+
+	rec, ok := p.activeJobs[jobID]
+	if !ok {
+		return nil
+	}
+
 	delete(p.activeJobs, jobID)
-	p.activeMu.Unlock()
+
+	return rec
 }
 
 func (p *Pool) cancelActiveJobs() {
 	p.activeMu.Lock()
 	defer p.activeMu.Unlock()
-	for jobID, cancel := range p.activeJobs {
+
+	for jobID, rec := range p.activeJobs {
 		p.logger.Warn("cancelling active job", log.String("job_id", jobID))
-		cancel()
+		rec.cancel()
 	}
 }
