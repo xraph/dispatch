@@ -73,3 +73,38 @@ const workerIDsKey = keyPrefix + "worker_ids"
 
 // leaderKey stores the current leader worker ID.
 const leaderKey = keyPrefix + "leader"
+
+// ── Artifact keys ──
+
+// artifactKey returns the key for an artifact entity: dispatch:artifact:{id}
+func artifactKey(id string) string { return keyPrefix + "artifact:" + id }
+
+// artifactIDsKey is the Set tracking all artifact IDs for enumeration.
+const artifactIDsKey = keyPrefix + "artifact_ids"
+
+// artifactKeyGuard maps live storage coordinates to an artifact ID. It is
+// claimed with SETNX so concurrent creates at the same coordinates resolve
+// to one winner, and released on soft-delete so a purged key is reusable.
+func artifactKeyGuard(backend, bucket, key string) string {
+	return fmt.Sprintf("%sartifact_key:%s:%s:%s", keyPrefix, backend, bucket, key)
+}
+
+// artifactEphemeralKey is the Sorted Set of ephemeral artifact IDs scored
+// by creation time. Durable artifacts are never members, which is this
+// backend's form of the SQL "lifecycle = 'ephemeral'" literal.
+const artifactEphemeralKey = keyPrefix + "artifact_ephemeral"
+
+// artifactDeletedKey is the Sorted Set of soft-deleted artifact IDs scored
+// by deletion time, driving the purge pass.
+const artifactDeletedKey = keyPrefix + "artifact_deleted"
+
+// artifactLinksKey is the Set of link members pointing at an artifact.
+func artifactLinksKey(artifactID string) string {
+	return keyPrefix + "artifact_links:" + artifactID
+}
+
+// ownerLinksKey is the Hash of an owner's artifact links, keyed by
+// "name\x00attempt".
+func ownerLinksKey(kind, ownerID string) string {
+	return fmt.Sprintf("%sartifact_owner_links:%s:%s", keyPrefix, kind, ownerID)
+}
