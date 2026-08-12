@@ -61,6 +61,10 @@ func RunDequeueSuite(t *testing.T, newStore func(t *testing.T) job.Store) {
 			"PreferHashesSortWithinPriorityBandAndNeverFilter",
 			testPreferHashesSortWithinPriorityBand,
 		},
+		{
+			"LocalityDecidesWhichRowsSurviveATightLimit",
+			testLocalityDecidesWhichRowsSurviveATightLimit,
+		},
 		{"ReservedForRestrictsToOneJob", testReservedForRestrictsToOneJob},
 		{"NonPositiveLimitClaimsNothing", testNonPositiveLimitClaimsNothing},
 		{"ClaimIsAtomicUnderConcurrency", testClaimIsAtomicUnderConcurrency},
@@ -796,6 +800,87 @@ func testPreferHashesSortWithinPriorityBand(t *testing.T, s job.Store) {
 	// one already staged; late-local then jumps its own priority band; the
 	// remaining two keep RunAt order. Nothing is filtered out.
 	wantOrder(t, got, "urgent-remote", "late-local", "early-remote", "mid-unhashed")
+}
+
+// testLocalityDecidesWhichRowsSurviveATightLimit closes the gap neither
+// LimitTruncatesAfterOrdering nor either PreferHashes case above can
+// reach: WHICH rows a tight Limit keeps when only locality — not
+// priority, not a static index, not a cached score — can tell them
+// apart.
+//
+// LimitTruncatesAfterOrdering pins order-then-truncate using priority
+// alone, and on two backends that is decorative: SQLite's dequeue index
+// is keyed priority DESC, run_at ASC, so its natural scan order already
+// matches the contract with no ORDER BY at all, and Redis's ZRange
+// returns score order, which encodes priority the same way. Neither
+// PreferHashes case above can catch a truncate-before-sort bug either,
+// because both use a Limit of 10 against fewer eligible jobs than that —
+// every eligible job comes back, so which ones a tight limit keeps is
+// never exercised.
+//
+// PreferHashes closes that hole precisely because it cannot be baked
+// into a static index or a precomputed score: it is supplied by the
+// caller at call time, fresh on every call. A backend that truncates to
+// Limit before applying the full ordering has no way to get this case
+// right by accident, on any backend.
+//
+// All six jobs share one priority band, so priority cannot decide the
+// winners; only Prefers can. The two preferred jobs carry the LATEST
+// RunAt of the six, so a backend that orders by priority then RunAt
+// alone — which is what "the index already matches" and "the score
+// already matches" both reduce to — keeps the two EARLIEST non-preferred
+// jobs instead. Limit is exactly the preferred count, so the winning set
+// is decided entirely by locality, not merely reordered within it.
+//
+// The losers are deliberately not one hash shape:
+//
+//   - noHash carries no hash at all, the common case, proving locality
+//     does not depend on every row having something to compare.
+//   - sortsAbovePreferred carries a hash that is lexicographically
+//     GREATER than the preferred hash. A backend that orders by the raw
+//     hash value instead of a preferred/not-preferred membership test —
+//     the wrong-way-round mistake job.DequeueOpts.Prefers exists to
+//     prevent — ranks it above a preferred job and is caught here too.
+//   - coldRemote carries an ordinary unmatched hash, so the case is not
+//     merely "empty vs. non-empty".
+//
+// A fixture set carrying only one non-empty hash value would risk a
+// false pass: an empty/absent hash collates below strings on some
+// engines, so a broken sort that happens to agree with the correct
+// answer only because "no hash" always sorts last would pass here for
+// the wrong reason. noHash and sortsAbovePreferred together rule that
+// out — sortsAbovePreferred forces a raw-value sort to prefer a loser
+// over a winner regardless of where empty hashes collate.
+func testLocalityDecidesWhichRowsSurviveATightLimit(t *testing.T, s job.Store) {
+	const (
+		queue     = "fit-locality-limit"
+		preferred = "blake3:locally-cached"
+	)
+
+	// Earliest RunAt of the six: what a priority+RunAt-only sort would
+	// keep under Limit 2, and must NOT win here.
+	noHash := newFitJob("no-hash", queue, nil, withPriority(5), withRunAtOffset(0))
+	sortsAbovePreferred := newFitJob("sorts-above-preferred", queue, nil,
+		withPriority(5), withRunAtOffset(time.Minute), withHash("zzz:never-staged"))
+	coldRemote := newFitJob("cold-remote", queue, nil,
+		withPriority(5), withRunAtOffset(2*time.Minute), withHash("blake3:elsewhere"))
+
+	// Latest RunAt of the six: must win anyway, purely on locality.
+	preferredEarly := newFitJob("preferred-early", queue, nil,
+		withPriority(5), withRunAtOffset(3*time.Minute), withHash(preferred))
+	preferredLate := newFitJob("preferred-late", queue, nil,
+		withPriority(5), withRunAtOffset(4*time.Minute), withHash(preferred))
+
+	mustEnqueue(t, s, noHash, sortsAbovePreferred, coldRemote, preferredEarly, preferredLate)
+
+	got := mustDequeue(t, s, job.DequeueOpts{
+		Queues:       []string{queue},
+		Limit:        2,
+		PreferHashes: []string{preferred},
+	})
+
+	wantOrder(t, got, "preferred-early", "preferred-late")
+	wantStillClaimable(t, s, queue, "no-hash", "sorts-above-preferred", "cold-remote")
 }
 
 // testReservedForRestrictsToOneJob proves a targeted claim returns that
