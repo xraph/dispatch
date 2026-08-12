@@ -23,7 +23,7 @@ func (s *Store) CreateArtifact(ctx context.Context, a *artifact.Artifact, link *
 				return artifact.ErrExists
 			}
 
-			return fmt.Errorf("dispatch/postgres: create artifact: %w", err)
+			return fmt.Errorf(errPrefix+"create artifact: %w", err)
 		}
 
 		return nil
@@ -31,12 +31,12 @@ func (s *Store) CreateArtifact(ctx context.Context, a *artifact.Artifact, link *
 
 	tx, err := s.pgdb.BeginTx(ctx, nil)
 	if err != nil {
-		return fmt.Errorf("dispatch/postgres: create artifact: begin: %w", err)
+		return fmt.Errorf(errPrefix+"create artifact: begin: %w", err)
 	}
 
 	defer func() {
 		if rerr := tx.Rollback(); rerr != nil && !errors.Is(rerr, sql.ErrTxDone) {
-			s.logger.Warn("dispatch/postgres: artifact tx rollback", log.String("error", rerr.Error()))
+			s.logger.Warn(errPrefix+"artifact tx rollback", log.String("error", rerr.Error()))
 		}
 	}()
 
@@ -45,15 +45,15 @@ func (s *Store) CreateArtifact(ctx context.Context, a *artifact.Artifact, link *
 			return artifact.ErrExists
 		}
 
-		return fmt.Errorf("dispatch/postgres: create artifact: %w", err)
+		return fmt.Errorf(errPrefix+"create artifact: %w", err)
 	}
 
 	if _, err := tx.Exec(ctx, insertLinkSQL, linkInsertArgs(link)...); err != nil {
-		return fmt.Errorf("dispatch/postgres: create artifact link: %w", err)
+		return fmt.Errorf(errPrefix+"create artifact link: %w", err)
 	}
 
 	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("dispatch/postgres: create artifact: commit: %w", err)
+		return fmt.Errorf(errPrefix+"create artifact: commit: %w", err)
 	}
 
 	return nil
@@ -110,7 +110,7 @@ func (s *Store) GetArtifact(ctx context.Context, artifactID id.ArtifactID) (*art
 			return nil, artifact.ErrNotFound
 		}
 
-		return nil, fmt.Errorf("dispatch/postgres: get artifact: %w", err)
+		return nil, fmt.Errorf(errPrefix+"get artifact: %w", err)
 	}
 
 	return fromArtifactModel(&m)
@@ -131,7 +131,7 @@ func (s *Store) FindArtifactByKey(ctx context.Context, backend, bucket, key stri
 			return nil, artifact.ErrNotFound
 		}
 
-		return nil, fmt.Errorf("dispatch/postgres: find artifact by key: %w", err)
+		return nil, fmt.Errorf(errPrefix+"find artifact by key: %w", err)
 	}
 
 	return fromArtifactModel(&m)
@@ -147,7 +147,7 @@ func (s *Store) UpdateArtifact(ctx context.Context, a *artifact.Artifact) error 
 		a.Size, nullString(a.ContentHash), nullString(a.ContentType), a.ExpiresAt, a.ID.String(),
 	).Exec(ctx)
 	if err != nil {
-		return fmt.Errorf("dispatch/postgres: update artifact: %w", err)
+		return fmt.Errorf(errPrefix+"update artifact: %w", err)
 	}
 
 	n, err := res.RowsAffected()
@@ -191,7 +191,7 @@ func (s *Store) ListArtifacts(ctx context.Context, opts artifact.ListOpts) ([]*a
 	}
 
 	if err := q.Scan(ctx); err != nil {
-		return nil, fmt.Errorf("dispatch/postgres: list artifacts: %w", err)
+		return nil, fmt.Errorf(errPrefix+"list artifacts: %w", err)
 	}
 
 	return fromArtifactModels(models)
@@ -201,7 +201,7 @@ func (s *Store) ListArtifacts(ctx context.Context, opts artifact.ListOpts) ([]*a
 func (s *Store) LinkArtifact(ctx context.Context, link *artifact.Link) error {
 	_, err := s.pgdb.Exec(ctx, insertLinkSQL, linkInsertArgs(link)...)
 	if err != nil {
-		return fmt.Errorf("dispatch/postgres: link artifact: %w", err)
+		return fmt.Errorf(errPrefix+"link artifact: %w", err)
 	}
 
 	return nil
@@ -217,7 +217,7 @@ func (s *Store) ListLinks(ctx context.Context, owner artifact.OwnerRef) ([]*arti
 		OrderExpr("name ASC, attempt ASC").
 		Scan(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("dispatch/postgres: list links: %w", err)
+		return nil, fmt.Errorf(errPrefix+"list links: %w", err)
 	}
 
 	out := make([]*artifact.Link, 0, len(models))
@@ -254,7 +254,7 @@ func (s *Store) FindLinkByName(
 			return nil, artifact.ErrNotFound
 		}
 
-		return nil, fmt.Errorf("dispatch/postgres: find link by name: %w", err)
+		return nil, fmt.Errorf(errPrefix+"find link by name: %w", err)
 	}
 
 	return fromLinkModel(&m)
@@ -282,7 +282,7 @@ func (s *Store) ListArtifactsByOwner(
 	}
 
 	if err := s.pgdb.NewRaw(query, args...).Scan(ctx, &models); err != nil {
-		return nil, fmt.Errorf("dispatch/postgres: list artifacts by owner: %w", err)
+		return nil, fmt.Errorf(errPrefix+"list artifacts by owner: %w", err)
 	}
 
 	return fromArtifactModels(models)
@@ -355,7 +355,7 @@ func (s *Store) SweepEphemeral(
 			ORDER BY created_at ASC`
 
 		if err := s.pgdb.NewRaw(query, opts.Retention.Seconds(), limit).Scan(ctx, &models); err != nil {
-			return nil, fmt.Errorf("dispatch/postgres: sweep ephemeral (dry run): %w", err)
+			return nil, fmt.Errorf(errPrefix+"sweep ephemeral (dry run): %w", err)
 		}
 
 		return fromArtifactModels(models)
@@ -372,7 +372,7 @@ func (s *Store) SweepEphemeral(
 		RETURNING *`
 
 	if err := s.pgdb.NewRaw(query, opts.Retention.Seconds(), limit).Scan(ctx, &models); err != nil {
-		return nil, fmt.Errorf("dispatch/postgres: sweep ephemeral: %w", err)
+		return nil, fmt.Errorf(errPrefix+"sweep ephemeral: %w", err)
 	}
 
 	return fromArtifactModels(models)
@@ -415,7 +415,7 @@ func (s *Store) SweepOrphans(
 		RETURNING *`
 
 	if err := s.pgdb.NewRaw(query, cutoff, limit).Scan(ctx, &models); err != nil {
-		return nil, fmt.Errorf("dispatch/postgres: sweep orphans: %w", err)
+		return nil, fmt.Errorf(errPrefix+"sweep orphans: %w", err)
 	}
 
 	return fromArtifactModels(models)
@@ -441,7 +441,7 @@ func (s *Store) ListPurgeable(
 		LIMIT $2`
 
 	if err := s.pgdb.NewRaw(query, grace.Seconds(), limit).Scan(ctx, &models); err != nil {
-		return nil, fmt.Errorf("dispatch/postgres: list purgeable: %w", err)
+		return nil, fmt.Errorf(errPrefix+"list purgeable: %w", err)
 	}
 
 	return fromArtifactModels(models)
@@ -453,7 +453,7 @@ func (s *Store) PurgeArtifact(ctx context.Context, artifactID id.ArtifactID) err
 		`DELETE FROM dispatch_artifacts WHERE id = $1`, artifactID.String(),
 	).Exec(ctx)
 	if err != nil {
-		return fmt.Errorf("dispatch/postgres: purge artifact: %w", err)
+		return fmt.Errorf(errPrefix+"purge artifact: %w", err)
 	}
 
 	return nil

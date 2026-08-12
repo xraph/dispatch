@@ -72,11 +72,11 @@ func (s *Store) DB() *grove.DB {
 func (s *Store) Migrate(ctx context.Context) error {
 	executor, err := migrate.NewExecutorFor(s.pgdb)
 	if err != nil {
-		return fmt.Errorf("dispatch/postgres: create migration executor: %w", err)
+		return fmt.Errorf(errPrefix+"create migration executor: %w", err)
 	}
 	orch := migrate.NewOrchestrator(executor, Migrations)
 	if _, err := orch.Migrate(ctx); err != nil {
-		return fmt.Errorf("dispatch/postgres: migration failed: %w", err)
+		return fmt.Errorf(errPrefix+"migration failed: %w", err)
 	}
 	return nil
 }

@@ -43,7 +43,7 @@ func (s *Store) StartWakeListener(ctx context.Context, wake func()) (func(), err
 	l, err := s.pgdb.Listen(ctx, wakeChannel, handler)
 	if err != nil {
 		cancel()
-		return nil, fmt.Errorf("dispatch/postgres: start wake listener: %w", err)
+		return nil, fmt.Errorf(errPrefix+"start wake listener: %w", err)
 	}
 
 	done := make(chan struct{})
