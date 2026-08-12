@@ -21,6 +21,8 @@ import (
 	"go.opentelemetry.io/otel/trace"
 
 	"github.com/xraph/dispatch"
+	"github.com/xraph/dispatch/artifact"
+	"github.com/xraph/dispatch/artifact/cache"
 	"github.com/xraph/dispatch/backoff"
 	"github.com/xraph/dispatch/cluster"
 	"github.com/xraph/dispatch/cron"
@@ -98,6 +100,10 @@ type Engine struct {
 	broker       *stream.Broker
 	brokerOpts   []stream.BrokerOption
 	enableBroker bool
+
+	// Artifact plane (optional; nil means disabled).
+	artifacts     *artifact.Service
+	artifactCache *cache.Cache
 
 	// Queue subsystem.
 	queueConfigs []queue.Config
@@ -372,8 +378,24 @@ func Build(d *dispatch.Dispatcher, opts ...Option) (*Engine, error) {
 }
 
 // Register registers a typed job definition with the engine.
+//
+// Use RegisterChecked when the definition declares artifact inputs and
+// you want the declaration validated against the staging budget.
 func Register[T any](eng *Engine, def *job.Definition[T]) {
 	job.RegisterDefinition(eng.registry, def)
+}
+
+// RegisterChecked registers a definition and validates its artifact
+// declarations, so a job that could never be staged fails here rather
+// than on every worker that picks it up.
+func RegisterChecked[T any](eng *Engine, def *job.Definition[T]) error {
+	if err := eng.ValidateArtifactInputs(def.Name, def.Opts.Inputs); err != nil {
+		return err
+	}
+
+	job.RegisterDefinition(eng.registry, def)
+
+	return nil
 }
 
 // Enqueue creates and enqueues a job.
@@ -417,6 +439,10 @@ func (eng *Engine) EnqueueRaw(ctx context.Context, name string, payload []byte, 
 	j.Timeout = jobOpts.Timeout
 	if !jobOpts.RunAt.IsZero() {
 		j.RunAt = jobOpts.RunAt
+	}
+
+	if err := eng.applyBindings(ctx, j, jobOpts.Bindings); err != nil {
+		return nil, err
 	}
 
 	if err := eng.jobStore.EnqueueJob(ctx, j); err != nil {

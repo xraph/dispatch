@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"sync"
+
+	"github.com/xraph/dispatch/artifact"
 )
 
 // HandlerFunc is a type-erased job handler that accepts raw JSON payload.
@@ -17,12 +19,18 @@ type HandlerFunc func(ctx context.Context, payload []byte) error
 type Registry struct {
 	mu       sync.RWMutex
 	handlers map[string]HandlerFunc
+
+	// inputs holds each job's artifact declarations. The staging
+	// middleware needs them keyed by job name, because by the time a job
+	// is executing the typed definition is long gone.
+	inputs map[string][]artifact.InputSpec
 }
 
 // NewRegistry creates an empty job registry.
 func NewRegistry() *Registry {
 	return &Registry{
 		handlers: make(map[string]HandlerFunc),
+		inputs:   make(map[string][]artifact.InputSpec),
 	}
 }
 
@@ -46,6 +54,21 @@ func RegisterDefinition[T any](r *Registry, def *Definition[T]) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.handlers[def.Name] = handler
+
+	if len(def.Opts.Inputs) > 0 {
+		specs := make([]artifact.InputSpec, len(def.Opts.Inputs))
+		copy(specs, def.Opts.Inputs)
+		r.inputs[def.Name] = specs
+	}
+}
+
+// Inputs returns the artifact declarations for a job, or nil when it
+// declares none.
+func (r *Registry) Inputs(name string) []artifact.InputSpec {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	return r.inputs[name]
 }
 
 // Get returns the handler for the given job name.

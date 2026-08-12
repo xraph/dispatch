@@ -28,6 +28,11 @@ type Options struct {
 	// engine size the job before scheduling it, validate bindings at
 	// enqueue, and stage the bytes before the handler runs.
 	Inputs []artifact.InputSpec
+
+	// Bindings maps declared input names to the artifacts supplied at
+	// enqueue. The engine validates them against Inputs before the job is
+	// persisted.
+	Bindings map[string]artifact.Ref
 }
 
 // DefaultOptions returns Options with sensible defaults.
