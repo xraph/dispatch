@@ -337,7 +337,16 @@ func (p *Pool) fetchLoop() {
 		}
 
 		dqCtx, dqCancel := p.callCtx()
-		jobs, err := p.store.DequeueJobs(dqCtx, p.queues, held)
+		// Deliberately unbudgeted: these opts are IsUnbounded, so every
+		// backend skips the fit predicate and the pool claims exactly what
+		// it claimed before DequeueOpts existed. Wiring the real budget —
+		// the resource manager's free capacity, the offered custom keys,
+		// and the locally staged input hashes — is Task 19's job, not a
+		// side effect of widening the store interface.
+		jobs, err := p.store.DequeueJobs(dqCtx, job.DequeueOpts{
+			Queues: p.queues,
+			Limit:  held,
+		})
 		dqCancel()
 		if err != nil {
 			p.releaseSlots(held)

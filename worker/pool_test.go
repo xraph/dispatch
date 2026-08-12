@@ -330,7 +330,8 @@ func newRecordingStore() *recordingStore {
 	return rs
 }
 
-func (r *recordingStore) DequeueJobs(ctx context.Context, queues []string, limit int) ([]*job.Job, error) {
+func (r *recordingStore) DequeueJobs(ctx context.Context, opts job.DequeueOpts) ([]*job.Job, error) {
+	limit := opts.Limit
 	r.dequeueCalls.Add(1)
 	cur := r.inFlight.Add(1)
 	defer r.inFlight.Add(-1)
@@ -352,7 +353,7 @@ func (r *recordingStore) DequeueJobs(ctx context.Context, queues []string, limit
 			break
 		}
 	}
-	return r.Store.DequeueJobs(ctx, queues, limit)
+	return r.Store.DequeueJobs(ctx, opts)
 }
 
 func setupRecordingPool(t *testing.T, rs *recordingStore, opts ...worker.PoolOption) (*worker.Pool, *job.Registry) {

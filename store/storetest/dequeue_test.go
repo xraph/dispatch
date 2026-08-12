@@ -1,4 +1,4 @@
-package jobtest_test
+package storetest_test
 
 import (
 	"context"
@@ -10,7 +10,7 @@ import (
 	"github.com/xraph/dispatch"
 	"github.com/xraph/dispatch/id"
 	"github.com/xraph/dispatch/job"
-	"github.com/xraph/dispatch/job/jobtest"
+	"github.com/xraph/dispatch/store/storetest"
 )
 
 // TestSuiteAgainstReference runs the conformance suite against the
@@ -24,7 +24,7 @@ import (
 // cases are mutually consistent and that the exported predicate helpers
 // actually satisfy them.
 func TestSuiteAgainstReference(t *testing.T) {
-	jobtest.RunDequeueSuite(t, func(_ *testing.T) job.Store {
+	storetest.RunDequeueSuite(t, func(_ *testing.T) job.Store {
 		return newReferenceStore()
 	})
 }
@@ -40,7 +40,7 @@ func newReferenceStore() *referenceStore {
 	return &referenceStore{jobs: make(map[id.JobID]*job.Job)}
 }
 
-func cloneJob(j *job.Job) *job.Job {
+func cloneRefJob(j *job.Job) *job.Job {
 	out := *j
 	out.Resources = j.Resources.Clone()
 	out.ResourceLimits = j.ResourceLimits.Clone()
@@ -56,7 +56,7 @@ func (r *referenceStore) EnqueueJob(_ context.Context, j *job.Job) error {
 		return dispatch.ErrJobAlreadyExists
 	}
 
-	r.jobs[j.ID] = cloneJob(j)
+	r.jobs[j.ID] = cloneRefJob(j)
 
 	return nil
 }
@@ -113,7 +113,7 @@ func (r *referenceStore) DequeueJobs(_ context.Context, opts job.DequeueOpts) ([
 		j.State = job.StateRunning
 		j.StartedAt = &started
 
-		claimed = append(claimed, cloneJob(j))
+		claimed = append(claimed, cloneRefJob(j))
 	}
 
 	return claimed, nil
@@ -128,7 +128,7 @@ func (r *referenceStore) GetJob(_ context.Context, jobID id.JobID) (*job.Job, er
 		return nil, dispatch.ErrJobNotFound
 	}
 
-	return cloneJob(j), nil
+	return cloneRefJob(j), nil
 }
 
 func (r *referenceStore) UpdateJob(_ context.Context, j *job.Job) error {
@@ -139,7 +139,7 @@ func (r *referenceStore) UpdateJob(_ context.Context, j *job.Job) error {
 		return dispatch.ErrJobNotFound
 	}
 
-	r.jobs[j.ID] = cloneJob(j)
+	r.jobs[j.ID] = cloneRefJob(j)
 
 	return nil
 }
@@ -163,7 +163,7 @@ func (r *referenceStore) ListJobsByState(
 
 	for _, j := range r.jobs {
 		if j.State == state {
-			out = append(out, cloneJob(j))
+			out = append(out, cloneRefJob(j))
 		}
 	}
 

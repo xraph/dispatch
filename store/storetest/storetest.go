@@ -1,6 +1,21 @@
 // Package storetest provides conformance suites that every Dispatch store
 // backend must pass. The suites are shared so five implementations cannot
 // quietly disagree about semantics that only one of them has tests for.
+//
+// RunLeaseSuite covers the opt-in lease capability. RunDequeueSuite
+// covers the resource-aware dequeue contract, where disagreement is not
+// cosmetic: the same job would become eligible on different workers
+// depending only on which store the operator chose, and the dimension
+// that silently drifts is the one deciding whether a 32 GB job lands on a
+// 4 GB machine. Its two load-bearing cases are
+// ZeroBudgetSelectsEverything, the guarantee that an unconstrained caller
+// still sees exactly what it saw before the option existed, and
+// ClaimIsAtomicUnderConcurrency, which proves the fit predicate did not
+// cost the claim its atomicity.
+//
+// The package depends only on job, resource, id, and the root package. It
+// must never import a store backend: the backends import this, not the
+// reverse.
 package storetest
 
 import (

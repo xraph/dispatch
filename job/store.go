@@ -81,17 +81,22 @@ type DequeueOpts struct {
 	Budget resource.Set
 
 	// CustomKeys are the custom resource keys the caller offers,
-	// typically free.CustomKeys(). When it is non-empty, a job is
-	// eligible only if every custom key it requires appears here.
+	// typically free.CustomKeys(). A job is eligible only if every custom
+	// key it requires appears here.
 	//
-	// An EMPTY list is unconstrained, not "offers nothing" — the same
-	// rule Budget uses for an absent key, for the same reason. A caller
-	// that has not been taught about custom resources must keep claiming
-	// the jobs it claimed yesterday, or shipping this option would strand
-	// every custom-key job in the fleet until every worker's config had
-	// been updated. The cost is that such a caller can claim a job it
-	// cannot run; the admission path rejects it after the claim, which is
-	// a bounded, visible failure rather than a silent stall.
+	// An empty list is read against IsUnbounded rather than on its own,
+	// because "no custom keys" means two different things to two
+	// different callers. If the whole of o is unbounded, the caller does
+	// not use the resource model at all and claims everything, custom
+	// keys included — that is the backward-compatibility guarantee. If o
+	// is bounded in any other way, an empty list means this worker
+	// genuinely has no custom resources, and a job requiring an fpga must
+	// not be handed to it.
+	//
+	// Reading an empty list as unconstrained in the bounded case would
+	// let a resource-aware worker claim work it cannot possibly run;
+	// reading it as "offers nothing" in the unbounded case would strand
+	// every custom-key job in the fleet the day this option shipped.
 	//
 	// Only key containment is tested at dequeue; the quantity is enforced
 	// locally after the claim, by the admission path that already owns
@@ -155,6 +160,13 @@ func (o DequeueOpts) Allows(j *Job) bool {
 		return false
 	}
 
+	// A caller that constrains nothing claims everything, including jobs
+	// declaring custom resources. Backends should reach the same result
+	// by skipping the predicate entirely on IsUnbounded.
+	if o.IsUnbounded() {
+		return true
+	}
+
 	if o.ReservedFor != nil && j.ID != *o.ReservedFor {
 		return false
 	}
@@ -170,11 +182,8 @@ func (o DequeueOpts) Allows(j *Job) bool {
 		}
 	}
 
-	// An empty offer constrains nothing; see the CustomKeys field.
-	if len(o.CustomKeys) == 0 {
-		return true
-	}
-
+	// o is bounded by this point, so an empty offer means the caller has
+	// no custom resources — not that it declined to say. See CustomKeys.
 	required := j.Resources.CustomKeys()
 	if len(required) == 0 {
 		return true
@@ -264,7 +273,7 @@ type Store interface {
 	// A job that does not fit stays pending and untouched, available to
 	// the next worker that does have room for it.
 	//
-	// Every backend must pass jobtest.RunDequeueSuite, which is the
+	// Every backend must pass storetest.RunDequeueSuite, which is the
 	// contract this signature only sketches.
 	DequeueJobs(ctx context.Context, opts DequeueOpts) ([]*Job, error)
 

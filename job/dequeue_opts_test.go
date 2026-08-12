@@ -134,8 +134,18 @@ func TestDequeueOptsAllows(t *testing.T) {
 			false,
 		},
 		{
-			"empty offer constrains nothing",
+			// Bounded opts with an empty offer: the caller is
+			// resource-aware and has no custom resources.
+			"empty offer on bounded opts rejects a custom requirement",
 			job.DequeueOpts{Budget: resource.Set{resource.Memory: 4 * gib}},
+			newJob(resource.Set{"fpga": 1}),
+			false,
+		},
+		{
+			// Unbounded opts with an empty offer: the caller does not use
+			// the resource model, and must keep claiming what it always did.
+			"empty offer on unbounded opts claims a custom requirement",
+			job.DequeueOpts{},
 			newJob(resource.Set{"fpga": 1}),
 			true,
 		},

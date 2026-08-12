@@ -1,4 +1,4 @@
-package jobtest
+package storetest
 
 import (
 	"context"
@@ -44,7 +44,10 @@ func RunDequeueSuite(t *testing.T, newStore func(t *testing.T) job.Store) {
 		{"DiskBudgetFilters", testDiskBudgetFilters},
 		{"GPUBudgetFilters", testGPUBudgetFilters},
 		{"AbsentBudgetKeyIsUnconstrained", testAbsentBudgetKeyIsUnconstrained},
-		{"AbsentCustomKeysAreUnconstrained", testAbsentCustomKeysAreUnconstrained},
+		{
+			"BoundedBudgetWithNoCustomKeysRejectsCustomRequirement",
+			testBoundedBudgetWithNoCustomKeysRejectsCustomRequirement,
+		},
 		{"ExplicitZeroBudgetKeyStillFilters", testExplicitZeroBudgetKeyStillFilters},
 		{"ZeroRequirementAlwaysFits", testZeroRequirementAlwaysFits},
 		{"ExactFitIsClaimable", testExactFitIsClaimable},
@@ -52,7 +55,10 @@ func RunDequeueSuite(t *testing.T, newStore func(t *testing.T) job.Store) {
 		{"CustomKeyPrefixDoesNotFalselyMatch", testCustomKeyPrefixDoesNotFalselyMatch},
 		{"CustomKeySubsetOfOfferedKeysIsClaimable", testCustomKeySubsetIsClaimable},
 		{"PriorityOrderingPreservedWithinBudget", testPriorityOrderingPreservedWithinBudget},
-		{"PreferHashesSortsFirstButNeverFilters", testPreferHashesSortsFirstButNeverFilters},
+		{
+			"PreferHashesSortWithinPriorityBandAndNeverFilter",
+			testPreferHashesSortWithinPriorityBand,
+		},
 		{"ReservedForRestrictsToOneJob", testReservedForRestrictsToOneJob},
 		{"ClaimIsAtomicUnderConcurrency", testClaimIsAtomicUnderConcurrency},
 	}
@@ -78,28 +84,28 @@ func runAtBase() time.Time {
 }
 
 // option mutates a fixture before it is enqueued.
-type option func(*job.Job)
+type fitOption func(*job.Job)
 
 // withPriority sets the job's scheduling priority.
-func withPriority(p int) option {
+func withPriority(p int) fitOption {
 	return func(j *job.Job) { j.Priority = p }
 }
 
 // withRunAtOffset moves the job's RunAt forward from the shared anchor.
 // Offsets must stay under an hour so the job remains ready to run.
-func withRunAtOffset(d time.Duration) option {
+func withRunAtOffset(d time.Duration) fitOption {
 	return func(j *job.Job) { j.RunAt = runAtBase().Add(d) }
 }
 
 // withHash sets the locality signal PreferHashes matches against.
-func withHash(h string) option {
+func withHash(h string) fitOption {
 	return func(j *job.Job) { j.PrimaryInputHash = h }
 }
 
 // newJob builds a pending job that is ready to run now, on the given
 // queue, requiring res. name is echoed in every failure message, so it
 // should describe the job's role in the case.
-func newJob(name, queue string, res resource.Set, opts ...option) *job.Job {
+func newFitJob(name, queue string, res resource.Set, opts ...fitOption) *job.Job {
 	j := &job.Job{
 		Entity:     dispatch.NewEntity(),
 		ID:         id.NewJobID(),
@@ -144,7 +150,7 @@ func mustDequeue(t *testing.T, s job.Store, opts job.DequeueOpts) []*job.Job {
 	return got
 }
 
-func names(jobs []*job.Job) []string {
+func jobNames(jobs []*job.Job) []string {
 	out := make([]string, 0, len(jobs))
 	for _, j := range jobs {
 		out = append(out, j.Name)
@@ -165,9 +171,9 @@ func wantExactly(t *testing.T, got []*job.Job, want ...string) {
 	for _, w := range want {
 		switch n := seen[w]; {
 		case n == 0:
-			t.Errorf("job %q was not claimed; claimed set = %v, want %v", w, names(got), want)
+			t.Errorf("job %q was not claimed; claimed set = %v, want %v", w, jobNames(got), want)
 		case n > 1:
-			t.Errorf("job %q claimed %d times; claimed set = %v", w, n, names(got))
+			t.Errorf("job %q claimed %d times; claimed set = %v", w, n, jobNames(got))
 		}
 
 		delete(seen, w)
@@ -175,7 +181,7 @@ func wantExactly(t *testing.T, got []*job.Job, want ...string) {
 
 	for extra := range seen {
 		t.Errorf("job %q was claimed but does not fit; claimed set = %v, want %v",
-			extra, names(got), want)
+			extra, jobNames(got), want)
 	}
 }
 
@@ -183,7 +189,7 @@ func wantExactly(t *testing.T, got []*job.Job, want ...string) {
 func wantOrder(t *testing.T, got []*job.Job, want ...string) {
 	t.Helper()
 
-	gotNames := names(got)
+	gotNames := jobNames(got)
 	if len(gotNames) != len(want) {
 		t.Fatalf("claimed %v, want %v", gotNames, want)
 	}
@@ -219,9 +225,9 @@ func wantStillClaimable(t *testing.T, s job.Store, queue string, want ...string)
 func testZeroBudgetSelectsEverything(t *testing.T, s job.Store) {
 	const queue = "fit-zero-budget"
 
-	undeclared := newJob("undeclared", queue, nil, withRunAtOffset(0))
-	small := newJob("small", queue, resource.Set{resource.Memory: GiB}, withRunAtOffset(time.Minute))
-	huge := newJob("huge", queue, resource.Set{
+	undeclared := newFitJob("undeclared", queue, nil, withRunAtOffset(0))
+	small := newFitJob("small", queue, resource.Set{resource.Memory: GiB}, withRunAtOffset(time.Minute))
+	huge := newFitJob("huge", queue, resource.Set{
 		resource.CPU:    64 * resource.MilliScale,
 		resource.Memory: 512 * GiB,
 		resource.Disk:   4096 * GiB,
@@ -265,8 +271,8 @@ func testGPUBudgetFilters(t *testing.T, s job.Store) {
 func runDimensionCase(t *testing.T, s job.Store, queue, key string, budget, fitting, exceeding int64) {
 	t.Helper()
 
-	fits := newJob("fits", queue, resource.Set{key: fitting}, withRunAtOffset(0))
-	exceeds := newJob("exceeds", queue, resource.Set{key: exceeding}, withRunAtOffset(time.Minute))
+	fits := newFitJob("fits", queue, resource.Set{key: fitting}, withRunAtOffset(0))
+	exceeds := newFitJob("exceeds", queue, resource.Set{key: exceeding}, withRunAtOffset(time.Minute))
 
 	mustEnqueue(t, s, fits, exceeds)
 
@@ -292,7 +298,7 @@ func runDimensionCase(t *testing.T, s job.Store, queue, key string, budget, fitt
 func testAbsentBudgetKeyIsUnconstrained(t *testing.T, s job.Store) {
 	const queue = "fit-absent-key"
 
-	gpuHeavy := newJob("gpu-heavy", queue, resource.Set{
+	gpuHeavy := newFitJob("gpu-heavy", queue, resource.Set{
 		resource.Memory: GiB,
 		resource.GPU:    8 * resource.MilliScale,
 	}, withRunAtOffset(0))
@@ -300,7 +306,7 @@ func testAbsentBudgetKeyIsUnconstrained(t *testing.T, s job.Store) {
 	// The declared dimension must keep filtering. An implementation that
 	// read "absent key is unconstrained" as "any missing key disables the
 	// predicate" would claim this one too.
-	tooBig := newJob("too-big", queue, resource.Set{
+	tooBig := newFitJob("too-big", queue, resource.Set{
 		resource.Memory: 64 * GiB,
 		resource.GPU:    resource.MilliScale,
 	}, withRunAtOffset(time.Minute))
@@ -316,35 +322,52 @@ func testAbsentBudgetKeyIsUnconstrained(t *testing.T, s job.Store) {
 	wantExactly(t, got, "gpu-heavy")
 }
 
-// testAbsentCustomKeysAreUnconstrained applies the absent-key rule to
-// the custom dimension, and closes the discontinuity a backend is most
-// likely to introduce here.
+// testBoundedBudgetWithNoCustomKeysRejectsCustomRequirement is the half
+// of the empty-offer rule a backend will get wrong.
 //
-// A caller that declares a budget but no custom keys must keep claiming
-// custom-key jobs. The tempting implementation — matching the job's
-// stored key list against an offered list that happens to be empty —
-// excludes every custom-key job the moment any budget is set, so a caller
-// would go from claiming everything to stranding all specialised work by
-// adding a memory budget. Backends must skip the containment clause
-// entirely when the offer is empty.
-func testAbsentCustomKeysAreUnconstrained(t *testing.T, s job.Store) {
-	const queue = "fit-absent-custom"
+// An empty CustomKeys list means two different things depending on the
+// rest of the opts, and the difference is decided by IsUnbounded:
+//
+//   - Unbounded opts — no budget, no keys, no hashes, no reservation —
+//     are a caller that does not use the resource model. It claims
+//     everything, custom resources included. ZeroBudgetSelectsEverything
+//     covers that half, and it is the backward-compatibility guarantee.
+//   - Opts bounded in any other way, here by a memory budget, are a
+//     resource-aware caller. An empty offer then means this worker has no
+//     custom resources at all, so a job requiring an fpga must NOT be
+//     claimed.
+//
+// A backend that reads an empty offer as "unconstrained" in both cases
+// hands a resource-aware worker specialised work it cannot possibly run.
+// A backend that reads it as "offers nothing" in both cases strands every
+// custom-key job in the fleet the day this option ships. The gate is
+// IsUnbounded, nothing else.
+func testBoundedBudgetWithNoCustomKeysRejectsCustomRequirement(t *testing.T, s job.Store) {
+	const queue = "fit-bounded-no-custom"
 
-	needsFPGA := newJob("needs-fpga", queue, resource.Set{
+	needsFPGA := newFitJob("needs-fpga", queue, resource.Set{
 		resource.Memory: GiB,
 		"fpga":          1,
 	}, withRunAtOffset(0))
-	plain := newJob("plain", queue, resource.Set{resource.Memory: GiB}, withRunAtOffset(time.Minute))
+	plain := newFitJob("plain", queue, resource.Set{resource.Memory: GiB}, withRunAtOffset(time.Minute))
 
 	mustEnqueue(t, s, needsFPGA, plain)
 
-	got := mustDequeue(t, s, job.DequeueOpts{
+	opts := job.DequeueOpts{
 		Queues: []string{queue},
 		Limit:  10,
 		Budget: resource.Set{resource.Memory: 4 * GiB},
-	})
+	}
 
-	wantExactly(t, got, "needs-fpga", "plain")
+	if opts.IsUnbounded() {
+		t.Fatal("opts carrying a memory budget report IsUnbounded() = true")
+	}
+
+	wantExactly(t, mustDequeue(t, s, opts), "plain")
+
+	// And the unbounded caller still gets it, so the rejection above was
+	// the offer being empty and bounded, not the job being unclaimable.
+	wantStillClaimable(t, s, queue, "needs-fpga")
 }
 
 // testExplicitZeroBudgetKeyStillFilters is the other half of the absent
@@ -356,8 +379,8 @@ func testAbsentCustomKeysAreUnconstrained(t *testing.T, s job.Store) {
 func testExplicitZeroBudgetKeyStillFilters(t *testing.T, s job.Store) {
 	const queue = "fit-explicit-zero"
 
-	needsMemory := newJob("needs-memory", queue, resource.Set{resource.Memory: 1}, withRunAtOffset(0))
-	needsNothing := newJob("needs-nothing", queue, nil, withRunAtOffset(time.Minute))
+	needsMemory := newFitJob("needs-memory", queue, resource.Set{resource.Memory: 1}, withRunAtOffset(0))
+	needsNothing := newFitJob("needs-nothing", queue, nil, withRunAtOffset(time.Minute))
 
 	mustEnqueue(t, s, needsMemory, needsNothing)
 
@@ -390,8 +413,8 @@ func testZeroRequirementAlwaysFits(t *testing.T, s job.Store) {
 
 	const queue = "fit-zero-requirement"
 
-	fresh := newJob("never-updated", queue, nil, withRunAtOffset(0))
-	updated := newJob("updated-after-enqueue", queue, nil, withRunAtOffset(time.Minute))
+	fresh := newFitJob("never-updated", queue, nil, withRunAtOffset(0))
+	updated := newFitJob("updated-after-enqueue", queue, nil, withRunAtOffset(time.Minute))
 
 	mustEnqueue(t, s, fresh, updated)
 
@@ -426,14 +449,14 @@ func testZeroRequirementAlwaysFits(t *testing.T, s job.Store) {
 func testExactFitIsClaimable(t *testing.T, s job.Store) {
 	const queue = "fit-exact"
 
-	exact := newJob("exact", queue, resource.Set{
+	exact := newFitJob("exact", queue, resource.Set{
 		resource.CPU:    2 * resource.MilliScale,
 		resource.Memory: 4 * GiB,
 	}, withRunAtOffset(0))
 
 	// One byte over the same budget. If this is claimed the comparison is
 	// the wrong way round; if "exact" is dropped the comparison is <.
-	overByOne := newJob("over-by-one", queue, resource.Set{
+	overByOne := newFitJob("over-by-one", queue, resource.Set{
 		resource.CPU:    2 * resource.MilliScale,
 		resource.Memory: 4*GiB + 1,
 	}, withRunAtOffset(time.Minute))
@@ -459,12 +482,12 @@ func testExactFitIsClaimable(t *testing.T, s job.Store) {
 func testCustomKeyContainmentFilters(t *testing.T, s job.Store) {
 	const queue = "fit-custom-containment"
 
-	plain := newJob("plain", queue, resource.Set{resource.Memory: GiB}, withRunAtOffset(0))
-	needsTPU := newJob("needs-tpu", queue, resource.Set{
+	plain := newFitJob("plain", queue, resource.Set{resource.Memory: GiB}, withRunAtOffset(0))
+	needsTPU := newFitJob("needs-tpu", queue, resource.Set{
 		resource.Memory: GiB,
 		"tpu":           1,
 	}, withRunAtOffset(time.Minute))
-	needsFPGA := newJob("needs-fpga", queue, resource.Set{
+	needsFPGA := newFitJob("needs-fpga", queue, resource.Set{
 		resource.Memory: GiB,
 		"fpga":          1,
 	}, withRunAtOffset(2*time.Minute))
@@ -497,8 +520,8 @@ func testCustomKeyContainmentFilters(t *testing.T, s job.Store) {
 func testCustomKeyPrefixDoesNotFalselyMatch(t *testing.T, s job.Store) {
 	const queue = "fit-custom-prefix"
 
-	needsFPGA := newJob("needs-fpga", queue, resource.Set{"fpga": 1}, withRunAtOffset(0))
-	needsFPGALarge := newJob("needs-fpga-large", queue,
+	needsFPGA := newFitJob("needs-fpga", queue, resource.Set{"fpga": 1}, withRunAtOffset(0))
+	needsFPGALarge := newFitJob("needs-fpga-large", queue,
 		resource.Set{"fpga-large": 1}, withRunAtOffset(time.Minute))
 
 	mustEnqueue(t, s, needsFPGA, needsFPGALarge)
@@ -516,24 +539,41 @@ func testCustomKeyPrefixDoesNotFalselyMatch(t *testing.T, s job.Store) {
 // testCustomKeySubsetIsClaimable pins containment as a genuine subset
 // test rather than a substring one.
 //
-// Both the job's required keys and the caller's offered keys are stored
-// sorted, so a backend tempted to write `offered LIKE '%' || required ||
-// '%'` gets the single-key cases right and then drops a job needing
-// {fpga, tpu} from a caller offering {fpga, nvme, tpu}, because the
-// interleaved key breaks the contiguous run. That failure strands
-// precisely the specialised job that is hardest to place elsewhere.
+// If this case is failing, LIKE is the thing that broke it, and reaching
+// for another LIKE will not fix it. Both the job's required keys and the
+// caller's offered keys are stored sorted, so
+//
+//	:offered LIKE '%' || req_custom_keys || '%'
+//
+// passes every single-key case in this suite — including the prefix
+// collision — and then silently drops a job needing {fpga, tpu} from a
+// caller offering {fpga, nvme, tpu}: the job encodes to ",fpga,tpu,",
+// which is not a substring of ",fpga,nvme,tpu,", because the interleaved
+// key breaks the contiguous run. The job stranded is precisely the
+// specialised one that is hardest to place anywhere else, and nothing in
+// the system reports it.
 //
 // A portable exact formulation for SQL backends: strip each offered key
 // from the stored list with nested REPLACE calls — one per offered key,
 // built in Go since the offered set is a parameter — always replacing
-// ",key," with ",", and require that what remains is "" or ",".
+// ",key," with ",", and require that what remains is "" or ",". With an
+// offer of {fpga, nvme, tpu}:
+//
+//	req_custom_keys = ''
+//	OR REPLACE(REPLACE(REPLACE(req_custom_keys, ',fpga,', ','),
+//	                                            ',nvme,', ','),
+//	                                            ',tpu,',  ',') IN ('', ',')
+//
+// Postgres may prefer string_to_array(...) <@ ARRAY[...]; Mongo can use
+// $expr with $setIsSubset over $split; Redis and memory should just call
+// job.DequeueOpts.Allows.
 func testCustomKeySubsetIsClaimable(t *testing.T, s job.Store) {
 	const (
 		superset = "fit-custom-superset"
 		partial  = "fit-custom-partial"
 	)
 
-	both := newJob("needs-fpga-and-tpu", superset, resource.Set{
+	both := newFitJob("needs-fpga-and-tpu", superset, resource.Set{
 		"fpga": 1,
 		"tpu":  1,
 	}, withRunAtOffset(0))
@@ -549,7 +589,7 @@ func testCustomKeySubsetIsClaimable(t *testing.T, s job.Store) {
 	wantExactly(t, got, "needs-fpga-and-tpu")
 
 	// The other half: offering some of what a job needs is not enough.
-	half := newJob("needs-both-offered-one", partial, resource.Set{
+	half := newFitJob("needs-both-offered-one", partial, resource.Set{
 		"fpga": 1,
 		"tpu":  1,
 	}, withRunAtOffset(0))
@@ -578,15 +618,15 @@ func testCustomKeySubsetIsClaimable(t *testing.T, s job.Store) {
 func testPriorityOrderingPreservedWithinBudget(t *testing.T, s job.Store) {
 	const queue = "fit-priority-order"
 
-	oversized := newJob("oversized", queue, resource.Set{resource.Memory: 64 * GiB},
+	oversized := newFitJob("oversized", queue, resource.Set{resource.Memory: 64 * GiB},
 		withPriority(100), withRunAtOffset(0))
-	high := newJob("high", queue, resource.Set{resource.Memory: GiB},
+	high := newFitJob("high", queue, resource.Set{resource.Memory: GiB},
 		withPriority(9), withRunAtOffset(time.Minute))
-	midEarly := newJob("mid-early", queue, resource.Set{resource.Memory: GiB},
+	midEarly := newFitJob("mid-early", queue, resource.Set{resource.Memory: GiB},
 		withPriority(5), withRunAtOffset(2*time.Minute))
-	midLate := newJob("mid-late", queue, resource.Set{resource.Memory: GiB},
+	midLate := newFitJob("mid-late", queue, resource.Set{resource.Memory: GiB},
 		withPriority(5), withRunAtOffset(3*time.Minute))
-	low := newJob("low", queue, resource.Set{resource.Memory: GiB},
+	low := newFitJob("low", queue, resource.Set{resource.Memory: GiB},
 		withPriority(1), withRunAtOffset(4*time.Minute))
 
 	mustEnqueue(t, s, oversized, high, midEarly, midLate, low)
@@ -601,28 +641,41 @@ func testPriorityOrderingPreservedWithinBudget(t *testing.T, s job.Store) {
 	wantStillClaimable(t, s, queue, "oversized")
 }
 
-// testPreferHashesSortsFirstButNeverFilters covers the locality signal.
+// testPreferHashesSortWithinPriorityBand covers the locality signal, and
+// exists mostly to stop five ORDER BY clauses being written the obvious
+// wrong way.
 //
-// A job whose PrimaryInputHash the caller already has staged sorts ahead
-// of its equals, but it never displaces a higher-priority job and it
-// never excludes anything. Both halves matter: a locality signal that
-// could reorder across priority bands would let a steady stream of
-// locally cached work starve the high-priority job the pool exists to run
-// first, and a locality signal that filtered would strand every job whose
-// inputs happen to be cold.
-func testPreferHashesSortsFirstButNeverFilters(t *testing.T, s job.Store) {
+// "Preferred jobs sort first" does NOT mean
+//
+//	ORDER BY (primary_input_hash = ANY($h)) DESC, priority DESC, run_at ASC
+//
+// It means
+//
+//	ORDER BY priority DESC, (primary_input_hash = ANY($h)) DESC, run_at ASC
+//
+// Locality is an optimization; priority is user-expressed intent, and an
+// optimization does not override intent. With locality above priority, a
+// steady stream of low-priority jobs whose inputs are already cached
+// beats a high-priority job whose inputs are cold — locality causing
+// exactly the starvation this predicate exists to prevent. So a
+// preferred job jumps its own priority band and no further.
+//
+// The other half: PreferHashes must never filter. All four jobs come
+// back, including the two the caller has no local copy of, or every job
+// with cold inputs would be stranded.
+func testPreferHashesSortWithinPriorityBand(t *testing.T, s job.Store) {
 	const (
 		queue = "fit-prefer-hashes"
 		local = "blake3:cached-locally"
 	)
 
-	urgent := newJob("urgent-remote", queue, resource.Set{resource.Memory: GiB},
+	urgent := newFitJob("urgent-remote", queue, resource.Set{resource.Memory: GiB},
 		withPriority(5), withRunAtOffset(0), withHash("blake3:elsewhere"))
-	early := newJob("early-remote", queue, resource.Set{resource.Memory: GiB},
+	early := newFitJob("early-remote", queue, resource.Set{resource.Memory: GiB},
 		withPriority(1), withRunAtOffset(time.Minute), withHash("blake3:also-elsewhere"))
-	mid := newJob("mid-unhashed", queue, resource.Set{resource.Memory: GiB},
+	mid := newFitJob("mid-unhashed", queue, resource.Set{resource.Memory: GiB},
 		withPriority(1), withRunAtOffset(2*time.Minute))
-	late := newJob("late-local", queue, resource.Set{resource.Memory: GiB},
+	late := newFitJob("late-local", queue, resource.Set{resource.Memory: GiB},
 		withPriority(1), withRunAtOffset(3*time.Minute), withHash(local))
 
 	mustEnqueue(t, s, urgent, early, mid, late)
@@ -648,9 +701,9 @@ func testPreferHashesSortsFirstButNeverFilters(t *testing.T, s job.Store) {
 func testReservedForRestrictsToOneJob(t *testing.T, s job.Store) {
 	const queue = "fit-reserved"
 
-	first := newJob("first", queue, resource.Set{resource.Memory: GiB}, withRunAtOffset(0))
-	target := newJob("target", queue, resource.Set{resource.Memory: GiB}, withRunAtOffset(time.Minute))
-	third := newJob("third", queue, resource.Set{resource.Memory: GiB}, withRunAtOffset(2*time.Minute))
+	first := newFitJob("first", queue, resource.Set{resource.Memory: GiB}, withRunAtOffset(0))
+	target := newFitJob("target", queue, resource.Set{resource.Memory: GiB}, withRunAtOffset(time.Minute))
+	third := newFitJob("third", queue, resource.Set{resource.Memory: GiB}, withRunAtOffset(2*time.Minute))
 
 	mustEnqueue(t, s, first, target, third)
 
@@ -695,7 +748,7 @@ func testClaimIsAtomicUnderConcurrency(t *testing.T, s job.Store) {
 	mine := make(map[id.JobID]string, jobCount)
 
 	for i := range jobCount {
-		j := newJob(fmt.Sprintf("concurrent-%d", i), queue,
+		j := newFitJob(fmt.Sprintf("concurrent-%d", i), queue,
 			resource.Set{resource.Memory: GiB}, withRunAtOffset(time.Duration(i)*time.Second))
 
 		mustEnqueue(t, s, j)
