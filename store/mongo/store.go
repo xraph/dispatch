@@ -200,6 +200,8 @@ func migrationIndexes() map[string][]mongod.IndexModel {
 				{Key: "state", Value: 1},
 				{Key: "heartbeat_at", Value: 1},
 			}},
+			// Lease index for the expired-lease reclaim scan.
+			{Keys: bson.D{{Key: "state", Value: 1}, {Key: "lease_expires_at", Value: 1}}},
 		},
 		colWorkflowRuns: {
 			{Keys: bson.D{{Key: "state", Value: 1}}},

@@ -41,10 +41,10 @@ type jobModel struct {
 	CreatedAt   time.Time  `grove:"created_at,notnull" bson:"created_at"`
 	UpdatedAt   time.Time  `grove:"updated_at,notnull" bson:"updated_at"`
 
-	LeaseEpoch     int        `bson:"lease_epoch"`
-	LeaseExpiresAt *time.Time `bson:"lease_expires_at,omitempty"`
-	LeaseTTL       int64      `bson:"lease_ttl"`
-	EvictCount     int        `bson:"evict_count"`
+	LeaseEpoch     int        `grove:"lease_epoch,notnull" bson:"lease_epoch"`
+	LeaseExpiresAt *time.Time `grove:"lease_expires_at"    bson:"lease_expires_at,omitempty"`
+	LeaseTTL       int64      `grove:"lease_ttl,notnull"   bson:"lease_ttl"`
+	EvictCount     int        `grove:"evict_count,notnull" bson:"evict_count"`
 }
 
 func toJobModel(j *job.Job) *jobModel {

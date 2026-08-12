@@ -24,6 +24,10 @@ func (s *Store) DequeueLeased(
 	workerID id.WorkerID,
 	leaseUntil time.Time,
 ) ([]*job.Job, error) {
+	if limit <= 0 {
+		return nil, nil
+	}
+
 	t := now()
 	jobs := make([]*job.Job, 0, limit)
 
@@ -142,6 +146,10 @@ func (s *Store) RenewLease(
 // epoch it was seen at, so two pools reclaiming concurrently cannot both
 // take the same job — the loser's filter no longer matches.
 func (s *Store) ReclaimExpiredLeases(ctx context.Context, limit int) ([]*job.Job, error) {
+	if limit <= 0 {
+		return nil, nil
+	}
+
 	t := now()
 	col := s.mdb.Collection(colJobs)
 
