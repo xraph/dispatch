@@ -134,15 +134,19 @@ func (s *Store) AcquireLeadership(ctx context.Context, workerID id.WorkerID, ttl
 	}
 
 	// Step 2: Check if there's already an active leader that isn't us.
+	//
+	// The whole row is selected rather than just the id column: the driver
+	// requires the number of returned columns to match the number of
+	// destination fields, so projecting a single column into the full
+	// model fails at scan time.
 	var leader workerModel
 	err = s.pgdb.NewSelect(&leader).
-		Column("id").
 		Where("is_leader = TRUE AND leader_until >= NOW()").
 		Limit(1).
 		Scan(ctx)
 	if err != nil {
 		if !isNoRows(err) {
-			return false, fmt.Errorf("dispatch/bun: check leader: %w", err)
+			return false, fmt.Errorf("dispatch/postgres: check leader: %w", err)
 		}
 		// No active leader — proceed to claim.
 	} else if leader.ID != wID {
