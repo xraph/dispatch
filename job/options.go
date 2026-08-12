@@ -4,6 +4,7 @@ import (
 	"time"
 
 	"github.com/xraph/dispatch/artifact"
+	"github.com/xraph/dispatch/resource"
 )
 
 // Options configures per-job behavior such as retries, queue, and priority.
@@ -39,6 +40,25 @@ type Options struct {
 	// enqueue. The engine validates them against Inputs before the job is
 	// persisted.
 	Bindings map[string]artifact.Ref
+
+	// Resources declares what this job needs. It is the floor: the
+	// engine may raise it via ResourceFunc or a configured estimator,
+	// and a per-enqueue WithResources call overrides both.
+	Resources resource.Set
+
+	// ResourceLimits is the enforcement ceiling. When unset, memory and
+	// the other incompressible keys default to their request and CPU is
+	// left unbounded.
+	ResourceLimits resource.Set
+
+	// ResourceFunc computes the requirement from the enqueue-time
+	// request, for jobs whose footprint scales with their input. It runs
+	// once, in the enqueuing process, and never on the scheduling path.
+	ResourceFunc resource.ResourceFunc
+
+	// ResourceClass is an opaque scheduling class the isolation backend
+	// interprets. Core never reads it.
+	ResourceClass string
 }
 
 // DefaultOptions returns Options with sensible defaults.
@@ -97,6 +117,57 @@ func WithArtifactInputs(specs ...artifact.InputSpec) Option {
 	return func(o *Options) {
 		o.Inputs = append(o.Inputs, specs...)
 	}
+}
+
+// WithResources declares the resources a job needs. Multiple sets are
+// merged per key, so the common form reads as a list:
+//
+//	job.WithResources(resource.CPUs(4), resource.MemoryGB(16))
+//
+// Passed at enqueue instead of on the definition, it overrides every
+// other source, including a configured estimator.
+func WithResources(sets ...resource.Set) Option {
+	return func(o *Options) {
+		for _, s := range sets {
+			if o.Resources == nil {
+				o.Resources = make(resource.Set, len(s))
+			}
+
+			for k, v := range s {
+				o.Resources[k] = v
+			}
+		}
+	}
+}
+
+// WithResourceLimits sets the enforcement ceiling explicitly.
+func WithResourceLimits(sets ...resource.Set) Option {
+	return func(o *Options) {
+		for _, s := range sets {
+			if o.ResourceLimits == nil {
+				o.ResourceLimits = make(resource.Set, len(s))
+			}
+
+			for k, v := range s {
+				o.ResourceLimits[k] = v
+			}
+		}
+	}
+}
+
+// WithResourceFunc computes the requirement from the job's input.
+//
+// This is what lets one definition serve a 40 MB model and a 4 GB one:
+// the artifact plane knows the input size at enqueue, so the function
+// sees it before the job is ever scheduled.
+func WithResourceFunc(fn resource.ResourceFunc) Option {
+	return func(o *Options) { o.ResourceFunc = fn }
+}
+
+// WithResourceClass sets an opaque scheduling class for the isolation
+// backend. Core stores and forwards it without interpretation.
+func WithResourceClass(class string) Option {
+	return func(o *Options) { o.ResourceClass = class }
 }
 
 // WithLeaseTTL sets how long this job's lease survives without renewal.

@@ -5,6 +5,7 @@ import (
 
 	"github.com/xraph/dispatch"
 	"github.com/xraph/dispatch/id"
+	"github.com/xraph/dispatch/resource"
 )
 
 // State represents the lifecycle state of a job.
@@ -52,6 +53,26 @@ type Job struct {
 	// the engine: bindings placed inside it would be invisible to the
 	// scheduler and to the staging middleware.
 	ArtifactBindings []byte `json:"artifact_bindings,omitempty"`
+
+	// Resources is the resolved requirement, computed once at enqueue.
+	// Scheduling reads this rather than calling user code.
+	Resources resource.Set `json:"resources,omitempty"`
+
+	// ResourceLimits is the resolved enforcement ceiling.
+	ResourceLimits resource.Set `json:"resource_limits,omitempty"`
+
+	// ResourceClass is forwarded to the isolation backend uninterpreted.
+	ResourceClass string `json:"resource_class,omitempty"`
+
+	// InputBytes is the total size of the declared artifact inputs. It
+	// is the estimator's primary feature and the measurement bucket key.
+	InputBytes int64 `json:"input_bytes,omitempty"`
+
+	// PrimaryInputHash is the content hash of the largest declared
+	// input, used as the locality-scheduling signal. Often empty: the
+	// artifact plane fills content_hash at first staging, not at
+	// registration, so locality helps from an artifact's second use on.
+	PrimaryInputHash string `json:"primary_input_hash,omitempty"`
 
 	// LeaseEpoch is the fencing token for the current lease. It increments
 	// on every grant and every reclamation. A worker holding a stale epoch
