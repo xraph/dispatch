@@ -150,6 +150,14 @@ func TestJobStore_DequeueSkipLocked(t *testing.T) {
 	ctx := context.Background()
 
 	// Enqueue 3 jobs with different priorities.
+	//
+	// run_at is backdated rather than set to now. Dequeue eligibility is
+	// `run_at <= NOW()`, where run_at comes from this process's clock and
+	// NOW() from the database's. When the two disagree by even a fraction
+	// of a millisecond -- routine when Postgres runs in a container -- a
+	// job stamped "now" is briefly in the future and is skipped, which
+	// made this test flake between 3, 2, and 0 eligible jobs. Backdating
+	// keeps the test about priority ordering and SKIP LOCKED.
 	for i := 0; i < 3; i++ {
 		j := &job.Job{
 			Entity:     dispatch.NewEntity(),
@@ -160,7 +168,7 @@ func TestJobStore_DequeueSkipLocked(t *testing.T) {
 			State:      job.StatePending,
 			Priority:   i, // 0, 1, 2
 			MaxRetries: 3,
-			RunAt:      time.Now().UTC(),
+			RunAt:      time.Now().UTC().Add(-time.Minute),
 		}
 		if err := s.EnqueueJob(ctx, j); err != nil {
 			t.Fatalf("enqueue job-%d: %v", i, err)
