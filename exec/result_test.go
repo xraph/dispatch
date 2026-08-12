@@ -29,6 +29,12 @@ func TestResult_Err(t *testing.T) {
 			wantText: "bad IFC header",
 		},
 		{
+			name:     "exit code without a handler message",
+			result:   exec.Result{Status: exec.StatusHandlerError, ExitCode: 137},
+			wantIs:   exec.ErrHandler,
+			wantText: "exit 137",
+		},
+		{
 			name:     "timeout",
 			result:   exec.Result{Status: exec.StatusTimeout},
 			wantIs:   exec.ErrTimeout,
