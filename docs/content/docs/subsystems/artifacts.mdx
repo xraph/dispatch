@@ -1,0 +1,233 @@
+---
+title: Artifacts
+description: Tracked object storage for job inputs and outputs.
+---
+
+Jobs that process large files have nowhere good to put them. A job's payload is a
+`BYTEA` column, so nobody puts a two-gigabyte model in it — they put an S3 URL in a
+string field instead, and from that moment Dispatch is blind to the data. It cannot
+size the job before scheduling it, cannot tell that two jobs want the same file,
+cannot clean up the intermediates, and cannot show you what a run consumed.
+
+The artifact plane makes that data a first-class thing Dispatch knows about.
+
+<Callout type="info">
+  Artifacts are entirely opt-in. With no backend configured, Dispatch behaves
+  exactly as it did before this existed.
+</Callout>
+
+## The two lifecycles
+
+Everything follows from which of these an artifact is.
+
+**Durable** artifacts are yours. Your application uploaded them; Dispatch registers
+them, reads them, and never deletes them. A customer's uploaded model is durable.
+
+**Ephemeral** artifacts are Dispatch's. A handler created them through the artifact
+API, and Dispatch reclaims them once every job or run that references them has
+finished and a retention window has passed. A tessellated mesh passed between
+workflow steps is ephemeral.
+
+The separation exists so that a bug in reclamation cannot reach your customers'
+data. `lifecycle = 'ephemeral'` appears as a literal in every sweep query on every
+backend, and the sweeper re-checks each artifact before acting on it.
+
+## Declaring inputs
+
+A job declares the artifacts it consumes. Declarations are what let the engine
+validate bindings at enqueue, know the total input size before scheduling, and
+materialise the bytes before your handler is called.
+
+```go
+var Tessellate = job.NewDefinition("tessellate.model",
+    func(ctx context.Context, in TessellateInput) error {
+        art := artifact.From(ctx)
+
+        // Already on local disk before the handler ran.
+        src := art.Path("model")
+
+        mesh, err := occt.Tessellate(src, in.Detail)
+        if err != nil {
+            return err
+        }
+
+        w, err := art.Create(ctx, "mesh.glb",
+            artifact.ContentType("model/gltf-binary"))
+        if err != nil {
+            return err
+        }
+        defer w.Abort() // no-op after a successful Commit
+
+        if _, err := io.Copy(w, mesh); err != nil {
+            return err
+        }
+
+        _, err = w.Commit(ctx)
+        return err
+    },
+    job.WithArtifactInputs(
+        artifact.Input("model",
+            artifact.Required,
+            artifact.MaxSize(8<<30),
+            artifact.StageAsPath),
+    ),
+    job.WithTimeout(6*time.Hour),
+)
+```
+
+Register with `RegisterChecked` to have the declaration validated against the
+staging budget, so a job that could never be staged fails on your machine rather
+than on a worker:
+
+```go
+if err := engine.RegisterChecked(eng, Tessellate); err != nil {
+    log.Fatal(err)
+}
+```
+
+Bind an artifact when you enqueue:
+
+```go
+ref, err := svc.Register(ctx, "uploads", "tower.ifc")
+if err != nil {
+    return err
+}
+
+_, err = engine.Enqueue(ctx, eng, "tessellate.model",
+    TessellateInput{Detail: 0.5},
+    engine.Bind("model", ref))
+```
+
+An oversized or undeclared binding is rejected here, at enqueue, so it never
+becomes a job that fails on a worker and burns retries.
+
+### Staging modes
+
+`StageAsPath` (the default) downloads the artifact before the handler runs and
+gives you a file path. This is what CAD kernels, mesh importers, and PDF engines
+need — they seek and memory-map, so a stream is no use to them.
+
+`StageLazy` downloads nothing up front. Call `art.Open(ctx, name)` to stream it if
+and when you need it. Right for data you read once, front to back.
+
+## Creating outputs
+
+Outputs are imperative rather than declared, so a handler can produce a number of
+them it only discovers at run time:
+
+```go
+for i, page := range pages {
+    w, err := art.Create(ctx, fmt.Sprintf("page-%d.png", i))
+    if err != nil {
+        return err
+    }
+    // ...render, then Commit
+}
+```
+
+### Resuming a retried job
+
+`Commit` publishes immediately and records the attempt, because a six-hour job
+splitting a four-hundred-page PDF cannot buffer its work until it returns. That
+makes `IfAbsent` possible:
+
+```go
+w, err := art.Create(ctx, "page-317.png", artifact.IfAbsent())
+if errors.Is(err, artifact.ErrExists) {
+    continue // a previous attempt already rendered this page
+}
+```
+
+A retried job can skip what it already did instead of starting over.
+
+## The staging cache
+
+Staged artifacts live in a content-addressed cache on each worker, keyed by their
+BLAKE3 hash.
+
+Three things follow from that. Two jobs consuming the same model share one copy on
+disk. Eight jobs staging it at once trigger one download, not eight. And a job
+re-run over an input it already staged pays nothing.
+
+The hash is computed *during* the download rather than by a separate pass, which is
+why registering an artifact does not hash it: doing so would turn a cheap row
+insert into a full read of a multi-gigabyte file. An artifact earns its hash the
+first time something stages it.
+
+A byte budget bounds the cache. When it is full, unleased entries are evicted
+least-recently-used; when everything is in use, a job **waits** rather than filling
+the volume. An entry a running handler holds is never evicted.
+
+```yaml
+cache:
+  dir: /var/lib/dispatch/cache
+  budget: 214748364800   # 200 GiB
+```
+
+## Configuration
+
+With Forge, mount both extensions and Dispatch discovers Trove from the container:
+
+```go
+app := forge.New(
+    troveext.New(),      // provides *trove.Trove
+    dispatchext.New(),   // discovers it
+)
+```
+
+```yaml
+extensions:
+  dispatch:
+    artifacts:
+      enabled: true
+      trove_store: ""              # "" uses the default instance
+      bucket: dispatch-artifacts
+      ephemeral_prefix: ephemeral
+      retention: 168h
+      purge_grace: 24h
+      cache:
+        dir: /var/lib/dispatch/cache
+        budget: 214748364800
+```
+
+Outside Forge, or with a store that is not Trove, supply a backend directly:
+
+```go
+dispatchext.New(
+    dispatchext.WithArtifactBackend(myBackend),
+    dispatchext.WithArtifactCacheDir("/var/lib/dispatch/cache"),
+    dispatchext.WithArtifactCacheBudget(200 << 30),
+)
+```
+
+Because the backend is an interface, Trove is a default rather than a dependency.
+Two of its features are worth knowing about: its `encrypt` middleware gives you
+artifacts encrypted at rest with no Dispatch code, and its `scan` middleware sits
+on the write path, so a malicious upload can be rejected before any parser opens
+it.
+
+## Reclamation
+
+Ephemeral artifacts are reclaimed in two phases. A **sweep** marks an artifact
+deleted and stops serving it. A **purge**, `purge_grace` later, removes the bytes
+and the row. A mistaken sweep is therefore observable and reversible for a day
+rather than instantly destructive.
+
+An artifact becomes eligible once every owner that links it has reached a terminal
+state and `retention` has elapsed since the last of them finished. Artifacts with
+no links at all — only possible after a crash mid-create — are handled by a
+separate orphan pass.
+
+Sweeping runs on the elected leader only. It can be stopped without a redeploy, and
+run in dry-run mode to see what it would do.
+
+## Error handling
+
+| Situation | What happens |
+|---|---|
+| Input artifact was deleted | Fails fast to the DLQ — retrying a fetch of something gone cannot succeed |
+| Backend timeout or 5xx | Transient; retried with normal backoff |
+| Binding exceeds the declared `MaxSize` | Rejected at enqueue, returned to the caller |
+| Declared inputs exceed the cache budget | Rejected at `RegisterChecked` |
+| Cache full and everything is leased | Bounded by the job's deadline, then `ErrBudgetExceeded` |
+| Worker killed mid-job | Leases are in-memory, so death releases them |

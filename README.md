@@ -15,6 +15,8 @@ Dispatch is a library — not a service. Import it, configure a store, and regis
 - **Extension hooks** — Opt-in lifecycle interfaces for every job, workflow, cron, and shutdown event
 - **OpenTelemetry** — Built-in metrics and tracing via the `observability` and `middleware` packages
 - **Relay integration** — Emit typed webhook events at every lifecycle point via `relay_hook`
+- **Artifact plane** — Track gigabyte-scale job inputs and outputs in object storage, staged to a content-addressed local cache
+- **Artifact plane** — Track gigabyte-scale job inputs and outputs in object storage, staged to a content-addressed local cache
 - **Pluggable storage** — Memory, PostgreSQL (pgx/v5), Grove ORM, SQLite, Redis
 
 ## Quick Start
@@ -84,6 +86,7 @@ func main() {
 | `dispatch` | Root — `Dispatcher`, `Config`, options, errors, `Entity` base type |
 | `engine` | Wires all subsystems; `Build`, `Register`, `Enqueue`, `RegisterWorkflow`, `RegisterCron` |
 | `job` | `Job` entity, `State` machine, `Definition[T]`, `Registry` |
+| `artifact` | Tracked object storage — declared inputs, imperative outputs, staging cache, lifecycle sweeping |
 | `workflow` | `Definition[T]`, `Run`, `State`, step checkpointing |
 | `cron` | `Entry`, `Scheduler`, distributed leader-elected cron |
 | `dlq` | `Entry`, `Service` — list, replay, purge |

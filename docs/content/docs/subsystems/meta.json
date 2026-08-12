@@ -2,6 +2,7 @@
   "title": "Subsystems",
   "pages": [
     "dwp",
+    "artifacts",
     "catalog",
     "delivery",
     "dlq",
