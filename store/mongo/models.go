@@ -13,6 +13,7 @@ import (
 	"github.com/xraph/dispatch/event"
 	"github.com/xraph/dispatch/id"
 	"github.com/xraph/dispatch/job"
+	"github.com/xraph/dispatch/resource"
 	"github.com/xraph/dispatch/workflow"
 )
 
@@ -45,10 +46,38 @@ type jobModel struct {
 	LeaseExpiresAt *time.Time `grove:"lease_expires_at"    bson:"lease_expires_at,omitempty"`
 	LeaseTTL       int64      `grove:"lease_ttl,notnull"   bson:"lease_ttl"`
 	EvictCount     int        `grove:"evict_count,notnull" bson:"evict_count"`
+
+	// The four canonical dimensions get their own fields because a
+	// later dequeue predicate compares them numerically and must
+	// behave identically across all five backends; JSON/BSON comparison
+	// semantics are not portable. They are derived from Resources by
+	// toJobModel -- the caller never sets them directly.
+	ReqCPUMilli    int64  `grove:"req_cpu_milli,notnull,default:0"    bson:"req_cpu_milli"`
+	ReqMemoryBytes int64  `grove:"req_memory_bytes,notnull,default:0" bson:"req_memory_bytes"`
+	ReqDiskBytes   int64  `grove:"req_disk_bytes,notnull,default:0"   bson:"req_disk_bytes"`
+	ReqGPUMilli    int64  `grove:"req_gpu_milli,notnull,default:0"    bson:"req_gpu_milli"`
+	ReqCustomKeys  string `grove:"req_custom_keys,notnull,default:''" bson:"req_custom_keys"`
+
+	// ResourceRequests and ResourceLimits are the full-fidelity copy of
+	// Resources / ResourceLimits, including custom keys the scalar
+	// fields above do not carry; fromJobModel reads Resources back from
+	// here, not from the scalars. Unlike the SQL backends this needs no
+	// resource.EncodeSet/DecodeSet codec wrapper: the BSON driver
+	// marshals resource.Set (a map[string]int64) as a native
+	// subdocument, and a nil map with "omitempty" is dropped from the
+	// document entirely -- not written as an empty subdocument -- so
+	// toJobModel leaves the field at its Go zero value for a zero Set
+	// and an undeclared job's document carries no resource_requests key
+	// at all, mirroring the SQL backends' NULL-column contract.
+	ResourceRequests resource.Set `grove:"resource_requests" bson:"resource_requests,omitempty"`
+	ResourceLimits   resource.Set `grove:"resource_limits"   bson:"resource_limits,omitempty"`
+	ResourceClass    string       `grove:"resource_class,notnull,default:''" bson:"resource_class"`
+	InputBytes       int64        `grove:"input_bytes,notnull,default:0"     bson:"input_bytes"`
+	PrimaryInputHash string       `grove:"primary_input_hash" bson:"primary_input_hash"`
 }
 
 func toJobModel(j *job.Job) *jobModel {
-	return &jobModel{
+	m := &jobModel{
 		ID:          j.ID.String(),
 		Name:        j.Name,
 		Queue:       j.Queue,
@@ -73,7 +102,29 @@ func toJobModel(j *job.Job) *jobModel {
 		LeaseExpiresAt: j.LeaseExpiresAt,
 		LeaseTTL:       j.LeaseTTL.Nanoseconds(),
 		EvictCount:     j.EvictCount,
+
+		ReqCPUMilli:      j.Resources[resource.CPU],
+		ReqMemoryBytes:   j.Resources[resource.Memory],
+		ReqDiskBytes:     j.Resources[resource.Disk],
+		ReqGPUMilli:      j.Resources[resource.GPU],
+		ReqCustomKeys:    resource.EncodeCustomKeys(j.Resources),
+		ResourceClass:    j.ResourceClass,
+		InputBytes:       j.InputBytes,
+		PrimaryInputHash: j.PrimaryInputHash,
 	}
+
+	// A zero Set (nil, or every quantity zero) is left as the field's
+	// Go zero value -- nil -- rather than assigned j.Resources/
+	// j.ResourceLimits verbatim, so "omitempty" drops the key instead
+	// of writing an empty subdocument.
+	if !j.Resources.IsZero() {
+		m.ResourceRequests = j.Resources
+	}
+	if !j.ResourceLimits.IsZero() {
+		m.ResourceLimits = j.ResourceLimits
+	}
+
+	return m
 }
 
 func fromJobModel(m *jobModel) (*job.Job, error) {
@@ -108,6 +159,12 @@ func fromJobModel(m *jobModel) (*job.Job, error) {
 		LeaseExpiresAt: m.LeaseExpiresAt,
 		LeaseTTL:       time.Duration(m.LeaseTTL),
 		EvictCount:     m.EvictCount,
+
+		Resources:        m.ResourceRequests,
+		ResourceLimits:   m.ResourceLimits,
+		ResourceClass:    m.ResourceClass,
+		InputBytes:       m.InputBytes,
+		PrimaryInputHash: m.PrimaryInputHash,
 	}
 
 	if m.WorkerID != "" {

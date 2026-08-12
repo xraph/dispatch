@@ -12,6 +12,7 @@ import (
 	"github.com/xraph/dispatch"
 	"github.com/xraph/dispatch/id"
 	"github.com/xraph/dispatch/job"
+	"github.com/xraph/dispatch/resource"
 )
 
 // ── JSON model for KV storage ──
@@ -41,9 +42,43 @@ type jobEntity struct {
 	LeaseExpiresAt *time.Time `json:"lease_expires_at,omitempty"`
 	LeaseTTL       int64      `json:"lease_ttl"`
 	EvictCount     int        `json:"evict_count"`
+
+	// The four canonical dimensions get their own fields because a
+	// later dequeue predicate compares them numerically and must
+	// behave identically across all five backends. They are derived
+	// from Resources by toJobEntity -- never independently settable.
+	ReqCPUMilli    int64  `json:"req_cpu_milli"`
+	ReqMemoryBytes int64  `json:"req_memory_bytes"`
+	ReqDiskBytes   int64  `json:"req_disk_bytes"`
+	ReqGPUMilli    int64  `json:"req_gpu_milli"`
+	ReqCustomKeys  string `json:"req_custom_keys"`
+
+	// ResourceRequests and ResourceLimits are the full-fidelity encoded
+	// copy of Resources / ResourceLimits produced by resource.EncodeSet,
+	// including custom keys the scalar fields above do not carry.
+	// fromJobEntity reconstructs Resources from here, not from the
+	// scalars. "omitempty" on this []byte -- nil for a zero Set, per
+	// EncodeSet's contract -- is what keeps an undeclared job's JSON
+	// blob free of the key entirely, mirroring the SQL backends' NULL
+	// column: an absent value, not "{}" or "".
+	ResourceRequests []byte `json:"resource_requests,omitempty"`
+	ResourceLimits   []byte `json:"resource_limits,omitempty"`
+	ResourceClass    string `json:"resource_class"`
+	InputBytes       int64  `json:"input_bytes"`
+	PrimaryInputHash string `json:"primary_input_hash"`
 }
 
-func toJobEntity(j *job.Job) *jobEntity {
+func toJobEntity(j *job.Job) (*jobEntity, error) {
+	reqJSON, err := resource.EncodeSet(j.Resources)
+	if err != nil {
+		return nil, fmt.Errorf("dispatch/redis: marshal job resources: %w", err)
+	}
+
+	limitsJSON, err := resource.EncodeSet(j.ResourceLimits)
+	if err != nil {
+		return nil, fmt.Errorf("dispatch/redis: marshal job resource limits: %w", err)
+	}
+
 	return &jobEntity{
 		ID:          j.ID.String(),
 		Name:        j.Name,
@@ -69,13 +104,34 @@ func toJobEntity(j *job.Job) *jobEntity {
 		LeaseExpiresAt: j.LeaseExpiresAt,
 		LeaseTTL:       j.LeaseTTL.Nanoseconds(),
 		EvictCount:     j.EvictCount,
-	}
+
+		ReqCPUMilli:      j.Resources[resource.CPU],
+		ReqMemoryBytes:   j.Resources[resource.Memory],
+		ReqDiskBytes:     j.Resources[resource.Disk],
+		ReqGPUMilli:      j.Resources[resource.GPU],
+		ReqCustomKeys:    resource.EncodeCustomKeys(j.Resources),
+		ResourceRequests: reqJSON,
+		ResourceLimits:   limitsJSON,
+		ResourceClass:    j.ResourceClass,
+		InputBytes:       j.InputBytes,
+		PrimaryInputHash: j.PrimaryInputHash,
+	}, nil
 }
 
 func fromJobEntity(e *jobEntity) (*job.Job, error) {
 	parsedID, err := id.ParseJobID(e.ID)
 	if err != nil {
 		return nil, fmt.Errorf("dispatch/redis: parse job id: %w", err)
+	}
+
+	resources, err := resource.DecodeSet(e.ResourceRequests)
+	if err != nil {
+		return nil, fmt.Errorf("dispatch/redis: unmarshal job resources: %w", err)
+	}
+
+	limits, err := resource.DecodeSet(e.ResourceLimits)
+	if err != nil {
+		return nil, fmt.Errorf("dispatch/redis: unmarshal job resource limits: %w", err)
 	}
 
 	j := &job.Job{
@@ -104,6 +160,12 @@ func fromJobEntity(e *jobEntity) (*job.Job, error) {
 		LeaseExpiresAt: e.LeaseExpiresAt,
 		LeaseTTL:       time.Duration(e.LeaseTTL),
 		EvictCount:     e.EvictCount,
+
+		Resources:        resources,
+		ResourceLimits:   limits,
+		ResourceClass:    e.ResourceClass,
+		InputBytes:       e.InputBytes,
+		PrimaryInputHash: e.PrimaryInputHash,
 	}
 
 	if e.WorkerID != "" {
@@ -130,7 +192,10 @@ func (s *Store) EnqueueJob(ctx context.Context, j *job.Job) error {
 		return dispatch.ErrJobAlreadyExists
 	}
 
-	e := toJobEntity(j)
+	e, err := toJobEntity(j)
+	if err != nil {
+		return err
+	}
 	if setErr := s.setEntity(ctx, key, e); setErr != nil {
 		return fmt.Errorf("dispatch/redis: enqueue set entity: %w", setErr)
 	}
@@ -223,7 +288,10 @@ func (s *Store) UpdateJob(ctx context.Context, j *job.Job) error {
 		return dispatch.ErrJobNotFound
 	}
 
-	e := toJobEntity(j)
+	e, err := toJobEntity(j)
+	if err != nil {
+		return err
+	}
 	e.UpdatedAt = now()
 	return s.setEntity(ctx, key, e)
 }
