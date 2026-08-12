@@ -40,6 +40,11 @@ type jobModel struct {
 	Timeout     int64      `grove:"timeout,notnull" bson:"timeout"`
 	CreatedAt   time.Time  `grove:"created_at,notnull" bson:"created_at"`
 	UpdatedAt   time.Time  `grove:"updated_at,notnull" bson:"updated_at"`
+
+	LeaseEpoch     int        `bson:"lease_epoch"`
+	LeaseExpiresAt *time.Time `bson:"lease_expires_at,omitempty"`
+	LeaseTTL       int64      `bson:"lease_ttl"`
+	EvictCount     int        `bson:"evict_count"`
 }
 
 func toJobModel(j *job.Job) *jobModel {
@@ -63,6 +68,11 @@ func toJobModel(j *job.Job) *jobModel {
 		Timeout:     j.Timeout.Nanoseconds(),
 		CreatedAt:   j.CreatedAt,
 		UpdatedAt:   j.UpdatedAt,
+
+		LeaseEpoch:     j.LeaseEpoch,
+		LeaseExpiresAt: j.LeaseExpiresAt,
+		LeaseTTL:       j.LeaseTTL.Nanoseconds(),
+		EvictCount:     j.EvictCount,
 	}
 }
 
@@ -93,6 +103,11 @@ func fromJobModel(m *jobModel) (*job.Job, error) {
 		CompletedAt: m.CompletedAt,
 		HeartbeatAt: m.HeartbeatAt,
 		Timeout:     time.Duration(m.Timeout),
+
+		LeaseEpoch:     m.LeaseEpoch,
+		LeaseExpiresAt: m.LeaseExpiresAt,
+		LeaseTTL:       time.Duration(m.LeaseTTL),
+		EvictCount:     m.EvictCount,
 	}
 
 	if m.WorkerID != "" {

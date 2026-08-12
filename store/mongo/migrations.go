@@ -272,5 +272,25 @@ func init() {
 				return mexec.DropCollection(ctx, (*artifactModel)(nil))
 			},
 		},
+		&migrate.Migration{
+			Name:    "add_job_lease_index",
+			Version: "20260812000001",
+			Up: func(ctx context.Context, exec migrate.Executor) error {
+				mexec, ok := exec.(*mongomigrate.Executor)
+				if !ok {
+					return fmt.Errorf("expected mongomigrate executor, got %T", exec)
+				}
+
+				// Mongo is schemaless, so the lease fields need no
+				// migration — only the index the reclaim scan reads.
+				return mexec.CreateIndexes(ctx, colJobs, []mongo.IndexModel{
+					{Keys: bson.D{{Key: "state", Value: 1}, {Key: "lease_expires_at", Value: 1}}},
+				})
+			},
+			Down: func(_ context.Context, _ migrate.Executor) error {
+				// Dropping an index is not worth failing a rollback over.
+				return nil
+			},
+		},
 	)
 }

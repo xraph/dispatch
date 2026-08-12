@@ -47,6 +47,7 @@ var (
 	_ event.Store    = (*Store)(nil)
 	_ cluster.Store  = (*Store)(nil)
 	_ artifact.Store = (*Store)(nil)
+	_ job.LeaseStore = (*Store)(nil)
 )
 
 // Store is a grove ORM implementation of store.Store using MongoDB driver.
