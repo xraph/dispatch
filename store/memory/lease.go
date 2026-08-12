@@ -70,8 +70,7 @@ func (m *Store) DequeueLeased(
 		j.LeaseExpiresAt = &until
 		j.UpdatedAt = now
 
-		cp := *j
-		result[i] = &cp
+		result[i] = cloneJob(j)
 	}
 
 	return result, nil
@@ -141,8 +140,7 @@ func (m *Store) ReclaimExpiredLeases(_ context.Context, limit int) ([]*job.Job, 
 		j.EvictCount++
 		j.UpdatedAt = now
 
-		cp := *j
-		reclaimed = append(reclaimed, &cp)
+		reclaimed = append(reclaimed, cloneJob(j))
 	}
 
 	return reclaimed, nil
