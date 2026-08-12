@@ -1,0 +1,122 @@
+---
+title: Execution Isolation
+description: Declaring the isolation a handler needs, and how Dispatch enforces it.
+---
+
+A handler that parses an untrusted customer upload with a memory-unsafe native
+library runs, today, in the same process as your database credentials. If the
+parser has a bug and the file is crafted to hit it, whatever the parser can
+reach, the attacker can reach — which in a typical worker is everything.
+
+The execution plane gives a job definition a way to say it needs more than
+that, and gives the engine a way to refuse to run it if the deployment cannot
+provide it.
+
+<Callout type="info">
+  Execution isolation is entirely opt-in. A definition that declares nothing
+  runs in-process exactly as it always has.
+</Callout>
+
+## The ladder
+
+Isolation is a `Level`, and levels are ordered:
+
+```go
+exec.LevelNone      // in-process: no isolation. The default.
+exec.LevelProcess   // a separate address space
+exec.LevelSandboxed // + mount, network, PID, and user namespaces, seccomp, dropped capabilities
+exec.LevelVM        // + an independent kernel (gVisor or Kata)
+```
+
+A definition declares the *minimum* it requires, not the executor it runs on
+— which rung actually satisfies that requirement is a deployment decision,
+made by whichever executors the deployment has configured.
+
+Only `LevelNone` ships today, as the in-process executor. `LevelProcess`,
+`LevelSandboxed`, and `LevelVM` describe rungs that later phases add
+(subprocess, OCI container, and Kubernetes pod, respectively). Declaring one
+of them now is legitimate — it documents the requirement — but no deployment
+can satisfy it yet, which matters for the reason below.
+
+## Declaring a policy
+
+```go
+var Tessellate = job.NewDefinition("tessellate.model",
+    func(ctx context.Context, in TessellateInput) error {
+        // parses an untrusted customer upload with a native geometry kernel
+        return nil
+    },
+    job.WithExecution(
+        exec.Isolate(exec.LevelProcess),
+        exec.GracePeriod(45*time.Second),
+    ),
+)
+```
+
+`exec.Isolate` sets the minimum level. `exec.GracePeriod` sets how long a
+sandbox gets to exit cleanly after being signalled before it is killed
+outright — later rungs use this for their kill ladder; the in-process
+executor ignores it, since there's no process to signal. `exec.Image`
+overrides the container image an out-of-process rung launches, for a handler
+that needs something other than the worker's own image. `exec.AllowDowngrade`
+is covered next.
+
+## No silent downgrades
+
+`exec.Registry.Select` picks the weakest configured executor that satisfies
+the declared level — a job asking for `LevelProcess` isolation is not handed
+a Kubernetes pod merely because one happens to be configured, and it is not
+handed the in-process executor merely because that's what's available.
+
+When nothing configured satisfies the level, `Select` **fails** rather than
+running the handler with less isolation than it declared. A parser that
+demanded a separate address space does not quietly fall back to running
+in-process just because no stronger rung was wired up — that would defeat
+the entire point of declaring the requirement. `exec.AllowDowngrade()` opts
+out of this for a definition that would genuinely rather run weakly isolated
+than not run at all.
+
+`engine.RegisterChecked` and `engine.RegisterAll` call `Select` at
+**registration**, not at execution, so a definition demanding isolation the
+deployment cannot provide fails when you start the process, not on the first
+malicious upload that reaches production. `engine.Register` skips the check,
+for definitions you've already verified some other way.
+
+Because only the in-process rung ships in this phase, **any definition that
+declares above `LevelNone` will fail registration unless it also sets
+`exec.AllowDowngrade()`** — there is nothing yet configured that can satisfy
+it. This is expected, not a bug: it's the same enforcement that will matter
+once a stronger rung exists, doing its job now with only one rung on the
+ladder.
+
+## Adding a stronger rung
+
+`engine.WithExecutor` adds an executor to the deployment's registry:
+
+```go
+eng := engine.Build(d,
+    engine.WithExecutor(subprocessExecutor),
+)
+```
+
+The in-process executor is always present as the default, so a deployment
+that adds nothing behaves exactly as before this existed. Adding an executor
+only changes what becomes available to definitions that ask for it.
+
+## Registering a mixed set
+
+`job.Registrable` lets definitions with different payload types share one
+slice, since Go forbids a generic method that would otherwise unify them:
+
+```go
+var defs []job.Registrable = []job.Registrable{Tessellate, SendEmail}
+
+if err := engine.RegisterAll(eng, defs...); err != nil {
+    log.Fatal(err)
+}
+```
+
+`RegisterAll` validates every definition's policy before registering any of
+them, so a rejected set leaves the registry as it was rather than half
+populated. This is also the seam a future out-of-process entrypoint uses: it
+can be handed the same `[]job.Registrable` without ever holding an `*Engine`.

@@ -3,6 +3,7 @@
   "pages": [
     "dwp",
     "artifacts",
+    "execution-isolation",
     "catalog",
     "delivery",
     "dlq",
