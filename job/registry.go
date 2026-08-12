@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"slices"
 	"sync"
 
 	"github.com/xraph/dispatch/artifact"
@@ -108,20 +109,33 @@ func RegisterDefinition[T any](r *Registry, def *Definition[T]) {
 
 // Resources returns the resource declaration for a job, or the zero
 // ResourceDecl when it declares none.
+//
+// The sets are cloned on the way out as well as in: returning the stored
+// maps by reference would let one caller's mutation rewrite the
+// requirement every future job of that name resolves from.
 func (r *Registry) Resources(name string) ResourceDecl {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 
-	return r.resources[name]
+	decl := r.resources[name]
+	decl.Requests = decl.Requests.Clone()
+	decl.Limits = decl.Limits.Clone()
+
+	return decl
 }
 
 // Inputs returns the artifact declarations for a job, or nil when it
 // declares none.
+//
+// The slice is copied, matching the copy RegisterDefinition makes on the
+// way in: a caller that mutated the stored declaration would change what
+// every future job of that name validates against. InputSpec is all
+// value fields, so a shallow copy is a complete one.
 func (r *Registry) Inputs(name string) []artifact.InputSpec {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 
-	return r.inputs[name]
+	return slices.Clone(r.inputs[name])
 }
 
 // Get returns the handler for the given job name.

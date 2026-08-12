@@ -184,6 +184,13 @@ func WithResourceDefaults(global resource.Set, perQueue map[string]resource.Set)
 // than the largest known capacity is rejected at enqueue rather than
 // pending forever. Leaving it unset in a single-process engine disables
 // that check, which is correct — there is nothing to compare against.
+//
+// Note that only the memory store round-trips cluster.Worker.Capacity
+// today; redis, postgres, sqlite, mongo and the k8s provider all map
+// worker fields explicitly and do not yet carry it. On those backends
+// MaxWorkerCapacity sees only this value, not the fleet maximum, so the
+// check is conservative: it may reject a job some larger worker could
+// have run, but it never admits one nothing can run.
 func WithWorkerCapacity(c resource.Set) Option {
 	return func(eng *Engine) { eng.workerCapacity = c }
 }

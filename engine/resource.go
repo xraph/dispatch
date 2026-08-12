@@ -3,6 +3,7 @@ package engine
 import (
 	"context"
 	"sort"
+	"time"
 
 	log "github.com/xraph/go-utils/log"
 
@@ -143,12 +144,20 @@ func inputSizes(bindings map[string]artifact.Ref) (
 	return sizes, total, sizes[0].Hash
 }
 
-// MaxWorkerCapacity returns the per-key maximum capacity across active
+// MaxWorkerCapacity returns the per-key maximum capacity across live
 // workers, or an empty Set when capacity is unknown.
 //
 // An empty result disables the unschedulable check rather than
 // rejecting everything, which is the right behaviour for a
 // single-process engine that has registered no workers yet.
+//
+// "Live" means both an active state and a recent heartbeat. State alone
+// is not enough: nothing in Dispatch ever writes WorkerDead — a worker
+// registers active and is either deregistered on clean shutdown or its
+// row is deleted by DeleteStaleWorkers. A worker killed by SIGKILL, an
+// OOM or a pod eviction therefore stays "active" in the registry until
+// something sweeps it, and counting its capacity would admit jobs no
+// live worker can run.
 func (eng *Engine) MaxWorkerCapacity(ctx context.Context) resource.Set {
 	maxCap := eng.workerCapacity.Clone()
 
@@ -168,8 +177,14 @@ func (eng *Engine) MaxWorkerCapacity(ctx context.Context) resource.Set {
 		return maxCap
 	}
 
+	cutoff := time.Now().UTC().Add(-eng.staleWorkerThreshold())
+
 	for _, w := range workers {
 		if w == nil || w.State != cluster.WorkerActive {
+			continue
+		}
+
+		if w.LastSeen.Before(cutoff) {
 			continue
 		}
 
@@ -177,4 +192,25 @@ func (eng *Engine) MaxWorkerCapacity(ctx context.Context) resource.Set {
 	}
 
 	return maxCap
+}
+
+// staleWorkerThreshold is how long a worker may go without a heartbeat
+// before its capacity stops counting.
+//
+// It reuses the sweep threshold from extension.go — max(5×heartbeat,
+// 5 minutes) — rather than inventing a second notion of staleness, so a
+// worker's capacity stops counting at roughly the same moment the rest
+// of the cluster layer stops believing in the worker.
+//
+// The threshold is deliberately generous in the same direction: shrinking
+// the fleet view too eagerly turns a valid enqueue into a hard
+// ErrUnschedulable, whereas holding a dead worker's capacity a little too
+// long only lets a job pend. A loud false rejection is the worse failure.
+func (eng *Engine) staleWorkerThreshold() time.Duration {
+	threshold := 5 * eng.d.Config().HeartbeatInterval
+	if threshold < 5*time.Minute {
+		threshold = 5 * time.Minute
+	}
+
+	return threshold
 }
