@@ -27,7 +27,19 @@ func TestDequeueOptsIsUnbounded(t *testing.T) {
 		{"explicit zero budget key", job.DequeueOpts{Budget: resource.Set{resource.Memory: 0}}, false},
 		{"budget", job.DequeueOpts{Budget: resource.Set{resource.CPU: 1000}}, false},
 		{"custom keys", job.DequeueOpts{CustomKeys: []string{"fpga"}}, false},
-		{"prefer hashes", job.DequeueOpts{PreferHashes: []string{"blake3:a"}}, false},
+		// Locality answers "should I order?", never "should I filter?".
+		// Counting it here would make PreferHashes-only opts bounded, and
+		// the empty-CustomKeys rule would then reject custom-resource jobs
+		// on its behalf.
+		{"prefer hashes alone", job.DequeueOpts{PreferHashes: []string{"blake3:a"}}, true},
+		{
+			"prefer hashes with a budget",
+			job.DequeueOpts{
+				Budget:       resource.Set{resource.CPU: 1000},
+				PreferHashes: []string{"blake3:a"},
+			},
+			false,
+		},
 		{"reserved for", job.DequeueOpts{ReservedFor: &reserved}, false},
 	}
 
@@ -153,6 +165,14 @@ func TestDequeueOptsAllows(t *testing.T) {
 			"a zero-quantity custom key is not a requirement",
 			job.DequeueOpts{CustomKeys: []string{"tpu"}},
 			newJob(resource.Set{"fpga": 0}),
+			true,
+		},
+		{
+			// PreferHashes must never filter, not even transitively through
+			// the empty-CustomKeys rule.
+			"prefer hashes alone claims a custom requirement",
+			job.DequeueOpts{PreferHashes: []string{"blake3:a"}},
+			newJob(resource.Set{"fpga": 1, resource.Memory: 1 << 40}),
 			true,
 		},
 		{

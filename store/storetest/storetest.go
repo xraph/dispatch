@@ -13,6 +13,21 @@
 // ClaimIsAtomicUnderConcurrency, which proves the fit predicate did not
 // cost the claim its atomicity.
 //
+// Known limitations of RunDequeueSuite, so a backend author knows what is
+// unpinned rather than guaranteed:
+//
+//   - ZeroBudgetSelectsEverything asserts set membership, not order. The
+//     ordering contract is pinned by PriorityOrderingPreservedWithinBudget,
+//     LimitTruncatesAfterOrdering, and the two PreferHashes cases; a
+//     backend that ordered correctly only when a budget was present would
+//     not be caught.
+//   - Every case names its queues explicitly, so empty DequeueOpts.Queues
+//     — "all queues" — is never exercised. It cannot be, while the suite
+//     supports backends that share one store across subtests: an
+//     all-queues claim would take other cases' jobs.
+//   - Requirements are built with resource.Set literals or nil, so a
+//     non-nil empty Set is never round-tripped through a backend here.
+//
 // The package depends only on job, resource, id, and the root package. It
 // must never import a store backend: the backends import this, not the
 // reverse.

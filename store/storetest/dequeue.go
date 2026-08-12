@@ -55,6 +55,8 @@ func RunDequeueSuite(t *testing.T, newStore func(t *testing.T) job.Store) {
 		{"CustomKeyPrefixDoesNotFalselyMatch", testCustomKeyPrefixDoesNotFalselyMatch},
 		{"CustomKeySubsetOfOfferedKeysIsClaimable", testCustomKeySubsetIsClaimable},
 		{"PriorityOrderingPreservedWithinBudget", testPriorityOrderingPreservedWithinBudget},
+		{"LimitTruncatesAfterOrdering", testLimitTruncatesAfterOrdering},
+		{"PreferHashesAloneOrdersWithoutFiltering", testPreferHashesAloneOrdersWithoutFiltering},
 		{
 			"PreferHashesSortWithinPriorityBandAndNeverFilter",
 			testPreferHashesSortWithinPriorityBand,
@@ -320,6 +322,7 @@ func testAbsentBudgetKeyIsUnconstrained(t *testing.T, s job.Store) {
 	})
 
 	wantExactly(t, got, "gpu-heavy")
+	wantStillClaimable(t, s, queue, "too-big")
 }
 
 // testBoundedBudgetWithNoCustomKeysRejectsCustomRequirement is the half
@@ -473,6 +476,7 @@ func testExactFitIsClaimable(t *testing.T, s job.Store) {
 	})
 
 	wantExactly(t, got, "exact")
+	wantStillClaimable(t, s, queue, "over-by-one")
 }
 
 // testCustomKeyContainmentFilters proves a job needing a custom key the
@@ -641,6 +645,106 @@ func testPriorityOrderingPreservedWithinBudget(t *testing.T, s job.Store) {
 	wantStillClaimable(t, s, queue, "oversized")
 }
 
+// testLimitTruncatesAfterOrdering pins WHICH jobs the limit keeps, not
+// just how many.
+//
+// Every other ordering case has as many eligible jobs as the limit
+// allows, so all of them come back and any order bug shows up as a
+// permutation. A backend that truncates BEFORE sorting — take an
+// arbitrary N of the eligible set, then sort within it — returns the
+// right count in the right relative order and passes all of them. Here
+// six jobs are eligible and only two may be claimed, so the top two must
+// be the two highest priorities and nothing else.
+//
+// Left unpinned, a worker with a small limit could be handed low-priority
+// work indefinitely while high-priority jobs wait — the same starvation
+// the locality ordering rule exists to prevent, arriving through a
+// different door. The shapes most at risk are a Redis candidate scan that
+// takes N before ordering, and a Mongo dequeueOne issuing N parallel
+// FindOneAndUpdates whose individual sorts do not compose into a global
+// one.
+func testLimitTruncatesAfterOrdering(t *testing.T, s job.Store) {
+	const (
+		queue    = "fit-limit-order"
+		eligible = 6
+	)
+
+	// Enqueued lowest priority first, so a backend that ignores ordering
+	// and takes the first two it finds is likely to return the wrong pair.
+	for i := range eligible {
+		mustEnqueue(t, s, newFitJob(
+			fmt.Sprintf("prio-%d", i), queue,
+			resource.Set{resource.Memory: GiB},
+			withPriority(i),
+			withRunAtOffset(time.Duration(i)*time.Minute),
+		))
+	}
+
+	got := mustDequeue(t, s, job.DequeueOpts{
+		Queues: []string{queue},
+		Limit:  2,
+		Budget: resource.Set{resource.Memory: 4 * GiB},
+	})
+
+	wantOrder(t, got, "prio-5", "prio-4")
+
+	// The four that lost are untouched, and the next call takes the next
+	// two by the same rule.
+	next := mustDequeue(t, s, job.DequeueOpts{
+		Queues: []string{queue},
+		Limit:  2,
+		Budget: resource.Set{resource.Memory: 4 * GiB},
+	})
+
+	wantOrder(t, next, "prio-3", "prio-2")
+	wantStillClaimable(t, s, queue, "prio-1", "prio-0")
+}
+
+// testPreferHashesAloneOrdersWithoutFiltering pins the split between the
+// two questions a dequeue asks: "should I filter?" and "should I order?".
+//
+// PreferHashes only ever answers the second, so it is not a term of
+// IsUnbounded. Opts carrying nothing but PreferHashes are unbounded: the
+// backend skips the fit predicate entirely and still applies the locality
+// term to its ORDER BY. If a backend derives "should I order?" from
+// IsUnbounded, or folds PreferHashes into it, then these opts become
+// bounded, the empty-CustomKeys rule fires, and the fpga job below
+// vanishes — PreferHashes filtering transitively, which is exactly what
+// "advisory, never a filter" forbids.
+func testPreferHashesAloneOrdersWithoutFiltering(t *testing.T, s job.Store) {
+	const (
+		queue = "fit-prefer-only"
+		local = "blake3:staged-here"
+	)
+
+	// Requires a custom resource the caller never offers, and is enqueued
+	// last, so it can only come back if nothing filtered it.
+	exotic := newFitJob("exotic", queue, resource.Set{
+		resource.Memory: 512 * GiB,
+		"fpga":          4,
+	}, withRunAtOffset(2*time.Minute))
+	plain := newFitJob("plain", queue, nil, withRunAtOffset(0))
+	cached := newFitJob("cached", queue, nil, withRunAtOffset(time.Minute), withHash(local))
+
+	mustEnqueue(t, s, plain, cached, exotic)
+
+	opts := job.DequeueOpts{
+		Queues:       []string{queue},
+		Limit:        10,
+		PreferHashes: []string{local},
+	}
+
+	if !opts.IsUnbounded() {
+		t.Fatal("opts carrying only PreferHashes report IsUnbounded() = false; " +
+			"locality is an ordering signal, not a constraint")
+	}
+
+	// Ordering still applies — cached jumps ahead of the earlier plain —
+	// and nothing is filtered, including the job needing an unoffered fpga
+	// and more memory than any worker has.
+	wantOrder(t, mustDequeue(t, s, opts), "cached", "plain", "exotic")
+}
+
 // testPreferHashesSortWithinPriorityBand covers the locality signal, and
 // exists mostly to stop five ORDER BY clauses being written the obvious
 // wrong way.
@@ -743,6 +847,7 @@ func testClaimIsAtomicUnderConcurrency(t *testing.T, s job.Store) {
 		queue    = "fit-concurrent"
 		jobCount = 20
 		claimers = 4
+		batch    = 2
 	)
 
 	mine := make(map[id.JobID]string, jobCount)
@@ -770,26 +875,42 @@ func testClaimIsAtomicUnderConcurrency(t *testing.T, s job.Store) {
 		go func() {
 			defer wg.Done()
 
-			// Every claimer asks for the whole batch under a budget that
-			// admits every job, so the only thing that can stop a job being
-			// claimed exactly once is the backend's own locking.
-			got, err := s.DequeueJobs(context.Background(), job.DequeueOpts{
-				Queues: []string{queue},
-				Limit:  jobCount,
-				Budget: resource.Set{resource.Memory: 4 * GiB},
-			})
-			if err != nil {
-				errCh <- err
+			// Each claimer drains the queue in small batches rather than
+			// asking for everything once. A single large claim per goroutine
+			// lets four claimers serialize — the first takes all 20 and the
+			// rest find an empty queue, so the interleaving that exposes a
+			// non-atomic claim never happens. Looping keeps every claimer
+			// contending until the queue is actually empty, which is what
+			// makes this a reliable detector rather than a probabilistic one.
+			for round := 0; round <= jobCount; round++ {
+				got, err := s.DequeueJobs(context.Background(), job.DequeueOpts{
+					Queues: []string{queue},
+					Limit:  batch,
+					Budget: resource.Set{resource.Memory: 4 * GiB},
+				})
+				if err != nil {
+					errCh <- err
 
-				return
+					return
+				}
+
+				if len(got) == 0 {
+					return
+				}
+
+				mu.Lock()
+
+				for _, j := range got {
+					claims[j.ID]++
+				}
+
+				mu.Unlock()
 			}
 
-			mu.Lock()
-			defer mu.Unlock()
-
-			for _, j := range got {
-				claims[j.ID]++
-			}
+			// Only reachable if the backend keeps handing out jobs after the
+			// queue should be empty, which the per-job assertions below will
+			// also catch. Bounding the loop keeps that a failure, not a hang.
+			errCh <- fmt.Errorf("claimer still draining %q after %d rounds", queue, jobCount)
 		}()
 	}
 

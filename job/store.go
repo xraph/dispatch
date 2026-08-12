@@ -122,6 +122,11 @@ type DequeueOpts struct {
 	// job the pool exists to run first. The full ordering is priority
 	// descending, then preferred before unpreferred, then RunAt
 	// ascending.
+	//
+	// It is deliberately NOT a term of IsUnbounded. If it were, opts
+	// carrying only PreferHashes would count as bounded, and the empty
+	// CustomKeys rule would then reject every custom-resource job — this
+	// field would filter transitively, contradicting the paragraph above.
 	PreferHashes []string
 
 	// ReservedFor restricts the claim to a single job. When set, no other
@@ -131,9 +136,22 @@ type DequeueOpts struct {
 	ReservedFor *id.JobID
 }
 
-// IsUnbounded reports whether o constrains nothing beyond Queues and
-// Limit, so a backend can skip building the fit predicate entirely and
-// run the query it ran before this option existed.
+// IsUnbounded reports whether o restricts WHICH jobs may be claimed.
+//
+// A dequeue asks two independent questions, and this answers only the
+// first:
+//
+//	should I filter?  — Budget, CustomKeys, ReservedFor. IsUnbounded.
+//	should I order?   — PreferHashes. len(o.PreferHashes) > 0.
+//
+// Do not reuse this for the second. A backend skips the fit predicate
+// when IsUnbounded is true, and separately adds the locality term to its
+// ORDER BY whenever PreferHashes is non-empty. A caller that sets only
+// PreferHashes therefore gets locality ordering over an unfiltered
+// candidate set, which is precisely what "advisory, never a filter"
+// means. Folding PreferHashes in here would make it bounded, and the
+// empty-CustomKeys rule would then reject every custom-resource job on
+// its behalf.
 //
 // It tests Budget for key presence rather than calling
 // resource.Set.IsZero: a Budget of {"memory": 0} is an exhausted worker,
@@ -142,7 +160,6 @@ type DequeueOpts struct {
 func (o DequeueOpts) IsUnbounded() bool {
 	return len(o.Budget) == 0 &&
 		len(o.CustomKeys) == 0 &&
-		len(o.PreferHashes) == 0 &&
 		o.ReservedFor == nil
 }
 
