@@ -28,6 +28,7 @@ import (
 	"github.com/xraph/dispatch/api"
 	"github.com/xraph/dispatch/artifact"
 	"github.com/xraph/dispatch/artifact/cache"
+	"github.com/xraph/dispatch/artifact/sweeper"
 	"github.com/xraph/dispatch/backoff"
 	dispatchdash "github.com/xraph/dispatch/dashboard"
 	"github.com/xraph/dispatch/dwp"
@@ -81,6 +82,7 @@ type Extension struct {
 	artifactStore artifact.Store
 	artifacts     *artifact.Service
 	artifactCache *cache.Cache
+	sweeper       *sweeper.Sweeper
 }
 
 // New creates a Dispatch Forge extension with the given options.
@@ -312,8 +314,62 @@ func (e *Extension) Start(ctx context.Context) error {
 		return err
 	}
 
+	e.startSweeper(ctx)
+
 	e.MarkStarted()
 	return nil
+}
+
+// startSweeper begins reclaiming Dispatch-owned storage.
+//
+// It runs on the elected leader only, so a fleet does not race to delete
+// the same objects, and it is skipped entirely when the artifact plane is
+// off.
+func (e *Extension) startSweeper(ctx context.Context) {
+	if e.artifacts == nil || !e.artifacts.Enabled() {
+		return
+	}
+
+	logger := e.logger
+	if logger == nil {
+		logger = e.App().Logger()
+	}
+
+	cfg := e.config.Artifacts
+
+	e.sweeper = sweeper.New(e.artifactStore, e.artifacts.Backend(),
+		sweeper.WithRetention(cfg.Retention),
+		sweeper.WithPurgeGrace(cfg.PurgeGrace),
+		sweeper.WithLogger(logger),
+		sweeper.WithLeaderCheck(e.isClusterLeader),
+	)
+
+	if serr := e.sweeper.Start(ctx); serr != nil {
+		logger.Warn("dispatch: could not start the artifact sweeper",
+			log.String("error", serr.Error()))
+	}
+}
+
+// isClusterLeader reports whether this instance holds cluster leadership.
+// A single-instance deployment has no cluster store and is always the
+// leader by default.
+func (e *Extension) isClusterLeader() bool {
+	cls := e.eng.ClusterStore()
+	if cls == nil {
+		return true
+	}
+
+	leader, err := cls.GetLeader(context.Background())
+	if err != nil || leader == nil {
+		return false
+	}
+
+	self := e.eng.WorkerID()
+	if self.IsNil() {
+		return false
+	}
+
+	return leader.ID.String() == self.String()
 }
 
 // Stop gracefully shuts down the dispatch engine.
@@ -322,6 +378,13 @@ func (e *Extension) Stop(ctx context.Context) error {
 		e.MarkStopped()
 		return nil
 	}
+	if e.sweeper != nil {
+		if serr := e.sweeper.Stop(ctx); serr != nil {
+			e.Logger().Warn("dispatch: artifact sweeper did not stop cleanly",
+				forge.F("error", serr.Error()))
+		}
+	}
+
 	err := e.eng.Stop(ctx)
 	e.MarkStopped()
 	return err
