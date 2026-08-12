@@ -239,27 +239,53 @@ Byte-for-byte today's behavior, the default, requiring no configuration.
 ### Selection, and the no-silent-downgrade rule
 
 Isolation is a property of the handler — this one parses IFC, that one sends an email —
-so it is declared on the definition:
+so it is declared on the definition. The declaration follows the same shape track A uses
+for inputs (`artifact.Input` returns a value; `job.WithArtifactInputs` adapts it), which
+is what keeps `exec` a leaf that never imports `job`:
 
 ```go
 var Tessellate = job.NewDefinition("tessellate.model", tessellate,
-    exec.WithIsolation(exec.Sandboxed),   // minimum rung
-    exec.WithGracePeriod(60*time.Second),
-    artifact.Input("model", artifact.Required, artifact.StageAsPath),
+    job.WithExecution(
+        exec.Isolate(exec.LevelSandboxed),   // minimum rung
+        exec.GracePeriod(60*time.Second),
+    ),
+    job.WithArtifactInputs(artifact.Input("model", artifact.Required)),
+    job.WithResources(resource.CPUs(4), resource.MemoryGB(16)),
     job.WithTimeout(6*time.Hour),
 )
 ```
 
 ```go
-type Isolation int
+// package exec
+type Level int
 
 const (
-    IsolationNone      Isolation = iota // in-process
-    IsolationProcess                    // separate address space
-    IsolationSandboxed                  // + namespaces, seccomp, no network
-    IsolationVM                         // + independent kernel (gVisor, Kata)
+    LevelNone      Level = iota // in-process
+    LevelProcess                // separate address space
+    LevelSandboxed              // + namespaces, seccomp, no network
+    LevelVM                     // + independent kernel (gVisor, Kata)
 )
+
+type Policy struct {
+    Level          Level
+    GracePeriod    time.Duration
+    AllowDowngrade bool
+    Image          string        // "" → the worker's own image
+}
+
+type PolicyOption func(*Policy)
+
+func Isolate(l Level) PolicyOption
+func GracePeriod(d time.Duration) PolicyOption
+func AllowDowngrade() PolicyOption
+func Image(ref string) PolicyOption
 ```
+
+`job.Options` gains an `Execution exec.Policy` field and `job.WithExecution(opts
+...exec.PolicyOption) job.Option`, exactly as it gained `Inputs` and
+`WithArtifactInputs`. `job.Registry` records the policy per name alongside the input specs
+it already records (`job/registry.go:67`), so the worker can look it up without the
+definition.
 
 The definition declares a **minimum**. Engine configuration maps rungs to configured
 executors. If a definition demands a rung the deployment cannot provide, `engine.Register`
