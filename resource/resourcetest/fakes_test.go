@@ -95,6 +95,29 @@ func TestFakeReclaimerReturnsUnitsToManager(t *testing.T) {
 	}
 }
 
+// TestFakeReclaimerConstructionFailureLeaksNothing is the regression
+// test for the leaked-lease bug: NewFakeReclaimer acquires leases one
+// at a time, so a failure partway through must release everything it
+// already took, or the manager permanently loses that capacity with no
+// live job to account for it — indistinguishable from a leak.
+func TestFakeReclaimerConstructionFailureLeaksNothing(t *testing.T) {
+	// 65 units of capacity is enough for six 10-unit leases (60) but not
+	// a seventh, so the tenth (of ten requested) never even gets tried:
+	// the failure happens on lease 7.
+	m := resource.NewManager(resource.Set{resource.Disk: 65})
+
+	if _, err := resourcetest.NewFakeReclaimer(m, resource.Disk, 10, 10); err == nil {
+		t.Fatal("NewFakeReclaimer() error = nil, want an error for capacity exhausted")
+	}
+
+	if got := m.Free()[resource.Disk]; got != 65 {
+		t.Errorf("Free() after failed construction = %d, want 65 (nothing should leak)", got)
+	}
+	if leases := m.Leases(); len(leases) != 0 {
+		t.Errorf("Leases() after failed construction = %v, want none held", leases)
+	}
+}
+
 func TestFakeReclaimerSetError(t *testing.T) {
 	m := resource.NewManager(resource.Set{resource.Disk: 10})
 

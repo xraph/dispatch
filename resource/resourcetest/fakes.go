@@ -84,6 +84,15 @@ func NewFakeReclaimer(m resource.Manager, key string, leaseSize int64, count int
 	for i := range count {
 		lease, ok := m.TryAcquire(fakeReclaimerOwner, resource.Set{key: leaseSize})
 		if !ok {
+			// Every lease acquired in iterations before this one is real,
+			// live capacity taken from m — the only handle to it is
+			// r.entries, which is about to be discarded. Release them all
+			// before returning, or the caller's manager permanently loses
+			// that capacity: indistinguishable from a job that leaked.
+			for _, held := range r.entries {
+				held.Release()
+			}
+
 			return nil, fmt.Errorf("resourcetest: acquire lease %d/%d of %d %s: capacity exhausted",
 				i+1, count, leaseSize, key)
 		}
