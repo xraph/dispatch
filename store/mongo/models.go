@@ -63,12 +63,26 @@ type jobModel struct {
 	// fields above do not carry; fromJobModel reads Resources back from
 	// here, not from the scalars. Unlike the SQL backends this needs no
 	// resource.EncodeSet/DecodeSet codec wrapper: the BSON driver
-	// marshals resource.Set (a map[string]int64) as a native
-	// subdocument, and a nil map with "omitempty" is dropped from the
-	// document entirely -- not written as an empty subdocument -- so
-	// toJobModel leaves the field at its Go zero value for a zero Set
-	// and an undeclared job's document carries no resource_requests key
-	// at all, mirroring the SQL backends' NULL-column contract.
+	// marshals resource.Set (a map[string]int64) as a native subdocument,
+	// so toJobModel leaves the field at its Go zero value (nil map) for
+	// a zero Set rather than assigning it -- never an empty subdocument.
+	//
+	// The "omitempty" bson tag below does NOT behave the same on both
+	// write paths, and a future reader relying on only one of them will
+	// be wrong for the other:
+	//   - EnqueueJob (NewInsert) goes through grove's structToMapInsert,
+	//     which builds the document by reflecting over the grove tags
+	//     and unconditionally sets doc[column] = value -- it never looks
+	//     at the bson tag, so "omitempty" has no effect here. A zero Set
+	//     is written as an explicit BSON null; the key IS present.
+	//   - UpdateJob (ReplaceOne) hands the struct straight to the raw
+	//     driver, whose native bson encoder DOES honor "omitempty": a
+	//     zero Set drops the key entirely; the key is ABSENT.
+	// Both are "never {}" and both decode back to a nil Set, so reads
+	// are unaffected. A query written directly against Mongo, though,
+	// must not test for only one shape -- see dequeueOne's filter
+	// comment in job.go for the specific trap (a plain equality test
+	// against null already covers both; $exists:false alone does not).
 	ResourceRequests resource.Set `grove:"resource_requests" bson:"resource_requests,omitempty"`
 	ResourceLimits   resource.Set `grove:"resource_limits"   bson:"resource_limits,omitempty"`
 	ResourceClass    string       `grove:"resource_class,notnull,default:''" bson:"resource_class"`

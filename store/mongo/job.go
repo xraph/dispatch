@@ -32,6 +32,9 @@ func (s *Store) EnqueueJob(ctx context.Context, j *job.Job) error {
 // queues. Each claim is a FindOneAndUpdate (atomic per-doc), but for limit > 1
 // the claims are issued in parallel so wall-clock cost stays close to a single
 // round-trip even on a slow connection.
+//
+// A future resource-aware predicate belongs in dequeueOne's filter below.
+// See that filter's comment for the null-vs-absent trap it must avoid.
 func (s *Store) DequeueJobs(ctx context.Context, queues []string, limit int) ([]*job.Job, error) {
 	if limit <= 0 {
 		return nil, nil
@@ -123,6 +126,18 @@ func (s *Store) dequeueOne(ctx context.Context, queues []string, t time.Time) (*
 		"queue":  bson.M{"$in": queues},
 		"run_at": bson.M{"$lte": t},
 	}
+	// When a resource-aware clause is added here: "no resource
+	// requirement" must NOT be tested with {"resource_requests":
+	// {"$exists": false}} alone. EnqueueJob (grove's NewInsert) writes
+	// a zero Set's resource_requests as an explicit BSON null -- key
+	// present, value null -- while UpdateJob (raw ReplaceOne) drops the
+	// key entirely; $exists:false only matches the latter, so it would
+	// silently miss most undeclared jobs (every one still on its
+	// original EnqueueJob-written document). Use a plain equality test,
+	// {"resource_requests": nil} -- Mongo's null-equality semantics
+	// already match a missing field too, so this one clause covers both
+	// write paths with no $or needed. Verified empirically, not assumed.
+	// See the field comment on jobModel.ResourceRequests in models.go.
 	update := bson.M{
 		"$set": bson.M{
 			"state":      string(job.StateRunning),
