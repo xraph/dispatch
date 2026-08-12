@@ -4,7 +4,6 @@ package postgres_test
 
 import (
 	"context"
-	"database/sql"
 	"errors"
 	"fmt"
 	"testing"
@@ -13,9 +12,10 @@ import (
 	"github.com/testcontainers/testcontainers-go"
 	pgmodule "github.com/testcontainers/testcontainers-go/modules/postgres"
 	"github.com/testcontainers/testcontainers-go/wait"
-	"github.com/uptrace/bun"
-	"github.com/uptrace/bun/dialect/pgdialect"
-	"github.com/uptrace/bun/driver/pgdriver"
+
+	"github.com/xraph/grove"
+	"github.com/xraph/grove/drivers/pgdriver"
+	_ "github.com/xraph/grove/drivers/pgdriver/pgmigrate" // registers the pg migrate executor
 
 	"github.com/xraph/dispatch"
 	"github.com/xraph/dispatch/cluster"
@@ -30,7 +30,7 @@ import (
 	log "github.com/xraph/go-utils/log"
 )
 
-// setupTestStore creates a Postgres container and returns a connected Bun Store.
+// setupTestStore creates a Postgres container and returns a connected store.
 func setupTestStore(t *testing.T) *postgres.Store {
 	t.Helper()
 
@@ -61,9 +61,15 @@ func setupTestStore(t *testing.T) *postgres.Store {
 		t.Fatalf("get connection string: %v", err)
 	}
 
-	// Create Bun DB from pgdriver.
-	sqldb := sql.OpenDB(pgdriver.NewConnector(pgdriver.WithDSN(connStr)))
-	db := bun.NewDB(sqldb, pgdialect.New())
+	drv := pgdriver.New()
+	if openErr := drv.Open(ctx, connStr); openErr != nil {
+		t.Fatalf("open pgdriver: %v", openErr)
+	}
+
+	db, err := grove.Open(drv)
+	if err != nil {
+		t.Fatalf("grove open: %v", err)
+	}
 
 	t.Cleanup(func() {
 		_ = db.Close()
