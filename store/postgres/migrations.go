@@ -416,5 +416,45 @@ func init() {
 				return err
 			},
 		},
+
+		// 008: Lease columns. Execution becomes a lease: lease_ttl on the
+		// row is what lets one reclaim query serve a 30-second job and a
+		// six-hour one, and lease_epoch fences a worker that was reclaimed
+		// while it was merely paused.
+		&migrate.Migration{
+			Name:    "add_job_lease_columns",
+			Version: "20260812120000",
+			Up: func(ctx context.Context, exec migrate.Executor) error {
+				_, err := exec.Exec(ctx, `
+					ALTER TABLE dispatch_jobs
+						ADD COLUMN IF NOT EXISTS lease_epoch      INTEGER NOT NULL DEFAULT 0,
+						ADD COLUMN IF NOT EXISTS lease_expires_at TIMESTAMPTZ,
+						ADD COLUMN IF NOT EXISTS lease_ttl        BIGINT NOT NULL DEFAULT 0,
+						ADD COLUMN IF NOT EXISTS evict_count      INTEGER NOT NULL DEFAULT 0`)
+				if err != nil {
+					return err
+				}
+
+				_, err = exec.Exec(ctx, `
+					CREATE INDEX IF NOT EXISTS idx_dispatch_jobs_lease
+						ON dispatch_jobs (lease_expires_at)
+						WHERE state = 'running'`)
+				return err
+			},
+			Down: func(ctx context.Context, exec migrate.Executor) error {
+				_, err := exec.Exec(ctx, `DROP INDEX IF EXISTS idx_dispatch_jobs_lease`)
+				if err != nil {
+					return err
+				}
+
+				_, err = exec.Exec(ctx, `
+					ALTER TABLE dispatch_jobs
+						DROP COLUMN IF EXISTS lease_epoch,
+						DROP COLUMN IF EXISTS lease_expires_at,
+						DROP COLUMN IF EXISTS lease_ttl,
+						DROP COLUMN IF EXISTS evict_count`)
+				return err
+			},
+		},
 	)
 }

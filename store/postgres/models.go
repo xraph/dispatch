@@ -21,48 +21,56 @@ import (
 type jobModel struct {
 	grove.BaseModel `grove:"table:dispatch_jobs"`
 
-	ID          string     `grove:"id,pk"`
-	Name        string     `grove:"name,notnull"`
-	Queue       string     `grove:"queue,notnull,default:'default'"`
-	Payload     []byte     `grove:"payload,notnull,type:bytea"`
-	State       string     `grove:"state,notnull,default:'pending'"`
-	Priority    int        `grove:"priority,notnull,default:0"`
-	MaxRetries  int        `grove:"max_retries,notnull,default:3"`
-	RetryCount  int        `grove:"retry_count,notnull,default:0"`
-	LastError   string     `grove:"last_error"`
-	ScopeAppID  string     `grove:"scope_app_id"`
-	ScopeOrgID  string     `grove:"scope_org_id"`
-	WorkerID    string     `grove:"worker_id"`
-	RunAt       time.Time  `grove:"run_at,notnull,default:current_timestamp"`
-	StartedAt   *time.Time `grove:"started_at"`
-	CompletedAt *time.Time `grove:"completed_at"`
-	HeartbeatAt *time.Time `grove:"heartbeat_at"`
-	Timeout     int64      `grove:"timeout,notnull,default:0"`
-	CreatedAt   time.Time  `grove:"created_at,notnull,default:current_timestamp"`
-	UpdatedAt   time.Time  `grove:"updated_at,notnull,default:current_timestamp"`
+	ID             string     `grove:"id,pk"`
+	Name           string     `grove:"name,notnull"`
+	Queue          string     `grove:"queue,notnull,default:'default'"`
+	Payload        []byte     `grove:"payload,notnull,type:bytea"`
+	State          string     `grove:"state,notnull,default:'pending'"`
+	Priority       int        `grove:"priority,notnull,default:0"`
+	MaxRetries     int        `grove:"max_retries,notnull,default:3"`
+	RetryCount     int        `grove:"retry_count,notnull,default:0"`
+	LastError      string     `grove:"last_error"`
+	ScopeAppID     string     `grove:"scope_app_id"`
+	ScopeOrgID     string     `grove:"scope_org_id"`
+	WorkerID       string     `grove:"worker_id"`
+	RunAt          time.Time  `grove:"run_at,notnull,default:current_timestamp"`
+	StartedAt      *time.Time `grove:"started_at"`
+	CompletedAt    *time.Time `grove:"completed_at"`
+	HeartbeatAt    *time.Time `grove:"heartbeat_at"`
+	Timeout        int64      `grove:"timeout,notnull,default:0"`
+	LeaseEpoch     int        `grove:"lease_epoch,notnull,default:0"`
+	LeaseExpiresAt *time.Time `grove:"lease_expires_at"`
+	LeaseTTL       int64      `grove:"lease_ttl,notnull,default:0"`
+	EvictCount     int        `grove:"evict_count,notnull,default:0"`
+	CreatedAt      time.Time  `grove:"created_at,notnull,default:current_timestamp"`
+	UpdatedAt      time.Time  `grove:"updated_at,notnull,default:current_timestamp"`
 }
 
 func toJobModel(j *job.Job) *jobModel {
 	return &jobModel{
-		ID:          j.ID.String(),
-		Name:        j.Name,
-		Queue:       j.Queue,
-		Payload:     j.Payload,
-		State:       string(j.State),
-		Priority:    j.Priority,
-		MaxRetries:  j.MaxRetries,
-		RetryCount:  j.RetryCount,
-		LastError:   j.LastError,
-		ScopeAppID:  j.ScopeAppID,
-		ScopeOrgID:  j.ScopeOrgID,
-		WorkerID:    j.WorkerID.String(),
-		RunAt:       j.RunAt,
-		StartedAt:   j.StartedAt,
-		CompletedAt: j.CompletedAt,
-		HeartbeatAt: j.HeartbeatAt,
-		Timeout:     j.Timeout.Nanoseconds(),
-		CreatedAt:   j.CreatedAt,
-		UpdatedAt:   j.UpdatedAt,
+		ID:             j.ID.String(),
+		Name:           j.Name,
+		Queue:          j.Queue,
+		Payload:        j.Payload,
+		State:          string(j.State),
+		Priority:       j.Priority,
+		MaxRetries:     j.MaxRetries,
+		RetryCount:     j.RetryCount,
+		LastError:      j.LastError,
+		ScopeAppID:     j.ScopeAppID,
+		ScopeOrgID:     j.ScopeOrgID,
+		WorkerID:       j.WorkerID.String(),
+		RunAt:          j.RunAt,
+		StartedAt:      j.StartedAt,
+		CompletedAt:    j.CompletedAt,
+		HeartbeatAt:    j.HeartbeatAt,
+		Timeout:        j.Timeout.Nanoseconds(),
+		LeaseEpoch:     j.LeaseEpoch,
+		LeaseExpiresAt: j.LeaseExpiresAt,
+		LeaseTTL:       j.LeaseTTL.Nanoseconds(),
+		EvictCount:     j.EvictCount,
+		CreatedAt:      j.CreatedAt,
+		UpdatedAt:      j.UpdatedAt,
 	}
 }
 
@@ -77,22 +85,26 @@ func fromJobModel(m *jobModel) (*job.Job, error) {
 			CreatedAt: m.CreatedAt,
 			UpdatedAt: m.UpdatedAt,
 		},
-		ID:          parsedID,
-		Name:        m.Name,
-		Queue:       m.Queue,
-		Payload:     m.Payload,
-		State:       job.State(m.State),
-		Priority:    m.Priority,
-		MaxRetries:  m.MaxRetries,
-		RetryCount:  m.RetryCount,
-		LastError:   m.LastError,
-		ScopeAppID:  m.ScopeAppID,
-		ScopeOrgID:  m.ScopeOrgID,
-		RunAt:       m.RunAt,
-		StartedAt:   m.StartedAt,
-		CompletedAt: m.CompletedAt,
-		HeartbeatAt: m.HeartbeatAt,
-		Timeout:     time.Duration(m.Timeout),
+		ID:             parsedID,
+		Name:           m.Name,
+		Queue:          m.Queue,
+		Payload:        m.Payload,
+		State:          job.State(m.State),
+		Priority:       m.Priority,
+		MaxRetries:     m.MaxRetries,
+		RetryCount:     m.RetryCount,
+		LastError:      m.LastError,
+		ScopeAppID:     m.ScopeAppID,
+		ScopeOrgID:     m.ScopeOrgID,
+		RunAt:          m.RunAt,
+		StartedAt:      m.StartedAt,
+		CompletedAt:    m.CompletedAt,
+		HeartbeatAt:    m.HeartbeatAt,
+		Timeout:        time.Duration(m.Timeout),
+		LeaseEpoch:     m.LeaseEpoch,
+		LeaseExpiresAt: m.LeaseExpiresAt,
+		LeaseTTL:       time.Duration(m.LeaseTTL),
+		EvictCount:     m.EvictCount,
 	}
 
 	if m.WorkerID != "" {
