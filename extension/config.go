@@ -1,6 +1,10 @@
 package extension
 
-import "github.com/xraph/dispatch"
+import (
+	"time"
+
+	"github.com/xraph/dispatch"
+)
 
 // Config holds configuration for the Dispatch Forge extension.
 // Fields can be set programmatically via Option functions or loaded from
@@ -31,6 +35,9 @@ type Config struct {
 	// (unnamed) kv.Store is used.
 	GroveKV string `json:"grove_kv" mapstructure:"grove_kv" yaml:"grove_kv"`
 
+	// Artifacts configures the artifact plane.
+	Artifacts ArtifactConfig `json:"artifacts" mapstructure:"artifacts" yaml:"artifacts"`
+
 	// EnableDWP enables the Dispatch Wire Protocol for real-time
 	// client communication (WebSocket, SSE, HTTP RPC).
 	EnableDWP bool `default:"false" json:"enable_dwp" mapstructure:"enable_dwp" yaml:"enable_dwp"`
@@ -49,4 +56,48 @@ func DefaultConfig() Config {
 	return Config{
 		BasePath: "/dispatch",
 	}
+}
+
+// ArtifactConfig configures the artifact plane — Dispatch's tracked
+// object storage for job inputs and outputs.
+//
+// The plane is entirely opt-in. With no backend resolved, Dispatch
+// behaves exactly as it did before artifacts existed.
+type ArtifactConfig struct {
+	// Enabled turns the artifact plane on. When false, no backend is
+	// resolved even if a Trove instance is present in the container.
+	Enabled bool `default:"false" json:"enabled" mapstructure:"enabled" yaml:"enabled"`
+
+	// TroveStore is the name of a *trove.Trove registered in the DI
+	// container. Empty resolves the default (unnamed) instance, which is
+	// what a single-store Trove extension provides.
+	TroveStore string `json:"trove_store" mapstructure:"trove_store" yaml:"trove_store"`
+
+	// Bucket is where Dispatch writes the ephemeral artifacts it owns.
+	Bucket string `default:"dispatch-artifacts" json:"bucket" mapstructure:"bucket" yaml:"bucket"`
+
+	// EphemeralPrefix is the key prefix for Dispatch-owned objects.
+	EphemeralPrefix string `default:"ephemeral" json:"ephemeral_prefix" mapstructure:"ephemeral_prefix" yaml:"ephemeral_prefix"`
+
+	// Retention is how long an ephemeral artifact survives after every
+	// owner reaches a terminal state.
+	Retention time.Duration `default:"168h" json:"retention" mapstructure:"retention" yaml:"retention"`
+
+	// PurgeGrace is how long a soft-deleted artifact's bytes survive
+	// before the purge pass removes them. It is the window in which a
+	// mistaken sweep can still be caught.
+	PurgeGrace time.Duration `default:"24h" json:"purge_grace" mapstructure:"purge_grace" yaml:"purge_grace"`
+
+	// Cache configures the worker-local staging cache.
+	Cache ArtifactCacheConfig `json:"cache" mapstructure:"cache" yaml:"cache"`
+}
+
+// ArtifactCacheConfig configures the worker-local staging cache.
+type ArtifactCacheConfig struct {
+	// Dir is where staged artifacts are held on local disk.
+	Dir string `default:"/var/lib/dispatch/cache" json:"dir" mapstructure:"dir" yaml:"dir"`
+
+	// Budget caps the bytes the cache may hold. A job needing more
+	// staging space than is free waits rather than filling the volume.
+	Budget int64 `json:"budget" mapstructure:"budget" yaml:"budget"`
 }

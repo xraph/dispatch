@@ -26,6 +26,8 @@ import (
 
 	"github.com/xraph/dispatch"
 	"github.com/xraph/dispatch/api"
+	"github.com/xraph/dispatch/artifact"
+	"github.com/xraph/dispatch/artifact/cache"
 	"github.com/xraph/dispatch/backoff"
 	dispatchdash "github.com/xraph/dispatch/dashboard"
 	"github.com/xraph/dispatch/dwp"
@@ -71,6 +73,14 @@ type Extension struct {
 	useGrove     bool
 	useGroveKV   bool
 	enableDWP    bool
+
+	// artifactBackend is an explicitly supplied backend, taking priority
+	// over anything discovered in the container.
+	artifactBackend artifact.Backend
+	// artifactStore is the store the artifact service persists through.
+	artifactStore artifact.Store
+	artifacts     *artifact.Service
+	artifactCache *cache.Cache
 }
 
 // New creates a Dispatch Forge extension with the given options.
@@ -90,6 +100,12 @@ func (e *Extension) Engine() *engine.Engine { return e.eng }
 
 // API returns the API handler.
 func (e *Extension) API() *api.API { return e.apiHandler }
+
+// Artifacts returns the artifact service, or nil when the plane is off.
+func (e *Extension) Artifacts() *artifact.Service { return e.artifacts }
+
+// ArtifactCache returns the staging cache, or nil when the plane is off.
+func (e *Extension) ArtifactCache() *cache.Cache { return e.artifactCache }
 
 // DWPServer returns the DWP server, or nil if DWP is not enabled.
 func (e *Extension) DWPServer() *dwp.Server { return e.dwpServer }
@@ -185,6 +201,27 @@ func (e *Extension) init(fapp forge.App) error {
 	// Enable stream broker if DWP is requested (via option or config).
 	if e.enableDWP || e.config.EnableDWP {
 		engOpts = append(engOpts, engine.WithStreamBroker())
+	}
+
+	// Build the artifact plane before the engine, because the staging
+	// middleware has to be in the chain the engine constructs.
+	if e.artifactStore == nil {
+		if as, ok := d.Store().(artifact.Store); ok {
+			e.artifactStore = as
+		}
+	}
+
+	if e.artifactStore != nil {
+		svc, artCache, aerr := e.buildArtifactPlane(fapp)
+		if aerr != nil {
+			return aerr
+		}
+
+		if svc != nil {
+			e.artifacts = svc
+			e.artifactCache = artCache
+			engOpts = append(engOpts, engine.WithArtifacts(svc, artCache))
+		}
 	}
 
 	e.eng, err = engine.Build(d, engOpts...)
@@ -401,6 +438,27 @@ func (e *Extension) mergeWithDefaults(cfg Config) Config {
 	if cfg.BasePath == "" {
 		cfg.BasePath = defaults.BasePath
 	}
+
+	if cfg.Artifacts.Bucket == "" {
+		cfg.Artifacts.Bucket = "dispatch-artifacts"
+	}
+
+	if cfg.Artifacts.EphemeralPrefix == "" {
+		cfg.Artifacts.EphemeralPrefix = artifact.DefaultEphemeralPrefix
+	}
+
+	if cfg.Artifacts.Retention == 0 {
+		cfg.Artifacts.Retention = 168 * time.Hour
+	}
+
+	if cfg.Artifacts.PurgeGrace == 0 {
+		cfg.Artifacts.PurgeGrace = 24 * time.Hour
+	}
+
+	if cfg.Artifacts.Cache.Dir == "" {
+		cfg.Artifacts.Cache.Dir = "/var/lib/dispatch/cache"
+	}
+
 	return cfg
 }
 
@@ -417,6 +475,22 @@ func (e *Extension) mergeConfigurations(yamlConfig, programmaticConfig Config) C
 
 	if programmaticConfig.EnableDWP {
 		yamlConfig.EnableDWP = true
+	}
+
+	if programmaticConfig.Artifacts.Enabled {
+		yamlConfig.Artifacts.Enabled = true
+	}
+
+	if yamlConfig.Artifacts.TroveStore == "" && programmaticConfig.Artifacts.TroveStore != "" {
+		yamlConfig.Artifacts.TroveStore = programmaticConfig.Artifacts.TroveStore
+	}
+
+	if yamlConfig.Artifacts.Cache.Dir == "" && programmaticConfig.Artifacts.Cache.Dir != "" {
+		yamlConfig.Artifacts.Cache.Dir = programmaticConfig.Artifacts.Cache.Dir
+	}
+
+	if yamlConfig.Artifacts.Cache.Budget == 0 && programmaticConfig.Artifacts.Cache.Budget != 0 {
+		yamlConfig.Artifacts.Cache.Budget = programmaticConfig.Artifacts.Cache.Budget
 	}
 
 	// String fields: YAML takes precedence.

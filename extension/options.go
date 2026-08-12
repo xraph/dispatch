@@ -6,6 +6,7 @@ import (
 	log "github.com/xraph/go-utils/log"
 
 	"github.com/xraph/dispatch"
+	"github.com/xraph/dispatch/artifact"
 	"github.com/xraph/dispatch/backoff"
 	"github.com/xraph/dispatch/dwp"
 	"github.com/xraph/dispatch/ext"
@@ -210,4 +211,42 @@ func WithDWP(opts ...dwp.Option) ExtOption {
 		e.enableDWP = true
 		e.dwpOpts = append(e.dwpOpts, opts...)
 	}
+}
+
+// WithArtifactBackend supplies the object store backing the artifact
+// plane explicitly, bypassing container discovery.
+//
+// Use it outside Forge, or when the backend is not Trove.
+func WithArtifactBackend(b artifact.Backend) ExtOption {
+	return func(e *Extension) {
+		e.artifactBackend = b
+		e.config.Artifacts.Enabled = true
+	}
+}
+
+// WithArtifactStore sets the store the artifact plane persists through.
+// It defaults to the dispatcher's store when that store implements
+// artifact.Store, which every bundled backend does.
+func WithArtifactStore(s artifact.Store) ExtOption {
+	return func(e *Extension) { e.artifactStore = s }
+}
+
+// WithArtifacts enables the artifact plane, resolving a Trove instance
+// from the DI container. Pass a store name for multi-store Trove setups,
+// or the empty string for the default instance.
+func WithArtifacts(troveStore string) ExtOption {
+	return func(e *Extension) {
+		e.config.Artifacts.Enabled = true
+		e.config.Artifacts.TroveStore = troveStore
+	}
+}
+
+// WithArtifactCacheDir sets where staged artifacts are held on disk.
+func WithArtifactCacheDir(dir string) ExtOption {
+	return func(e *Extension) { e.config.Artifacts.Cache.Dir = dir }
+}
+
+// WithArtifactCacheBudget caps the bytes the staging cache may hold.
+func WithArtifactCacheBudget(bytes int64) ExtOption {
+	return func(e *Extension) { e.config.Artifacts.Cache.Budget = bytes }
 }
