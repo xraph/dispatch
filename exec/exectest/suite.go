@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"testing"
 	"time"
 
@@ -13,6 +14,11 @@ import (
 
 // Capabilities describes what a rung can actually do, so the suite asserts
 // enforcement only against rungs that provide it.
+//
+// It describes variation, not an opt-out. RunSuite cross-checks it against
+// the executor's own Level: anything claiming LevelProcess or above must
+// enforce deadlines and isolate panics, and saying otherwise fails the suite
+// rather than skipping the tests that prove it.
 type Capabilities struct {
 	// Enforces means the rung can stop a handler that ignores its
 	// deadline. Only out-of-process rungs can.
@@ -36,6 +42,9 @@ func RunSuite(t *testing.T, name string, newExecutor func(*testing.T) exec.Execu
 	t.Helper()
 
 	t.Run(name, func(t *testing.T) {
+		t.Run("CapabilitiesMatchLevel", func(t *testing.T) {
+			testCapabilitiesMatchLevel(t, name, newExecutor, caps)
+		})
 		t.Run("Identity", func(t *testing.T) { testIdentity(t, newExecutor) })
 		t.Run("Success", func(t *testing.T) { testSuccess(t, newExecutor) })
 		t.Run("HandlerError", func(t *testing.T) { testHandlerError(t, newExecutor) })
@@ -70,6 +79,51 @@ func request(name string, payload any) *exec.Request {
 		Payload:     raw,
 		Fingerprint: exec.Fingerprint(HandlerNames()),
 		Policy:      exec.NewPolicy(),
+	}
+}
+
+// CheckCapabilities reports whether the capabilities a rung claims are
+// consistent with the isolation it advertises, returning nil when they are.
+//
+// Without this check Capabilities is an escape hatch: a rung that reports
+// LevelProcess but sets Enforces false skips DeadlineEnforced — the only
+// test proving it can stop a handler that ignores cancellation, which is the
+// property the whole isolation ladder exists to provide — and still passes
+// the suite clean. An executor may run handlers where it cannot kill them,
+// or it may claim LevelProcess; it may not do both.
+//
+// RunSuite calls this. It is exported so a rung's own tests can assert the
+// same consistency without running the full suite.
+func CheckCapabilities(name string, level exec.Level, caps Capabilities) error {
+	if level < exec.LevelProcess {
+		return nil
+	}
+
+	var errs []error
+	if !caps.Enforces {
+		errs = append(errs, fmt.Errorf(
+			"executor %q reports Level %s but Capabilities.Enforces = false: "+
+				"a rung running handlers out of process must be able to kill one that ignores its deadline",
+			name, level))
+	}
+	if !caps.IsolatesPanic {
+		errs = append(errs, fmt.Errorf(
+			"executor %q reports Level %s but Capabilities.IsolatesPanic = false: "+
+				"a handler panicking in another address space cannot take the worker down",
+			name, level))
+	}
+
+	return errors.Join(errs...)
+}
+
+func testCapabilitiesMatchLevel(
+	t *testing.T,
+	name string,
+	newExecutor func(*testing.T) exec.Executor,
+	caps Capabilities,
+) {
+	if err := CheckCapabilities(name, newExecutor(t).Level(), caps); err != nil {
+		t.Errorf("CheckCapabilities() = %v, want nil", err)
 	}
 }
 
