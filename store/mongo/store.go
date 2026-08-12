@@ -16,6 +16,7 @@ import (
 	"github.com/xraph/grove"
 	"github.com/xraph/grove/drivers/mongodriver"
 
+	"github.com/xraph/dispatch/artifact"
 	"github.com/xraph/dispatch/cluster"
 	"github.com/xraph/dispatch/cron"
 	"github.com/xraph/dispatch/dlq"
@@ -26,13 +27,15 @@ import (
 
 // Collection name constants.
 const (
-	colJobs         = "dispatch_jobs"
-	colWorkflowRuns = "dispatch_workflow_runs"
-	colCheckpoints  = "dispatch_checkpoints"
-	colCronEntries  = "dispatch_cron_entries"
-	colDLQ          = "dispatch_dlq"
-	colEvents       = "dispatch_events"
-	colWorkers      = "dispatch_workers"
+	colJobs          = "dispatch_jobs"
+	colWorkflowRuns  = "dispatch_workflow_runs"
+	colCheckpoints   = "dispatch_checkpoints"
+	colCronEntries   = "dispatch_cron_entries"
+	colDLQ           = "dispatch_dlq"
+	colEvents        = "dispatch_events"
+	colWorkers       = "dispatch_workers"
+	colArtifacts     = "dispatch_artifacts"
+	colArtifactLinks = "dispatch_artifact_links"
 )
 
 // Ensure Store implements all subsystem interfaces at compile time.
@@ -43,6 +46,7 @@ var (
 	_ dlq.Store      = (*Store)(nil)
 	_ event.Store    = (*Store)(nil)
 	_ cluster.Store  = (*Store)(nil)
+	_ artifact.Store = (*Store)(nil)
 )
 
 // Store is a grove ORM implementation of store.Store using MongoDB driver.
@@ -137,6 +141,44 @@ func isDuplicateKey(err error) bool {
 // migrationIndexes returns the index definitions for all dispatch collections.
 func migrationIndexes() map[string][]mongod.IndexModel {
 	return map[string][]mongod.IndexModel{
+		colArtifacts: {
+			// Partial unique index on the storage coordinates: only live
+			// rows collide, so a purged key becomes reusable.
+			{
+				Keys: bson.D{
+					{Key: "backend", Value: 1},
+					{Key: "bucket", Value: 1},
+					{Key: "key", Value: 1},
+				},
+				Options: options.Index().
+					SetName("dispatch_artifacts_unique_live_key").
+					SetUnique(true).
+					SetPartialFilterExpression(bson.M{"deleted_at": bson.M{"$eq": nil}}),
+			},
+			{Keys: bson.D{{Key: "lifecycle", Value: 1}, {Key: "created_at", Value: 1}}},
+			{Keys: bson.D{{Key: "deleted_at", Value: 1}}},
+			{Keys: bson.D{{Key: "content_hash", Value: 1}}},
+			{Keys: bson.D{
+				{Key: "scope_app_id", Value: 1},
+				{Key: "scope_org_id", Value: 1},
+			}},
+		},
+		colArtifactLinks: {
+			{
+				Keys: bson.D{
+					{Key: "artifact_id", Value: 1},
+					{Key: "owner_kind", Value: 1},
+					{Key: "owner_id", Value: 1},
+					{Key: "name", Value: 1},
+					{Key: "attempt", Value: 1},
+				},
+				Options: options.Index().
+					SetName("dispatch_artifact_links_unique").
+					SetUnique(true),
+			},
+			{Keys: bson.D{{Key: "owner_kind", Value: 1}, {Key: "owner_id", Value: 1}}},
+			{Keys: bson.D{{Key: "artifact_id", Value: 1}}},
+		},
 		colJobs: {
 			// Dequeue index: queue + state + priority + run_at.
 			{Keys: bson.D{
