@@ -18,7 +18,7 @@ func (s *Store) EnqueueJob(ctx context.Context, j *job.Job) error {
 		if isDuplicateKey(err) {
 			return dispatch.ErrJobAlreadyExists
 		}
-		return fmt.Errorf("dispatch/bun: enqueue job: %w", err)
+		return fmt.Errorf("dispatch/postgres: enqueue job: %w", err)
 	}
 	s.notifyWake(ctx)
 	return nil
@@ -48,14 +48,14 @@ func (s *Store) DequeueJobs(ctx context.Context, queues []string, limit int) ([]
 		queues, limit,
 	).Scan(ctx, &models)
 	if err != nil {
-		return nil, fmt.Errorf("dispatch/bun: dequeue jobs: %w", err)
+		return nil, fmt.Errorf("dispatch/postgres: dequeue jobs: %w", err)
 	}
 
 	jobs := make([]*job.Job, 0, len(models))
 	for i := range models {
 		j, convErr := fromJobModel(&models[i])
 		if convErr != nil {
-			return nil, fmt.Errorf("dispatch/bun: dequeue convert: %w", convErr)
+			return nil, fmt.Errorf("dispatch/postgres: dequeue convert: %w", convErr)
 		}
 		jobs = append(jobs, j)
 	}
@@ -73,7 +73,7 @@ func (s *Store) GetJob(ctx context.Context, jobID id.JobID) (*job.Job, error) {
 		if isNoRows(err) {
 			return nil, dispatch.ErrJobNotFound
 		}
-		return nil, fmt.Errorf("dispatch/bun: get job: %w", err)
+		return nil, fmt.Errorf("dispatch/postgres: get job: %w", err)
 	}
 	return fromJobModel(m)
 }
@@ -84,7 +84,7 @@ func (s *Store) UpdateJob(ctx context.Context, j *job.Job) error {
 	m.UpdatedAt = time.Now().UTC()
 	res, err := s.pgdb.NewUpdate(m).WherePK().Exec(ctx)
 	if err != nil {
-		return fmt.Errorf("dispatch/bun: update job: %w", err)
+		return fmt.Errorf("dispatch/postgres: update job: %w", err)
 	}
 	rows, _ := res.RowsAffected() //nolint:errcheck // driver always returns nil
 	if rows == 0 {
@@ -99,7 +99,7 @@ func (s *Store) DeleteJob(ctx context.Context, jobID id.JobID) error {
 		Where("id = ?", jobID.String()).
 		Exec(ctx)
 	if err != nil {
-		return fmt.Errorf("dispatch/bun: delete job: %w", err)
+		return fmt.Errorf("dispatch/postgres: delete job: %w", err)
 	}
 	rows, _ := res.RowsAffected() //nolint:errcheck // driver always returns nil
 	if rows == 0 {
@@ -129,14 +129,14 @@ func (s *Store) ListJobsByState(ctx context.Context, state job.State, opts job.L
 
 	err := q.Scan(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("dispatch/bun: list jobs by state: %w", err)
+		return nil, fmt.Errorf("dispatch/postgres: list jobs by state: %w", err)
 	}
 
 	jobs := make([]*job.Job, 0, len(models))
 	for i := range models {
 		j, convErr := fromJobModel(&models[i])
 		if convErr != nil {
-			return nil, fmt.Errorf("dispatch/bun: list jobs convert: %w", convErr)
+			return nil, fmt.Errorf("dispatch/postgres: list jobs convert: %w", convErr)
 		}
 		jobs = append(jobs, j)
 	}
@@ -151,7 +151,7 @@ func (s *Store) HeartbeatJob(ctx context.Context, jobID id.JobID, _ id.WorkerID)
 		Where("id = ?", jobID.String()).
 		Exec(ctx)
 	if err != nil {
-		return fmt.Errorf("dispatch/bun: heartbeat job: %w", err)
+		return fmt.Errorf("dispatch/postgres: heartbeat job: %w", err)
 	}
 	rows, _ := res.RowsAffected() //nolint:errcheck // driver always returns nil
 	if rows == 0 {
@@ -171,14 +171,14 @@ func (s *Store) ReapStaleJobs(ctx context.Context, threshold time.Duration) ([]*
 		Where("COALESCE(heartbeat_at, started_at) < NOW() - ?::interval", threshold.String()).
 		Scan(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("dispatch/bun: reap stale jobs: %w", err)
+		return nil, fmt.Errorf("dispatch/postgres: reap stale jobs: %w", err)
 	}
 
 	jobs := make([]*job.Job, 0, len(models))
 	for i := range models {
 		j, convErr := fromJobModel(&models[i])
 		if convErr != nil {
-			return nil, fmt.Errorf("dispatch/bun: reap stale convert: %w", convErr)
+			return nil, fmt.Errorf("dispatch/postgres: reap stale convert: %w", convErr)
 		}
 		jobs = append(jobs, j)
 	}
@@ -198,7 +198,7 @@ func (s *Store) CountJobs(ctx context.Context, opts job.CountOpts) (int64, error
 
 	count, err := q.Count(ctx)
 	if err != nil {
-		return 0, fmt.Errorf("dispatch/bun: count jobs: %w", err)
+		return 0, fmt.Errorf("dispatch/postgres: count jobs: %w", err)
 	}
 	return count, nil
 }

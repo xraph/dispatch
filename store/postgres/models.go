@@ -69,7 +69,7 @@ func toJobModel(j *job.Job) *jobModel {
 func fromJobModel(m *jobModel) (*job.Job, error) {
 	parsedID, err := id.ParseJobID(m.ID)
 	if err != nil {
-		return nil, fmt.Errorf("dispatch/bun: parse job id %q: %w", m.ID, err)
+		return nil, fmt.Errorf("dispatch/postgres: parse job id %q: %w", m.ID, err)
 	}
 
 	j := &job.Job{
@@ -144,7 +144,7 @@ func toRunModel(r *workflow.Run) *workflowRunModel {
 func fromRunModel(m *workflowRunModel) (*workflow.Run, error) {
 	parsedID, err := id.ParseRunID(m.ID)
 	if err != nil {
-		return nil, fmt.Errorf("dispatch/bun: parse run id %q: %w", m.ID, err)
+		return nil, fmt.Errorf("dispatch/postgres: parse run id %q: %w", m.ID, err)
 	}
 
 	return &workflow.Run{
@@ -180,12 +180,12 @@ type checkpointModel struct {
 func fromCheckpointModel(m *checkpointModel) (*workflow.Checkpoint, error) {
 	parsedID, err := id.ParseCheckpointID(m.ID)
 	if err != nil {
-		return nil, fmt.Errorf("dispatch/bun: parse checkpoint id %q: %w", m.ID, err)
+		return nil, fmt.Errorf("dispatch/postgres: parse checkpoint id %q: %w", m.ID, err)
 	}
 
 	parsedRunID, err := id.ParseRunID(m.RunID)
 	if err != nil {
-		return nil, fmt.Errorf("dispatch/bun: parse run id %q: %w", m.RunID, err)
+		return nil, fmt.Errorf("dispatch/postgres: parse run id %q: %w", m.RunID, err)
 	}
 
 	return &workflow.Checkpoint{
@@ -245,7 +245,7 @@ func toCronModel(e *cron.Entry) *cronEntryModel {
 func fromCronModel(m *cronEntryModel) (*cron.Entry, error) {
 	parsedID, err := id.ParseCronID(m.ID)
 	if err != nil {
-		return nil, fmt.Errorf("dispatch/bun: parse cron id %q: %w", m.ID, err)
+		return nil, fmt.Errorf("dispatch/postgres: parse cron id %q: %w", m.ID, err)
 	}
 
 	e := &cron.Entry{
@@ -313,12 +313,12 @@ func toDLQModel(e *dlq.Entry) *dlqEntryModel {
 func fromDLQModel(m *dlqEntryModel) (*dlq.Entry, error) {
 	parsedID, err := id.ParseDLQID(m.ID)
 	if err != nil {
-		return nil, fmt.Errorf("dispatch/bun: parse dlq id %q: %w", m.ID, err)
+		return nil, fmt.Errorf("dispatch/postgres: parse dlq id %q: %w", m.ID, err)
 	}
 
 	parsedJobID, err := id.ParseJobID(m.JobID)
 	if err != nil {
-		return nil, fmt.Errorf("dispatch/bun: parse job id %q: %w", m.JobID, err)
+		return nil, fmt.Errorf("dispatch/postgres: parse job id %q: %w", m.JobID, err)
 	}
 
 	return &dlq.Entry{
@@ -367,7 +367,7 @@ func toEventModel(evt *event.Event) *eventModel {
 func fromEventModel(m *eventModel) (*event.Event, error) {
 	parsedID, err := id.ParseEventID(m.ID)
 	if err != nil {
-		return nil, fmt.Errorf("dispatch/bun: parse event id %q: %w", m.ID, err)
+		return nil, fmt.Errorf("dispatch/postgres: parse event id %q: %w", m.ID, err)
 	}
 
 	return &event.Event{
@@ -416,7 +416,7 @@ func toWorkerModel(w *cluster.Worker) *workerModel {
 func fromWorkerModel(m *workerModel) (*cluster.Worker, error) {
 	parsedID, err := id.ParseWorkerID(m.ID)
 	if err != nil {
-		return nil, fmt.Errorf("dispatch/bun: parse worker id %q: %w", m.ID, err)
+		return nil, fmt.Errorf("dispatch/postgres: parse worker id %q: %w", m.ID, err)
 	}
 
 	return &cluster.Worker{

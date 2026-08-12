@@ -24,7 +24,7 @@ func (s *Store) RegisterWorker(ctx context.Context, w *cluster.Worker) error {
 		Set("metadata = EXCLUDED.metadata").
 		Exec(ctx)
 	if err != nil {
-		return fmt.Errorf("dispatch/bun: register worker: %w", err)
+		return fmt.Errorf("dispatch/postgres: register worker: %w", err)
 	}
 	return nil
 }
@@ -35,7 +35,7 @@ func (s *Store) DeregisterWorker(ctx context.Context, workerID id.WorkerID) erro
 		Where("id = ?", workerID.String()).
 		Exec(ctx)
 	if err != nil {
-		return fmt.Errorf("dispatch/bun: deregister worker: %w", err)
+		return fmt.Errorf("dispatch/postgres: deregister worker: %w", err)
 	}
 	if rows, _ := res.RowsAffected(); rows == 0 { //nolint:errcheck // driver always returns nil
 		return dispatch.ErrWorkerNotFound
@@ -50,7 +50,7 @@ func (s *Store) HeartbeatWorker(ctx context.Context, workerID id.WorkerID) error
 		Where("id = ?", workerID.String()).
 		Exec(ctx)
 	if err != nil {
-		return fmt.Errorf("dispatch/bun: heartbeat worker: %w", err)
+		return fmt.Errorf("dispatch/postgres: heartbeat worker: %w", err)
 	}
 	if rows, _ := res.RowsAffected(); rows == 0 { //nolint:errcheck // driver always returns nil
 		return dispatch.ErrWorkerNotFound
@@ -65,14 +65,14 @@ func (s *Store) ListWorkers(ctx context.Context) ([]*cluster.Worker, error) {
 		OrderExpr("created_at ASC").
 		Scan(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("dispatch/bun: list workers: %w", err)
+		return nil, fmt.Errorf("dispatch/postgres: list workers: %w", err)
 	}
 
 	workers := make([]*cluster.Worker, 0, len(models))
 	for i := range models {
 		w, convErr := fromWorkerModel(&models[i])
 		if convErr != nil {
-			return nil, fmt.Errorf("dispatch/bun: list workers convert: %w", convErr)
+			return nil, fmt.Errorf("dispatch/postgres: list workers convert: %w", convErr)
 		}
 		workers = append(workers, w)
 	}
@@ -86,11 +86,11 @@ func (s *Store) DeleteStaleWorkers(ctx context.Context, threshold time.Duration)
 		Where("last_seen < NOW() - ?::interval", threshold.String()).
 		Exec(ctx)
 	if err != nil {
-		return 0, fmt.Errorf("dispatch/bun: delete stale workers: %w", err)
+		return 0, fmt.Errorf("dispatch/postgres: delete stale workers: %w", err)
 	}
 	n, err := res.RowsAffected()
 	if err != nil {
-		return 0, fmt.Errorf("dispatch/bun: delete stale workers rows affected: %w", err)
+		return 0, fmt.Errorf("dispatch/postgres: delete stale workers rows affected: %w", err)
 	}
 	return n, nil
 }
@@ -103,14 +103,14 @@ func (s *Store) ReapDeadWorkers(ctx context.Context, threshold time.Duration) ([
 		Where("last_seen < NOW() - ?::interval", threshold.String()).
 		Scan(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("dispatch/bun: reap dead workers: %w", err)
+		return nil, fmt.Errorf("dispatch/postgres: reap dead workers: %w", err)
 	}
 
 	workers := make([]*cluster.Worker, 0, len(models))
 	for i := range models {
 		w, convErr := fromWorkerModel(&models[i])
 		if convErr != nil {
-			return nil, fmt.Errorf("dispatch/bun: reap dead workers convert: %w", convErr)
+			return nil, fmt.Errorf("dispatch/postgres: reap dead workers convert: %w", convErr)
 		}
 		workers = append(workers, w)
 	}
@@ -130,7 +130,7 @@ func (s *Store) AcquireLeadership(ctx context.Context, workerID id.WorkerID, ttl
 		Where("is_leader = TRUE AND leader_until < NOW()").
 		Exec(ctx)
 	if err != nil {
-		return false, fmt.Errorf("dispatch/bun: clear expired leader: %w", err)
+		return false, fmt.Errorf("dispatch/postgres: clear expired leader: %w", err)
 	}
 
 	// Step 2: Check if there's already an active leader that isn't us.
@@ -160,7 +160,7 @@ func (s *Store) AcquireLeadership(ctx context.Context, workerID id.WorkerID, ttl
 		Where("id = ?", wID).
 		Exec(ctx)
 	if claimErr != nil {
-		return false, fmt.Errorf("dispatch/bun: claim leadership: %w", claimErr)
+		return false, fmt.Errorf("dispatch/postgres: claim leadership: %w", claimErr)
 	}
 	if rows, _ := res.RowsAffected(); rows == 0 { //nolint:errcheck // driver always returns nil
 		return false, nil
@@ -178,7 +178,7 @@ func (s *Store) RenewLeadership(ctx context.Context, workerID id.WorkerID, ttl t
 		Where("id = ? AND is_leader = TRUE", workerID.String()).
 		Exec(ctx)
 	if err != nil {
-		return false, fmt.Errorf("dispatch/bun: renew leadership: %w", err)
+		return false, fmt.Errorf("dispatch/postgres: renew leadership: %w", err)
 	}
 	if rows, _ := res.RowsAffected(); rows == 0 { //nolint:errcheck // driver always returns nil
 		return false, nil
@@ -197,7 +197,7 @@ func (s *Store) GetLeader(ctx context.Context) (*cluster.Worker, error) {
 		if isNoRows(err) {
 			return nil, nil
 		}
-		return nil, fmt.Errorf("dispatch/bun: get leader: %w", err)
+		return nil, fmt.Errorf("dispatch/postgres: get leader: %w", err)
 	}
 	return fromWorkerModel(m)
 }
