@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/xraph/dispatch"
+	"github.com/xraph/dispatch/artifact"
 	"github.com/xraph/dispatch/cluster"
 	"github.com/xraph/dispatch/cron"
 	"github.com/xraph/dispatch/dlq"
@@ -25,6 +26,7 @@ var (
 	_ dlq.Store      = (*Store)(nil)
 	_ event.Store    = (*Store)(nil)
 	_ cluster.Store  = (*Store)(nil)
+	_ artifact.Store = (*Store)(nil)
 )
 
 // Store is a fully in-memory implementation of store.Store.
@@ -39,6 +41,9 @@ type Store struct {
 	dlqs        map[string]*dlq.Entry
 	events      map[string]*event.Event
 	workers     map[string]*cluster.Worker
+
+	artifacts     map[string]*artifact.Artifact
+	artifactLinks []*artifact.Link
 
 	// leader tracks the current cluster leader worker ID string.
 	leader      string
@@ -55,6 +60,7 @@ func New() *Store {
 		dlqs:        make(map[string]*dlq.Entry),
 		events:      make(map[string]*event.Event),
 		workers:     make(map[string]*cluster.Worker),
+		artifacts:   make(map[string]*artifact.Artifact),
 	}
 }
 

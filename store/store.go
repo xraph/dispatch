@@ -7,6 +7,7 @@ package store
 import (
 	"context"
 
+	"github.com/xraph/dispatch/artifact"
 	"github.com/xraph/dispatch/cluster"
 	"github.com/xraph/dispatch/cron"
 	"github.com/xraph/dispatch/dlq"
@@ -37,6 +38,7 @@ type Store interface {
 	dlq.Store
 	event.Store
 	cluster.Store
+	artifact.Store
 
 	// Migrate runs all schema migrations.
 	Migrate(ctx context.Context) error
