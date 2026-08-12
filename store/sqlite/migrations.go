@@ -373,5 +373,45 @@ func init() {
 				return err
 			},
 		},
+
+		// Lease columns. See the postgres migration of the same name for
+		// why the lease lives on the row.
+		&migrate.Migration{
+			Name:    "add_job_lease_columns",
+			Version: "20260812120000",
+			Up: func(ctx context.Context, exec migrate.Executor) error {
+				stmts := []string{
+					`ALTER TABLE dispatch_jobs ADD COLUMN lease_epoch INTEGER NOT NULL DEFAULT 0`,
+					`ALTER TABLE dispatch_jobs ADD COLUMN lease_expires_at TEXT`,
+					`ALTER TABLE dispatch_jobs ADD COLUMN lease_ttl INTEGER NOT NULL DEFAULT 0`,
+					`ALTER TABLE dispatch_jobs ADD COLUMN evict_count INTEGER NOT NULL DEFAULT 0`,
+					`CREATE INDEX IF NOT EXISTS idx_dispatch_jobs_lease
+						ON dispatch_jobs (lease_expires_at) WHERE state = 'running'`,
+				}
+				for _, stmt := range stmts {
+					if _, err := exec.Exec(ctx, stmt); err != nil {
+						return err
+					}
+				}
+
+				return nil
+			},
+			Down: func(ctx context.Context, exec migrate.Executor) error {
+				stmts := []string{
+					`DROP INDEX IF EXISTS idx_dispatch_jobs_lease`,
+					`ALTER TABLE dispatch_jobs DROP COLUMN lease_epoch`,
+					`ALTER TABLE dispatch_jobs DROP COLUMN lease_expires_at`,
+					`ALTER TABLE dispatch_jobs DROP COLUMN lease_ttl`,
+					`ALTER TABLE dispatch_jobs DROP COLUMN evict_count`,
+				}
+				for _, stmt := range stmts {
+					if _, err := exec.Exec(ctx, stmt); err != nil {
+						return err
+					}
+				}
+
+				return nil
+			},
+		},
 	)
 }
