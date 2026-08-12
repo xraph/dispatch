@@ -12,8 +12,12 @@ import (
 
 // EnqueueJob persists a new job in pending state.
 func (s *Store) EnqueueJob(ctx context.Context, j *job.Job) error {
-	m := toJobModel(j)
-	_, err := s.pgdb.NewInsert(m).Exec(ctx)
+	m, err := toJobModel(j)
+	if err != nil {
+		return err
+	}
+
+	_, err = s.pgdb.NewInsert(m).Exec(ctx)
 	if err != nil {
 		if isDuplicateKey(err) {
 			return dispatch.ErrJobAlreadyExists
@@ -80,7 +84,11 @@ func (s *Store) GetJob(ctx context.Context, jobID id.JobID) (*job.Job, error) {
 
 // UpdateJob persists changes to an existing job.
 func (s *Store) UpdateJob(ctx context.Context, j *job.Job) error {
-	m := toJobModel(j)
+	m, err := toJobModel(j)
+	if err != nil {
+		return err
+	}
+
 	m.UpdatedAt = time.Now().UTC()
 	res, err := s.pgdb.NewUpdate(m).WherePK().Exec(ctx)
 	if err != nil {

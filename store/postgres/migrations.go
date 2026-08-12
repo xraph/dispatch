@@ -456,5 +456,68 @@ func init() {
 				return err
 			},
 		},
+
+		// 009: Resource model columns for resource-aware scheduling.
+		//
+		// Every column defaults to zero or empty, so rows written before
+		// this migration remain dequeueable by every worker during a
+		// rolling deploy.
+		&migrate.Migration{
+			Name:    "job_resource_columns",
+			Version: "20260812130000",
+			Up: func(ctx context.Context, exec migrate.Executor) error {
+				// The four canonical dimensions get real columns because
+				// the dequeue predicate compares them and JSON comparison
+				// semantics are not portable across the five backends.
+				for _, stmt := range []string{
+					`ALTER TABLE dispatch_jobs ADD COLUMN IF NOT EXISTS req_cpu_milli BIGINT NOT NULL DEFAULT 0`,
+					`ALTER TABLE dispatch_jobs ADD COLUMN IF NOT EXISTS req_memory_bytes BIGINT NOT NULL DEFAULT 0`,
+					`ALTER TABLE dispatch_jobs ADD COLUMN IF NOT EXISTS req_disk_bytes BIGINT NOT NULL DEFAULT 0`,
+					`ALTER TABLE dispatch_jobs ADD COLUMN IF NOT EXISTS req_gpu_milli BIGINT NOT NULL DEFAULT 0`,
+					`ALTER TABLE dispatch_jobs ADD COLUMN IF NOT EXISTS req_custom_keys TEXT NOT NULL DEFAULT ''`,
+					`ALTER TABLE dispatch_jobs ADD COLUMN IF NOT EXISTS resource_requests JSONB`,
+					`ALTER TABLE dispatch_jobs ADD COLUMN IF NOT EXISTS resource_limits JSONB`,
+					`ALTER TABLE dispatch_jobs ADD COLUMN IF NOT EXISTS resource_class TEXT NOT NULL DEFAULT ''`,
+					`ALTER TABLE dispatch_jobs ADD COLUMN IF NOT EXISTS input_bytes BIGINT NOT NULL DEFAULT 0`,
+					`ALTER TABLE dispatch_jobs ADD COLUMN IF NOT EXISTS primary_input_hash TEXT`,
+				} {
+					if _, err := exec.Exec(ctx, stmt); err != nil {
+						return err
+					}
+				}
+
+				// Covering index: the dequeue predicate reads all four
+				// scalars for every candidate row, so including them
+				// keeps the scan index-only.
+				_, err := exec.Exec(ctx, `
+					CREATE INDEX IF NOT EXISTS idx_dispatch_jobs_dequeue_res
+						ON dispatch_jobs (queue, priority DESC, run_at ASC)
+						INCLUDE (req_cpu_milli, req_memory_bytes,
+						         req_disk_bytes, req_gpu_milli)
+						WHERE state IN ('pending', 'retrying')`)
+
+				return err
+			},
+			Down: func(ctx context.Context, exec migrate.Executor) error {
+				if _, err := exec.Exec(ctx,
+					`DROP INDEX IF EXISTS idx_dispatch_jobs_dequeue_res`); err != nil {
+					return err
+				}
+
+				for _, col := range []string{
+					"req_cpu_milli", "req_memory_bytes", "req_disk_bytes",
+					"req_gpu_milli", "req_custom_keys", "resource_requests",
+					"resource_limits", "resource_class", "input_bytes",
+					"primary_input_hash",
+				} {
+					if _, err := exec.Exec(ctx,
+						`ALTER TABLE dispatch_jobs DROP COLUMN IF EXISTS `+col); err != nil {
+						return err
+					}
+				}
+
+				return nil
+			},
+		},
 	)
 }

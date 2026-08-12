@@ -1,7 +1,9 @@
 package postgres
 
 import (
+	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/xraph/grove"
@@ -13,6 +15,7 @@ import (
 	"github.com/xraph/dispatch/event"
 	"github.com/xraph/dispatch/id"
 	"github.com/xraph/dispatch/job"
+	"github.com/xraph/dispatch/resource"
 	"github.com/xraph/dispatch/workflow"
 )
 
@@ -44,9 +47,82 @@ type jobModel struct {
 	EvictCount     int        `grove:"evict_count,notnull,default:0"`
 	CreatedAt      time.Time  `grove:"created_at,notnull,default:current_timestamp"`
 	UpdatedAt      time.Time  `grove:"updated_at,notnull,default:current_timestamp"`
+
+	// The four canonical dimensions get real scalar columns because the
+	// dequeue predicate compares them and must behave identically across
+	// five backends; JSON comparison semantics are not portable. They are
+	// derived from Resources by toJobModel — the caller never sets them
+	// directly.
+	ReqCPUMilli    int64  `grove:"req_cpu_milli,notnull,default:0"`
+	ReqMemoryBytes int64  `grove:"req_memory_bytes,notnull,default:0"`
+	ReqDiskBytes   int64  `grove:"req_disk_bytes,notnull,default:0"`
+	ReqGPUMilli    int64  `grove:"req_gpu_milli,notnull,default:0"`
+	ReqCustomKeys  string `grove:"req_custom_keys,notnull,default:''"`
+
+	// ResourceRequests and ResourceLimits are the full-fidelity JSON copy
+	// of Resources / ResourceLimits, including custom keys the scalar
+	// columns above do not carry. fromJobModel reads Resources back from
+	// here, not from the scalars.
+	ResourceRequests []byte `grove:"resource_requests,type:jsonb"`
+	ResourceLimits   []byte `grove:"resource_limits,type:jsonb"`
+	ResourceClass    string `grove:"resource_class,notnull,default:''"`
+	InputBytes       int64  `grove:"input_bytes,notnull,default:0"`
+	PrimaryInputHash string `grove:"primary_input_hash"`
 }
 
-func toJobModel(j *job.Job) *jobModel {
+// CustomKeySep delimits the custom-resource key list. The list is stored
+// as a delimited string rather than an array so every backend can express
+// the containment test in its own idiom without a schema translation.
+const CustomKeySep = ","
+
+// encodeSet marshals a resource Set for the JSON column. A zero Set
+// stores NULL rather than "{}", so an undeclared job is indistinguishable
+// from one written before this migration.
+func encodeSet(s resource.Set) ([]byte, error) {
+	if s.IsZero() {
+		return nil, nil
+	}
+
+	return json.Marshal(s)
+}
+
+// decodeSet unmarshals the JSON column, treating NULL and empty as unset.
+func decodeSet(b []byte) (resource.Set, error) {
+	if len(b) == 0 {
+		return nil, nil
+	}
+
+	var s resource.Set
+	if err := json.Unmarshal(b, &s); err != nil {
+		return nil, err
+	}
+
+	return s, nil
+}
+
+// encodeCustomKeys renders the custom keys as a delimited string with a
+// leading and trailing separator, so a containment test can match on
+// ",fpga," and never partially match ",fpga-large,".
+func encodeCustomKeys(s resource.Set) string {
+	keys := s.CustomKeys()
+	if len(keys) == 0 {
+		return ""
+	}
+
+	return CustomKeySep + strings.Join(keys, CustomKeySep) + CustomKeySep
+}
+
+func toJobModel(j *job.Job) (*jobModel, error) {
+	reqJSON, err := encodeSet(j.Resources)
+	if err != nil {
+		return nil, fmt.Errorf(errPrefix+"marshal job resources: %w", err)
+	}
+
+	limitsJSON, err := encodeSet(j.ResourceLimits)
+	if err != nil {
+		return nil, fmt.Errorf(errPrefix+"marshal job resource limits: %w", err)
+	}
+
 	return &jobModel{
 		ID:             j.ID.String(),
 		Name:           j.Name,
@@ -71,13 +147,34 @@ func toJobModel(j *job.Job) *jobModel {
 		EvictCount:     j.EvictCount,
 		CreatedAt:      j.CreatedAt,
 		UpdatedAt:      j.UpdatedAt,
-	}
+
+		ReqCPUMilli:      j.Resources[resource.CPU],
+		ReqMemoryBytes:   j.Resources[resource.Memory],
+		ReqDiskBytes:     j.Resources[resource.Disk],
+		ReqGPUMilli:      j.Resources[resource.GPU],
+		ReqCustomKeys:    encodeCustomKeys(j.Resources),
+		ResourceRequests: reqJSON,
+		ResourceLimits:   limitsJSON,
+		ResourceClass:    j.ResourceClass,
+		InputBytes:       j.InputBytes,
+		PrimaryInputHash: j.PrimaryInputHash,
+	}, nil
 }
 
 func fromJobModel(m *jobModel) (*job.Job, error) {
 	parsedID, err := id.ParseJobID(m.ID)
 	if err != nil {
 		return nil, fmt.Errorf(errPrefix+"parse job id %q: %w", m.ID, err)
+	}
+
+	resources, err := decodeSet(m.ResourceRequests)
+	if err != nil {
+		return nil, fmt.Errorf(errPrefix+"unmarshal job resources: %w", err)
+	}
+
+	limits, err := decodeSet(m.ResourceLimits)
+	if err != nil {
+		return nil, fmt.Errorf(errPrefix+"unmarshal job resource limits: %w", err)
 	}
 
 	j := &job.Job{
@@ -105,6 +202,12 @@ func fromJobModel(m *jobModel) (*job.Job, error) {
 		LeaseExpiresAt: m.LeaseExpiresAt,
 		LeaseTTL:       time.Duration(m.LeaseTTL),
 		EvictCount:     m.EvictCount,
+
+		Resources:        resources,
+		ResourceLimits:   limits,
+		ResourceClass:    m.ResourceClass,
+		InputBytes:       m.InputBytes,
+		PrimaryInputHash: m.PrimaryInputHash,
 	}
 
 	if m.WorkerID != "" {
