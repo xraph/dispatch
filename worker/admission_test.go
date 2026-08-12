@@ -150,10 +150,10 @@ func TestLeaseReleasedAfterExecution(t *testing.T) {
 
 	// The panic case drives runJob directly rather than through a started
 	// pool. A handler that panics past a pool with no Recover middleware
-	// takes the process with it, so there is no way to observe the ledger
-	// afterwards from inside a running pool — but the defer that returns
-	// the lease is the same one either way, and this recovers the panic at
-	// the boundary to read Free() on the other side of it.
+	// takes the process with it — there is no surviving pool to observe
+	// afterwards — but the defer that returns the lease is the same one
+	// either way, and this recovers the panic at the boundary so the
+	// ledger can be read on the other side of it.
 	t.Run("panic", func(t *testing.T) {
 		h := newLeaseHarness(t, false)
 
@@ -164,11 +164,13 @@ func TestLeaseReleasedAfterExecution(t *testing.T) {
 
 		j := newResourceJob("panicker", resource.Set{resource.Memory: gib})
 
-		lease, fits := h.pool.admit(j)
-		if !fits {
-			t.Fatal("admit refused a job that fits")
+		lease, err := h.pool.admit(j)
+		if err != nil {
+			t.Fatalf("admit refused a job that fits: %v", err)
 		}
 
+		// Pre-condition, not the assertion: the lease is genuinely held
+		// going in, so the drained check afterwards means something.
 		if got := h.manager.Free()[resource.Memory]; got != 3*gib {
 			t.Fatalf("free memory while admitted = %d, want %d", got, 3*gib)
 		}
@@ -225,13 +227,138 @@ func assertLeaseReturned(t *testing.T, handlerErr error) {
 	h.assertDrained()
 }
 
+// TestAdmitReclaimsDiskBeforeRefusing closes the loop between the two
+// halves of the disk rule.
+//
+// dequeueBudget offers disk as free PLUS what the cache can evict, so
+// admission has to be able to evict, or the worker promises the store
+// capacity it will then refuse to honour — claiming the job, bouncing it,
+// and doing it again on the next poll forever. Nothing registers a
+// reclaimer on the shared manager yet, which is the only reason that is
+// not already happening in production.
+func TestAdmitReclaimsDiskBeforeRefusing(t *testing.T) {
+	mgr := resource.NewManager(resource.Set{resource.Disk: 100 * gib})
+
+	// A staging cache holding 60 GiB across six evictable entries, so 40
+	// GiB is free and 60 GiB is reclaimable.
+	cache, err := resourcetest.NewFakeReclaimer(mgr, resource.Disk, 10*gib, 6)
+	if err != nil {
+		t.Fatalf("disk reclaimer: %v", err)
+	}
+
+	mgr.RegisterReclaimer(resource.Disk, cache)
+
+	h := newHarness(t, mgr, true)
+
+	if got := h.pool.dequeueBudget()[resource.Disk]; got != 100*gib {
+		t.Fatalf("setup: budget disk = %d, want %d", got, 100*gib)
+	}
+
+	if free := mgr.Free()[resource.Disk]; free != 40*gib {
+		t.Fatalf("setup: free disk = %d, want %d", free, 40*gib)
+	}
+
+	// A job sized to the budget the store was given. TryAcquire would
+	// refuse this against the 40 GiB that is free right now.
+	j := newResourceJob("staging-hog", resource.Set{resource.Disk: 100 * gib})
+
+	lease, err := h.pool.admit(j)
+	if err != nil {
+		t.Fatalf("admit refused a job the dequeue budget promised: %v", err)
+	}
+
+	if cache.Calls() == 0 {
+		t.Error("admit took the lease without reclaiming; the budget was redeemed by luck, not eviction")
+	}
+
+	if got := mgr.Free()[resource.Disk]; got != 0 {
+		t.Errorf("free disk while the job holds everything = %d, want 0", got)
+	}
+
+	lease.Release()
+
+	if got := mgr.Free()[resource.Disk]; got != 100*gib {
+		t.Errorf("free disk after release = %d, want %d", got, 100*gib)
+	}
+}
+
+// TestAdmitRefusesWhatNoEvictionCanFree is the other side: reclamation
+// is bounded by what is actually reclaimable, so a job larger than
+// capacity is refused immediately rather than waited on.
+func TestAdmitRefusesWhatNoEvictionCanFree(t *testing.T) {
+	mgr := resource.NewManager(resource.Set{resource.Disk: 10 * gib})
+	h := newHarness(t, mgr, true)
+
+	j := newResourceJob("too-big", resource.Set{resource.Disk: 40 * gib})
+
+	start := time.Now()
+
+	if _, err := h.pool.admit(j); err == nil {
+		t.Fatal("admit accepted a job larger than total capacity")
+	}
+
+	// Acquire fails a want that exceeds capacity before it waits at all,
+	// so this must not have burned the admission deadline.
+	if elapsed := time.Since(start); elapsed > h.pool.admitTimeout() {
+		t.Errorf("admit blocked for %v on an impossible job; want an immediate refusal", elapsed)
+	}
+}
+
+// TestPoolPacesUnfittableBacklog pins the pacing of a batch that
+// dispatched nothing.
+//
+// The "there may be more ready work, poll again immediately" fast path
+// was only safe because every returned job went through the blocking
+// hand-off, which paced the loop at the rate work completes. A job
+// refused locally never touches that channel and returns instantly, so
+// reading len(jobs) as productive spins the claim/requeue cycle as fast
+// as the store can serve it — each turn costing a dequeue and an
+// UpdateJob against a backlog nothing can run.
+func TestPoolPacesUnfittableBacklog(t *testing.T) {
+	mgr := resource.NewManager(resource.Set{"fpga": 1})
+	h := newHarness(t, mgr, true,
+		WithPoolConcurrency(2),
+		WithMaxPollInterval(50*time.Millisecond),
+	)
+
+	job.RegisterDefinition(h.registry, job.NewDefinition("never-fits",
+		func(_ context.Context, _ struct{}) error { return nil }))
+
+	// Every one of these passes the store's filter — dequeue matches
+	// custom keys, not quantities — and fails admission.
+	for range 60 {
+		j := newResourceJob("never-fits", resource.Set{"fpga": 4})
+		if err := h.store.EnqueueJob(context.Background(), j); err != nil {
+			t.Fatalf("enqueue: %v", err)
+		}
+	}
+
+	h.start()
+	time.Sleep(500 * time.Millisecond)
+
+	calls := h.store.calls()
+
+	h.stop()
+
+	t.Logf("DequeueJobs calls in 500ms against a 60-job unfittable backlog = %d", calls)
+
+	// Paced: 10ms doubling to a 50ms cap is ~12 polls in 500ms. Reverting
+	// the fix on this exact test measures 713. The bound is loose enough
+	// to survive a slow CI box and still an order of magnitude below it.
+	if calls > 60 {
+		t.Errorf("DequeueJobs calls in 500ms = %d, want <= 60; a batch that dispatched nothing is not backing off", calls)
+	}
+}
+
 // TestPoolRequeuesJobThatDoesNotFitLocally covers the gap the store
 // cannot close: dequeue matches custom resources by KEY, never by
 // quantity, so a worker offering "fpga" legitimately claims a job wanting
-// four of them. That job must go back to pending, not run.
+// four of them. That job must go back to pending, not run — and the
+// queue/tenant token taken for it must come back too.
 func TestPoolRequeuesJobThatDoesNotFitLocally(t *testing.T) {
 	mgr := resource.NewManager(resource.Set{"fpga": 1})
-	h := newHarness(t, mgr, true)
+	qm := newCountingQueueManager()
+	h := newHarness(t, mgr, true, WithQueueManager(qm))
 
 	var ran atomic.Bool
 
@@ -279,7 +406,130 @@ func TestPoolRequeuesJobThatDoesNotFitLocally(t *testing.T) {
 		t.Errorf("free fpga = %d, want 1 (a refused claim must take no lease)", free)
 	}
 
+	acquired, released := qm.counts()
+	if acquired == 0 {
+		t.Fatal("queue manager was never consulted; the misfit path is not being exercised")
+	}
+
+	if acquired != released {
+		t.Errorf("queue tokens acquired = %d, released = %d; a refused job must give its token back",
+			acquired, released)
+	}
+
 	h.assertDrained()
+}
+
+// TestAbandonReturnsEverything covers the shutdown path, which no
+// realistic race can be made to hit on demand: a job claimed by the
+// fetcher and cancelled before the hand-off must give back its row, its
+// queue token, and its lease.
+func TestAbandonReturnsEverything(t *testing.T) {
+	mgr := resource.NewManager(resource.Set{resource.Memory: 4 * gib})
+	qm := newCountingQueueManager()
+	h := newHarness(t, mgr, true, WithQueueManager(qm))
+
+	ctx := context.Background()
+
+	j := newResourceJob("interrupted", resource.Set{resource.Memory: gib})
+	if err := h.store.EnqueueJob(ctx, j); err != nil {
+		t.Fatalf("enqueue: %v", err)
+	}
+
+	// Walk the fetcher's steps by hand, up to the hand-off it never wins.
+	claimed, err := h.store.DequeueJobs(ctx, job.DequeueOpts{Queues: []string{"default"}, Limit: 1})
+	if err != nil || len(claimed) != 1 {
+		t.Fatalf("dequeue: %v (%d jobs)", err, len(claimed))
+	}
+
+	if !h.pool.queueManager.Acquire(claimed[0].Queue, claimed[0].ScopeOrgID) {
+		t.Fatal("queue manager refused")
+	}
+
+	lease, err := h.pool.admit(claimed[0])
+	if err != nil {
+		t.Fatalf("admit: %v", err)
+	}
+
+	h.pool.abandon(admitted{job: claimed[0], lease: lease})
+
+	got, err := h.store.GetJob(ctx, j.ID)
+	if err != nil {
+		t.Fatalf("get job: %v", err)
+	}
+
+	if got.State != job.StatePending {
+		t.Errorf("job state = %q, want %q", got.State, job.StatePending)
+	}
+
+	if got.StartedAt != nil {
+		t.Errorf("StartedAt = %v, want nil (the attempt never started)", got.StartedAt)
+	}
+
+	if acquired, released := qm.counts(); acquired != released {
+		t.Errorf("queue tokens acquired = %d, released = %d", acquired, released)
+	}
+
+	if free := mgr.Free()[resource.Memory]; free != 4*gib {
+		t.Errorf("free memory = %d, want %d", free, 4*gib)
+	}
+
+	h.assertDrained()
+}
+
+// TestRequeueLocalMisfitDuringShutdownUsesFreshContext pins the branch
+// that keeps a stopping pool from stranding claimed jobs.
+//
+// Admission is bounded by the pool's own context, so shutdown makes it
+// fail for every job the fetcher is holding. Requeueing those through the
+// rate-limited path would write through that same cancelled context, the
+// UpdateJob would fail, and the job would sit in running with no worker
+// until the reaper noticed.
+func TestRequeueLocalMisfitDuringShutdownUsesFreshContext(t *testing.T) {
+	mgr := resource.NewManager(resource.Set{resource.Memory: 4 * gib})
+	h := newHarness(t, mgr, true)
+
+	ctx := context.Background()
+
+	j := newResourceJob("interrupted", resource.Set{resource.Memory: gib})
+	if err := h.store.EnqueueJob(ctx, j); err != nil {
+		t.Fatalf("enqueue: %v", err)
+	}
+
+	claimed, err := h.store.DequeueJobs(ctx, job.DequeueOpts{Queues: []string{"default"}, Limit: 1})
+	if err != nil || len(claimed) != 1 {
+		t.Fatalf("dequeue: %v (%d jobs)", err, len(claimed))
+	}
+
+	// Another job took the whole worker between the budget and the claim,
+	// so admission would have to wait — the only way a cancelled context
+	// can be observed, since a job that fits is granted outright.
+	blocker, ok := mgr.TryAcquire("other-job", resource.Set{resource.Memory: 4 * gib})
+	if !ok {
+		t.Fatal("setup: blocker did not fit")
+	}
+
+	defer blocker.Release()
+
+	// The pool is stopping: its context is dead and every store call made
+	// through it would fail.
+	h.pool.cancelFunc()
+
+	_, admitErr := h.pool.admit(claimed[0])
+	if admitErr == nil {
+		t.Fatal("admit succeeded against a cancelled pool context with no free capacity")
+	}
+
+	h.pool.requeueLocalMisfit(claimed[0], admitErr)
+
+	got, err := h.store.GetJob(ctx, j.ID)
+	if err != nil {
+		t.Fatalf("get job: %v", err)
+	}
+
+	if got.State != job.StatePending {
+		t.Errorf("job state = %q, want %q; the requeue wrote through the cancelled context",
+			got.State, job.StatePending)
+	}
 }
 
 // TestPoolWithoutManagerPassesZeroBudget is the degradation guarantee: a
@@ -379,6 +629,36 @@ func (r *recordingOptsStore) calls() int {
 	return r.count
 }
 
+// countingQueueManager is a QueueManager that admits everything and
+// counts both sides of the token.
+//
+// It exists because WithQueueManager had no test call site anywhere in
+// the repo, so nothing could observe a token that was never released —
+// which is how two new release call sites landed in a blind spot.
+type countingQueueManager struct {
+	acquires atomic.Int64
+	releases atomic.Int64
+	refuse   atomic.Bool
+}
+
+func newCountingQueueManager() *countingQueueManager { return &countingQueueManager{} }
+
+func (q *countingQueueManager) Acquire(_, _ string) bool {
+	if q.refuse.Load() {
+		return false
+	}
+
+	q.acquires.Add(1)
+
+	return true
+}
+
+func (q *countingQueueManager) Release(_, _ string) { q.releases.Add(1) }
+
+func (q *countingQueueManager) counts() (acquired, released int64) {
+	return q.acquires.Load(), q.releases.Load()
+}
+
 type leaseHarness struct {
 	t        *testing.T
 	pool     *Pool
@@ -397,8 +677,9 @@ func newLeaseHarness(t *testing.T, withRecover bool) *leaseHarness {
 
 // newHarness builds a pool with concurrency 1 over mgr, which may be nil.
 // withRecover installs middleware.Recover; the panic test omits it on
-// purpose, and then never starts the pool.
-func newHarness(t *testing.T, mgr resource.Manager, withRecover bool) *leaseHarness {
+// purpose, and then never starts the pool. Options in extra are applied
+// last, so they override the defaults here.
+func newHarness(t *testing.T, mgr resource.Manager, withRecover bool, extra ...PoolOption) *leaseHarness {
 	t.Helper()
 
 	logger := log.NewNoopLogger()
@@ -423,6 +704,8 @@ func newHarness(t *testing.T, mgr resource.Manager, withRecover bool) *leaseHarn
 	if mgr != nil {
 		opts = append(opts, WithResourceManager(mgr))
 	}
+
+	opts = append(opts, extra...)
 
 	h := &leaseHarness{
 		t:        t,

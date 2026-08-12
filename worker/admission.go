@@ -2,6 +2,7 @@ package worker
 
 import (
 	"context"
+	"time"
 
 	log "github.com/xraph/go-utils/log"
 
@@ -98,40 +99,89 @@ func (p *Pool) offeredCustomKeys() []string {
 
 // admit reserves local capacity for a job that has already been claimed.
 //
-// It is deliberately non-blocking. The fetcher holds claimed, running
-// jobs at this point: blocking here would hold them hostage behind
-// whatever is currently executing, past their heartbeat and into the
-// reaper. TryAcquire also never reclaims, which is right for the same
-// reason — a caller that cannot wait cannot afford eviction I/O either.
+// It uses Acquire under a short deadline, NOT TryAcquire, and the
+// distinction is the difference between working and deadlocking.
+// TryAcquire never reclaims — its own doc says a caller that cannot wait
+// cannot afford eviction I/O either — but dequeueBudget offers disk as
+// free PLUS reclaimable. Pairing the two would tell the store that 100
+// GiB is available, take delivery of the job it sends back, and then
+// refuse it against free alone. Every poll. Forever. The budget's promise
+// has to be redeemable by the thing that redeems it, so admission has to
+// be able to evict.
 //
-// The false return is reachable in normal operation even though the
-// store already applied a fit predicate: dequeue matches custom
-// resources by key only, never by quantity, so a worker offering "fpga"
-// can legitimately claim a job wanting four of them. It is also reachable
-// on the canonical keys, because the budget was computed before the claim
-// and another job may have been admitted since.
-func (p *Pool) admit(j *job.Job) (resource.Lease, bool) {
+// Acquire reclaims first and only waits if reclamation was not enough, so
+// a deadline turns "block until someone finishes" into "evict if you can,
+// then give up". The instinct behind TryAcquire — never block the fetcher,
+// which is sitting on claimed, running jobs whose heartbeats are ticking —
+// is served by the deadline instead of by refusing to reclaim.
+//
+// The deadline is pollInterval, derived rather than invented: a refusal
+// only costs one requeue and the next poll retries, so the fetcher should
+// never stall longer than the cadence it would have waited anyway.
+//
+// A failure is reachable in normal operation even though the store already
+// applied a fit predicate. Dequeue matches custom resources by key only,
+// never by quantity, so a worker offering "fpga" can legitimately claim a
+// job wanting four of them. It is also reachable on the canonical keys,
+// because the budget was computed before the claim and another job may
+// have been admitted since. The returned error names the dimensions that
+// did not fit, which is what the requeue path logs.
+func (p *Pool) admit(j *job.Job) (resource.Lease, error) {
 	if p.resources == nil {
-		return nil, true
+		return nil, nil
 	}
 
-	return p.resources.TryAcquire(j.ID.String(), j.Resources)
+	ctx, cancel := context.WithTimeout(p.cancelCtx, p.admitTimeout())
+	defer cancel()
+
+	return p.resources.Acquire(ctx, j.ID.String(), j.Resources)
 }
 
-// requeueLocalMisfit returns a job this worker claimed but cannot fit to
-// pending, so another worker — or this one, later — can run it.
+// admitTimeout bounds how long admission may spend reclaiming for one
+// job. A non-positive poll interval would expire the context before
+// Acquire's first iteration, degrading it back into the TryAcquire
+// behaviour that cannot redeem the disk budget, so it floors at
+// something small rather than at zero.
+func (p *Pool) admitTimeout() time.Duration {
+	if p.pollInterval > 0 {
+		return p.pollInterval
+	}
+
+	return time.Millisecond
+}
+
+// requeueLocalMisfit returns a job this worker claimed but could not
+// admit to pending, so another worker — or this one, later — can run it.
 //
 // It reuses the rate-limited requeue path verbatim: same state, same
 // short delay. A job that no worker in the fleet can ever fit will bounce
 // on that delay rather than run; detecting that condition is the job of
 // unschedulable sweeping, which is a later phase and deliberately not
-// approximated here.
-func (p *Pool) requeueLocalMisfit(j *job.Job) {
+// approximated here. What does pace it is the fetch loop, which treats a
+// batch that dispatched nothing as an empty poll and backs off.
+//
+// cause is logged rather than recomputed. resource.Manager already names
+// the dimensions that did not fit in its error, and re-deriving them here
+// would take the manager's mutex and call every reclaimer's Available on
+// the misfit path — to produce a worse answer, since the natural thing to
+// compare against is the ceiling the store was offered rather than the
+// free capacity the acquisition actually failed on.
+func (p *Pool) requeueLocalMisfit(j *job.Job, cause error) {
+	if p.cancelCtx.Err() != nil {
+		// Admission was interrupted by shutdown, not by a shortfall. The
+		// rate-limited path would write through the pool's own cancelled
+		// context and silently fail, stranding a running job with no
+		// worker until the reaper; the undispatched path uses a fresh one.
+		p.requeueUndispatched(j)
+
+		return
+	}
+
 	p.logger.Debug("job does not fit local capacity, returning to pending",
 		log.String("job_id", j.ID.String()),
 		log.String("job_name", j.Name),
 		log.Any("required", j.Resources),
-		log.Any("short", j.Resources.Exceeds(p.dequeueBudget())),
+		log.String("error", cause.Error()),
 	)
 
 	p.requeueRateLimited(j)

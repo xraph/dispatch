@@ -3,6 +3,7 @@ package worker
 import (
 	"context"
 	"errors"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -187,8 +188,10 @@ func WithResourceManager(m resource.Manager) PoolOption {
 // Setting this without a resource manager makes the dequeue bounded on
 // its own, which is a deliberate opt-in: the worker then claims only
 // jobs whose custom keys it offers, with no quantity accounting at all.
+//
+// The slice is copied, so the caller keeps no handle on pool state.
 func WithWorkerCustomKeys(keys []string) PoolOption {
-	return func(p *Pool) { p.customKeys = keys }
+	return func(p *Pool) { p.customKeys = slices.Clone(keys) }
 }
 
 // WithStoreCallTimeout caps a single store roundtrip. Pass a positive
@@ -424,6 +427,11 @@ func (p *Pool) fetchLoop() {
 			continue
 		}
 
+		// dispatched counts jobs actually handed to a worker, which is what
+		// paces the loop below — len(jobs) is not, because a refused job
+		// never reaches the blocking hand-off that used to do the pacing.
+		dispatched := 0
+
 		for _, j := range jobs {
 			// Check queue/tenant rate limit and concurrency.
 			if p.queueManager != nil && !p.queueManager.Acquire(j.Queue, j.ScopeOrgID) {
@@ -434,10 +442,10 @@ func (p *Pool) fetchLoop() {
 			// Reserve local capacity between the claim and the hand-off,
 			// so no job reaches a worker without the resources it declared
 			// already accounted for.
-			lease, fits := p.admit(j)
-			if !fits {
+			lease, admitErr := p.admit(j)
+			if admitErr != nil {
 				p.releaseQueueSlot(j)
-				p.requeueLocalMisfit(j)
+				p.requeueLocalMisfit(j, admitErr)
 
 				continue
 			}
@@ -447,6 +455,7 @@ func (p *Pool) fetchLoop() {
 			select {
 			case p.jobCh <- a:
 				held-- // The worker now owns this slot.
+				dispatched++
 			case <-p.stopCh:
 				p.abandon(a)
 				p.releaseSlots(held)
@@ -459,11 +468,20 @@ func (p *Pool) fetchLoop() {
 		}
 		p.releaseSlots(held)
 
-		if len(jobs) > 0 {
+		if dispatched > 0 {
 			// There may be more ready work; poll again immediately.
 			interval = p.pollInterval
 			continue
 		}
+
+		// A batch that dispatched nothing paces like an empty one, even
+		// though the store returned rows. The immediate re-poll above is
+		// only safe when something went through the blocking hand-off,
+		// which is what throttles the loop to the rate work completes.
+		// A rate-limited or unadmittable job returns instantly, so
+		// treating its batch as productive spins the claim/requeue cycle
+		// as fast as the store can serve it — thousands of dequeues and
+		// an UpdateJob each, against a backlog nothing can run.
 
 		interval = min(interval*2, p.maxPollInterval)
 		woken, ok := p.wait(interval)
