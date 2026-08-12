@@ -11,6 +11,7 @@ import (
 	_ "github.com/xraph/grove/drivers/pgdriver/pgmigrate" // register pg migration executor
 	"github.com/xraph/grove/migrate"
 
+	"github.com/xraph/dispatch/artifact"
 	"github.com/xraph/dispatch/cluster"
 	"github.com/xraph/dispatch/cron"
 	"github.com/xraph/dispatch/dlq"
@@ -27,6 +28,7 @@ var (
 	_ dlq.Store      = (*Store)(nil)
 	_ event.Store    = (*Store)(nil)
 	_ cluster.Store  = (*Store)(nil)
+	_ artifact.Store = (*Store)(nil)
 )
 
 // Store is a grove ORM implementation of store.Store using PostgreSQL dialect.
