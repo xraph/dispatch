@@ -24,6 +24,7 @@ require (
 	github.com/xraph/grove/kv v1.5.9
 	github.com/xraph/grove/kv/drivers/redisdriver v1.5.9
 	github.com/xraph/relay v1.5.5
+	github.com/xraph/trove v1.5.0
 	github.com/xraph/vessel v1.0.2
 	go.jetify.com/typeid/v2 v2.0.0-alpha.3
 	go.mongodb.org/mongo-driver/v2 v2.5.0
@@ -162,6 +163,7 @@ require (
 	github.com/gofrs/uuid/v5 v5.3.2 // indirect
 	github.com/grpc-ecosystem/grpc-gateway/v2 v2.28.0 // indirect
 	github.com/jinzhu/inflection v1.0.0 // indirect
+	github.com/klauspost/cpuid/v2 v2.0.12 // indirect
 	github.com/mdelapenya/tlscert v0.2.0 // indirect
 	github.com/moby/moby/api v1.54.1 // indirect
 	github.com/moby/moby/client v0.4.0 // indirect
@@ -179,6 +181,7 @@ require (
 	github.com/xdg-go/scram v1.2.0 // indirect
 	github.com/xdg-go/stringprep v1.0.4 // indirect
 	github.com/youmark/pkcs8 v0.0.0-20240726163527-a2c0da244d78 // indirect
+	github.com/zeebo/blake3 v0.2.4 // indirect
 	go.opentelemetry.io/otel/exporters/jaeger v1.17.0 // indirect
 	go.opentelemetry.io/otel/exporters/otlp/otlptrace v1.40.0 // indirect
 	go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracehttp v1.40.0 // indirect
