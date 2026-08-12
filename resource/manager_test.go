@@ -105,39 +105,93 @@ func TestManagerAcquireOverCapacityFailsImmediately(t *testing.T) {
 	}
 }
 
-// countingReclaimer frees up to avail bytes, one call at a time.
+// countingReclaimer models what the artifact cache becomes: a component
+// that holds a Manager lease per cached entry and returns units by
+// releasing those leases, never by crediting the ledger itself.
+//
+// Reclaim takes the reclaimer's lock and then the manager's, via
+// Release. That is only safe because the manager drops its own lock
+// across Reclaim and snapshots its reclaimer map before calling
+// Available, so the manager never holds its lock while reaching for
+// this one. The fake is built this way on purpose: it is the test of
+// that lock ordering as much as of the accounting.
 type countingReclaimer struct {
-	mu    sync.Mutex
-	avail int64
-	calls int
+	mu      sync.Mutex
+	entries []resource.Lease
+	calls   int
 }
 
-func (r *countingReclaimer) Reclaim(_ context.Context, _ string, need int64) (int64, error) {
+// newCountingReclaimer acquires count leases of each units against m,
+// standing in for count cached entries.
+func newCountingReclaimer(t *testing.T, m resource.Manager, key string, count int, each int64) *countingReclaimer {
+	t.Helper()
+
+	r := &countingReclaimer{}
+
+	for i := 0; i < count; i++ {
+		l, ok := m.TryAcquire("cache-entry", resource.Set{key: each})
+		if !ok {
+			t.Fatalf("reclaimer setup: entry %d of %d did not fit", i, count)
+		}
+
+		r.entries = append(r.entries, l)
+	}
+
+	return r
+}
+
+func (r *countingReclaimer) Reclaim(_ context.Context, key string, need int64) (int64, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
 	r.calls++
-	freed := min(need, r.avail)
-	r.avail -= freed
+
+	var freed int64
+
+	// Evict whole entries until the shortfall is covered. Releasing the
+	// lease is what actually returns the units to the manager; the
+	// returned count only tells it to re-check.
+	for freed < need && len(r.entries) > 0 {
+		last := len(r.entries) - 1
+		entry := r.entries[last]
+		r.entries = r.entries[:last]
+
+		freed += entry.Held()[key]
+		entry.Release()
+	}
 
 	return freed, nil
 }
 
-func (r *countingReclaimer) Available(string) int64 {
+func (r *countingReclaimer) Available(key string) int64 {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	return r.avail
+	var avail int64
+	for _, entry := range r.entries {
+		avail += entry.Held()[key]
+	}
+
+	return avail
 }
 
 func TestManagerReclaimerFreesDisk(t *testing.T) {
 	m := resource.NewManager(resource.Set{resource.Disk: 100})
-	rec := &countingReclaimer{avail: 80}
+
+	// Eight cached entries of 10, then a job holding the rest, so the
+	// ledger is full and only reclamation can satisfy the next request.
+	rec := newCountingReclaimer(t, m, resource.Disk, 8, 10)
 	m.RegisterReclaimer(resource.Disk, rec)
 
-	// Fill the ledger so only reclamation can satisfy the next request.
-	if _, ok := m.TryAcquire("cache", resource.Set{resource.Disk: 100}); !ok {
+	if _, ok := m.TryAcquire("other", resource.Set{resource.Disk: 20}); !ok {
 		t.Fatal("setup acquire failed")
+	}
+
+	if got := m.Reclaimable()[resource.Disk]; got != 80 {
+		t.Errorf("Reclaimable() disk = %d, want 80", got)
+	}
+	if got := m.Free()[resource.Disk]; got != 0 {
+		t.Fatalf("setup left %d disk free, want 0", got)
 	}
 
 	lease, err := m.Acquire(context.Background(), "job-1", resource.Set{resource.Disk: 50})
@@ -150,11 +204,24 @@ func TestManagerReclaimerFreesDisk(t *testing.T) {
 	if lease.Held()[resource.Disk] != 50 {
 		t.Errorf("held = %v, want 50 disk", lease.Held())
 	}
+
+	// The invariant reclamation must not break: every unit that is not
+	// free is recorded against exactly one live lease. It holds because a
+	// reclaimer returns units by releasing the lease that held them, so
+	// release stays the ledger's only mutator.
+	var accounted int64
+	for _, info := range m.Leases() {
+		accounted += info.Held[resource.Disk]
+	}
+
+	if free := m.Free()[resource.Disk]; accounted+free != 100 {
+		t.Errorf("ledger invariant broken: %d held + %d free != 100 capacity", accounted, free)
+	}
 }
 
 func TestManagerMemoryHasNoReclaimer(t *testing.T) {
 	m := resource.NewManager(resource.Set{resource.Memory: 100, resource.Disk: 100})
-	rec := &countingReclaimer{avail: 100}
+	rec := newCountingReclaimer(t, m, resource.Disk, 10, 10)
 	m.RegisterReclaimer(resource.Disk, rec)
 
 	if _, ok := m.TryAcquire("holder", resource.Set{resource.Memory: 100}); !ok {

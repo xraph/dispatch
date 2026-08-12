@@ -15,9 +15,24 @@ import (
 // running job cannot. Registering a reclaimer for a key turns blocking
 // into "reclaim, then block only if that was not enough". A key with no
 // reclaimer — memory, CPU — can only wait for a release.
+//
+// A reclaimer holds a Manager lease for what it caches, and returns
+// units by releasing that lease — it never credits the ledger directly.
+// The artifact cache holds one lease per cached entry, so evicting an
+// entry releases that entry's lease and the bytes come back through the
+// same path a finished job's would.
 type Reclaimer interface {
 	// Reclaim frees up to need units of key, returning how many it
 	// actually freed. Returning zero means nothing more is reclaimable.
+	//
+	// The units are returned to the manager by releasing the Lease that
+	// held them. The return value is only a "something changed, re-check"
+	// signal — the manager does not add it to the ledger, because those
+	// units are still recorded against a live lease until that lease is
+	// released, and counting them in both places would invent capacity.
+	//
+	// Reclaim is called with the manager's lock dropped, so releasing a
+	// lease from inside it is safe and is the expected implementation.
 	Reclaim(ctx context.Context, key string, need int64) (int64, error)
 	// Available reports how much could be freed without blocking.
 	Available(key string) int64
@@ -156,8 +171,8 @@ func (m *manager) Reclaimable() Set {
 
 	// The reclaimer map is snapshotted under our lock and then queried
 	// with it dropped. Available takes the reclaimer's own lock, and a
-	// reclaimer is free to read the manager back — taking both locks in
-	// both orders is a deadlock.
+	// reclaimer takes ours whenever it releases a lease to return units —
+	// taking both locks in both orders is a deadlock.
 	out := make(Set, len(reclaimers))
 	for k, r := range reclaimers {
 		out[k] = r.Available(k)
@@ -235,19 +250,23 @@ func (m *manager) Acquire(ctx context.Context, owner string, want Set) (Lease, e
 }
 
 // reclaimLocked asks the registered reclaimer for each short key to free
-// the shortfall. It reports whether anything was freed.
+// the shortfall. It reports whether anything was freed, which is only a
+// "something changed, re-check the ledger" signal for the caller's loop.
 //
-// The manager's lock is released across the reclaimer call: eviction
-// does file I/O and takes the reclaimer's own lock, so holding this one
-// through it would both block every other admission on disk I/O and
-// invite a lock-order inversion against a reclaimer that reads the
-// manager back.
+// The freed amount is deliberately not added back here. The manager's
+// invariant is used == Σ live lease.held, and release is its only
+// mutator: a reclaimer returns units by releasing the lease that held
+// them, so by the time Reclaim returns the ledger already reflects the
+// change. Crediting the return value on top would count those units
+// twice — the lease still records them until it is released, and
+// release subtracts held in full — which is how a worker would slowly
+// invent capacity it does not have.
 //
-// The reclaimer frees the underlying resource and reports how much; the
-// ledger is credited here rather than by the callback, exactly as the
-// artifact cache's budget subtracts for its evictor. A reclaimer must
-// therefore not also release a lease for what it just freed, or the
-// capacity would be credited twice.
+// The manager's lock is released across the reclaimer call. That is
+// what makes the design work rather than an optimization: Reclaim calls
+// back into the manager to return the bytes, so holding the lock
+// through it would deadlock on the first eviction. It also keeps
+// eviction I/O off the admission path for every other caller.
 func (m *manager) reclaimLocked(ctx context.Context, want Set) bool {
 	free := m.freeLocked()
 
@@ -266,7 +285,6 @@ func (m *manager) reclaimLocked(ctx context.Context, want Set) bool {
 		m.mu.Lock()
 
 		if err == nil && freed > 0 {
-			m.used = m.used.Sub(Set{key: freed})
 			freedAny = true
 		}
 	}
@@ -319,8 +337,14 @@ func (m *manager) grantLocked(owner string, want Set) *lease {
 	return l
 }
 
-// release returns a lease's resources. Idempotent: releasing twice must
-// not credit the ledger twice, or a worker slowly invents capacity.
+// release returns a lease's resources. It is the only path that reduces
+// used, reclamation included, which is what keeps the invariant
+// used == Σ live lease.held true by construction.
+//
+// Idempotent: releasing twice must not credit the ledger twice, or a
+// worker slowly invents capacity. The sync.Once on the lease and the
+// liveness check here are belt and braces — either alone would hold for
+// the paths that exist today, so both are kept deliberately.
 func (m *manager) release(l *lease) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
