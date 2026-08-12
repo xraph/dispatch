@@ -36,6 +36,11 @@ type jobEntity struct {
 	Timeout     int64      `json:"timeout"`
 	CreatedAt   time.Time  `json:"created_at"`
 	UpdatedAt   time.Time  `json:"updated_at"`
+
+	LeaseEpoch     int        `json:"lease_epoch"`
+	LeaseExpiresAt *time.Time `json:"lease_expires_at,omitempty"`
+	LeaseTTL       int64      `json:"lease_ttl"`
+	EvictCount     int        `json:"evict_count"`
 }
 
 func toJobEntity(j *job.Job) *jobEntity {
@@ -59,6 +64,11 @@ func toJobEntity(j *job.Job) *jobEntity {
 		Timeout:     j.Timeout.Nanoseconds(),
 		CreatedAt:   j.CreatedAt,
 		UpdatedAt:   j.UpdatedAt,
+
+		LeaseEpoch:     j.LeaseEpoch,
+		LeaseExpiresAt: j.LeaseExpiresAt,
+		LeaseTTL:       j.LeaseTTL.Nanoseconds(),
+		EvictCount:     j.EvictCount,
 	}
 }
 
@@ -89,6 +99,11 @@ func fromJobEntity(e *jobEntity) (*job.Job, error) {
 		CompletedAt: e.CompletedAt,
 		HeartbeatAt: e.HeartbeatAt,
 		Timeout:     time.Duration(e.Timeout),
+
+		LeaseEpoch:     e.LeaseEpoch,
+		LeaseExpiresAt: e.LeaseExpiresAt,
+		LeaseTTL:       time.Duration(e.LeaseTTL),
+		EvictCount:     e.EvictCount,
 	}
 
 	if e.WorkerID != "" {

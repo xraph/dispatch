@@ -26,6 +26,7 @@ import (
 // Compile-time interface checks.
 var (
 	_ job.Store      = (*Store)(nil)
+	_ job.LeaseStore = (*Store)(nil)
 	_ workflow.Store = (*Store)(nil)
 	_ cron.Store     = (*Store)(nil)
 	_ dlq.Store      = (*Store)(nil)
