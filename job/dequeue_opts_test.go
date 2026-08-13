@@ -1,6 +1,7 @@
 package job_test
 
 import (
+	"errors"
 	"testing"
 	"time"
 
@@ -347,5 +348,82 @@ func TestDequeueOptsOfferedCustomKeys(t *testing.T) {
 
 	if none := (job.DequeueOpts{}).OfferedCustomKeys(); none != nil {
 		t.Errorf("OfferedCustomKeys() on zero opts = %v, want nil", none)
+	}
+}
+
+func TestDequeueOptsGrants(t *testing.T) {
+	worker := id.NewWorkerID()
+	until := time.Date(2026, 8, 12, 12, 0, 0, 0, time.UTC)
+
+	tests := []struct {
+		name string
+		opts job.DequeueOpts
+		want bool
+	}{
+		// The zero value is the pool as it is configured today, and it
+		// must never grant: that is the backward-compatibility guarantee
+		// every backend reads off this method.
+		{"zero value", job.DequeueOpts{}, false},
+		{"queues and limit only", job.DequeueOpts{Queues: []string{"default"}, Limit: 8}, false},
+		// A worker id alone is not a request for a lease. Grants keys on
+		// LeaseUntil only, so a caller that identifies itself without
+		// asking for a lease still gets its lease columns left alone.
+		{"worker without expiry", job.DequeueOpts{WorkerID: worker}, false},
+		{"expiry alone", job.DequeueOpts{LeaseUntil: until}, true},
+		{"worker and expiry", job.DequeueOpts{WorkerID: worker, LeaseUntil: until}, true},
+		// A past expiry is a real grant, not a no-op: it is how a caller
+		// hands over a job it wants reclaimed at the next sweep, and the
+		// conformance suite's fencing case relies on it.
+		{
+			"expiry in the past",
+			job.DequeueOpts{WorkerID: worker, LeaseUntil: until.Add(-time.Hour)},
+			true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := tt.opts.Grants(); got != tt.want {
+				t.Errorf("Grants() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+// TestDequeueOptsValidate pins the one input every backend must refuse.
+//
+// A lease granted to the zero worker can never be renewed, because
+// RenewLease matches on worker ID — so the job would be claimed, expire,
+// be reclaimed, and go round again forever. That is a queue that never
+// drains rather than an error, which is why it is rejected here instead
+// of tolerated.
+func TestDequeueOptsValidate(t *testing.T) {
+	worker := id.NewWorkerID()
+	until := time.Date(2026, 8, 12, 12, 0, 0, 0, time.UTC)
+
+	tests := []struct {
+		name string
+		opts job.DequeueOpts
+		want error
+	}{
+		{"zero value", job.DequeueOpts{}, nil},
+		// No grant means WorkerID is ignored, both ways round.
+		{"no grant, no worker", job.DequeueOpts{Queues: []string{"default"}, Limit: 1}, nil},
+		{"no grant, worker set", job.DequeueOpts{WorkerID: worker}, nil},
+		{"grant with worker", job.DequeueOpts{WorkerID: worker, LeaseUntil: until}, nil},
+		{"grant without worker", job.DequeueOpts{LeaseUntil: until}, job.ErrLeaseWithoutWorker},
+		{
+			"grant with explicitly zero worker",
+			job.DequeueOpts{WorkerID: id.WorkerID{}, LeaseUntil: until},
+			job.ErrLeaseWithoutWorker,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := tt.opts.Validate(); !errors.Is(got, tt.want) {
+				t.Errorf("Validate() = %v, want %v", got, tt.want)
+			}
+		})
 	}
 }

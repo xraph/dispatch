@@ -139,9 +139,11 @@ func (m *Store) EnqueueJob(_ context.Context, j *job.Job) error {
 // job.DequeueOpts.Allows / Less, not reimplemented here, so this store
 // stays the reference the SQL backends are checked against.
 //
-// When opts.Grants() the claim also grants a lease. The whole claim runs
-// under one write lock, so the grant is part of it: the job is never
-// visible to ReclaimExpiredLeases as running-without-a-lease.
+// When opts.Grants() the claim also grants a lease, under the one write
+// lock that already performs the claim. ReclaimExpiredLeases tests
+// job.Lease.IsExpired, which reports false for a zero expiry, so a job
+// left running with no lease would be invisible to it rather than
+// vulnerable to it. See job.DequeueOpts.LeaseUntil.
 func (m *Store) DequeueJobs(_ context.Context, opts job.DequeueOpts) ([]*job.Job, error) {
 	if opts.Limit <= 0 {
 		return nil, nil

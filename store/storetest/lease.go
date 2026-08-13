@@ -119,8 +119,9 @@ func testDequeueGrantsLeaseAndBumpsEpoch(t *testing.T, s LeaseStore) {
 	// The grant must have been PERSISTED by the claim, not merely decorated
 	// onto the returned copy. A backend that granted as a follow-up write
 	// would still pass every assertion above; this is the one that fails if
-	// the row itself is running with no lease, which is the state
-	// ReclaimExpiredLeases is entitled to take back.
+	// the row itself is running with no lease — the state no reclaimer can
+	// see, because every backend ignores a null expiry, and therefore the
+	// state nothing recovers from. See job.DequeueOpts.LeaseUntil.
 	stored, err := s.GetJob(ctx, j.ID)
 	if err != nil {
 		t.Fatalf("get: %v", err)

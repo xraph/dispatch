@@ -62,14 +62,25 @@ const maxDequeueRounds = 8
 // claiming update itself, not a filter over claimed documents.
 //
 // When opts.Grants() the lease fields are part of that same per-document
-// update, never a follow-up write: per-document atomicity is what makes
-// the claim exclusive, and a job running with no lease is a job
-// ReclaimExpiredLeases is entitled to take back.
+// update, never a follow-up write. Per-document atomicity is what makes
+// the claim exclusive, and it is also what keeps the grant recoverable:
+// ReclaimExpiredLeases matches lease_expires_at {$ne: nil}, so a document
+// left running with no expiry is not one at risk of reclamation — it is
+// one reclamation can never see. See job.DequeueOpts.LeaseUntil.
 func (s *Store) DequeueJobs(ctx context.Context, opts job.DequeueOpts) ([]*job.Job, error) {
 	// A worker computing zero free slots must claim zero jobs, never the
 	// whole queue. Matches the SQL backends' LIMIT 0.
 	if opts.Limit <= 0 {
 		return nil, nil
+	}
+
+	// Ahead of the empty-Queues guard, so an incoherent grant is reported
+	// rather than swallowed by a return that happens to be silent here.
+	// A caller that names no queues still deserves to hear that its lease
+	// has no holder, and the five backends must agree on which inputs are
+	// errors — see job.DequeueOpts.Validate.
+	if err := opts.Validate(); err != nil {
+		return nil, fmt.Errorf("dispatch/mongo: dequeue jobs: %w", err)
 	}
 
 	// An empty queue list is a guard, not a query. The driver marshals a
@@ -82,10 +93,6 @@ func (s *Store) DequeueJobs(ctx context.Context, opts job.DequeueOpts) ([]*job.J
 	// backend performs. See job.DequeueOpts.Queues.
 	if len(opts.Queues) == 0 {
 		return nil, nil
-	}
-
-	if err := opts.Validate(); err != nil {
-		return nil, fmt.Errorf("dispatch/mongo: dequeue jobs: %w", err)
 	}
 
 	for range maxDequeueRounds {

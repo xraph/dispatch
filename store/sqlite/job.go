@@ -45,8 +45,10 @@ func (s *Store) EnqueueJob(ctx context.Context, j *job.Job) error {
 // pending and untouched for the next worker that does have room.
 //
 // When opts.Grants() the lease columns are additional assignments in that
-// same UPDATE's SET clause, never a follow-up statement: a job running
-// with no lease is a job ReclaimExpiredLeases is entitled to take back.
+// same UPDATE's SET clause, never a follow-up statement. ReclaimExpiredLeases
+// requires lease_expires_at IS NOT NULL, so a row left running with a null
+// expiry is not a row at risk of reclamation — it is one reclamation can
+// never see. See job.DequeueOpts.LeaseUntil.
 func (s *Store) DequeueJobs(ctx context.Context, opts job.DequeueOpts) ([]*job.Job, error) {
 	// A worker computing zero free slots must claim zero jobs, never the
 	// whole queue. This early return is load-bearing on SQLite rather than
@@ -57,6 +59,15 @@ func (s *Store) DequeueJobs(ctx context.Context, opts job.DequeueOpts) ([]*job.J
 		return nil, nil
 	}
 
+	// Ahead of the empty-Queues guard, so an incoherent grant is reported
+	// rather than swallowed by a return that happens to be silent here.
+	// A caller that names no queues still deserves to hear that its lease
+	// has no holder, and the five backends must agree on which inputs are
+	// errors — see job.DequeueOpts.Validate.
+	if err := opts.Validate(); err != nil {
+		return nil, fmt.Errorf("dispatch/sqlite: dequeue jobs: %w", err)
+	}
+
 	// `queue IN ()` is a SQLite syntax error, where Postgres's
 	// `queue = ANY('{}')` is merely false. Claiming nothing is what
 	// store/postgres does for the same input, and there is no existing
@@ -64,10 +75,6 @@ func (s *Store) DequeueJobs(ctx context.Context, opts job.DequeueOpts) ([]*job.J
 	// query that could run without a queue list.
 	if len(opts.Queues) == 0 {
 		return nil, nil
-	}
-
-	if err := opts.Validate(); err != nil {
-		return nil, fmt.Errorf("dispatch/sqlite: dequeue jobs: %w", err)
 	}
 
 	query, args := buildDequeueQuery(opts, time.Now().UTC())
@@ -190,7 +197,10 @@ const dequeueSQL = `
 // helper below therefore binds as it writes, and they are called in
 // textual order: SET, queues, run_at, fit predicate, ORDER BY, LIMIT.
 func buildDequeueQuery(opts job.DequeueOpts, now time.Time) (query string, args []any) {
-	args = make([]any, 0, len(opts.Queues)+len(opts.CustomKeys)*2+len(opts.PreferHashes)+8)
+	// +10 covers the fixed binds: started_at, updated_at, the grant's
+	// worker id and expiry, run_at, the custom-key separator, and the
+	// limit, with headroom.
+	args = make([]any, 0, len(opts.Queues)+len(opts.CustomKeys)*2+len(opts.PreferHashes)+10)
 
 	// bind appends v and returns the placeholder that reads it. Values
 	// never reach the statement text.

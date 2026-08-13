@@ -183,24 +183,33 @@ func TestBuildDequeueQueryOrdersLocalityBelowPriority(t *testing.T) {
 // Rendering the statement is the only way to see that, and a swap is
 // silent otherwise — a budget compared against a queue name is a
 // perfectly valid SQLite expression.
+//
+// The granting case is the one that most needs this. buildLeaseGrant
+// binds BETWEEN updated_at and the queue list, which is the middle of the
+// sequence rather than either end, so getting it wrong shifts every
+// later value by two: the queue list would read the worker id and the
+// expiry, and the statement would still run.
 func TestBuildDequeueQueryBindsInTextualOrder(t *testing.T) {
 	reserved := id.NewJobID()
+	worker := id.NewWorkerID()
 	now := fixedNow()
+	until := now.Add(90 * time.Second)
+	stamp := "'" + now.Format(time.RFC3339Nano) + "'"
+	leaseStamp := "'" + until.Format(time.RFC3339Nano) + "'"
 
-	query, args := buildDequeueQuery(job.DequeueOpts{
+	base := job.DequeueOpts{
 		Queues:       []string{"alpha", "beta"},
 		Limit:        3,
 		Budget:       resource.Set{resource.Memory: 4 << 30, resource.GPU: 0},
 		CustomKeys:   []string{"tpu", "fpga"},
 		PreferHashes: []string{"blake3:staged"},
 		ReservedFor:  &reserved,
-	}, now)
+	}
 
-	got := render(t, query, args)
-	stamp := "'" + now.Format(time.RFC3339Nano) + "'"
-
-	for _, want := range []string{
-		"SET state = 'running', started_at = " + stamp + ", updated_at = " + stamp,
+	// Every case asserts the whole sequence, not just its own addition: a
+	// mis-bound grant corrupts the values AFTER it, so the queue list and
+	// the limit are the assertions that actually catch it.
+	common := []string{
 		"AND queue IN ('alpha','beta')",
 		"AND run_at <= " + stamp,
 		"AND id = '" + reserved.String() + "'",
@@ -209,11 +218,59 @@ func TestBuildDequeueQueryBindsInTextualOrder(t *testing.T) {
 		"REPLACE(REPLACE(req_custom_keys, ',fpga,', ','), ',tpu,', ',') IN ('', ',')",
 		"COALESCE(primary_input_hash IN ('blake3:staged'), 0) DESC",
 		"LIMIT 3",
-	} {
-		if !strings.Contains(got, want) {
-			t.Errorf("rendered statement is missing %q — a value was bound out of "+
-				"position:\n%s", want, got)
-		}
+	}
+
+	grantOpts := base
+	grantOpts.WorkerID = worker
+	grantOpts.LeaseUntil = until
+
+	tests := []struct {
+		name   string
+		opts   job.DequeueOpts
+		want   []string
+		banned []string
+	}{
+		{
+			name: "no grant",
+			opts: base,
+			want: append([]string{
+				"SET state = 'running', started_at = " + stamp + ", updated_at = " + stamp + "\n",
+			}, common...),
+			// A caller that did not ask for a lease must not have one
+			// written, and the statement is where that is decided.
+			banned: []string{"worker_id", "lease_epoch", "lease_expires_at"},
+		},
+		{
+			name: "grant",
+			opts: grantOpts,
+			want: append([]string{
+				"SET state = 'running', started_at = " + stamp + ", updated_at = " + stamp + ",",
+				"worker_id = '" + worker.String() + "'",
+				"lease_epoch = lease_epoch + 1",
+				"lease_expires_at = " + leaseStamp,
+			}, common...),
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			query, args := buildDequeueQuery(tt.opts, now)
+			got := render(t, query, args)
+
+			for _, want := range tt.want {
+				if !strings.Contains(got, want) {
+					t.Errorf("rendered statement is missing %q — a value was bound out of "+
+						"position:\n%s", want, got)
+				}
+			}
+
+			for _, banned := range tt.banned {
+				if strings.Contains(got, banned) {
+					t.Errorf("rendered statement contains %q for opts that grant no "+
+						"lease:\n%s", banned, got)
+				}
+			}
+		})
 	}
 }
 

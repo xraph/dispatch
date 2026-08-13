@@ -413,11 +413,13 @@ func (s *Store) readJobEntities(ctx context.Context, ids []string) ([]*jobEntity
 // second SET or a Lua compare-and-set. Winning the ZREM already removed
 // the job from every path any other worker could reach it by, so there is
 // nothing left to race against and no epoch to compare. What must not
-// happen is granting after the running write returns: RenewLease and
-// ReclaimExpiredLeases guard their writes on the epoch, so a job written
-// as running-without-a-lease is one a concurrent reclaim may legitimately
-// take, and the second write would then resurrect a claim the fence had
-// already revoked.
+// happen is granting in a SECOND write after this one: ReclaimExpiredLeases
+// skips any entity whose job.Lease.IsExpired is false, and that is false
+// for a zero expiry, so an entity written as running with no lease is one
+// reclamation can never see rather than one it might take. A crash between
+// the two writes would strand the job until the coarse global stale-job
+// threshold noticed it — the mechanism leases exist to replace. See
+// job.DequeueOpts.LeaseUntil.
 func (s *Store) claimCandidates(
 	ctx context.Context,
 	opts job.DequeueOpts,

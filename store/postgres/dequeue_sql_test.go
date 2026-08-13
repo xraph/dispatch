@@ -1,8 +1,10 @@
 package postgres
 
 import (
+	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/xraph/dispatch/id"
 	"github.com/xraph/dispatch/job"
@@ -238,4 +240,123 @@ func hasArg(args []any, want string) bool {
 	}
 
 	return false
+}
+
+// argFor returns the value the statement reads at the assignment starting
+// with prefix, by resolving the $N it names against the args slice.
+//
+// Postgres numbers its placeholders, so the SQLite bind-order hazard does
+// not exist here — but the equivalent one does: buildDequeueQuery's bind
+// closure derives each number from len(args) at the moment it is called,
+// so a helper that writes its text and appends its values in different
+// orders would emit a number naming somebody else's value. Reading the
+// number back out of the finished statement is what catches that.
+func argFor(t *testing.T, query string, args []any, prefix string) any {
+	t.Helper()
+
+	i := strings.Index(query, prefix)
+	if i < 0 {
+		t.Fatalf("statement has no %q assignment:\n%s", prefix, query)
+	}
+
+	rest := query[i+len(prefix):]
+	if rest == "" || rest[0] != '$' {
+		t.Fatalf("%q is not read from a bind parameter:\n%s", prefix, query)
+	}
+
+	end := 1
+	for end < len(rest) && rest[end] >= '0' && rest[end] <= '9' {
+		end++
+	}
+
+	n, err := strconv.Atoi(rest[1:end])
+	if err != nil {
+		t.Fatalf("%q names an unparseable placeholder %q", prefix, rest[:end])
+	}
+
+	if n < 1 || n > len(args) {
+		t.Fatalf("%q names $%d but only %d args were bound: %v", prefix, n, len(args), args)
+	}
+
+	return args[n-1]
+}
+
+// TestBuildDequeueQueryGrantsLeaseInTheClaim pins the two halves of the
+// grant: it is absent unless the caller asks for it, and when present it
+// is part of the claiming UPDATE's SET clause rather than a second
+// statement — which is what makes a claimed job always carry a lease
+// (see job.DequeueOpts.LeaseUntil).
+//
+// The epoch is pinned as `lease_epoch + 1` specifically. Binding a
+// computed successor instead would need a prior read, and the read is
+// what the single statement exists to avoid.
+func TestBuildDequeueQueryGrantsLeaseInTheClaim(t *testing.T) {
+	worker := id.NewWorkerID()
+
+	// Deliberately NOT UTC. lease_expires_at is a timestamptz and the
+	// driver would convert either way, but every other timestamp this
+	// package writes is normalized before it is bound, and a caller that
+	// hands over a wall-clock time in its own zone is the ordinary case.
+	until := time.Date(2026, 8, 12, 12, 1, 30, 0, time.FixedZone("UTC-5", -5*60*60))
+
+	base := job.DequeueOpts{
+		Queues: []string{"default"},
+		Limit:  3,
+		Budget: resource.Set{resource.Memory: 4 << 30},
+	}
+
+	grantOpts := base
+	grantOpts.WorkerID = worker
+	grantOpts.LeaseUntil = until
+
+	t.Run("no grant leaves the lease columns alone", func(t *testing.T) {
+		query, _ := buildDequeueQuery(base)
+
+		for _, banned := range []string{"worker_id", "lease_epoch", "lease_expires_at"} {
+			if strings.Contains(query, banned) {
+				t.Errorf("opts granting no lease still wrote %q:\n%s", banned, query)
+			}
+		}
+	})
+
+	t.Run("grant rides in the SET clause", func(t *testing.T) {
+		query, args := buildDequeueQuery(grantOpts)
+
+		setEnd := strings.Index(query, "WHERE id IN (")
+		if setEnd < 0 {
+			t.Fatalf("statement lost its claim shape:\n%s", query)
+		}
+
+		// Every lease assignment must fall inside the UPDATE's SET clause,
+		// which is the part of the text before the candidate subquery.
+		for _, want := range []string{"worker_id = $", "lease_epoch = lease_epoch + 1", "lease_expires_at = $"} {
+			at := strings.Index(query, want)
+			if at < 0 {
+				t.Errorf("granting opts did not emit %q:\n%s", want, query)
+
+				continue
+			}
+
+			if at > setEnd {
+				t.Errorf("%q is outside the claiming SET clause:\n%s", want, query)
+			}
+		}
+
+		if got := argFor(t, query, args, "worker_id = "); got != worker.String() {
+			t.Errorf("worker_id reads %v, want %s", got, worker)
+		}
+
+		got, ok := argFor(t, query, args, "lease_expires_at = ").(time.Time)
+		if !ok {
+			t.Fatalf("lease_expires_at was not bound as a time.Time: %v", args)
+		}
+
+		if !got.Equal(until) {
+			t.Errorf("lease_expires_at reads %v, want %v", got, until)
+		}
+
+		if got.Location() != time.UTC {
+			t.Errorf("lease_expires_at bound in %v, want UTC", got.Location())
+		}
+	})
 }

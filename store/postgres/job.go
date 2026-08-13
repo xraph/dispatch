@@ -44,8 +44,10 @@ func (s *Store) EnqueueJob(ctx context.Context, j *job.Job) error {
 // conjunct of the inner SELECT's WHERE.
 //
 // When opts.Grants() the lease columns are additional assignments in that
-// same UPDATE's SET clause, never a follow-up statement: a job running
-// with no lease is a job ReclaimExpiredLeases is entitled to take back.
+// same UPDATE's SET clause, never a follow-up statement. ReclaimExpiredLeases
+// requires lease_expires_at IS NOT NULL, so a row left running with a null
+// expiry is not a row at risk of reclamation — it is one reclamation can
+// never see. See job.DequeueOpts.LeaseUntil.
 func (s *Store) DequeueJobs(ctx context.Context, opts job.DequeueOpts) ([]*job.Job, error) {
 	// A worker computing zero free slots must claim zero jobs, never the
 	// whole queue. Postgres would already return nothing for LIMIT 0, but

@@ -174,9 +174,20 @@ type DequeueOpts struct {
 	// existed. That is the backward-compatibility guarantee: a caller
 	// that does not opt in cannot be affected by this.
 	//
-	// The grant must be part of the claim, not a second write. A job that
-	// is running with no lease yet is a job the reclaim loop is entitled
-	// to take back.
+	// The grant must be part of the claim, not a second write, and the
+	// reason is the opposite of the obvious one. Reclamation cannot
+	// rescue a half-granted job: every backend requires a non-null
+	// expiry to consider a row at all, and Lease.IsExpired reports false
+	// for a zero ExpiresAt precisely so the reclaim loop never steals a
+	// job that was never leased. So a crash between a claim and a
+	// separate grant would leave a row running with no expiry that
+	// nothing in the lease machinery can see — not a job at risk of
+	// being reclaimed, a job that can never be reclaimed. It would sit
+	// there until the coarse global stale-job threshold noticed, which
+	// is the mechanism leases exist to replace.
+	//
+	// One write means a claimed job always carries a lease something can
+	// act on.
 	LeaseUntil time.Time
 }
 
@@ -394,11 +405,14 @@ type Store interface {
 	// When opts.Grants() the same statement also grants a lease: the
 	// claimed rows get opts.WorkerID, opts.LeaseUntil, and an incremented
 	// lease_epoch, and the returned jobs carry the epoch they were
-	// granted. The grant is part of the claim for the same reason the fit
-	// test is — a job running with no lease yet is a job
-	// LeaseStore.ReclaimExpiredLeases is entitled to take back. Opts that
-	// do not grant leave every lease column untouched. A grant with no
-	// WorkerID is refused with ErrLeaseWithoutWorker and claims nothing.
+	// granted. The grant travels in the claiming write itself, never as a
+	// follow-up: a row left running with no expiry is invisible to
+	// LeaseStore.ReclaimExpiredLeases, so a crash between two writes
+	// would strand it rather than expose it. See DequeueOpts.LeaseUntil.
+	//
+	// Opts that do not grant leave every lease column untouched. A grant
+	// with no WorkerID is refused with ErrLeaseWithoutWorker and claims
+	// nothing.
 	//
 	// Every backend must pass storetest.RunDequeueSuite, which is the
 	// contract this signature only sketches.
@@ -437,11 +451,14 @@ type Store interface {
 // and atomic reclamation. This mirrors the capability idiom the artifact
 // backend already uses for RangeReader and Presigner.
 //
-// Every method takes an absolute leaseUntil rather than a TTL. If the
-// store computed now+ttl it would need per-dialect interval arithmetic
-// over a nanosecond integer — and SQLite, Mongo, and Redis have no
-// interval type at all. Passing a timestamp means every backend only
-// writes a value, and lease policy lives in one place.
+// Where an expiry is passed at all — RenewLease here, and
+// DequeueOpts.LeaseUntil for the grant — it is an absolute timestamp
+// rather than a TTL. If the store computed now+ttl it would need
+// per-dialect interval arithmetic over a nanosecond integer, and SQLite,
+// Mongo, and Redis have no interval type at all. Passing a timestamp
+// means every backend only writes a value, and lease policy lives in one
+// place. ReclaimExpiredLeases takes no expiry: it acts on the ones
+// already written.
 //
 // The GRANT is deliberately not here. It travels on DequeueOpts instead
 // (WorkerID and LeaseUntil), so a leased claim is an ordinary claim that
