@@ -149,11 +149,17 @@ func TestDequeueBoundedQueryPlanUsesDequeueIndex(t *testing.T) {
 		`ANALYZE dispatch_jobs`,
 		`SET enable_seqscan = off`,
 		`BEGIN`,
-		// idx_dispatch_jobs_state is cheaper on a table this small, and
-		// idx_dispatch_jobs_dequeue is the same key without the INCLUDE,
-		// so either would satisfy a name check without proving anything.
+		// idx_dispatch_jobs_state is cheaper on a table this small, so it
+		// would satisfy a name check without proving anything.
+		//
+		// idx_dispatch_jobs_dequeue is NOT dropped here because the
+		// resource migration drops it for good: it is the same key list
+		// and the same partial predicate as
+		// idx_dispatch_jobs_dequeue_res, differing only by the INCLUDE
+		// payload, so shipping both meant two B-tree writes per enqueue
+		// and two per claim on the busiest table in the schema for a plan
+		// the planner would never pick. Its absence is asserted below.
 		`DROP INDEX idx_dispatch_jobs_state`,
-		`DROP INDEX idx_dispatch_jobs_dequeue`,
 	} {
 		if _, execErr := conn.Exec(ctx, stmt); execErr != nil {
 			t.Fatalf("%s: %v", stmt, execErr)
@@ -196,6 +202,66 @@ func TestDequeueBoundedQueryPlanUsesDequeueIndex(t *testing.T) {
 	}
 
 	t.Logf("bounded dequeue plan:\n%s", plan)
+}
+
+// TestResourceMigrationDropsTheRedundantDequeueIndex pins that the
+// migration retires the index its own covering index supersedes.
+//
+// idx_dispatch_jobs_dequeue (migration 001) and
+// idx_dispatch_jobs_dequeue_res (migration 009) have the IDENTICAL key
+// list — (queue, priority DESC, run_at ASC) — and the IDENTICAL partial
+// predicate. The only difference is the INCLUDE payload, which makes the
+// second a strict superset. Every deployment that kept both paid a
+// second index insert on every enqueue and a second delete on every
+// claim, forever, on the hottest table in the schema, to serve a plan
+// the planner has no reason to choose.
+func TestResourceMigrationDropsTheRedundantDequeueIndex(t *testing.T) {
+	s := setupTestStore(t)
+	ctx := context.Background()
+
+	conn, err := pgdriver.Unwrap(s.DB()).AcquireConn(ctx)
+	if err != nil {
+		t.Fatalf("acquire dedicated conn: %v", err)
+	}
+
+	defer conn.Release()
+
+	for _, tc := range []struct {
+		index string
+		want  bool
+	}{
+		{"idx_dispatch_jobs_dequeue_res", true},
+		{"idx_dispatch_jobs_dequeue", false},
+	} {
+		var present bool
+
+		if err = conn.QueryRow(ctx,
+			`SELECT EXISTS (SELECT 1 FROM pg_class WHERE relname = $1 AND relkind = 'i')`,
+			tc.index).Scan(&present); err != nil {
+			t.Fatalf("look up %s: %v", tc.index, err)
+		}
+
+		if present != tc.want {
+			t.Errorf("index %s present = %v, want %v", tc.index, present, tc.want)
+		}
+	}
+
+	// The covering index must also be VALID: CREATE INDEX CONCURRENTLY
+	// leaves an unusable-but-present index behind when it fails, which
+	// the planner ignores and IF NOT EXISTS would then skip forever.
+	var valid bool
+
+	if err = conn.QueryRow(ctx, `
+		SELECT i.indisvalid
+		FROM pg_class c JOIN pg_index i ON i.indexrelid = c.oid
+		WHERE c.relname = 'idx_dispatch_jobs_dequeue_res'`).Scan(&valid); err != nil {
+		t.Fatalf("read indisvalid: %v", err)
+	}
+
+	if !valid {
+		t.Error("idx_dispatch_jobs_dequeue_res is INVALID: a failed CONCURRENTLY build was " +
+			"left in place, so the dequeue scan has no usable index and nothing reports it")
+	}
 }
 
 func newHashFixture(name, queue string, runAt time.Time) *job.Job {

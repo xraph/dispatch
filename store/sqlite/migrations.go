@@ -424,54 +424,104 @@ func init() {
 		&migrate.Migration{
 			Name:    "job_resource_columns",
 			Version: "20260812130000",
+			// Every ADD COLUMN is guarded, and the guard is not
+			// belt-and-braces — it is the only thing standing between a
+			// partial failure and a permanently wedged database.
+			//
+			// SQLite has no ADD COLUMN IF NOT EXISTS and grove runs Up
+			// bare, outside any transaction. So a failure at the sixth of
+			// ten statements — a disk-full, a SIGKILL mid-deploy, a
+			// cancelled context — leaves five columns added and no row in
+			// grove_migrations. The retry then dies on "duplicate column
+			// name: req_cpu_milli" and dies the same way forever: every
+			// pod that starts reports the same error, and there is no
+			// recovery short of an operator hand-writing DDL against a
+			// production database. Postgres avoided this with IF NOT
+			// EXISTS throughout; this is SQLite's equivalent.
+			//
+			// A transaction would have been the other answer. It is not
+			// taken because the sqlite migrate executor routes through
+			// the pooled *sql.DB rather than a pinned connection, so a
+			// BEGIN issued via Exec is not guaranteed to be the same
+			// session as the statements that follow it. Guarding each
+			// statement needs no assumption about connection affinity and
+			// makes the whole Up re-runnable from any point, which is
+			// strictly stronger than atomic-or-nothing.
 			Up: func(ctx context.Context, exec migrate.Executor) error {
-				stmts := []string{
-					`ALTER TABLE dispatch_jobs ADD COLUMN req_cpu_milli INTEGER NOT NULL DEFAULT 0`,
-					`ALTER TABLE dispatch_jobs ADD COLUMN req_memory_bytes INTEGER NOT NULL DEFAULT 0`,
-					`ALTER TABLE dispatch_jobs ADD COLUMN req_disk_bytes INTEGER NOT NULL DEFAULT 0`,
-					`ALTER TABLE dispatch_jobs ADD COLUMN req_gpu_milli INTEGER NOT NULL DEFAULT 0`,
-					`ALTER TABLE dispatch_jobs ADD COLUMN req_custom_keys TEXT NOT NULL DEFAULT ''`,
+				columns := []struct{ name, ddl string }{
+					{"req_cpu_milli", `INTEGER NOT NULL DEFAULT 0`},
+					{"req_memory_bytes", `INTEGER NOT NULL DEFAULT 0`},
+					{"req_disk_bytes", `INTEGER NOT NULL DEFAULT 0`},
+					{"req_gpu_milli", `INTEGER NOT NULL DEFAULT 0`},
+					{"req_custom_keys", `TEXT NOT NULL DEFAULT ''`},
 					// No JSONB in SQLite: plain TEXT columns hold the
 					// full-fidelity JSON copy that fromJobModel reads
 					// Resources/ResourceLimits back from.
-					`ALTER TABLE dispatch_jobs ADD COLUMN resource_requests TEXT`,
-					`ALTER TABLE dispatch_jobs ADD COLUMN resource_limits TEXT`,
-					`ALTER TABLE dispatch_jobs ADD COLUMN resource_class TEXT NOT NULL DEFAULT ''`,
-					`ALTER TABLE dispatch_jobs ADD COLUMN input_bytes INTEGER NOT NULL DEFAULT 0`,
-					`ALTER TABLE dispatch_jobs ADD COLUMN primary_input_hash TEXT`,
-					// SQLite has no INCLUDE clause for a covering index,
-					// so the scalar columns the dequeue predicate reads
-					// go directly in the key list instead.
-					`CREATE INDEX IF NOT EXISTS idx_dispatch_jobs_dequeue_res
-						ON dispatch_jobs (queue, priority DESC, run_at ASC,
-						                  req_cpu_milli, req_memory_bytes,
-						                  req_disk_bytes, req_gpu_milli)
-						WHERE state IN ('pending', 'retrying')`,
+					{"resource_requests", `TEXT`},
+					{"resource_limits", `TEXT`},
+					{"resource_class", `TEXT NOT NULL DEFAULT ''`},
+					{"input_bytes", `INTEGER NOT NULL DEFAULT 0`},
+					{"primary_input_hash", `TEXT`},
 				}
-				for _, stmt := range stmts {
-					if _, err := exec.Exec(ctx, stmt); err != nil {
+
+				for _, c := range columns {
+					if err := addColumnIfMissing(ctx, exec,
+						"dispatch_jobs", c.name, c.ddl); err != nil {
 						return err
 					}
 				}
 
-				return nil
+				// SQLite has no INCLUDE clause for a covering index, so
+				// the scalar columns the dequeue predicate reads go
+				// directly in the key list instead.
+				if _, err := exec.Exec(ctx, `
+					CREATE INDEX IF NOT EXISTS idx_dispatch_jobs_dequeue_res
+						ON dispatch_jobs (queue, priority DESC, run_at ASC,
+						                  req_cpu_milli, req_memory_bytes,
+						                  req_disk_bytes, req_gpu_milli)
+						WHERE state IN ('pending', 'retrying')`); err != nil {
+					return err
+				}
+
+				// idx_dispatch_jobs_dequeue (the initial migration) is a
+				// strict key PREFIX of the index just created, over the
+				// same partial predicate, so every query it could serve
+				// the new one serves too. Keeping both costs a second
+				// B-tree insert on every enqueue and a second delete on
+				// every claim, forever, for a plan SQLite would never
+				// choose. Postgres drops its equivalent for the same
+				// reason.
+				//
+				// Dropped after the replacement exists, so there is no
+				// instant at which the dequeue statement has no index.
+				_, err := exec.Exec(ctx, `DROP INDEX IF EXISTS idx_dispatch_jobs_dequeue`)
+
+				return err
 			},
 			Down: func(ctx context.Context, exec migrate.Executor) error {
-				stmts := []string{
-					`DROP INDEX IF EXISTS idx_dispatch_jobs_dequeue_res`,
-					`ALTER TABLE dispatch_jobs DROP COLUMN req_cpu_milli`,
-					`ALTER TABLE dispatch_jobs DROP COLUMN req_memory_bytes`,
-					`ALTER TABLE dispatch_jobs DROP COLUMN req_disk_bytes`,
-					`ALTER TABLE dispatch_jobs DROP COLUMN req_gpu_milli`,
-					`ALTER TABLE dispatch_jobs DROP COLUMN req_custom_keys`,
-					`ALTER TABLE dispatch_jobs DROP COLUMN resource_requests`,
-					`ALTER TABLE dispatch_jobs DROP COLUMN resource_limits`,
-					`ALTER TABLE dispatch_jobs DROP COLUMN resource_class`,
-					`ALTER TABLE dispatch_jobs DROP COLUMN input_bytes`,
-					`ALTER TABLE dispatch_jobs DROP COLUMN primary_input_hash`,
+				// Restore the prefix index before dropping its superset,
+				// same ordering rule in reverse.
+				if _, err := exec.Exec(ctx, `
+					CREATE INDEX IF NOT EXISTS idx_dispatch_jobs_dequeue
+						ON dispatch_jobs (queue, priority DESC, run_at ASC)
+						WHERE state IN ('pending', 'retrying')`); err != nil {
+					return err
 				}
-				for _, stmt := range stmts {
-					if _, err := exec.Exec(ctx, stmt); err != nil {
+
+				if _, err := exec.Exec(ctx,
+					`DROP INDEX IF EXISTS idx_dispatch_jobs_dequeue_res`); err != nil {
+					return err
+				}
+
+				// Guarded for the same reason Up is: a Down that fails
+				// halfway must be re-runnable.
+				for _, col := range []string{
+					"req_cpu_milli", "req_memory_bytes", "req_disk_bytes",
+					"req_gpu_milli", "req_custom_keys", "resource_requests",
+					"resource_limits", "resource_class", "input_bytes",
+					"primary_input_hash",
+				} {
+					if err := dropColumnIfPresent(ctx, exec, "dispatch_jobs", col); err != nil {
 						return err
 					}
 				}
@@ -480,4 +530,49 @@ func init() {
 			},
 		},
 	)
+}
+
+// columnExists reports whether table already has the named column.
+//
+// pragma_table_info is the table-valued form of PRAGMA table_info, which
+// means it can be queried with bind parameters like any other relation
+// rather than string-formatted into a PRAGMA statement.
+func columnExists(ctx context.Context, exec migrate.Executor, table, column string) (bool, error) {
+	rows, err := exec.Query(ctx,
+		`SELECT 1 FROM pragma_table_info(?) WHERE name = ?`, table, column)
+	if err != nil {
+		return false, err
+	}
+
+	found := rows.Next()
+
+	if closeErr := rows.Close(); closeErr != nil {
+		return false, closeErr
+	}
+
+	return found, rows.Err()
+}
+
+// addColumnIfMissing is SQLite's stand-in for ADD COLUMN IF NOT EXISTS.
+func addColumnIfMissing(ctx context.Context, exec migrate.Executor, table, column, ddl string) error {
+	present, err := columnExists(ctx, exec, table, column)
+	if err != nil || present {
+		return err
+	}
+
+	_, err = exec.Exec(ctx, `ALTER TABLE `+table+` ADD COLUMN `+column+` `+ddl)
+
+	return err
+}
+
+// dropColumnIfPresent is SQLite's stand-in for DROP COLUMN IF EXISTS.
+func dropColumnIfPresent(ctx context.Context, exec migrate.Executor, table, column string) error {
+	present, err := columnExists(ctx, exec, table, column)
+	if err != nil || !present {
+		return err
+	}
+
+	_, err = exec.Exec(ctx, `ALTER TABLE `+table+` DROP COLUMN `+column)
+
+	return err
 }

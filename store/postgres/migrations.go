@@ -462,62 +462,201 @@ func init() {
 		// Every column defaults to zero or empty, so rows written before
 		// this migration remain dequeueable by every worker during a
 		// rolling deploy.
+		//
+		// This migration runs against a LIVE fleet. extension.Start calls
+		// Migrate by default, so the first upgraded pod executes it while
+		// every old pod is still enqueueing, claiming and completing on
+		// dispatch_jobs — the hottest table in the schema. Both halves are
+		// written for that: the DDL takes its exclusive lock under a
+		// timeout rather than queueing behind a long-running claim, and
+		// the index is built without blocking writes at all.
 		&migrate.Migration{
 			Name:    "job_resource_columns",
 			Version: "20260812130000",
 			Up: func(ctx context.Context, exec migrate.Executor) error {
-				// The four canonical dimensions get real columns because
-				// the dequeue predicate compares them and JSON comparison
-				// semantics are not portable across the five backends.
-				for _, stmt := range []string{
-					`ALTER TABLE dispatch_jobs ADD COLUMN IF NOT EXISTS req_cpu_milli BIGINT NOT NULL DEFAULT 0`,
-					`ALTER TABLE dispatch_jobs ADD COLUMN IF NOT EXISTS req_memory_bytes BIGINT NOT NULL DEFAULT 0`,
-					`ALTER TABLE dispatch_jobs ADD COLUMN IF NOT EXISTS req_disk_bytes BIGINT NOT NULL DEFAULT 0`,
-					`ALTER TABLE dispatch_jobs ADD COLUMN IF NOT EXISTS req_gpu_milli BIGINT NOT NULL DEFAULT 0`,
-					`ALTER TABLE dispatch_jobs ADD COLUMN IF NOT EXISTS req_custom_keys TEXT NOT NULL DEFAULT ''`,
-					`ALTER TABLE dispatch_jobs ADD COLUMN IF NOT EXISTS resource_requests JSONB`,
-					`ALTER TABLE dispatch_jobs ADD COLUMN IF NOT EXISTS resource_limits JSONB`,
-					`ALTER TABLE dispatch_jobs ADD COLUMN IF NOT EXISTS resource_class TEXT NOT NULL DEFAULT ''`,
-					`ALTER TABLE dispatch_jobs ADD COLUMN IF NOT EXISTS input_bytes BIGINT NOT NULL DEFAULT 0`,
-					`ALTER TABLE dispatch_jobs ADD COLUMN IF NOT EXISTS primary_input_hash TEXT`,
-				} {
-					if _, err := exec.Exec(ctx, stmt); err != nil {
-						return err
-					}
+				// One ALTER, not ten. Each statement takes its own
+				// ACCESS EXCLUSIVE lock on dispatch_jobs, so ten of them
+				// are ten separate chances to queue behind an in-flight
+				// SELECT ... FOR UPDATE SKIP LOCKED — and every enqueue
+				// and completion in the fleet queues behind THAT, because
+				// a waiting ACCESS EXCLUSIVE request blocks the lock
+				// queue ahead of it. Migration 008 already batches its
+				// four this way.
+				//
+				// All ten defaults are constants, so on PostgreSQL 11+
+				// this is a catalog update and does not rewrite the
+				// table; the lock is held for microseconds once acquired.
+				// Acquiring it is the part that can wait, which is what
+				// the lock_timeout below bounds.
+				if err := withLockTimeout(ctx, exec, `
+					ALTER TABLE dispatch_jobs
+						ADD COLUMN IF NOT EXISTS req_cpu_milli     BIGINT NOT NULL DEFAULT 0,
+						ADD COLUMN IF NOT EXISTS req_memory_bytes  BIGINT NOT NULL DEFAULT 0,
+						ADD COLUMN IF NOT EXISTS req_disk_bytes    BIGINT NOT NULL DEFAULT 0,
+						ADD COLUMN IF NOT EXISTS req_gpu_milli     BIGINT NOT NULL DEFAULT 0,
+						ADD COLUMN IF NOT EXISTS req_custom_keys   TEXT NOT NULL DEFAULT '',
+						ADD COLUMN IF NOT EXISTS resource_requests JSONB,
+						ADD COLUMN IF NOT EXISTS resource_limits   JSONB,
+						ADD COLUMN IF NOT EXISTS resource_class    TEXT NOT NULL DEFAULT '',
+						ADD COLUMN IF NOT EXISTS input_bytes       BIGINT NOT NULL DEFAULT 0,
+						ADD COLUMN IF NOT EXISTS primary_input_hash TEXT`); err != nil {
+					return err
 				}
 
 				// Covering index: the dequeue predicate reads all four
 				// scalars for every candidate row, so including them
 				// keeps the scan index-only.
-				_, err := exec.Exec(ctx, `
-					CREATE INDEX IF NOT EXISTS idx_dispatch_jobs_dequeue_res
+				//
+				// CONCURRENTLY because a plain CREATE INDEX takes a SHARE
+				// lock for the whole build, which blocks every INSERT,
+				// UPDATE and DELETE on dispatch_jobs — the entire fleet's
+				// enqueues, claims and completions, for as long as the
+				// build takes on a production-sized queue. Grove does not
+				// wrap Up in a transaction (migrate.Orchestrator.Migrate
+				// calls m.Up directly, and the pg executor runs
+				// autocommit on a pinned connection), so CONCURRENTLY,
+				// which cannot run inside one, is available here.
+				//
+				// The cost of CONCURRENTLY is that a failed build leaves
+				// an INVALID index behind, which the planner ignores and
+				// IF NOT EXISTS would then silently skip forever. So an
+				// invalid leftover is dropped first, which makes a retry
+				// after a failed migration converge instead of wedging.
+				if err := dropIfInvalid(ctx, exec, "idx_dispatch_jobs_dequeue_res"); err != nil {
+					return err
+				}
+
+				if _, err := exec.Exec(ctx, `
+					CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_dispatch_jobs_dequeue_res
 						ON dispatch_jobs (queue, priority DESC, run_at ASC)
 						INCLUDE (req_cpu_milli, req_memory_bytes,
 						         req_disk_bytes, req_gpu_milli)
-						WHERE state IN ('pending', 'retrying')`)
+						WHERE state IN ('pending', 'retrying')`); err != nil {
+					return err
+				}
+
+				// idx_dispatch_jobs_dequeue (migration 001) has the
+				// IDENTICAL key list and the IDENTICAL partial predicate;
+				// the index just created differs only by an INCLUDE
+				// payload, which makes it a strict superset. Keeping both
+				// costs a second B-tree insert on every enqueue and a
+				// second delete on every claim, forever, on the hottest
+				// table in the schema — for a plan the planner would
+				// never choose.
+				//
+				// Dropped AFTER the replacement is valid, so there is no
+				// instant at which the dequeue statement has no index.
+				_, err := exec.Exec(ctx,
+					`DROP INDEX CONCURRENTLY IF EXISTS idx_dispatch_jobs_dequeue`)
 
 				return err
 			},
 			Down: func(ctx context.Context, exec migrate.Executor) error {
-				if _, err := exec.Exec(ctx,
-					`DROP INDEX IF EXISTS idx_dispatch_jobs_dequeue_res`); err != nil {
+				// Restore 001's index before dropping its superset, same
+				// ordering rule in reverse: never leave the dequeue
+				// statement unindexed.
+				if err := dropIfInvalid(ctx, exec, "idx_dispatch_jobs_dequeue"); err != nil {
 					return err
 				}
 
-				for _, col := range []string{
-					"req_cpu_milli", "req_memory_bytes", "req_disk_bytes",
-					"req_gpu_milli", "req_custom_keys", "resource_requests",
-					"resource_limits", "resource_class", "input_bytes",
-					"primary_input_hash",
-				} {
-					if _, err := exec.Exec(ctx,
-						`ALTER TABLE dispatch_jobs DROP COLUMN IF EXISTS `+col); err != nil {
-						return err
-					}
+				if _, err := exec.Exec(ctx, `
+					CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_dispatch_jobs_dequeue
+						ON dispatch_jobs (queue, priority DESC, run_at ASC)
+						WHERE state IN ('pending', 'retrying')`); err != nil {
+					return err
 				}
 
-				return nil
+				if _, err := exec.Exec(ctx,
+					`DROP INDEX CONCURRENTLY IF EXISTS idx_dispatch_jobs_dequeue_res`); err != nil {
+					return err
+				}
+
+				return withLockTimeout(ctx, exec, `
+					ALTER TABLE dispatch_jobs
+						DROP COLUMN IF EXISTS req_cpu_milli,
+						DROP COLUMN IF EXISTS req_memory_bytes,
+						DROP COLUMN IF EXISTS req_disk_bytes,
+						DROP COLUMN IF EXISTS req_gpu_milli,
+						DROP COLUMN IF EXISTS req_custom_keys,
+						DROP COLUMN IF EXISTS resource_requests,
+						DROP COLUMN IF EXISTS resource_limits,
+						DROP COLUMN IF EXISTS resource_class,
+						DROP COLUMN IF EXISTS input_bytes,
+						DROP COLUMN IF EXISTS primary_input_hash`)
 			},
 		},
 	)
+}
+
+// ddlLockTimeout bounds how long a DDL statement waits for its ACCESS
+// EXCLUSIVE lock on a table the fleet is actively writing.
+//
+// Without it the ALTER waits indefinitely behind whatever claim happens
+// to hold a row lock, AND — because a pending ACCESS EXCLUSIVE request
+// blocks everything queued behind it — every enqueue and completion in
+// the fleet waits behind the ALTER. A migration that cannot get the lock
+// promptly must fail and be retried, not convert one slow query into a
+// fleet-wide stall.
+//
+// Three seconds is long enough to win an uncontended queue comfortably
+// and short enough that a failed attempt is a blip rather than an
+// outage. Migrate is idempotent here, so a retry is free.
+const ddlLockTimeout = "3s"
+
+// withLockTimeout runs one DDL statement under ddlLockTimeout.
+//
+// SET rather than SET LOCAL because grove runs Up outside a transaction,
+// where SET LOCAL is a no-op with a warning. The pg executor pins one
+// connection for the whole migration run (see pgmigrate.Executor), so
+// the setting would otherwise leak into every migration after this one —
+// hence the reset, which runs even when the statement failed.
+func withLockTimeout(ctx context.Context, exec migrate.Executor, stmt string) error {
+	if _, err := exec.Exec(ctx, `SET lock_timeout = '`+ddlLockTimeout+`'`); err != nil {
+		return err
+	}
+
+	_, execErr := exec.Exec(ctx, stmt)
+
+	if _, err := exec.Exec(ctx, `SET lock_timeout = DEFAULT`); err != nil && execErr == nil {
+		return err
+	}
+
+	return execErr
+}
+
+// dropIfInvalid removes an index left INVALID by a CREATE INDEX
+// CONCURRENTLY that failed partway.
+//
+// Such an index exists in the catalog but is ignored by the planner, so
+// CREATE INDEX CONCURRENTLY IF NOT EXISTS sees it, does nothing, and the
+// table permanently has no usable index while every subsequent migration
+// run reports success. Dropping it first is what makes a retry after a
+// failed migration converge.
+func dropIfInvalid(ctx context.Context, exec migrate.Executor, name string) error {
+	rows, err := exec.Query(ctx, `
+		SELECT 1
+		FROM pg_class c
+		JOIN pg_index i ON i.indexrelid = c.oid
+		WHERE c.relname = $1 AND NOT i.indisvalid`, name)
+	if err != nil {
+		return err
+	}
+
+	invalid := rows.Next()
+
+	if closeErr := rows.Close(); closeErr != nil {
+		return closeErr
+	}
+
+	if rowsErr := rows.Err(); rowsErr != nil {
+		return rowsErr
+	}
+
+	if !invalid {
+		return nil
+	}
+
+	_, err = exec.Exec(ctx, `DROP INDEX CONCURRENTLY IF EXISTS `+name)
+
+	return err
 }
