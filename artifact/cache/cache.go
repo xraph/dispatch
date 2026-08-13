@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/zeebo/blake3"
@@ -20,6 +21,7 @@ import (
 	"github.com/xraph/dispatch"
 	"github.com/xraph/dispatch/artifact"
 	"github.com/xraph/dispatch/id"
+	"github.com/xraph/dispatch/resource"
 )
 
 // DefaultBudget is the disk allowance when none is configured.
@@ -37,26 +39,72 @@ const hashPrefix = "blake3:"
 
 // Cache stages artifacts to local disk, content-addressed and bounded by
 // a byte budget. It is safe for concurrent use.
+//
+// Every cached object holds one resource.Manager lease for its bytes,
+// and eviction returns them by releasing that lease. That is what lets
+// the same ledger that admits jobs see the disk the cache is sitting
+// on: without it, staged bytes would be invisible to admission and a
+// worker would offer capacity it had already spent.
 type Cache struct {
 	dir     string
 	backend artifact.Backend
 	logger  log.Logger
 
 	entries *entryTable
-	budget  *budget
 	flight  singleflight.Group
+
+	// resources is the ledger every cached byte is admitted against.
+	// With no manager configured this is a private single-key manager
+	// over the configured allowance, which is exactly the private disk
+	// budget the cache used to own; with one supplied it is the
+	// worker's shared ledger.
+	resources resource.Manager
+	// allowance is the disk capacity of the private manager, used only
+	// when no manager is supplied.
+	allowance int64
+	// used totals the bytes this cache holds against the manager,
+	// in-flight downloads included. The manager's own used counts every
+	// tenant of the volume, so it cannot answer this question.
+	used atomic.Int64
 
 	closeOnce sync.Once
 }
+
+// Cache is the manager's disk reclaimer: it is the component that can
+// hand bytes back on demand.
+var _ resource.Reclaimer = (*Cache)(nil)
 
 // Option configures a Cache.
 type Option func(*Cache)
 
 // WithBudget sets the maximum bytes the cache may hold on disk.
+//
+// It configures the private manager the cache builds for itself, so it
+// is ignored when WithManager supplies one: a shared ledger's disk
+// capacity is the allowance, and a second ceiling underneath it would
+// only be a place for the two to disagree.
 func WithBudget(bytes int64) Option {
 	return func(c *Cache) {
 		if bytes > 0 {
-			c.budget = newBudget(bytes)
+			c.allowance = bytes
+		}
+	}
+}
+
+// WithManager admits cached bytes against a shared resource manager
+// rather than a private one.
+//
+// This is what makes staged bytes visible to job admission. The cache
+// registers itself as the manager's disk reclaimer and holds a lease
+// per cached entry, so a worker sizing up a job is offered the disk
+// that is free plus the disk the cache can evict, and redeems the
+// second half by evicting. A nil manager leaves the private one in
+// place, so a caller threading an optional dependency through does not
+// have to branch.
+func WithManager(m resource.Manager) Option {
+	return func(c *Cache) {
+		if m != nil {
+			c.resources = m
 		}
 	}
 }
@@ -77,15 +125,19 @@ func New(dir string, backend artifact.Backend, opts ...Option) (*Cache, error) {
 	}
 
 	c := &Cache{
-		dir:     dir,
-		backend: backend,
-		logger:  log.NewNoopLogger(),
-		entries: newEntryTable(),
-		budget:  newBudget(DefaultBudget),
+		dir:       dir,
+		backend:   backend,
+		logger:    log.NewNoopLogger(),
+		entries:   newEntryTable(),
+		allowance: DefaultBudget,
 	}
 
 	for _, opt := range opts {
 		opt(c)
+	}
+
+	if c.resources == nil {
+		c.resources = resource.NewManager(resource.Set{resource.Disk: c.allowance})
 	}
 
 	if err := os.MkdirAll(filepath.Join(dir, hashDir), dirPerm); err != nil {
@@ -100,17 +152,19 @@ func New(dir string, backend artifact.Backend, opts ...Option) (*Cache, error) {
 		return nil, err
 	}
 
-	c.budget.setEvictor(c.evictOne)
+	// Registered after the walk, so nothing can evict a file whose lease
+	// this cache has not taken yet.
+	c.resources.RegisterReclaimer(resource.Disk, c)
 
 	return c, nil
 }
 
 // Budget returns the configured disk allowance. The engine uses it to
 // reject a job definition whose declared inputs could never be staged.
-func (c *Cache) Budget() int64 { return c.budget.Limit() }
+func (c *Cache) Budget() int64 { return c.resources.Capacity()[resource.Disk] }
 
 // Used returns the bytes currently held on disk.
-func (c *Cache) Used() int64 { return c.budget.Used() }
+func (c *Cache) Used() int64 { return c.used.Load() }
 
 // Dir returns the cache root.
 func (c *Cache) Dir() string { return c.dir }
@@ -131,11 +185,16 @@ func (c *Cache) resetTmp() error {
 }
 
 // rebuild reconstructs the entry table by walking the hash directories.
+//
+// Each surviving file takes its own lease, so a restart re-admits what
+// is on disk rather than starting from an empty ledger while the volume
+// is already full. A file the ledger cannot account for is deleted: the
+// allowance has shrunk, or something else on this box now holds the
+// volume, and keeping bytes nothing knows about is the exact hole this
+// accounting exists to close. The cost is a re-download.
 func (c *Cache) rebuild() error {
 	root := filepath.Join(c.dir, hashDir)
 	now := time.Now()
-
-	var total int64
 
 	err := filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
@@ -151,26 +210,28 @@ func (c *Cache) rebuild() error {
 			return ierr
 		}
 
-		e := &entry{
+		h, ok := c.tryHold(info.Size())
+		if !ok {
+			c.logger.Warn("dispatch/artifact/cache: dropping unaccountable cached file",
+				log.String("path", path), log.Int64("bytes", info.Size()))
+			c.removeQuietly(path)
+
+			return nil
+		}
+
+		// One file per hash on disk, so this never collides.
+		_ = c.entries.put(&entry{
 			hash:     hashPrefix + d.Name(),
 			path:     path,
 			size:     info.Size(),
+			hold:     h,
 			lastUsed: now,
-		}
-
-		c.entries.put(e, "")
-		total += info.Size()
+		}, "")
 
 		return nil
 	})
 	if err != nil {
 		return fmt.Errorf("dispatch/artifact/cache: rebuild index: %w", err)
-	}
-
-	if total > 0 {
-		// Account for what is already on disk without blocking: this is
-		// recovery, not a new reservation.
-		c.budget.Adjust(0, total)
 	}
 
 	return nil
@@ -193,30 +254,41 @@ func (c *Cache) Stage(ctx context.Context, ref artifact.Ref) (path, hash string,
 
 	coord := coordKey(backendName, ref.Bucket, ref.Key)
 
-	// Fast path: a ref that already knows its hash, or coordinates we
-	// have staged before.
-	if e, ok := c.lookup(ref, coord); ok {
-		c.entries.lease(e, time.Now())
+	// Pinning is the loop condition, not a step in it. An entry can be
+	// evicted between being found and being leased, and handing back a
+	// path whose file has just been unlinked — and whose bytes the
+	// manager has already credited to someone else — is worse than
+	// paying for the download again.
+	for {
+		// Fast path: a ref that already knows its hash, or coordinates
+		// we have staged before.
+		if e, ok := c.lookup(ref, coord); ok && c.entries.lease(e, time.Now()) {
+			return e.path, e.hash, c.releaseFunc(e), nil
+		}
 
-		return e.path, e.hash, c.releaseFunc(e), nil
+		// Slow path: one download per artifact, however many stagers
+		// arrive.
+		res, ferr, _ := c.flight.Do(coord, func() (any, error) {
+			return c.download(ctx, ref, coord)
+		})
+		if ferr != nil {
+			return "", "", nil, ferr
+		}
+
+		e, ok := res.(*entry)
+		if !ok {
+			return "", "", nil, fmt.Errorf("dispatch/artifact/cache: unexpected flight result %T", res)
+		}
+
+		if c.entries.lease(e, time.Now()) {
+			return e.path, e.hash, c.releaseFunc(e), nil
+		}
+
+		if cerr := ctx.Err(); cerr != nil {
+			return "", "", nil, fmt.Errorf("dispatch/artifact/cache: stage %s/%s: %w",
+				ref.Bucket, ref.Key, cerr)
+		}
 	}
-
-	// Slow path: one download per artifact, however many stagers arrive.
-	res, err, _ := c.flight.Do(coord, func() (any, error) {
-		return c.download(ctx, ref, coord)
-	})
-	if err != nil {
-		return "", "", nil, err
-	}
-
-	e, ok := res.(*entry)
-	if !ok {
-		return "", "", nil, fmt.Errorf("dispatch/artifact/cache: unexpected flight result %T", res)
-	}
-
-	c.entries.lease(e, time.Now())
-
-	return e.path, e.hash, c.releaseFunc(e), nil
 }
 
 // lookup resolves a cached entry by hash, then by coordinates.
@@ -233,13 +305,18 @@ func (c *Cache) lookup(ref artifact.Ref, coord string) (*entry, bool) {
 }
 
 // releaseFunc returns an idempotent release for an entry.
+//
+// The manager is only nudged when the entry loses its last stager,
+// because that is the only release that changes what eviction could
+// free.
 func (c *Cache) releaseFunc(e *entry) func() {
 	var once sync.Once
 
 	return func() {
 		once.Do(func() {
-			c.entries.release(e)
-			c.budget.Wake()
+			if c.entries.release(e) {
+				c.wake()
+			}
 		})
 	}
 }
@@ -264,15 +341,19 @@ func (c *Cache) download(ctx context.Context, ref artifact.Ref, coord string) (*
 		reserved = 0
 	}
 
-	if err := c.budget.Acquire(ctx, reserved); err != nil {
+	h, err := c.newHold(ctx, reserved)
+	if err != nil {
 		return nil, err
 	}
 
+	// The hold belongs to whoever ends up owning the bytes. Until an
+	// entry takes it, that is nobody, and every path out of here has to
+	// give it back.
 	committed := false
 
 	defer func() {
 		if !committed {
-			c.budget.Release(reserved)
+			c.releaseHold(h)
 		}
 	}()
 
@@ -305,10 +386,14 @@ func (c *Cache) download(ctx context.Context, ref artifact.Ref, coord string) (*
 		return nil, err
 	}
 
-	if written != reserved {
-		// Either the ref carried no size, or it lied. Correct the budget
-		// to what actually landed on disk.
-		c.budget.Adjust(reserved, written)
+	// Either the ref carried no size, or it lied. Correct the hold to
+	// what actually landed on disk. Growing can block or evict, which is
+	// why it is bounded by the caller's context like the first
+	// reservation was; failing here costs the download, not the ledger.
+	if rerr := c.resize(ctx, h, written); rerr != nil {
+		c.removeQuietly(tmpPath)
+
+		return nil, rerr
 	}
 
 	hash := hashPrefix + sum
@@ -322,12 +407,10 @@ func (c *Cache) download(ctx context.Context, ref artifact.Ref, coord string) (*
 
 	// A different artifact may share these bytes and have staged them
 	// first. Content addressing makes that a cache hit, not a conflict:
-	// drop our copy's accounting and reuse the existing entry.
+	// the existing entry's hold already covers this file, so ours stays
+	// uncommitted and the deferred release hands it straight back.
 	if existing, ok := c.entries.getByHash(hash); ok && existing.path == final {
-		c.budget.Adjust(written, 0)
 		c.entries.alias(coord, hash)
-
-		committed = true
 
 		return existing, nil
 	}
@@ -336,10 +419,16 @@ func (c *Cache) download(ctx context.Context, ref artifact.Ref, coord string) (*
 		hash:     hash,
 		path:     final,
 		size:     written,
+		hold:     h,
 		lastUsed: time.Now(),
 	}
 
-	c.entries.put(e, coord)
+	// A racing download of the same bytes under different coordinates
+	// may have registered first. It owns the file and the hold that
+	// covers it; ours goes back with the deferred release.
+	if live := c.entries.put(e, coord); live != e {
+		return live, nil
+	}
 
 	committed = true
 
@@ -395,25 +484,88 @@ func (c *Cache) promote(tmpPath, sum string) (string, error) {
 	return final, nil
 }
 
-// evictOne removes the least recently used unleased entry. It returns the
-// bytes reclaimed, or zero when every entry is leased.
-func (c *Cache) evictOne() int64 {
+// evictOne removes the least recently used unleased entry, releasing
+// the lease that held its bytes. It reports the bytes reclaimed and
+// whether there was anything to evict at all — an empty artifact frees
+// zero bytes and is still progress, so the two answers cannot be folded
+// into one number without stalling reclamation on a zero-byte file.
+//
+// The table picks the victim and forgets it under its own lock, and it
+// only ever picks an entry no stager holds. By the time the file is
+// unlinked here nothing can reach it, which is what keeps the cache's
+// lease count and the manager's lease from disagreeing about who owns
+// these bytes.
+func (c *Cache) evictOne() (int64, bool) {
 	victim := c.entries.evictLRU()
 	if victim == nil {
-		return 0
+		return 0, false
 	}
 
 	c.removeQuietly(victim.path)
 
-	// Only the file and the table entry are dropped here. The budget
-	// subtracts the returned size itself, because it already holds its
-	// own mutex when it calls this.
+	freed := victim.hold.bytes
+	c.releaseHold(victim.hold)
+
 	c.logger.Debug("dispatch/artifact/cache: evicted entry",
 		log.String("hash", victim.hash),
 		log.Int64("bytes", victim.size),
 	)
 
-	return victim.size
+	return freed, true
+}
+
+// Reclaim frees up to need bytes by evicting least recently used
+// entries, satisfying resource.Reclaimer.
+//
+// The bytes return to the manager as each victim's lease is released,
+// which is the only path that credits the ledger; the count returned
+// here is the manager's "something changed, re-check" signal and is
+// deliberately not added to anything.
+//
+// It reclaims nothing for any key but disk. This cache holds bytes on
+// one volume and nothing else, and a reclaimer that answered for memory
+// it does not hold would have the manager admit work the box cannot
+// run.
+//
+// This runs on the admission path — Manager.Acquire calls it before it
+// blocks, under whatever deadline the caller set — so it does the
+// unlinks the shortfall needs and stops, rather than tidying up while a
+// fetcher waits.
+func (c *Cache) Reclaim(ctx context.Context, key string, need int64) (int64, error) {
+	if key != resource.Disk || need <= 0 {
+		return 0, nil
+	}
+
+	var freed int64
+
+	for freed < need && ctx.Err() == nil {
+		bytes, ok := c.evictOne()
+		if !ok {
+			// Everything left is leased by a running stager.
+			break
+		}
+
+		freed += bytes
+	}
+
+	return freed, nil
+}
+
+// Available reports the bytes eviction could free right now, satisfying
+// resource.Reclaimer.
+//
+// It reads the entry table and nothing else. Reclaim reaches the
+// manager — releasing a lease is how it gives bytes back — but only
+// after it has let go of the table lock, so the two locks are taken in
+// sequence and never nested. Totalling the leases here instead of the
+// entries would nest them the other way round, on the one call the
+// manager makes while a caller is mid-Acquire. That is the deadlock.
+func (c *Cache) Available(key string) int64 {
+	if key != resource.Disk {
+		return 0
+	}
+
+	return c.entries.evictableBytes()
 }
 
 // removeQuietly deletes a path, logging rather than failing.
@@ -424,10 +576,11 @@ func (c *Cache) removeQuietly(path string) {
 	}
 }
 
-// Purge removes every cached file and resets the accounting.
+// Purge removes every cached file and returns its bytes to the manager.
 func (c *Cache) Purge() error {
 	for _, e := range c.entries.all() {
 		c.removeQuietly(e.path)
+		c.releaseHold(e.hold)
 	}
 
 	c.entries = newEntryTable()
@@ -439,8 +592,6 @@ func (c *Cache) Purge() error {
 	if err := os.MkdirAll(filepath.Join(c.dir, hashDir), dirPerm); err != nil {
 		return fmt.Errorf("dispatch/artifact/cache: recreate hash dir: %w", err)
 	}
-
-	c.budget.Reset()
 
 	return nil
 }

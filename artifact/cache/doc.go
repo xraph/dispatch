@@ -25,6 +25,15 @@
 // admission control: a job needing more staging space than is available
 // waits instead of filling the disk.
 //
+// The budget is a resource.Manager, not a counter. Each cached object
+// holds one lease for its bytes and eviction releases it, so with
+// WithManager the staged bytes sit in the same ledger the worker admits
+// jobs against: the cache is registered as that manager's disk
+// reclaimer, and a job short on disk gets it by evicting rather than by
+// waiting for a cache that has no reason to shrink. With no manager
+// supplied the cache builds a private single-key one, which is the
+// private disk budget it always had.
+//
 // The cache is a cache. Its index is an optimisation rebuilt from disk on
 // startup, and a corrupt or missing index costs a re-download, never
 // correctness.
