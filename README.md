@@ -16,7 +16,7 @@ Dispatch is a library — not a service. Import it, configure a store, and regis
 - **OpenTelemetry** — Built-in metrics and tracing via the `observability` and `middleware` packages
 - **Relay integration** — Emit typed webhook events at every lifecycle point via `relay_hook`
 - **Artifact plane** — Track gigabyte-scale job inputs and outputs in object storage, staged to a content-addressed local cache
-- **Artifact plane** — Track gigabyte-scale job inputs and outputs in object storage, staged to a content-addressed local cache
+- **Resource model** — Size jobs by what they actually need and admit them against detected worker capacity, instead of counting identical slots
 - **Pluggable storage** — Memory, PostgreSQL (pgx/v5), Grove ORM, SQLite, Redis
 
 ## Quick Start
@@ -79,6 +79,61 @@ func main() {
 }
 ```
 
+## Resource-Aware Scheduling
+
+A worker slot is a promise that one job fits. That works while every job is the same size, and stops working the moment one definition serves both a 2 MB input and a 2 GB one: `concurrency: 4` says the worker may run four jobs, never how big they are, so a slot-counting pool starts four of the large ones on a box sized for the small ones and the kernel decides which of them dies. Adding a dedicated queue per size is the usual workaround, and it trades an OOM for a fleet that is idle in one queue and backed up in another.
+
+The `resource` package replaces the slot with a vector. A job declares what it needs — or computes it at enqueue from its input size — the worker detects what it has (cgroup-first, so a container reports its quota rather than the host's cores), and admission is a comparison. A job that does not fit stays pending instead of being started next to work already using the memory.
+
+Minimal wiring, in one process:
+
+```go
+capacity := resource.Detect(resource.CapacityConfig{DiskBytes: 20 << 30})
+resources := resource.NewManager(capacity)
+
+// The SAME manager goes to both. The staging cache holds a lease per
+// cached entry and reclaims disk on demand; the pool offers disk at
+// dequeue as free plus what the cache could evict. Give the cache its
+// own manager and that second half is always zero.
+staging, _ := cache.New(cacheDir, backend, cache.WithManager(resources))
+
+eng, _ := engine.Build(d,
+    engine.WithArtifacts(artifacts, staging),
+    engine.WithResourceManager(resources),
+)
+```
+
+Sizing one definition from its input:
+
+```go
+job.NewDefinition("render", handler,
+    job.WithArtifactInputs(artifact.Input("scene", artifact.Required)),
+    job.WithResourceFunc(func(_ context.Context, r resource.Request) (resource.Set, error) {
+        return resource.MemoryBytes(32<<20 + r.InputBytes*16), nil
+    }),
+)
+```
+
+The function runs once, in the enqueuing process, and the result is written to the job row — nothing evaluates user code on the scheduling path, and two workers can never disagree about how big a job is.
+
+Under Forge, the same thing is configuration:
+
+```yaml
+extensions:
+  dispatch:
+    resources:
+      enabled: true
+      cpu_overcommit: 1.0      # CPU is compressible; there is no memory equivalent
+      memory_fraction: 0.8     # leave the rest for the runtime and the page cache
+      explicit:                # overrides detection, and the only way to declare
+        gpu: 4000              # a custom resource — nothing detects an FPGA
+        fpga: 2
+```
+
+Leave it out and nothing changes: no ledger is built, the pool dequeues unbounded, every store backend skips its fit predicate, and the staging cache keeps the private disk budget it has always had.
+
+Runnable end to end in [`_examples/resources`](./_examples/resources).
+
 ## Package Index
 
 | Package | Description |
@@ -87,6 +142,7 @@ func main() {
 | `engine` | Wires all subsystems; `Build`, `Register`, `Enqueue`, `RegisterWorkflow`, `RegisterCron` |
 | `job` | `Job` entity, `State` machine, `Definition[T]`, `Registry` |
 | `artifact` | Tracked object storage — declared inputs, imperative outputs, staging cache, lifecycle sweeping |
+| `resource` | Resource vectors, capacity detection, the shared admission ledger and its reclaimers |
 | `workflow` | `Definition[T]`, `Run`, `State`, step checkpointing |
 | `cron` | `Entry`, `Scheduler`, distributed leader-elected cron |
 | `dlq` | `Entry`, `Service` — list, replay, purge |
