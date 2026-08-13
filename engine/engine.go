@@ -447,6 +447,12 @@ func Build(d *dispatch.Dispatcher, opts ...Option) (*Engine, error) {
 	if config.WorkerStoreCallTimeout != 0 {
 		poolOpts = append(poolOpts, worker.WithStoreCallTimeout(config.WorkerStoreCallTimeout))
 	}
+	if config.ReapInterval != 0 {
+		poolOpts = append(poolOpts, worker.WithReapInterval(config.ReapInterval))
+	}
+	if config.DefaultLeaseTTL != 0 {
+		poolOpts = append(poolOpts, worker.WithDefaultLeaseTTL(config.DefaultLeaseTTL))
+	}
 
 	// Create queue manager if queue configs were provided.
 	if len(eng.queueConfigs) > 0 {

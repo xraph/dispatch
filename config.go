@@ -29,6 +29,16 @@ type Config struct {
 	// considered stale.
 	StaleJobThreshold time.Duration
 
+	// ReapInterval is how often the pool scans for expired leases. Zero
+	// uses worker.DefaultReapInterval. This is the scan cadence, not the
+	// lease duration.
+	ReapInterval time.Duration
+
+	// DefaultLeaseTTL is how far each renewal pushes a job's lease expiry
+	// when the job declares none of its own. Zero falls back to
+	// StaleJobThreshold, preserving existing reclamation timing.
+	DefaultLeaseTTL time.Duration
+
 	// WorkerStoreCallTimeout caps a single worker store roundtrip
 	// (DequeueJobs, HeartbeatJob, ReapStaleJobs, UpdateJob). Bounds
 	// how long a stalled driver session can hold a pool connection
@@ -76,6 +86,8 @@ func DefaultConfig() Config {
 		// Tuning fields (zero leaves the subsystem default in place;
 		// callers override via options).
 		WorkerStoreCallTimeout: 0,
+		ReapInterval:           0,
+		DefaultLeaseTTL:        0,
 		CronTickInterval:       0,
 		CronLeaderTTL:          0,
 		CronLockTTL:            0,

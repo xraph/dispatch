@@ -61,6 +61,19 @@ type QueueManager interface {
 // can't pile up more than 50 in-flight calls at once.
 const defaultStoreCallTimeout = 5 * time.Second
 
+// DefaultReapInterval is how often the pool scans for expired leases.
+//
+// It is deliberately independent of any lease TTL. The reaper used to
+// tick at the stale-job threshold, so a five-minute threshold meant a
+// dead job could sit for ten minutes before anyone looked; and with
+// per-definition TTLs there is no single threshold left to tick at.
+const DefaultReapInterval = 15 * time.Second
+
+// DefaultReclaimBatch caps how many expired leases one pass reclaims, so
+// a backlog after an outage drains over several ticks instead of one
+// statement that locks a large slice of the table.
+const DefaultReclaimBatch = 100
+
 // Pool manages a set of concurrent worker goroutines fed by a single
 // fetcher that polls the store for jobs and executes them through the
 // Executor.
@@ -84,6 +97,11 @@ type Pool struct {
 	// Heartbeat / reaper configuration.
 	heartbeatInterval time.Duration
 	staleJobThreshold time.Duration
+
+	// reapInterval is the reaper's scan cadence. Zero uses
+	// DefaultReapInterval; this is deliberately independent of
+	// staleJobThreshold and any lease TTL. See WithReapInterval.
+	reapInterval time.Duration
 
 	// leaseStore is the store's optional lease capability. Nil means the
 	// backend implements only job.Store, and the pool keeps its previous
@@ -163,6 +181,28 @@ func WithHeartbeatInterval(d time.Duration) PoolOption {
 // disables stale job reaping.
 func WithStaleJobThreshold(d time.Duration) PoolOption {
 	return func(p *Pool) { p.staleJobThreshold = d }
+}
+
+// WithReapInterval sets how often the reaper scans for expired leases /
+// stale jobs.
+//
+// This is the scan cadence, not the lease duration — it does not control
+// how long a lease survives without renewal. For that, see
+// WithDefaultLeaseTTL and job.WithLeaseTTL. A zero value leaves
+// DefaultReapInterval in place; it has no effect when WithStaleJobThreshold
+// is zero, since that still disables reaping entirely.
+func WithReapInterval(d time.Duration) PoolOption {
+	return func(p *Pool) { p.reapInterval = d }
+}
+
+// resolvedReapInterval returns the configured reap interval, or
+// DefaultReapInterval when unset.
+func (p *Pool) resolvedReapInterval() time.Duration {
+	if p.reapInterval > 0 {
+		return p.reapInterval
+	}
+
+	return DefaultReapInterval
 }
 
 // WithQueueManager sets the queue manager for rate limiting and
@@ -848,7 +888,7 @@ func (p *Pool) sendHeartbeats() {
 func (p *Pool) reaperLoop() {
 	defer p.wg.Done()
 
-	ticker := time.NewTicker(p.staleJobThreshold)
+	ticker := time.NewTicker(p.resolvedReapInterval())
 	defer ticker.Stop()
 
 	for {
@@ -861,7 +901,51 @@ func (p *Pool) reaperLoop() {
 	}
 }
 
+// reapStaleJobs reclaims jobs that have gone dark, through the store's
+// atomic path when it has one, falling back to the legacy SELECT-then-
+// UPDATE path for a backend that implements only job.Store.
 func (p *Pool) reapStaleJobs() {
+	if p.leaseStore != nil {
+		p.reclaimExpiredLeases()
+
+		return
+	}
+
+	p.reapStaleJobsLegacy()
+}
+
+// reclaimExpiredLeases takes back jobs whose lease has lapsed. The store
+// does the claim and the read in one statement, so unlike the legacy
+// path two pools cannot both reset the same job.
+func (p *Pool) reclaimExpiredLeases() {
+	reapCtx, reapCancel := p.callCtx()
+	reclaimed, err := p.leaseStore.ReclaimExpiredLeases(reapCtx, DefaultReclaimBatch)
+	reapCancel()
+	if err != nil {
+		if isTransientStoreErr(err) {
+			p.logger.Warn("reclaim expired leases transient error", log.String("error", err.Error()))
+		} else {
+			p.logger.Error("reclaim expired leases error", log.String("error", err.Error()))
+		}
+
+		return
+	}
+
+	for _, j := range reclaimed {
+		p.logger.Info("reclaimed expired lease",
+			log.String("job_id", j.ID.String()),
+			log.String("job_name", j.Name),
+			log.Int("evict_count", j.EvictCount),
+			log.Int("lease_epoch", j.LeaseEpoch),
+		)
+	}
+
+	if len(reclaimed) > 0 {
+		p.Wake()
+	}
+}
+
+func (p *Pool) reapStaleJobsLegacy() {
 	reapCtx, reapCancel := p.callCtx()
 	stale, err := p.store.ReapStaleJobs(reapCtx, p.staleJobThreshold)
 	reapCancel()
