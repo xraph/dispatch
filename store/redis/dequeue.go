@@ -222,7 +222,7 @@ func (s *Store) scanQueue(
 	t time.Time,
 ) ([]dequeueCandidate, error) {
 	key := queueKey(q)
-	full := !opts.IsUnbounded() || len(opts.PreferHashes) > 0
+	full := !opts.IsUnbounded() || len(opts.PreferredHashes()) > 0
 
 	var (
 		out     []dequeueCandidate

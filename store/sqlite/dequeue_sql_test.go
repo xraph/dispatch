@@ -22,11 +22,14 @@ import (
 //     the statement, and a mis-binding shows up as a wrong answer only for
 //     the option combinations the suite happens to exercise.
 //   - The candidate SELECT's ORDER BY is what makes the LIMIT truncate an
-//     ORDERED set. Removing it entirely still passes all 20 conformance
-//     cases here, measured — SQLite answers the scan from
-//     idx_dispatch_jobs_dequeue, whose key order happens to match priority
-//     DESC, run_at ASC, so the right rows come back for the wrong reason.
-//     TestBuildDequeueQueryOrdersLocalityBelowPriority is the pin.
+//     ORDERED set. Re-measured against the current 21-case suite:
+//     removing it entirely fails exactly ONE case,
+//     LocalityDecidesWhichRowsSurviveATightLimit. The other twenty pass,
+//     because SQLite answers the scan from idx_dispatch_jobs_dequeue_res,
+//     whose leading key order happens to match priority DESC, run_at ASC,
+//     so the right rows come back for the wrong reason.
+//     TestBuildDequeueQueryOrdersLocalityBelowPriority is the pin that
+//     does not depend on which index the planner chose.
 
 // render substitutes each bind parameter into the statement in order, so
 // a test can read the finished SQL the way SQLite reads it. It is a test

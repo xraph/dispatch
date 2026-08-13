@@ -130,7 +130,7 @@ extensions:
         fpga: 2
 ```
 
-Leave it out and nothing changes: no ledger is built, the pool dequeues unbounded, every store backend skips its fit predicate, and the staging cache keeps the private disk budget it has always had.
+Leave it out and the runtime behaves as it did before: no ledger is built, the pool dequeues unbounded, every store backend skips its fit predicate, and the staging cache keeps the private disk budget it has always had. The schema is the exception — the resource columns are added by migration whether or not you turn any of this on, because a job row has to be readable by every worker in a mixed-version fleet.
 
 Runnable end to end in [`_examples/resources`](./_examples/resources).
 

@@ -222,7 +222,12 @@ func buildCustomKeyPredicate(opts job.DequeueOpts, bind func(any) string) string
 // The term is applied whenever PreferHashes is non-empty, including on
 // otherwise-unbounded opts: IsUnbounded governs filtering only.
 func buildDequeueOrder(opts job.DequeueOpts, bind func(any) string) string {
-	if len(opts.PreferHashes) == 0 {
+	// PreferredHashes, not PreferHashes: an empty entry would bind as
+	// '' and match every unhashed job, since primary_input_hash is a
+	// plain string and an unhashed job stores '' rather than NULL. See
+	// job.DequeueOpts.PreferredHashes.
+	hashes := opts.PreferredHashes()
+	if len(hashes) == 0 {
 		return "priority DESC, run_at ASC"
 	}
 
@@ -232,7 +237,7 @@ func buildDequeueOrder(opts job.DequeueOpts, bind func(any) string) string {
 	// rank exactly the rows with no locality signal ABOVE the ones the
 	// caller has staged. COALESCE makes "unknown" mean "not preferred".
 	return "priority DESC, COALESCE(primary_input_hash = ANY(" +
-		bind(opts.PreferHashes) + "), FALSE) DESC, run_at ASC"
+		bind(hashes) + "), FALSE) DESC, run_at ASC"
 }
 
 // GetJob retrieves a job by ID.

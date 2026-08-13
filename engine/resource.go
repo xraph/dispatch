@@ -128,6 +128,18 @@ func (eng *Engine) resolveResources(ctx context.Context, j *job.Job, opts job.Op
 		OverrideLimits: opts.ResourceLimits,
 		Class:          class,
 		MaxCapacity:    eng.MaxWorkerCapacity(ctx),
+		// Neither source may fail an enqueue, but neither may fail
+		// silently either: both run once per enqueue in this process, so
+		// a broken one is broken for every job of that name from here on
+		// and the only symptom is jobs quietly sized from the static
+		// declaration.
+		OnError: func(source string, err error) {
+			eng.logger.Warn("resource: sizing source failed; falling back to the declaration",
+				log.String("source", source),
+				log.String("job", j.Name),
+				log.String("queue", j.Queue),
+				log.String("error", err.Error()))
+		},
 		Request: resource.Request{
 			JobName:    j.Name,
 			Queue:      j.Queue,

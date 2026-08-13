@@ -47,8 +47,30 @@ var budgetedKeys = [...]string{resource.CPU, resource.Memory, resource.Disk, res
 // therefore be evaluated as part of the claim, never applied to the rows
 // the claim returned.
 type DequeueOpts struct {
-	// Queues restricts the claim to these queue names. Empty means the
-	// backend's existing "all queues" behaviour.
+	// Queues restricts the claim to these queue names.
+	//
+	// An EMPTY list is not a portable request and callers should not
+	// send one. The backends genuinely disagree, and the disagreement
+	// predates this option:
+	//
+	//	memory    claims from every queue
+	//	postgres  claims nothing (queue = ANY(NULL) matches no row)
+	//	sqlite    claims nothing (queue IN () matches no row)
+	//	redis     claims nothing — the index is one sorted set per queue
+	//	          name and there has never been a cross-queue index
+	//	mongo     claims nothing, by an explicit early return
+	//
+	// Mongo's guard is the one that had to be added: {queue: {$in: nil}}
+	// marshals to BSON null and the server rejects the whole query with
+	// "$in needs an array", so an empty list was a hard error rather
+	// than any behaviour at all. It returns empty to match the three
+	// backends a real deployment would be running, rather than inventing
+	// an all-queues scan that no other persistent backend performs.
+	//
+	// The conformance suite does not exercise an empty list and no
+	// caller in this repository sends one. Unifying the five would be a
+	// behaviour change to store/memory and is deliberately not made
+	// here; documenting the split is what stops a caller assuming it.
 	Queues []string
 
 	// Limit is the maximum number of jobs to claim. It counts eligible
@@ -115,6 +137,9 @@ type DequeueOpts struct {
 	// PreferHashes are PrimaryInputHash values the caller already has
 	// staged locally. A job whose PrimaryInputHash appears here sorts
 	// ahead of jobs at the same priority, saving a re-download.
+	//
+	// Backends must bind PreferredHashes rather than this field: an
+	// empty string here is not a locality signal and must not become one.
 	//
 	// This is advisory and must NEVER filter, and must never outrank
 	// priority: locality that could reorder across priority bands would
@@ -249,6 +274,40 @@ func (o DequeueOpts) Less(a, b *Job) bool {
 	}
 
 	return a.RunAt.Before(b.RunAt)
+}
+
+// PreferredHashes returns the locality hashes worth matching on:
+// deduplicated, in caller order, with the empty string dropped. It is
+// what every backend must bind, never PreferHashes itself.
+//
+// The empty string is the case that matters. Prefers reports false for a
+// job with no PrimaryInputHash, so an empty entry offers no information
+// — but primary_input_hash is a plain string column, and a job that was
+// never hashed stores ” rather than NULL on the SQL backends. Bound
+// verbatim, ” = ANY('{""}') is TRUE, so a single empty entry would make
+// EVERY unhashed job "locally staged" and hand it the head of its
+// priority band. Under a tight Limit that is not a reordering, it is a
+// filter: the jobs the caller actually has staged stop being claimed at
+// all. Mongo already stripped empties; postgres and sqlite bound them.
+func (o DequeueOpts) PreferredHashes() []string {
+	if len(o.PreferHashes) == 0 {
+		return nil
+	}
+
+	seen := make(map[string]struct{}, len(o.PreferHashes))
+	out := make([]string, 0, len(o.PreferHashes))
+
+	for _, h := range o.PreferHashes {
+		if _, dup := seen[h]; dup || h == "" {
+			continue
+		}
+
+		seen[h] = struct{}{}
+
+		out = append(out, h)
+	}
+
+	return out
 }
 
 // OfferedCustomKeys returns CustomKeys sorted, for backends that build a

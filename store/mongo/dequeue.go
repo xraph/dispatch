@@ -149,37 +149,6 @@ func customKeyFilter(opts job.DequeueOpts) bson.M {
 	return bson.M{"$expr": bson.M{"$setIsSubset": bson.A{required, bson.M{"$literal": offered}}}}
 }
 
-// preferredHashes returns the locality hashes worth matching on: deduped,
-// and with the empty string dropped.
-//
-// job.DequeueOpts.Prefers reports false for a job with no
-// PrimaryInputHash, so an empty string in the caller's list must not turn
-// every unhashed job into a preferred one.
-func preferredHashes(opts job.DequeueOpts) []string {
-	if len(opts.PreferHashes) == 0 {
-		return nil
-	}
-
-	seen := make(map[string]struct{}, len(opts.PreferHashes))
-	out := make([]string, 0, len(opts.PreferHashes))
-
-	for _, h := range opts.PreferHashes {
-		if h == "" {
-			continue
-		}
-
-		if _, dup := seen[h]; dup {
-			continue
-		}
-
-		seen[h] = struct{}{}
-
-		out = append(out, h)
-	}
-
-	return out
-}
-
 // preferredExpr computes 1 for a job the caller already has staged and 0
 // for every other, so a descending sort on it puts preferred first.
 //

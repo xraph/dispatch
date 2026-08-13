@@ -67,6 +67,18 @@ func (s *Store) DequeueJobs(ctx context.Context, opts job.DequeueOpts) ([]*job.J
 		return nil, nil
 	}
 
+	// An empty queue list is a guard, not a query. The driver marshals a
+	// nil []string to BSON null, so {queue: {$in: null}} reaches the
+	// server and is rejected outright — "$in needs an array" — which
+	// surfaces as a dequeue ERROR every poll, backing the pool off on a
+	// configuration that merely names no queues. Postgres, SQLite and
+	// Redis all claim nothing for the same input; this matches them
+	// rather than inventing an all-queues scan no other persistent
+	// backend performs. See job.DequeueOpts.Queues.
+	if len(opts.Queues) == 0 {
+		return nil, nil
+	}
+
 	for range maxDequeueRounds {
 		t := now()
 
@@ -117,7 +129,7 @@ func (s *Store) dequeueCandidates(
 	// And it ranks strictly BELOW priority — above it, a steady stream of
 	// locally staged low-priority work would starve the high-priority job
 	// the pool exists to run first.
-	if hashes := preferredHashes(opts); len(hashes) > 0 {
+	if hashes := opts.PreferredHashes(); len(hashes) > 0 {
 		pipeline = append(pipeline, bson.D{{Key: "$addFields", Value: bson.M{
 			preferredField: preferredExpr(hashes),
 		}}})

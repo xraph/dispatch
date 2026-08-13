@@ -227,24 +227,105 @@ func TestDequeueOptsLess(t *testing.T) {
 	lowRemoteEarly := mk(1, time.Second, "")
 	lowRemoteLate := mk(1, time.Minute, "")
 
-	// Priority outranks locality: a stream of locally cached work must not
-	// be able to starve a high-priority job.
-	if !opts.Less(highRemote, lowLocal) {
-		t.Error("Less(high priority remote, low priority local) = false, want true")
+	// Every rule is asserted in BOTH directions, and that is not
+	// belt-and-braces: `func Less(a, b *Job) bool { return true }`
+	// satisfies every one-directional assertion here, and a comparator
+	// that is true both ways is not an ordering at all — sort.SliceStable
+	// would return an arbitrary permutation and the backends that sort in
+	// Go would hand back arbitrary work.
+	//
+	// The equal case is asserted for the same reason: Less must be a
+	// strict weak ordering, so two jobs that tie on all three terms must
+	// report false in both directions.
+	for _, tc := range []struct {
+		name string
+		hi   *job.Job
+		lo   *job.Job
+	}{
+		// Priority outranks locality: a stream of locally cached work
+		// must not be able to starve a high-priority job.
+		{"priority outranks locality", highRemote, lowLocal},
+		// Within a priority band, locality wins even against an earlier
+		// RunAt.
+		{"locality outranks RunAt within a band", lowLocal, lowRemoteEarly},
+		// Beyond that, RunAt ascending.
+		{"RunAt breaks the remaining tie", lowRemoteEarly, lowRemoteLate},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if !opts.Less(tc.hi, tc.lo) {
+				t.Errorf("Less(%s) = false, want true", tc.name)
+			}
+
+			if opts.Less(tc.lo, tc.hi) {
+				t.Errorf("Less is true in BOTH directions for %s, which is not an ordering",
+					tc.name)
+			}
+		})
 	}
 
-	// Within a priority band, locality wins even against an earlier RunAt.
-	if !opts.Less(lowLocal, lowRemoteEarly) {
-		t.Error("Less(local, earlier remote) = false, want true")
+	// A genuine tie: same priority, same locality answer, same RunAt.
+	tieA := mk(1, time.Second, "")
+	tieB := mk(1, time.Second, "")
+
+	if opts.Less(tieA, tieB) || opts.Less(tieB, tieA) {
+		t.Error("Less reports an order between two jobs that tie on every term; " +
+			"a comparator that never returns false for equal elements is not a strict " +
+			"weak ordering and sort will produce an arbitrary permutation")
 	}
 
-	// Beyond that, RunAt ascending.
-	if !opts.Less(lowRemoteEarly, lowRemoteLate) {
-		t.Error("Less(earlier, later) = false, want true")
+	// Two jobs the caller has BOTH staged tie on locality, so RunAt
+	// decides — locality is a boolean, never a ranking among preferred
+	// jobs.
+	bothLocalEarly := mk(1, 0, "blake3:local")
+	bothLocalLate := mk(1, time.Minute, "blake3:local")
+
+	if !opts.Less(bothLocalEarly, bothLocalLate) || opts.Less(bothLocalLate, bothLocalEarly) {
+		t.Error("two equally preferred jobs must be separated by RunAt, not by hash value")
 	}
 
 	if opts.Prefers(mk(1, 0, "")) {
 		t.Error("Prefers(job with no hash) = true, want false")
+	}
+}
+
+// TestDequeueOptsPreferredHashes pins the normalisation every backend
+// binds instead of PreferHashes.
+//
+// The empty entry is the one that matters. primary_input_hash is a plain
+// string column, so a job that was never hashed stores ” rather than
+// NULL, and an empty entry bound verbatim makes `” = ANY('{""}')` true
+// for every one of them. Under a tight Limit that is not a reordering
+// but a filter: the jobs the caller actually staged stop being claimed.
+func TestDequeueOptsPreferredHashes(t *testing.T) {
+	opts := job.DequeueOpts{
+		PreferHashes: []string{"blake3:b", "", "blake3:a", "blake3:b", ""},
+	}
+
+	got := opts.PreferredHashes()
+	want := []string{"blake3:b", "blake3:a"}
+
+	if len(got) != len(want) {
+		t.Fatalf("PreferredHashes() = %v, want %v", got, want)
+	}
+
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("PreferredHashes() = %v, want %v (caller order, deduplicated, no empties)",
+				got, want)
+		}
+	}
+
+	// A list of nothing but empties carries no locality signal at all,
+	// and must not leave a backend emitting a term that matches every
+	// unhashed job.
+	empties := job.DequeueOpts{PreferHashes: []string{"", ""}}
+	if got = empties.PreferredHashes(); len(got) != 0 {
+		t.Errorf("PreferredHashes() = %v for a list of empty strings, want none", got)
+	}
+
+	var zero job.DequeueOpts
+	if zero.PreferredHashes() != nil {
+		t.Error("PreferredHashes() on zero opts must be nil")
 	}
 }
 

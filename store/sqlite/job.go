@@ -141,15 +141,22 @@ var budgetColumns = []struct {
 // data-modifying CTE. The one occurrence is the load-bearing one — it
 // decides which rows the LIMIT keeps.
 //
-// Do not delete it on the grounds that the returned slice is sorted in Go
-// anyway. Measured: with this ORDER BY removed, all 20 cases of
-// storetest.RunDequeueSuite still pass, because SQLite answers the
-// candidate scan from idx_dispatch_jobs_dequeue and that index's key
-// order happens to be priority DESC, run_at ASC — the right rows come
-// back for the wrong reason, and would stop doing so the moment the
-// planner picked another index. The shared suite cannot protect this;
-// TestBuildDequeueQueryOrdersLocalityBelowPriority and
-// TestDequeueSelectsPreferredOverNullHashUnderLimit do.
+// Do not delete it on the grounds that the returned slice is sorted in
+// Go anyway. Re-measured against the current 21-case
+// storetest.RunDequeueSuite, with this ORDER BY removed entirely:
+// exactly ONE case fails, LocalityDecidesWhichRowsSurviveATightLimit.
+// Every other case still passes, LimitTruncatesAfterOrdering included,
+// because SQLite answers the candidate scan from
+// idx_dispatch_jobs_dequeue_res and that index's leading key order is
+// priority DESC, run_at ASC — so twenty of twenty-one right answers
+// arrive for the wrong reason and would stop arriving the moment the
+// planner picked another index.
+//
+// The single case that does catch it is the one that cannot be baked
+// into any index: locality depends on the caller's staged set, which was
+// not known when the rows were written. That case was added for exactly
+// this hole. TestBuildDequeueQueryOrdersLocalityBelowPriority and
+// TestDequeueSelectsPreferredOverNullHashUnderLimit pin it here too.
 const dequeueSQL = `
 		UPDATE dispatch_jobs
 		SET state = 'running', started_at = %s, updated_at = %s
@@ -289,12 +296,17 @@ func buildCustomKeyPredicate(opts job.DequeueOpts, bind func(any) string) string
 // The term is applied whenever PreferHashes is non-empty, including on
 // otherwise-unbounded opts: IsUnbounded governs filtering only.
 func buildDequeueOrder(opts job.DequeueOpts, bind func(any) string) string {
-	if len(opts.PreferHashes) == 0 {
+	// PreferredHashes, not PreferHashes: an empty entry would bind as ''
+	// and match every unhashed job, since primary_input_hash is a plain
+	// string and an unhashed job stores '' rather than NULL. See
+	// job.DequeueOpts.PreferredHashes.
+	preferred := opts.PreferredHashes()
+	if len(preferred) == 0 {
 		return "priority DESC, run_at ASC"
 	}
 
-	hashes := make([]string, len(opts.PreferHashes))
-	for i, h := range opts.PreferHashes {
+	hashes := make([]string, len(preferred))
+	for i, h := range preferred {
 		hashes[i] = bind(h)
 	}
 

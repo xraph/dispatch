@@ -824,9 +824,9 @@ func testPreferHashesSortWithinPriorityBand(t *testing.T, s job.Store) {
 // Limit before applying the full ordering has no way to get this case
 // right by accident, on any backend.
 //
-// All six jobs share one priority band, so priority cannot decide the
+// All five jobs share one priority band, so priority cannot decide the
 // winners; only Prefers can. The two preferred jobs carry the LATEST
-// RunAt of the six, so a backend that orders by priority then RunAt
+// RunAt of the five, so a backend that orders by priority then RunAt
 // alone — which is what "the index already matches" and "the score
 // already matches" both reduce to — keeps the two EARLIEST non-preferred
 // jobs instead. Limit is exactly the preferred count, so the winning set
@@ -857,7 +857,7 @@ func testLocalityDecidesWhichRowsSurviveATightLimit(t *testing.T, s job.Store) {
 		preferred = "blake3:locally-cached"
 	)
 
-	// Earliest RunAt of the six: what a priority+RunAt-only sort would
+	// Earliest RunAt of the five: what a priority+RunAt-only sort would
 	// keep under Limit 2, and must NOT win here.
 	noHash := newFitJob("no-hash", queue, nil, withPriority(5), withRunAtOffset(0))
 	sortsAbovePreferred := newFitJob("sorts-above-preferred", queue, nil,
@@ -865,7 +865,7 @@ func testLocalityDecidesWhichRowsSurviveATightLimit(t *testing.T, s job.Store) {
 	coldRemote := newFitJob("cold-remote", queue, nil,
 		withPriority(5), withRunAtOffset(2*time.Minute), withHash("blake3:elsewhere"))
 
-	// Latest RunAt of the six: must win anyway, purely on locality.
+	// Latest RunAt of the five: must win anyway, purely on locality.
 	preferredEarly := newFitJob("preferred-early", queue, nil,
 		withPriority(5), withRunAtOffset(3*time.Minute), withHash(preferred))
 	preferredLate := newFitJob("preferred-late", queue, nil,

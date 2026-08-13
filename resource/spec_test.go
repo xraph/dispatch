@@ -107,6 +107,63 @@ func TestResolveEstimatorErrorFallsBack(t *testing.T) {
 	}
 }
 
+// TestResolveReportsSourceErrors pins the other half of "never fails an
+// enqueue": it must not fail SILENTLY either.
+//
+// Both dynamic sources run once per enqueue, in the enqueuing process,
+// so one that is misconfigured is misconfigured for every job of that
+// name from then on. Falling back to the declaration with no signal
+// means the fleet under-sizes those jobs indefinitely and the symptom —
+// OOM kills under real input — points at the handler, not at the
+// estimator that stopped answering.
+func TestResolveReportsSourceErrors(t *testing.T) {
+	funcErr := errors.New("input service unreachable")
+	estErr := errors.New("rollup unavailable")
+
+	reported := map[string]error{}
+
+	got, err := resource.Resolve(context.Background(), resource.ResolveInput{
+		Declared: resource.Set{resource.Memory: 8 << 30},
+		Func: func(context.Context, resource.Request) (resource.Set, error) {
+			return nil, funcErr
+		},
+		Estimator: stubEstimator{err: estErr},
+		OnError: func(source string, err error) {
+			reported[source] = err
+		},
+	})
+	if err != nil {
+		t.Fatalf("a reported source error must still never fail enqueue: %v", err)
+	}
+
+	if got.Requests[resource.Memory] != 8<<30 {
+		t.Errorf("got %v, want the declaration preserved", got.Requests)
+	}
+
+	if !errors.Is(reported[resource.SourceFunc], funcErr) {
+		t.Errorf("func error reported as %v, want %v", reported[resource.SourceFunc], funcErr)
+	}
+
+	if !errors.Is(reported[resource.SourceEstimator], estErr) {
+		t.Errorf("estimator error reported as %v, want %v",
+			reported[resource.SourceEstimator], estErr)
+	}
+
+	// A source that succeeds reports nothing.
+	reported = map[string]error{}
+
+	if _, err = resource.Resolve(context.Background(), resource.ResolveInput{
+		Estimator: stubEstimator{out: resource.Set{resource.Memory: 1 << 30}},
+		OnError:   func(source string, err error) { reported[source] = err },
+	}); err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+
+	if len(reported) != 0 {
+		t.Errorf("a successful estimator reported %v, want nothing", reported)
+	}
+}
+
 func TestResolveRejectsUnschedulable(t *testing.T) {
 	_, err := resource.Resolve(context.Background(), resource.ResolveInput{
 		Declared:    resource.Set{resource.Memory: 64 << 30},

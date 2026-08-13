@@ -66,8 +66,16 @@ func TestSqliteRoundTripsResources(t *testing.T) {
 // with a zero Set, not a Set containing zero-valued canonical keys -- those
 // are indistinguishable to a caller checking IsZero(), but the row-level
 // NULL-vs-"{}" distinction is what a rolling deploy depends on.
+//
+// So this asserts the STORED value, not just the decoded one. IsZero() is
+// true for nil, for Set{} and for Set{"memory": 0} alike, which means the
+// decoded-side check the comment above describes cannot actually see the
+// distinction it names. Reading the column back raw can: NULL is what a
+// worker still running the pre-resource code reads as "no requirement".
+// Redis and Mongo already assert on their raw stored value; this is
+// SQLite's.
 func TestSqliteJobWithNoResourcesRoundTrips(t *testing.T) {
-	s := openSqliteStore(t)
+	s, drv, _ := openMigratedWithDriver(t)
 	ctx := context.Background()
 
 	j := &job.Job{
@@ -89,5 +97,46 @@ func TestSqliteJobWithNoResourcesRoundTrips(t *testing.T) {
 	}
 	if !got.Resources.IsZero() {
 		t.Errorf("Resources = %v, want zero", got.Resources)
+	}
+
+	var (
+		requestsNull int
+		limitsNull   int
+		cpu          int64
+		customKeys   string
+		class        string
+		inputBytes   int64
+	)
+
+	row := drv.QueryRow(ctx, `
+		SELECT resource_requests IS NULL,
+		       resource_limits IS NULL,
+		       req_cpu_milli,
+		       req_custom_keys,
+		       resource_class,
+		       input_bytes
+		FROM dispatch_jobs WHERE id = ?`, j.ID.String())
+
+	if err = row.Scan(&requestsNull, &limitsNull, &cpu,
+		&customKeys, &class, &inputBytes); err != nil {
+		t.Fatalf("raw column read: %v", err)
+	}
+
+	if requestsNull != 1 {
+		t.Error(`resource_requests is not NULL for an undeclared job; a stored "{}" decodes ` +
+			`to the same zero Set but is a different row, and NULL is what a worker running ` +
+			`the pre-resource code reads as "no requirement"`)
+	}
+
+	if limitsNull != 1 {
+		t.Error("resource_limits is not NULL for an undeclared job")
+	}
+
+	// The scalar columns are NOT NULL DEFAULT, so they must be present
+	// and zero — that is what lets the dequeue comparisons be bare
+	// rather than COALESCEd.
+	if cpu != 0 || customKeys != "" || class != "" || inputBytes != 0 {
+		t.Errorf("scalar columns = cpu %d, keys %q, class %q, input %d; want all zero/empty",
+			cpu, customKeys, class, inputBytes)
 	}
 }

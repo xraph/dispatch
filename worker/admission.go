@@ -148,12 +148,23 @@ func (p *Pool) admit(ctx context.Context, j *job.Job) (resource.Lease, error) {
 // Sharing one deadline makes the worst case the deadline itself, whatever
 // the batch size.
 //
-// Spending the budget does not poison the rest of the batch. Acquire only
-// consults the context when a request does NOT fit; anything that fits is
-// granted outright, expired context or not. So an exhausted budget stops
-// the fetcher WAITING, and no more than that: the jobs behind the one
-// that burned it are still admitted if there is room, and requeued as
-// misfits if there is not — which is a correct, already-tested outcome.
+// Spending the budget does not poison the whole batch, but it does cost
+// the jobs behind more than just the wait, and the difference matters.
+//
+// Anything that FITS is granted outright, expired context or not:
+// resource.Manager.Acquire returns before it ever looks at ctx when the
+// request fits current free capacity. So a batch of jobs this worker has
+// room for is admitted in full however long the first one took.
+//
+// What an exhausted budget also costs is RECLAMATION. Acquire's loop
+// checks ctx.Err() at the top and returns before calling reclaimLocked
+// below it, so once the budget is spent a job that would have fitted
+// after evicting some cached artifact bytes is no longer given the
+// chance: it is refused and requeued as a misfit even though the disk it
+// needed was reclaimable. That is a correct outcome — the job stays
+// pending, nothing is lost, and the next poll gets a fresh budget — but
+// it is a throughput cost paid by every job after the one that burned
+// the budget, not "the fetcher merely stopped waiting".
 //
 // It mirrors callCtx: no manager or no jobs means no budget to spend, and
 // the caller still gets a cancel func so it can defer uniformly.

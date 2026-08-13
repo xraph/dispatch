@@ -113,11 +113,18 @@ type ArtifactCacheConfig struct {
 // ResourceConfig configures how this worker's capacity is derived and
 // whether jobs are admitted against it at all.
 //
-// Off by default, and off means off: no manager is constructed, the pool
-// offers no dequeue budget, every store backend skips its fit predicate,
-// and the staging cache keeps the private disk budget it has always had.
-// A deployment that does not set this behaves exactly as it did before
-// the resource model existed.
+// Off by default, and off means the RUNTIME does nothing new: no manager
+// is constructed, the pool offers no dequeue budget, every store backend
+// skips its fit predicate, and the staging cache keeps the private disk
+// budget it has always had. A deployment that does not set this behaves
+// at runtime as it did before the resource model existed.
+//
+// Two things happen regardless, and neither is under this flag. The
+// resource columns are added by migration on every upgrade, because a
+// job row has to be readable by every worker in a mixed-version fleet;
+// on Postgres that includes an index build, which is why it is done
+// CONCURRENTLY. And every enqueue writes those columns, at their zero
+// values when nothing declares a requirement.
 type ResourceConfig struct {
 	// Enabled turns on capacity detection and resource-aware admission.
 	Enabled bool `default:"false" json:"enabled" mapstructure:"enabled" yaml:"enabled"`

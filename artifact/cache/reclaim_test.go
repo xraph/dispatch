@@ -282,6 +282,66 @@ func TestPrivateManagerBehavesLikeTheOldBudget(t *testing.T) {
 	}
 }
 
+// probingManager wraps a resource.Manager and signals every time the
+// reclaimer registered for a key is ASKED to free something and answers
+// "nothing".
+//
+// That callback is the only externally visible moment in
+// resource.Manager.Acquire's wait loop, and it is precisely the moment
+// the test needs: reclaimLocked runs with the manager's lock DROPPED,
+// immediately before the acquirer checks the reclaim generation and goes
+// into cond.Wait. Releasing the cache entry from inside that window is
+// the exact race the generation counter exists to survive — a plain
+// Broadcast there reaches nobody, because the acquirer is not waiting yet.
+type probingManager struct {
+	resource.Manager
+
+	refused chan struct{} // "asked to evict, gave nothing"
+	proceed chan struct{} // test → reclaimer: you may return now
+}
+
+func (m *probingManager) RegisterReclaimer(key string, r resource.Reclaimer) {
+	if r == nil {
+		m.Manager.RegisterReclaimer(key, nil)
+
+		return
+	}
+
+	m.Manager.RegisterReclaimer(key, &probingReclaimer{
+		Reclaimer: r,
+		refused:   m.refused,
+		proceed:   m.proceed,
+	})
+}
+
+type probingReclaimer struct {
+	resource.Reclaimer
+
+	once    sync.Once
+	refused chan struct{}
+	proceed chan struct{}
+}
+
+func (r *probingReclaimer) Reclaim(ctx context.Context, key string, need int64) (int64, error) {
+	freed, err := r.Reclaimer.Reclaim(ctx, key, need)
+
+	// Only the FIRST refusal is gated. The acquirer rounds its loop more
+	// than once and a second block would never be released.
+	//
+	// Gating AFTER the wrapped call is what makes it safe: the cache has
+	// let go of its entry table by the time it returns, so the test
+	// goroutine can release an entry from here without deadlocking
+	// against it.
+	if freed == 0 {
+		r.once.Do(func() {
+			r.refused <- struct{}{}
+			<-r.proceed
+		})
+	}
+
+	return freed, err
+}
+
 // TestBlockedStageWakesWhenAnEntryIsReleased covers the wake-up the
 // manager cannot generate for itself: it broadcasts when a lease is
 // released, and a cache lease dropping to zero is not one of those, yet
@@ -289,8 +349,32 @@ func TestPrivateManagerBehavesLikeTheOldBudget(t *testing.T) {
 //
 // Without it the stage below sleeps until its deadline and the job
 // requeues for no reason — a worker going quiet rather than erroring.
+// This is the guard for the permanent-hang bug found during the track, so
+// it is synchronised rather than timed: it waits for the stager to be
+// observed asking the cache for space and being refused, which is the
+// last thing that happens before it sleeps. A sleep would let the release
+// land FIRST on a slow or loaded machine, and then the second Stage
+// succeeds trivially without the wake-up path running at all — a broken
+// generation counter would be invisible and the test would still pass.
+//
+// Releasing at the refusal point is also deliberately the HARDEST timing,
+// not merely a deterministic one: reclaimLocked holds no manager lock
+// across the reclaimer call, so the release and its Wake land inside the
+// window where the acquirer has already been told "nothing available" and
+// has not yet reached cond.Wait. Only the generation counter carries the
+// signal across that gap.
+//
+// Mutation-verified: deleting the reclaimGen re-check in
+// resource.Manager.Acquire makes this hang to the 5s deadline and fail.
 func TestBlockedStageWakesWhenAnEntryIsReleased(t *testing.T) {
-	mgr := resource.NewManager(resource.Set{resource.Disk: 10})
+	refused := make(chan struct{})
+	proceed := make(chan struct{})
+	mgr := &probingManager{
+		Manager: resource.NewManager(resource.Set{resource.Disk: 10}),
+		refused: refused,
+		proceed: proceed,
+	}
+
 	c := managedCache(t, mgr, 2, 10)
 
 	_, _, releaseA, err := c.Stage(context.Background(),
@@ -313,10 +397,24 @@ func TestBlockedStageWakesWhenAnEntryIsReleased(t *testing.T) {
 		done <- serr
 	}()
 
-	// Let the stager get as far as blocking on a full, fully leased
-	// cache before handing it the one thing that can help.
-	time.Sleep(50 * time.Millisecond)
+	// Wait for the stager to be exactly where this test needs it: it has
+	// asked the cache to evict, the cache — whose only entry is still
+	// pinned — has answered "nothing", and it is now held inside that
+	// call with the manager's lock DROPPED and cond.Wait still ahead of
+	// it.
+	select {
+	case <-refused:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the second Stage never reached the cache's reclaimer; " +
+			"it is not blocked where this test believes it is")
+	}
+
+	// Both halves of the wake-up land in that window: the entry loses its
+	// last stager, and the cache's Wake bumps the generation and
+	// broadcasts to a waiter that is not waiting yet.
 	releaseA()
+
+	close(proceed)
 
 	select {
 	case serr := <-done:
