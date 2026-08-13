@@ -1,6 +1,7 @@
 package extension
 
 import (
+	"slices"
 	"time"
 
 	log "github.com/xraph/go-utils/log"
@@ -310,6 +311,16 @@ func WithExplicitCapacity(sets ...resource.Set) ExtOption {
 // advertises at dequeue. Empty advertises every custom key it has
 // capacity for, which is usually what you want; this exists so a worker
 // draining a device can stop attracting work for it.
+//
+// Keys accumulate across calls and duplicates collapse, matching
+// WithExplicitCapacity above. The slice is copied, so the caller keeps no
+// handle on extension state.
 func WithWorkerCustomKeys(keys ...string) ExtOption {
-	return func(e *Extension) { e.config.Resources.CustomKeys = keys }
+	return func(e *Extension) {
+		for _, k := range keys {
+			if !slices.Contains(e.config.Resources.CustomKeys, k) {
+				e.config.Resources.CustomKeys = append(e.config.Resources.CustomKeys, k)
+			}
+		}
+	}
 }

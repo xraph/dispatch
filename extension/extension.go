@@ -215,22 +215,27 @@ func (e *Extension) init(fapp forge.App) error {
 		engOpts = append(engOpts, engine.WithStreamBroker())
 	}
 
-	// The admission ledger is built first, because both of the things
-	// that follow have to be given the SAME instance: the staging cache
-	// holds a lease per cached entry and registers itself as the ledger's
-	// disk reclaimer, and the worker pool offers disk at dequeue as free
-	// PLUS what that reclaimer could evict. Two managers and the second
-	// half of that budget is permanently zero.
-	e.resources = e.buildResourceManager()
-
-	// Build the artifact plane before the engine, because the staging
-	// middleware has to be in the chain the engine constructs.
+	// Resolve the artifact store before the ledger, not after. The
+	// ledger's disk capacity is the staging budget, and there is no
+	// staging cache unless this resolves — a store that does not
+	// implement artifact.Store turns `artifacts.enabled: true` into a
+	// plane that is configured and never built.
 	if e.artifactStore == nil {
 		if as, ok := d.Store().(artifact.Store); ok {
 			e.artifactStore = as
 		}
 	}
 
+	// The admission ledger is built next, because both of the things that
+	// follow have to be given the SAME instance: the staging cache holds
+	// a lease per cached entry and registers itself as the ledger's disk
+	// reclaimer, and the worker pool offers disk at dequeue as free PLUS
+	// what that reclaimer could evict. Two managers and the second half
+	// of that budget is permanently zero.
+	e.resources = e.buildResourceManager()
+
+	// The artifact plane is built before the engine, because the staging
+	// middleware has to be in the chain the engine constructs.
 	if e.artifactStore != nil {
 		svc, artCache, aerr := e.buildArtifactPlane(fapp, e.resources)
 		if aerr != nil {

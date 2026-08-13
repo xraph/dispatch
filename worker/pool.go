@@ -169,6 +169,17 @@ func WithQueueManager(m QueueManager) PoolOption {
 // Without one the pool passes an unbounded DequeueOpts and takes no
 // leases — every backend skips its fit predicate and behaviour is
 // identical to a pool that predates the resource model.
+//
+// Prefer engine.WithResourceManager to calling this directly. A manager
+// makes admit able to stall the fetcher for up to one pollInterval per
+// batch while it holds claimed, running-state, not-yet-heartbeating jobs,
+// which puts pollInterval and staleJobThreshold into a relationship the
+// pool cannot police: it is handed both as already-decided values and
+// does not own the policy. engine.Build validates them together
+// (checkReaperMargin) before it constructs a pool. Construct one here
+// instead and that check does not run — a staleJobThreshold inside the
+// stall lets the reaper reclaim a job this fetcher still holds, and the
+// job runs twice.
 func WithResourceManager(m resource.Manager) PoolOption {
 	return func(p *Pool) { p.resources = m }
 }

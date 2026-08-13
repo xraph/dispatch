@@ -2,13 +2,16 @@ package extension_test
 
 import (
 	"context"
+	"sync"
 	"testing"
+	"time"
 
 	forgetesting "github.com/xraph/forge/testing"
 
 	"github.com/xraph/dispatch/artifact"
 	"github.com/xraph/dispatch/artifact/artifacttest"
 	"github.com/xraph/dispatch/extension"
+	"github.com/xraph/dispatch/job"
 	"github.com/xraph/dispatch/resource"
 	"github.com/xraph/dispatch/store/memory"
 )
@@ -169,6 +172,118 @@ func TestResourcesDisabledIsTodaysBehaviour(t *testing.T) {
 	// its private manager is the only ceiling there is.
 	if got, want := ext.ArtifactCache().Budget(), 32*mib; got != want {
 		t.Fatalf("cache budget = %d, want %d", got, want)
+	}
+}
+
+// dequeueSpy records the DequeueOpts the extension's own worker pool
+// sends to the store. It is the only vantage point from which the
+// degradation guarantee can actually be observed: the pool is not
+// exported, so what a disabled resource model does has to be read off the
+// wire it writes to.
+type dequeueSpy struct {
+	*memory.Store
+
+	mu   sync.Mutex
+	opts []job.DequeueOpts
+}
+
+func (s *dequeueSpy) DequeueJobs(ctx context.Context, opts job.DequeueOpts) ([]*job.Job, error) {
+	s.mu.Lock()
+	s.opts = append(s.opts, opts)
+	s.mu.Unlock()
+
+	return s.Store.DequeueJobs(ctx, opts)
+}
+
+// seen returns a copy of everything recorded so far.
+func (s *dequeueSpy) seen() []job.DequeueOpts {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	return append([]job.DequeueOpts(nil), s.opts...)
+}
+
+// runAndCaptureDequeues starts the extension, waits for the pool to poll
+// at least once, and returns what it asked the store for.
+func runAndCaptureDequeues(t *testing.T, opts ...extension.ExtOption) []job.DequeueOpts {
+	t.Helper()
+
+	spy := &dequeueSpy{Store: memory.New()}
+
+	base := []extension.ExtOption{
+		extension.WithStore(spy),
+		extension.WithDisableRoutes(),
+		extension.WithPollInterval(20 * time.Millisecond),
+	}
+
+	ext := extension.New(append(base, opts...)...)
+
+	if err := ext.Register(forgetesting.NewTestApp("test-app", "0.1.0")); err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+
+	ctx := t.Context()
+
+	if err := ext.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	deadline := time.Now().Add(5 * time.Second)
+	for len(spy.seen()) == 0 && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	stopCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	if err := ext.Stop(stopCtx); err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+
+	seen := spy.seen()
+	if len(seen) == 0 {
+		t.Fatal("the pool never polled the store")
+	}
+
+	return seen
+}
+
+// TestDisabledPoolDequeuesUnbounded is the degradation guarantee stated
+// where it is actually observable: with no resource model configured,
+// every dequeue this worker issues carries no budget and no custom keys,
+// so DequeueOpts.IsUnbounded() holds and every store backend skips its
+// fit predicate entirely.
+//
+// This is the single behaviour every deployment that predates the
+// resource model depends on, so it is asserted through the extension's
+// own pool rather than inferred from the manager being nil.
+func TestDisabledPoolDequeuesUnbounded(t *testing.T) {
+	for i, opts := range runAndCaptureDequeues(t) {
+		if !opts.IsUnbounded() {
+			t.Fatalf("dequeue %d: IsUnbounded() = false, want true "+
+				"(Budget=%v CustomKeys=%v)", i, opts.Budget, opts.CustomKeys)
+		}
+	}
+}
+
+// TestEnabledPoolDequeuesBounded is its mirror: turning the model on has
+// to change what goes over that same wire, or the pool is holding a
+// ledger it never consults.
+func TestEnabledPoolDequeuesBounded(t *testing.T) {
+	seen := runAndCaptureDequeues(t,
+		extension.WithResources(),
+		extension.WithExplicitCapacity(resource.Set{resource.Memory: 4 * mib}),
+	)
+
+	for i, opts := range seen {
+		if opts.IsUnbounded() {
+			t.Fatalf("dequeue %d: IsUnbounded() = true, want false with a ledger", i)
+		}
+
+		if opts.Budget[resource.Memory] != 4*mib {
+			t.Fatalf("dequeue %d: budget memory = %d, want %d",
+				i, opts.Budget[resource.Memory], 4*mib)
+		}
 	}
 }
 

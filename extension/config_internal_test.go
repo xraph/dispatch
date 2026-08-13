@@ -6,6 +6,7 @@ import (
 
 	"github.com/xraph/dispatch/artifact/cache"
 	"github.com/xraph/dispatch/resource"
+	"github.com/xraph/dispatch/store/memory"
 )
 
 // TestResourceConfigYAMLShape pins the keys an operator writes. They are
@@ -98,6 +99,39 @@ func TestMergeResourceConfig(t *testing.T) {
 	})
 }
 
+// TestWithWorkerCustomKeysMergesAndCopies keeps the option consistent
+// with WithExplicitCapacity beside it and engine.WithWorkerCustomKeys
+// below it: keys accumulate, duplicates collapse, and the caller's slice
+// is not retained.
+func TestWithWorkerCustomKeysMergesAndCopies(t *testing.T) {
+	caller := []string{"fpga", "tpu"}
+
+	e := New(
+		WithWorkerCustomKeys(caller...),
+		WithWorkerCustomKeys("fpga", "npu"),
+	)
+
+	want := []string{"fpga", "tpu", "npu"}
+
+	got := e.config.Resources.CustomKeys
+	if len(got) != len(want) {
+		t.Fatalf("CustomKeys = %v, want %v", got, want)
+	}
+
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("CustomKeys = %v, want %v", got, want)
+		}
+	}
+
+	// The caller keeps no handle on extension state.
+	caller[0] = "mutated"
+
+	if e.config.Resources.CustomKeys[0] != "fpga" {
+		t.Errorf("the caller's slice is aliased: %v", e.config.Resources.CustomKeys)
+	}
+}
+
 // TestStagingBudgetRouting pins where the cache budget ends up.
 //
 // cache.WithBudget is ignored once a manager is supplied, so if the
@@ -107,11 +141,22 @@ func TestStagingBudgetRouting(t *testing.T) {
 	cases := []struct {
 		name     string
 		artifact ArtifactConfig
+		noStore  bool
 		want     int64
 	}{
 		{
-			name: "no artifact plane omits disk entirely",
+			name: "artifacts off omits disk entirely",
 			want: 0,
+		},
+		{
+			// init only builds the plane when the dispatcher's store
+			// implements artifact.Store. Configured-but-not-built has to
+			// omit disk too, or the ledger advertises 20 GiB with no cache
+			// behind it and no reclaimer registered for it.
+			name:     "artifacts configured but no artifact store",
+			artifact: ArtifactConfig{Enabled: true},
+			noStore:  true,
+			want:     0,
 		},
 		{
 			name:     "configured budget",
@@ -128,9 +173,71 @@ func TestStagingBudgetRouting(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			e := &Extension{config: Config{Artifacts: tc.artifact}}
+			if !tc.noStore {
+				e.artifactStore = memory.New()
+			}
 
 			if got := e.stagingBudget(); got != tc.want {
 				t.Errorf("stagingBudget() = %d, want %d", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestDiskOverrideWarning pins when the operator gets told that two
+// config keys are setting the same number.
+//
+// resources.explicit.disk is not just what the worker advertises: the
+// cache reads its eviction ceiling off the ledger's disk capacity, so an
+// explicit value is what the cache WRITES against. Above the volume that
+// is ENOSPC, and before this it could only be reached by the cache budget
+// key that names itself.
+func TestDiskOverrideWarning(t *testing.T) {
+	cases := []struct {
+		name     string
+		explicit resource.Set
+		staging  int64
+		want     bool
+	}{
+		{
+			name:     "both set and disagreeing",
+			explicit: resource.Set{resource.Disk: 500 << 30},
+			staging:  200 << 30,
+			want:     true,
+		},
+		{
+			name:     "both set and agreeing",
+			explicit: resource.Set{resource.Disk: 200 << 30},
+			staging:  200 << 30,
+		},
+		{
+			name:    "only the cache budget",
+			staging: 200 << 30,
+		},
+		{
+			// No staging cache to disagree with: explicit disk is then the
+			// only source there is, which is not an override of anything.
+			name:     "only explicit, no cache",
+			explicit: resource.Set{resource.Disk: 500 << 30},
+		},
+		{
+			name:     "an unrelated explicit key",
+			explicit: resource.Set{resource.Memory: 8 << 30},
+			staging:  200 << 30,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, conflict := diskOverride(tc.explicit, tc.staging)
+
+			if conflict != tc.want {
+				t.Fatalf("diskOverride() conflict = %v, want %v", conflict, tc.want)
+			}
+
+			if conflict && got != tc.explicit[resource.Disk] {
+				t.Errorf("reported explicit disk = %d, want %d",
+					got, tc.explicit[resource.Disk])
 			}
 		})
 	}

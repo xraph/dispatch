@@ -244,11 +244,15 @@ func run() error {
 	// 4. Watch the ordering
 	// ──────────────────────────────────────────────────
 
+	// Reset BEFORE Start. Every goroutine that reads the timeline is
+	// created by Start or after it, so the write is ordered ahead of all
+	// of them; resetting afterwards would race the workers already
+	// logging against it.
+	clock.reset()
+
 	if serr := eng.Start(ctx); serr != nil {
 		return fmt.Errorf("start engine: %w", serr)
 	}
-
-	clock.reset()
 
 	// Sample the queue while the first three are running. This is the
 	// observation the example exists to make: a job sitting in pending
