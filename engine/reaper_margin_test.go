@@ -1,12 +1,14 @@
 package engine_test
 
 import (
+	"errors"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/xraph/dispatch"
 	"github.com/xraph/dispatch/engine"
+	"github.com/xraph/dispatch/job"
 	"github.com/xraph/dispatch/resource"
 	"github.com/xraph/dispatch/store/memory"
 )
@@ -131,10 +133,23 @@ func TestBuildRejectsUnsafeReaperMargin(t *testing.T) {
 	}
 }
 
-// TestBuildDefaultsCapacityFromTheManager pins the convenience that keeps
-// the two numbers from drifting: what the worker publishes is what
-// admission enforces, unless the caller deliberately says otherwise.
-func TestBuildDefaultsCapacityFromTheManager(t *testing.T) {
+// TestBuildDoesNotDeriveCapacityFromTheManager pins the ruling that
+// replaced the old "publish what admission enforces" convenience.
+//
+// The convenience looked like it kept two numbers from drifting. What it
+// actually did was answer a FLEET question with a LOCAL number: the
+// unschedulable check asks "is any worker big enough", and seeding its
+// floor from this process's ledger silently rescoped that to "is THIS
+// process big enough". Nothing could raise it back afterwards, because
+// cluster.Worker.Capacity round-trips on store/memory alone — postgres,
+// sqlite, mongo and redis all enumerate worker fields by hand and drop
+// it. On those four the check collapsed entirely to the local manager,
+// so a light API pod with resources enabled hard-rejected at enqueue the
+// tessellation job the heavy tier runs perfectly well.
+//
+// A manager is now just a manager. The check is inert until an operator
+// states the fleet ceiling out loud.
+func TestBuildDoesNotDeriveCapacityFromTheManager(t *testing.T) {
 	capacity := resource.Set{resource.Memory: 8 << 30, "fpga": 2}
 
 	d, err := dispatch.New(dispatch.WithStore(memory.New()))
@@ -147,15 +162,26 @@ func TestBuildDefaultsCapacityFromTheManager(t *testing.T) {
 		t.Fatalf("Build: %v", err)
 	}
 
-	published := eng.MaxWorkerCapacity(t.Context())
-
-	for k, v := range capacity {
-		if published[k] != v {
-			t.Errorf("published %s = %d, want %d", k, published[k], v)
-		}
+	if got := eng.MaxWorkerCapacity(t.Context()); len(got) != 0 {
+		t.Errorf("MaxWorkerCapacity = %v, want empty: installing a ledger must not turn the "+
+			"fleet-wide unschedulable check on with this process's own numbers", got)
 	}
 
-	// An explicit declaration still wins.
+	// And with it off, a job larger than this process still enqueues —
+	// some other worker may be able to run it.
+	huge := resource.Set{resource.Memory: 64 << 30}
+
+	j, err := eng.EnqueueRaw(t.Context(), "huge", []byte(`{}`), job.WithResources(huge))
+	if err != nil {
+		t.Fatalf("EnqueueRaw of a job larger than this worker: %v", err)
+	}
+
+	if j.Resources[resource.Memory] != 64<<30 {
+		t.Errorf("stored requirement = %v, want the declaration intact", j.Resources)
+	}
+
+	// An explicit declaration is what turns the check on, and it is then
+	// enforced.
 	d2, err := dispatch.New(dispatch.WithStore(memory.New()))
 	if err != nil {
 		t.Fatalf("dispatch.New: %v", err)
@@ -170,6 +196,11 @@ func TestBuildDefaultsCapacityFromTheManager(t *testing.T) {
 	}
 
 	if got := eng2.MaxWorkerCapacity(t.Context())[resource.Memory]; got != 1<<30 {
-		t.Errorf("explicit capacity was overwritten: memory = %d", got)
+		t.Errorf("declared capacity was overwritten: memory = %d", got)
+	}
+
+	if _, err = eng2.EnqueueRaw(t.Context(), "huge", []byte(`{}`),
+		job.WithResources(huge)); !errors.Is(err, resource.ErrUnschedulable) {
+		t.Errorf("EnqueueRaw error = %v, want ErrUnschedulable once a ceiling is declared", err)
 	}
 }

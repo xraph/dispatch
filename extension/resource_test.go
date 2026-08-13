@@ -341,22 +341,36 @@ func TestNoArtifactPlaneOmitsDisk(t *testing.T) {
 	}
 }
 
-// TestPublishedCapacityMatchesTheLedger pins the other half of the
-// wiring: what this worker tells the cluster it can run has to be what
-// admission actually enforces, or the enqueue-time unschedulable check
-// rejects jobs the worker could run — or worse, admits ones it cannot.
-func TestPublishedCapacityMatchesTheLedger(t *testing.T) {
+// TestEnablingResourcesDoesNotEnableTheUnschedulableCheck pins the
+// other half of the wiring, and it is the inverse of what this test
+// asserted before: `resources.enabled: true` in a config file is a
+// statement about THIS pod, and must not be read as a statement about
+// the largest worker in the fleet.
+//
+// The unschedulable check compares a job's requirement against the
+// biggest worker anywhere. Deriving that ceiling from the local ledger
+// answered it with the wrong number and could not recover: cluster
+// workers only round-trip Capacity on store/memory, so on postgres,
+// sqlite, mongo and redis the fleet view is permanently empty and the
+// ceiling is permanently this process. A light API pod would then reject
+// at enqueue the tessellation job the heavy tier runs perfectly well —
+// the opening scenario of the design, inverted.
+//
+// So a Forge deployment that turns resources on gets local admission and
+// a resource-aware dequeue, and nothing that can fail an enqueue. The
+// check is engine.WithWorkerCapacity, and it is the operator's to
+// declare.
+func TestEnablingResourcesDoesNotEnableTheUnschedulableCheck(t *testing.T) {
 	ext := registerWithResources(t,
 		extension.WithExplicitCapacity(resource.Set{"fpga": 3}),
 	)
 
-	published := ext.Engine().MaxWorkerCapacity(context.Background())
-	ledger := ext.Resources().Capacity()
+	if ledger := ext.Resources().Capacity(); ledger["fpga"] != 3 {
+		t.Fatalf("ledger capacity = %v, want the explicit fpga declaration", ledger)
+	}
 
-	for _, k := range ledger.Keys() {
-		if published[k] != ledger[k] {
-			t.Errorf("published capacity %s = %d, ledger = %d",
-				k, published[k], ledger[k])
-		}
+	if published := ext.Engine().MaxWorkerCapacity(context.Background()); len(published) != 0 {
+		t.Errorf("MaxWorkerCapacity = %v, want empty: enabling resources must not turn a "+
+			"fleet-wide enqueue-time check on with one pod's numbers", published)
 	}
 }

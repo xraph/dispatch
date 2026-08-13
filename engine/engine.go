@@ -196,19 +196,32 @@ func WithResourceDefaults(global resource.Set, perQueue map[string]resource.Set)
 	}
 }
 
-// WithWorkerCapacity declares this process's worker capacity.
+// WithWorkerCapacity declares the largest single-worker capacity in the
+// fleet, and is the ONLY thing that turns the enqueue-time unschedulable
+// check on. Leave it unset — the default — and Enqueue never rejects a
+// job for being too big for any worker.
 //
-// It is also the floor for the unschedulable check: a job needing more
-// than the largest known capacity is rejected at enqueue rather than
-// pending forever. Leaving it unset in a single-process engine disables
-// that check, which is correct — there is nothing to compare against.
+// It is a fleet-wide statement, not a description of this process, and
+// the distinction is the whole reason the check is opt-in. Declare it
+// and a job requiring more than this on any dimension fails Enqueue with
+// ErrUnschedulable, wherever it was enqueued from: a light API pod that
+// declared its own 2 GiB would hard-reject the tessellation job the
+// heavy tier runs perfectly well.
 //
-// Note that only the memory store round-trips cluster.Worker.Capacity
-// today; redis, postgres, sqlite, mongo and the k8s provider all map
-// worker fields explicitly and do not yet carry it. On those backends
-// MaxWorkerCapacity sees only this value, not the fleet maximum, so the
-// check is conservative: it may reject a job some larger worker could
-// have run, but it never admits one nothing can run.
+// The check cannot derive the fleet maximum for itself, because
+// cluster.Worker.Capacity does not round-trip. Only store/memory carries
+// it; postgres, sqlite, mongo, redis and the k8s provider all enumerate
+// worker fields by hand and drop it, so a worker registered with
+// {memory: 64GiB} reads back an empty map. MaxWorkerCapacity therefore
+// sees this value and — on memory alone — whatever live workers
+// published, never the real fleet maximum. Persisting Capacity in those
+// four models would make the derivation honest and is tracked as
+// follow-up work; until then, declaring the ceiling is the operator's
+// job or the check stays off.
+//
+// It is deliberately NOT defaulted from WithResourceManager's capacity.
+// That default read as a convenience and behaved as a silent rescope of
+// a fleet-wide question to one process.
 func WithWorkerCapacity(c resource.Set) Option {
 	return func(eng *Engine) { eng.workerCapacity = c }
 }
@@ -231,10 +244,19 @@ func WithWorkerCapacity(c resource.Set) Option {
 // leases are taken. That is exactly how Dispatch behaved before the
 // resource model existed.
 //
-// When set and WithWorkerCapacity was not, the manager's capacity also
-// becomes the capacity this worker publishes to the cluster registry, so
-// the enqueue-time unschedulable check sees the same numbers admission
-// enforces.
+// Installing a manager does NOT declare a fleet capacity, and does not
+// turn the enqueue-time unschedulable check on. See WithWorkerCapacity
+// for why that is opt-in and separate.
+//
+// WARNING — leases. A pool that dequeues through job.LeaseStore calls
+// DequeueLeased(queues, limit), which carries no budget, no custom-key
+// containment and no locality. Every guarantee this manager provides at
+// the STORE is absent on that path: the pool still admits locally, so a
+// job too large for this worker is claimed, refused and requeued on
+// every poll rather than left for a worker that fits. Turning leases and
+// resources on together is the natural upgrade and the combination that
+// looks correctly configured while behaving least like it. Build logs a
+// warning when it sees both; see job.LeaseStore.DequeueLeased.
 func WithResourceManager(m resource.Manager) Option {
 	return func(eng *Engine) { eng.resources = m }
 }
@@ -436,12 +458,27 @@ func Build(d *dispatch.Dispatcher, opts ...Option) (*Engine, error) {
 
 		poolOpts = append(poolOpts, worker.WithResourceManager(eng.resources))
 
-		// The published capacity defaults to what admission actually
-		// enforces, so the enqueue-time unschedulable check and the local
-		// ledger cannot disagree about how big this worker is.
-		if eng.workerCapacity == nil {
-			eng.workerCapacity = eng.resources.Capacity()
-		}
+		// Deliberately NOT seeding eng.workerCapacity from the ledger.
+		// The manager describes THIS process; workerCapacity is the floor
+		// of a fleet-wide check. Defaulting one from the other rescoped
+		// the question to one process, and because cluster.Worker.Capacity
+		// does not round-trip on four of the five backends, nothing could
+		// raise it back to the fleet maximum afterwards — so a light API
+		// worker rejected at enqueue every job bigger than itself. See
+		// WithWorkerCapacity.
+		//
+		// No construction-time warning about leases is emitted here, and
+		// the omission is deliberate rather than an oversight. The
+		// combination that loses every guarantee this manager provides is
+		// a pool that DEQUEUES through job.LeaseStore, and no such pool
+		// exists in this tree yet — worker.Pool has exactly one dequeue
+		// path and it is DequeueJobs. Warning on the only fact that is
+		// observable today, "the store happens to implement LeaseStore",
+		// would fire for every postgres, sqlite, mongo and redis
+		// deployment that turns resources on, about something none of
+		// them are doing. The guard is stated where the widening will
+		// happen instead: job.LeaseStore.DequeueLeased and
+		// WithResourceManager.
 	}
 
 	if len(eng.workerCustomKeys) > 0 {

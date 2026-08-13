@@ -99,9 +99,7 @@ func (eng *Engine) resolveResources(ctx context.Context, j *job.Job, opts job.Op
 
 	// Nothing anywhere constrains this job, so there is nothing to
 	// resolve and nothing to check it against. Skipping keeps enqueue a
-	// single insert for every job written before this feature existed —
-	// MaxWorkerCapacity reads the cluster registry, and paying for that
-	// on an unconstrained enqueue would be a regression for no answer.
+	// single insert for every job written before this feature existed.
 	if !eng.resourcesInPlay(decl, opts) {
 		return nil
 	}
@@ -213,21 +211,38 @@ func inputSizes(bindings map[string]artifact.Ref) (
 	return sizes, total, sizes[0].Hash
 }
 
-// MaxWorkerCapacity returns the per-key maximum capacity across live
-// workers, or an empty Set when capacity is unknown.
+// MaxWorkerCapacity returns the per-key maximum capacity the
+// unschedulable check may compare a job against, or an empty Set when
+// the check is off.
 //
-// An empty result disables the unschedulable check rather than
-// rejecting everything, which is the right behaviour for a
-// single-process engine that has registered no workers yet.
+// An empty result disables the check rather than rejecting everything.
 //
-// "Live" means both an active state and a recent heartbeat. State alone
-// is not enough: nothing in Dispatch ever writes WorkerDead — a worker
-// registers active and is either deregistered on clean shutdown or its
-// row is deleted by DeleteStaleWorkers. A worker killed by SIGKILL, an
-// OOM or a pod eviction therefore stays "active" in the registry until
-// something sweeps it, and counting its capacity would admit jobs no
-// live worker can run.
+// It is empty unless an operator called WithWorkerCapacity, and that
+// gate is the whole correctness argument. The registry cannot supply the
+// fleet maximum on its own: cluster.Worker.Capacity round-trips only on
+// store/memory — postgres, sqlite, mongo, redis and the k8s provider all
+// enumerate worker fields by hand and drop it — so a fleet whose largest
+// worker has 64 GiB reads back as a fleet of workers with no capacity at
+// all. Deriving the ceiling from whatever this process happens to know
+// therefore does not converge on the truth; it converges on THIS
+// process, and rejects at enqueue every job bigger than the pod that
+// enqueued it. Requiring the declaration also keeps the common path free
+// of a ListWorkers round trip per enqueue.
+//
+// When the declaration is present the registry is still consulted, so
+// the ceiling can only rise toward the real fleet maximum on a backend
+// that carries capacity. "Live" means both an active state and a recent
+// heartbeat. State alone is not enough: nothing in Dispatch ever writes
+// WorkerDead — a worker registers active and is either deregistered on
+// clean shutdown or its row is deleted by DeleteStaleWorkers. A worker
+// killed by SIGKILL, an OOM or a pod eviction therefore stays "active"
+// in the registry until something sweeps it, and counting its capacity
+// would admit jobs no live worker can run.
 func (eng *Engine) MaxWorkerCapacity(ctx context.Context) resource.Set {
+	if len(eng.workerCapacity) == 0 {
+		return nil
+	}
+
 	maxCap := eng.workerCapacity.Clone()
 
 	if eng.clusterStore == nil {

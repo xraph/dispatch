@@ -340,6 +340,24 @@ type LeaseStore interface {
 	// leaseUntil is a short initial grant that only has to survive until
 	// the holder's first renewal; the renewal then extends it using the
 	// job's own LeaseTTL.
+	//
+	// WARNING — this signature takes (queues, limit), NOT DequeueOpts, so
+	// it carries no Budget, no CustomKeys, no ReservedFor and no
+	// PreferHashes. Every guarantee the resource model provides AT THE
+	// STORE is absent on this path, and nothing reports it: a pool that
+	// dequeues through here claims a 64 GiB job onto a 4 GiB worker, the
+	// local admission ledger refuses it, and it is requeued — on every
+	// poll, by every worker, instead of being left for one that fits.
+	// Custom-key containment and locality are simply gone.
+	//
+	// That is the combination the resource model exists to prevent, and
+	// it is the natural upgrade: leases and resources are both things an
+	// operator turns on when a fleet gets big enough to need them, and
+	// together they look correctly configured while behaving least like
+	// it. Nothing in this tree calls DequeueLeased yet. Whoever wires a
+	// pool to it MUST widen this to DequeueOpts first — see
+	// engine.WithResourceManager, which states the same warning from the
+	// other side.
 	DequeueLeased(
 		ctx context.Context,
 		queues []string,
