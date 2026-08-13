@@ -80,11 +80,23 @@ func TestLocalFS_AbortLeavesNoFile(t *testing.T) {
 
 func TestLocalFS_RejectsEscapingKey(t *testing.T) {
 	// A key is attacker-influenced in the general case. It must never
-	// resolve outside root.
+	// resolve outside root. A key that lexically collapses to root itself
+	// ("", ".", "a/..", "a/b/../..") is equally dangerous even though it
+	// never leaves root: Create would write into root's parent (Dir of
+	// root), and Delete would remove the whole scratch directory instead
+	// of one object.
 	be := shim.NewLocalFS(t.TempDir())
-	for _, key := range []string{"../escape", "a/../../escape", "/absolute"} {
-		if _, err := be.Create(context.Background(), "b", key); err == nil {
+	ctx := context.Background()
+	keys := []string{
+		"../escape", "a/../../escape", "/absolute",
+		"", ".", "a/..", "a/b/../..",
+	}
+	for _, key := range keys {
+		if _, err := be.Create(ctx, "b", key); err == nil {
 			t.Errorf("Create(%q) = nil, want a rejection", key)
+		}
+		if err := be.Delete(ctx, artifact.Ref{Bucket: "b", Key: key}); err == nil {
+			t.Errorf("Delete(%q) = nil, want a rejection", key)
 		}
 	}
 }

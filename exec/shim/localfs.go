@@ -69,12 +69,22 @@ func (fs *LocalFS) Name() string { return "localfs" }
 // every method routes through, and it fails closed rather than silently
 // clamping a traversal into some other path inside root: a caller that
 // asked for "../escape" gets an error, not a different object.
+//
+// A key must always denote something strictly inside root, never root
+// itself: Create's caller expects a file, not the directory it lives in,
+// and Delete's caller expects to remove one object, not the whole scratch
+// tree. filepath.Clean collapses every self-cancelling key ("", ".",
+// "a/..", "a/b/../..") to exactly ".", so that single value is the one
+// case to reject here.
 func (fs *LocalFS) resolve(key string) (string, error) {
 	if filepath.IsAbs(key) {
 		return "", fmt.Errorf("shim: key %q must not be absolute", key)
 	}
 
 	cleaned := filepath.Clean(key)
+	if cleaned == "." {
+		return "", fmt.Errorf("shim: key %q resolves to the output root", key)
+	}
 
 	full := filepath.Join(fs.root, cleaned)
 
