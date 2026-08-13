@@ -11,6 +11,7 @@ import (
 	"github.com/xraph/dispatch/dwp"
 	"github.com/xraph/dispatch/ext"
 	mw "github.com/xraph/dispatch/middleware"
+	"github.com/xraph/dispatch/resource"
 )
 
 // ExtOption configures the Dispatch Forge extension.
@@ -247,6 +248,68 @@ func WithArtifactCacheDir(dir string) ExtOption {
 }
 
 // WithArtifactCacheBudget caps the bytes the staging cache may hold.
+//
+// With the resource model enabled this becomes the shared ledger's disk
+// capacity, so it is the figure a job's declared disk requirement is
+// admitted against rather than a private ceiling inside the cache.
 func WithArtifactCacheBudget(bytes int64) ExtOption {
 	return func(e *Extension) { e.config.Artifacts.Cache.Budget = bytes }
+}
+
+// WithResources turns on capacity detection and resource-aware
+// admission.
+//
+// The extension then builds one resource.Manager over the detected
+// capacity and hands the same instance to the staging cache and the
+// worker pool: the cache holds a lease per cached entry and reclaims disk
+// on demand, the pool admits every claimed job against what is actually
+// free. Without this the pool dequeues unbounded and nothing changes.
+//
+// Detection is cgroup-first, so a container with a two-core quota
+// advertises two cores rather than the host's sixty-four.
+func WithResources() ExtOption {
+	return func(e *Extension) { e.config.Resources.Enabled = true }
+}
+
+// WithCPUOvercommit multiplies the detected core count (default 1.0).
+//
+// CPU is compressible: exceeding it makes jobs slow, not dead. There is
+// no memory equivalent, deliberately — overcommitting memory is how a box
+// enters the OOM cascade this model prevents.
+func WithCPUOvercommit(factor float64) ExtOption {
+	return func(e *Extension) { e.config.Resources.CPUOvercommit = factor }
+}
+
+// WithMemoryFraction sets the share of detected memory to advertise
+// (default 0.8), leaving the remainder for the Go runtime, the page
+// cache, and everything else sharing the box.
+func WithMemoryFraction(fraction float64) ExtOption {
+	return func(e *Extension) { e.config.Resources.MemoryFraction = fraction }
+}
+
+// WithExplicitCapacity overrides detection per key and is the only way to
+// declare a custom resource — nothing detects "fpga".
+//
+// Quantities are canonical units: cpu in millicores, memory and disk in
+// bytes, gpu in milli-devices. Sets merge per key across calls.
+func WithExplicitCapacity(sets ...resource.Set) ExtOption {
+	return func(e *Extension) {
+		for _, s := range sets {
+			if e.config.Resources.Explicit == nil {
+				e.config.Resources.Explicit = make(resource.Set, len(s))
+			}
+
+			for k, v := range s {
+				e.config.Resources.Explicit[k] = v
+			}
+		}
+	}
+}
+
+// WithWorkerCustomKeys narrows the custom resource keys this worker
+// advertises at dequeue. Empty advertises every custom key it has
+// capacity for, which is usually what you want; this exists so a worker
+// draining a device can stop attracting work for it.
+func WithWorkerCustomKeys(keys ...string) ExtOption {
+	return func(e *Extension) { e.config.Resources.CustomKeys = keys }
 }

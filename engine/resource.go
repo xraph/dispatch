@@ -2,16 +2,85 @@ package engine
 
 import (
 	"context"
+	"fmt"
 	"sort"
 	"time"
 
 	log "github.com/xraph/go-utils/log"
 
+	"github.com/xraph/dispatch"
 	"github.com/xraph/dispatch/artifact"
 	"github.com/xraph/dispatch/cluster"
 	"github.com/xraph/dispatch/job"
 	"github.com/xraph/dispatch/resource"
 )
+
+// Resources returns the shared admission ledger, or nil when the
+// resource model is off. It is the instance the staging cache must have
+// been built with.
+func (eng *Engine) Resources() resource.Manager { return eng.resources }
+
+// reaperSafetyFactor is the multiple of the claim-to-first-heartbeat
+// window that StaleJobThreshold has to clear.
+//
+// Two, and the second one is not padding. The window itself —
+// PollInterval + HeartbeatInterval — is what the fetcher can legitimately
+// spend between claiming a job and that job's first heartbeat: admission
+// may stall the batch for up to one poll interval while it reclaims disk,
+// and the job then waits up to one heartbeat tick to be written down as
+// alive. A threshold merely larger than that window leaves no room for
+// the heartbeat itself to be slow, and the heartbeat is a store write on
+// the same connection pool the dequeue just used. Doubling buys exactly
+// one missed heartbeat round, which is the smallest slack that survives a
+// briefly busy store.
+//
+// Below it the failure is not a stalled worker but a corrupted one: the
+// reaper reclaims jobs the fetcher is still holding — rows already in
+// running state, already claimed, not yet heartbeating — and the same job
+// runs twice.
+//
+// The stock configuration clears it comfortably (1s + 10s, doubled, is
+// 22s against a 30s threshold), so turning the resource model on does not
+// force anybody to retune. What it catches is the combination that looks
+// harmless: raising PollInterval to spare a shared database, or dropping
+// StaleJobThreshold to fail over faster, without noticing the other.
+const reaperSafetyFactor = 2
+
+// checkReaperMargin rejects a configuration in which the stale-job
+// reaper could reclaim a job the fetcher has claimed but not yet handed
+// to a worker.
+//
+// It runs only when a resource manager is installed, because admission is
+// what introduced the stall: Pool.admit calls Manager.Acquire under a
+// one-poll-interval budget so it can evict cached disk to make room, and
+// that budget is shared by the whole batch. Without a manager the fetcher
+// never waits and the relationship does not exist.
+//
+// This fails Build rather than warning. The resource model is opt-in, so
+// nobody arrives here by accident, and the symptom it prevents — a job
+// executing twice because two subsystems disagreed about who owned it —
+// is not one an operator can be expected to diagnose from a log line.
+func checkReaperMargin(cfg dispatch.Config) error {
+	if cfg.StaleJobThreshold <= 0 {
+		// The reaper is disabled; nothing can reclaim anything.
+		return nil
+	}
+
+	window := max(cfg.PollInterval, 0) + max(cfg.HeartbeatInterval, 0)
+
+	minimum := reaperSafetyFactor * window
+	if cfg.StaleJobThreshold >= minimum {
+		return nil
+	}
+
+	return fmt.Errorf(
+		"dispatch: StaleJobThreshold (%s) is too low for resource-aware admission: "+
+			"the fetcher may hold a claimed job for up to PollInterval (%s) while it reclaims "+
+			"capacity, and that job is not heartbeated for a further HeartbeatInterval (%s), "+
+			"so the reaper could reclaim a job this worker is still holding; "+
+			"set StaleJobThreshold to at least %s, or leave the resource manager unset",
+		cfg.StaleJobThreshold, cfg.PollInterval, cfg.HeartbeatInterval, minimum)
+}
 
 // resolveResources computes the job's resource spec and writes it onto
 // the job before it is persisted.

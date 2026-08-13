@@ -35,6 +35,7 @@ import (
 	"github.com/xraph/dispatch/engine"
 	"github.com/xraph/dispatch/ext"
 	mw "github.com/xraph/dispatch/middleware"
+	"github.com/xraph/dispatch/resource"
 	mongostore "github.com/xraph/dispatch/store/mongo"
 	pgstore "github.com/xraph/dispatch/store/postgres"
 	redisstore "github.com/xraph/dispatch/store/redis"
@@ -83,6 +84,10 @@ type Extension struct {
 	artifacts     *artifact.Service
 	artifactCache *cache.Cache
 	sweeper       *sweeper.Sweeper
+
+	// resources is the single admission ledger shared by the staging
+	// cache and the worker pool. Nil when the resource model is off.
+	resources resource.Manager
 }
 
 // New creates a Dispatch Forge extension with the given options.
@@ -108,6 +113,11 @@ func (e *Extension) Artifacts() *artifact.Service { return e.artifacts }
 
 // ArtifactCache returns the staging cache, or nil when the plane is off.
 func (e *Extension) ArtifactCache() *cache.Cache { return e.artifactCache }
+
+// Resources returns the shared admission ledger, or nil when the
+// resource model is off. It is the same instance the staging cache and
+// the worker pool were built with — which is the point of exposing it.
+func (e *Extension) Resources() resource.Manager { return e.resources }
 
 // DWPServer returns the DWP server, or nil if DWP is not enabled.
 func (e *Extension) DWPServer() *dwp.Server { return e.dwpServer }
@@ -205,6 +215,14 @@ func (e *Extension) init(fapp forge.App) error {
 		engOpts = append(engOpts, engine.WithStreamBroker())
 	}
 
+	// The admission ledger is built first, because both of the things
+	// that follow have to be given the SAME instance: the staging cache
+	// holds a lease per cached entry and registers itself as the ledger's
+	// disk reclaimer, and the worker pool offers disk at dequeue as free
+	// PLUS what that reclaimer could evict. Two managers and the second
+	// half of that budget is permanently zero.
+	e.resources = e.buildResourceManager()
+
 	// Build the artifact plane before the engine, because the staging
 	// middleware has to be in the chain the engine constructs.
 	if e.artifactStore == nil {
@@ -214,7 +232,7 @@ func (e *Extension) init(fapp forge.App) error {
 	}
 
 	if e.artifactStore != nil {
-		svc, artCache, aerr := e.buildArtifactPlane(fapp)
+		svc, artCache, aerr := e.buildArtifactPlane(fapp, e.resources)
 		if aerr != nil {
 			return aerr
 		}
@@ -223,6 +241,14 @@ func (e *Extension) init(fapp forge.App) error {
 			e.artifacts = svc
 			e.artifactCache = artCache
 			engOpts = append(engOpts, engine.WithArtifacts(svc, artCache))
+		}
+	}
+
+	if e.resources != nil {
+		engOpts = append(engOpts, engine.WithResourceManager(e.resources))
+
+		if keys := e.config.Resources.CustomKeys; len(keys) > 0 {
+			engOpts = append(engOpts, engine.WithWorkerCustomKeys(keys))
 		}
 	}
 
@@ -522,6 +548,19 @@ func (e *Extension) mergeWithDefaults(cfg Config) Config {
 		cfg.Artifacts.Cache.Dir = "/var/lib/dispatch/cache"
 	}
 
+	// Only filled in when the model is on. A zero CPUOvercommit on a
+	// disabled config must stay zero, so a later `enabled: true` in YAML
+	// cannot be silently reinterpreted as "someone chose these numbers".
+	if cfg.Resources.Enabled {
+		if cfg.Resources.CPUOvercommit <= 0 {
+			cfg.Resources.CPUOvercommit = resource.DefaultCPUOvercommit
+		}
+
+		if cfg.Resources.MemoryFraction <= 0 {
+			cfg.Resources.MemoryFraction = resource.DefaultMemoryFraction
+		}
+	}
+
 	return cfg
 }
 
@@ -555,6 +594,8 @@ func (e *Extension) mergeConfigurations(yamlConfig, programmaticConfig Config) C
 	if yamlConfig.Artifacts.Cache.Budget == 0 && programmaticConfig.Artifacts.Cache.Budget != 0 {
 		yamlConfig.Artifacts.Cache.Budget = programmaticConfig.Artifacts.Cache.Budget
 	}
+
+	yamlConfig.Resources = mergeResourceConfig(yamlConfig.Resources, programmaticConfig.Resources)
 
 	// String fields: YAML takes precedence.
 	if yamlConfig.BasePath == "" && programmaticConfig.BasePath != "" {

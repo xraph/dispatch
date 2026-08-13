@@ -4,6 +4,7 @@ import (
 	"time"
 
 	"github.com/xraph/dispatch"
+	"github.com/xraph/dispatch/resource"
 )
 
 // Config holds configuration for the Dispatch Forge extension.
@@ -37,6 +38,9 @@ type Config struct {
 
 	// Artifacts configures the artifact plane.
 	Artifacts ArtifactConfig `json:"artifacts" mapstructure:"artifacts" yaml:"artifacts"`
+
+	// Resources configures the worker's resource model.
+	Resources ResourceConfig `json:"resources" mapstructure:"resources" yaml:"resources"`
 
 	// EnableDWP enables the Dispatch Wire Protocol for real-time
 	// client communication (WebSocket, SSE, HTTP RPC).
@@ -99,5 +103,47 @@ type ArtifactCacheConfig struct {
 
 	// Budget caps the bytes the cache may hold. A job needing more
 	// staging space than is free waits rather than filling the volume.
+	//
+	// With the resource model on this becomes the shared ledger's disk
+	// capacity rather than a private ceiling inside the cache, so it is
+	// the same number a job's disk requirement is admitted against.
 	Budget int64 `json:"budget" mapstructure:"budget" yaml:"budget"`
+}
+
+// ResourceConfig configures how this worker's capacity is derived and
+// whether jobs are admitted against it at all.
+//
+// Off by default, and off means off: no manager is constructed, the pool
+// offers no dequeue budget, every store backend skips its fit predicate,
+// and the staging cache keeps the private disk budget it has always had.
+// A deployment that does not set this behaves exactly as it did before
+// the resource model existed.
+type ResourceConfig struct {
+	// Enabled turns on capacity detection and resource-aware admission.
+	Enabled bool `default:"false" json:"enabled" mapstructure:"enabled" yaml:"enabled"`
+
+	// CPUOvercommit multiplies the detected core count. CPU is
+	// compressible — exceeding it makes jobs slow rather than dead — so
+	// values above 1.0 are a legitimate throughput trade. Zero means 1.0.
+	//
+	// There is deliberately no memory equivalent. Overcommitting memory
+	// is how a box enters the OOM cascade this model exists to prevent.
+	CPUOvercommit float64 `default:"1.0" json:"cpu_overcommit" mapstructure:"cpu_overcommit" yaml:"cpu_overcommit"`
+
+	// MemoryFraction is the share of the detected memory limit to
+	// advertise, leaving the rest for the Go runtime, the page cache, and
+	// everything else on the box. Zero means 0.8.
+	MemoryFraction float64 `default:"0.8" json:"memory_fraction" mapstructure:"memory_fraction" yaml:"memory_fraction"`
+
+	// Explicit overrides detection per key, and is the ONLY way to
+	// declare a custom resource: there is no detection for "fpga".
+	// Quantities are canonical units — cpu in millicores, memory and disk
+	// in bytes, gpu in milli-devices, custom keys in whatever integer the
+	// declaring job means by them.
+	Explicit resource.Set `json:"explicit" mapstructure:"explicit" yaml:"explicit"`
+
+	// CustomKeys narrows the custom resource keys this worker advertises
+	// at dequeue. Empty advertises every custom key in the detected
+	// capacity, which is the honest default.
+	CustomKeys []string `json:"custom_keys" mapstructure:"custom_keys" yaml:"custom_keys"`
 }

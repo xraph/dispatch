@@ -10,6 +10,7 @@ import (
 	"github.com/xraph/dispatch/artifact"
 	"github.com/xraph/dispatch/artifact/cache"
 	troveadapter "github.com/xraph/dispatch/artifact/trove"
+	"github.com/xraph/dispatch/resource"
 )
 
 // resolveArtifactBackend finds the object store backing the artifact
@@ -62,7 +63,14 @@ func (e *Extension) resolveArtifactBackend(fapp forge.App) (artifact.Backend, er
 
 // buildArtifactPlane constructs the artifact service and staging cache,
 // returning nils when no backend is configured.
-func (e *Extension) buildArtifactPlane(fapp forge.App) (*artifact.Service, *cache.Cache, error) {
+//
+// resources is the shared admission ledger, or nil when the resource
+// model is off. Passed in rather than read off the extension so the one
+// coupling that matters is visible at the call site: this cache and the
+// worker pool must be handed the SAME manager.
+func (e *Extension) buildArtifactPlane(
+	fapp forge.App, resources resource.Manager,
+) (*artifact.Service, *cache.Cache, error) {
 	backend, err := e.resolveArtifactBackend(fapp)
 	if err != nil {
 		return nil, nil, err
@@ -84,7 +92,15 @@ func (e *Extension) buildArtifactPlane(fapp forge.App) (*artifact.Service, *cach
 	if e.logger != nil {
 		cacheOpts = append(cacheOpts, cache.WithLogger(e.logger))
 	}
-	if cfg.Cache.Budget > 0 {
+
+	// WithBudget configures the cache's PRIVATE manager and is ignored
+	// once WithManager supplies one. With the resource model on, the
+	// configured budget has already been routed into the shared ledger's
+	// disk capacity by stagingBudget, so setting it here too would be a
+	// second ceiling that does nothing.
+	if resources != nil {
+		cacheOpts = append(cacheOpts, cache.WithManager(resources))
+	} else if cfg.Cache.Budget > 0 {
 		cacheOpts = append(cacheOpts, cache.WithBudget(cfg.Cache.Budget))
 	}
 

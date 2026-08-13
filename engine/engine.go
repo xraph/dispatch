@@ -14,6 +14,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"slices"
 	"time"
 
 	log "github.com/xraph/go-utils/log"
@@ -114,6 +115,15 @@ type Engine struct {
 	queueResources  map[string]resource.Set
 	workerCapacity  resource.Set
 
+	// resources is the shared admission ledger. It must be the SAME
+	// instance the staging cache was built with, or the cache's staged
+	// bytes are invisible to the pool's disk budget. Nil disables the
+	// model outright.
+	resources resource.Manager
+	// workerCustomKeys narrows the custom keys this worker advertises at
+	// dequeue. Empty derives them from the manager's capacity.
+	workerCustomKeys []string
+
 	// Queue subsystem.
 	queueConfigs []queue.Config
 	queueManager *queue.Manager
@@ -201,6 +211,46 @@ func WithResourceDefaults(global resource.Set, perQueue map[string]resource.Set)
 // have run, but it never admits one nothing can run.
 func WithWorkerCapacity(c resource.Set) Option {
 	return func(eng *Engine) { eng.workerCapacity = c }
+}
+
+// WithResourceManager installs the admission ledger the worker pool
+// admits jobs against.
+//
+// The manager passed here MUST be the same instance the staging cache
+// was built with (cache.WithManager). One ledger is the whole design:
+// the cache holds a lease per cached entry and registers itself as the
+// manager's disk reclaimer, and the pool's dequeue budget offers disk as
+// free PLUS what that reclaimer could evict. Give the cache a private
+// manager — which it constructs for itself when none is supplied — and
+// the pool's Reclaimable() is permanently zero, staged bytes are never
+// offered back to the budget, and the disk path quietly does nothing.
+// It presents as a worker that went quiet, not as an error.
+//
+// Leaving this unset is the supported default: the pool passes an
+// unbounded DequeueOpts, every backend skips its fit predicate, and no
+// leases are taken. That is exactly how Dispatch behaved before the
+// resource model existed.
+//
+// When set and WithWorkerCapacity was not, the manager's capacity also
+// becomes the capacity this worker publishes to the cluster registry, so
+// the enqueue-time unschedulable check sees the same numbers admission
+// enforces.
+func WithResourceManager(m resource.Manager) Option {
+	return func(eng *Engine) { eng.resources = m }
+}
+
+// WithWorkerCustomKeys narrows the custom resource keys this worker
+// advertises at dequeue.
+//
+// The default — every custom key the manager has capacity for — is
+// usually right. This exists to shrink it, so a worker draining a device
+// can stop attracting work for it without being reconfigured. Keep the
+// list a subset of the manager's custom capacity: dequeue matches custom
+// keys by containment and never by quantity, so a key advertised here
+// with no capacity behind it passes the store's filter and is then
+// refused locally, on every attempt.
+func WithWorkerCustomKeys(keys []string) Option {
+	return func(eng *Engine) { eng.workerCustomKeys = slices.Clone(keys) }
 }
 
 // WithTracerProvider sets a custom OTel TracerProvider for the engine.
@@ -373,6 +423,29 @@ func Build(d *dispatch.Dispatcher, opts ...Option) (*Engine, error) {
 	if len(eng.queueConfigs) > 0 {
 		eng.queueManager = queue.NewManager(eng.queueConfigs...)
 		poolOpts = append(poolOpts, worker.WithQueueManager(eng.queueManager))
+	}
+
+	// Hand the pool the shared ledger. The timing check runs only when a
+	// manager is present, because admission is the only thing that can
+	// stall the fetcher: with no manager, admissionBudget hands back the
+	// pool's own context and admit returns immediately.
+	if eng.resources != nil {
+		if err := checkReaperMargin(config); err != nil {
+			return nil, err
+		}
+
+		poolOpts = append(poolOpts, worker.WithResourceManager(eng.resources))
+
+		// The published capacity defaults to what admission actually
+		// enforces, so the enqueue-time unschedulable check and the local
+		// ledger cannot disagree about how big this worker is.
+		if eng.workerCapacity == nil {
+			eng.workerCapacity = eng.resources.Capacity()
+		}
+	}
+
+	if len(eng.workerCustomKeys) > 0 {
+		poolOpts = append(poolOpts, worker.WithWorkerCustomKeys(eng.workerCustomKeys))
 	}
 
 	eng.pool = worker.NewPool(
