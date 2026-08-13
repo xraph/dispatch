@@ -421,39 +421,121 @@ func init() {
 		// row is what lets one reclaim query serve a 30-second job and a
 		// six-hour one, and lease_epoch fences a worker that was reclaimed
 		// while it was merely paused.
+		//
+		// This migration runs against a LIVE fleet — extension.Start calls
+		// Migrate by default, so the first upgraded pod executes it while
+		// every old pod is still enqueueing, claiming and completing on
+		// dispatch_jobs. See migration 009 below, which hit the identical
+		// hazards; the same three mechanisms are used here, and 008 runs
+		// first so it has to be at least as safe.
 		&migrate.Migration{
 			Name:    "add_job_lease_columns",
 			Version: "20260812120000",
 			Up: func(ctx context.Context, exec migrate.Executor) error {
-				_, err := exec.Exec(ctx, `
+				// Batched into one ALTER and bounded by lock_timeout: a
+				// pending ACCESS EXCLUSIVE request blocks the whole lock
+				// queue behind it, so an ALTER that queues behind one
+				// in-flight SELECT ... FOR UPDATE SKIP LOCKED stalls every
+				// enqueue and completion in the fleet. All four defaults
+				// are constants, so on PostgreSQL 11+ this is a catalog
+				// update with no table rewrite; acquiring the lock is the
+				// only part that can wait, and that is what the timeout
+				// bounds.
+				if err := withLockTimeout(ctx, exec, `
 					ALTER TABLE dispatch_jobs
 						ADD COLUMN IF NOT EXISTS lease_epoch      INTEGER NOT NULL DEFAULT 0,
 						ADD COLUMN IF NOT EXISTS lease_expires_at TIMESTAMPTZ,
 						ADD COLUMN IF NOT EXISTS lease_ttl        BIGINT NOT NULL DEFAULT 0,
-						ADD COLUMN IF NOT EXISTS evict_count      INTEGER NOT NULL DEFAULT 0`)
-				if err != nil {
+						ADD COLUMN IF NOT EXISTS evict_count      INTEGER NOT NULL DEFAULT 0`); err != nil {
 					return err
 				}
 
-				_, err = exec.Exec(ctx, `
-					CREATE INDEX IF NOT EXISTS idx_dispatch_jobs_lease
+				// Adopt the jobs that were already running when the fleet
+				// upgraded. Without this they are stranded permanently.
+				//
+				// The new column arrives NULL, ReclaimExpiredLeases
+				// requires a non-NULL expiry to consider a row at all
+				// (job.Lease.IsExpired reads a zero expiry as "never
+				// leased", not "expired"), and the pool's reaper no longer
+				// calls ReapStaleJobs for a backend that implements
+				// job.LeaseStore. Dequeue claims only pending and
+				// retrying rows, so nothing else would ever look at these
+				// again: a job running at the instant of the upgrade would
+				// stay running forever, holding its slot, invisible to
+				// every recovery path.
+				//
+				// heartbeat_at first because it is the freshest evidence
+				// the job was alive; started_at when the job was claimed
+				// but has not heartbeated yet; NOW() only for rows
+				// predating both, which gives them a full grace period
+				// rather than reclaiming them out from under a live
+				// worker. Every one of these is in the past or the
+				// present, so the first sweep after the upgrade hands them
+				// to the normal reclaim path — the same path that would
+				// have collected them had they been leased from the
+				// start.
+				//
+				// Idempotent by the IS NULL predicate: a re-run after a
+				// failed migration cannot overwrite an expiry a running
+				// worker has since renewed.
+				//
+				// Under the same lock_timeout, which bounds row locks as
+				// well as table locks. This UPDATE cannot stall the fleet
+				// the way the ALTER can — it takes only ROW EXCLUSIVE on
+				// the table — but it can wait indefinitely on a row a
+				// completing worker is holding, and a migration that waits
+				// indefinitely is a deploy that never finishes. Failing
+				// and being retried is strictly better, and the predicate
+				// above makes the retry free.
+				if err := withLockTimeout(ctx, exec, `
+					UPDATE dispatch_jobs
+					SET lease_expires_at = COALESCE(heartbeat_at, started_at, NOW())
+					WHERE state = 'running' AND lease_expires_at IS NULL`); err != nil {
+					return err
+				}
+
+				// CONCURRENTLY: a plain CREATE INDEX holds a SHARE lock
+				// for the whole build, blocking every INSERT, UPDATE and
+				// DELETE on dispatch_jobs until it finishes. Grove does
+				// not wrap Up in a transaction — migrate.Orchestrator
+				// calls m.Up directly and the pg executor runs autocommit
+				// on a pinned connection — so CONCURRENTLY, which cannot
+				// run inside one, is available here. Migration 009 relies
+				// on the same property.
+				//
+				// Its cost is that a failed build leaves an INVALID index
+				// that the planner ignores and IF NOT EXISTS would then
+				// skip forever, so an invalid leftover is dropped first.
+				// That is what makes a retry converge instead of
+				// reporting success over an unusable index.
+				//
+				// Built after the backfill so the write lands in the index
+				// as it is created rather than as a maintenance cost on
+				// top of it.
+				if err := dropIfInvalid(ctx, exec, "idx_dispatch_jobs_lease"); err != nil {
+					return err
+				}
+
+				_, err := exec.Exec(ctx, `
+					CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_dispatch_jobs_lease
 						ON dispatch_jobs (lease_expires_at)
 						WHERE state = 'running'`)
+
 				return err
 			},
 			Down: func(ctx context.Context, exec migrate.Executor) error {
-				_, err := exec.Exec(ctx, `DROP INDEX IF EXISTS idx_dispatch_jobs_lease`)
+				_, err := exec.Exec(ctx,
+					`DROP INDEX CONCURRENTLY IF EXISTS idx_dispatch_jobs_lease`)
 				if err != nil {
 					return err
 				}
 
-				_, err = exec.Exec(ctx, `
+				return withLockTimeout(ctx, exec, `
 					ALTER TABLE dispatch_jobs
 						DROP COLUMN IF EXISTS lease_epoch,
 						DROP COLUMN IF EXISTS lease_expires_at,
 						DROP COLUMN IF EXISTS lease_ttl,
 						DROP COLUMN IF EXISTS evict_count`)
-				return err
 			},
 		},
 

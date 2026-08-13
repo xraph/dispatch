@@ -2,6 +2,7 @@ package sqlite
 
 import (
 	"context"
+	"time"
 
 	"github.com/xraph/grove/migrate"
 )
@@ -376,36 +377,93 @@ func init() {
 
 		// Lease columns. See the postgres migration of the same name for
 		// why the lease lives on the row.
+		//
+		// Every ADD COLUMN is guarded, for the reason spelled out on the
+		// resource migration below: SQLite has no ADD COLUMN IF NOT
+		// EXISTS and grove runs Up outside any transaction, so a failure
+		// at the third of the four would leave two columns added and no
+		// row in grove_migrations, and every retry from every pod would
+		// then die on "duplicate column name" forever, with no recovery
+		// short of hand-written DDL against a production database. The
+		// guard is the whole difference between a failed migration and a
+		// wedged one.
 		&migrate.Migration{
 			Name:    "add_job_lease_columns",
 			Version: "20260812120000",
 			Up: func(ctx context.Context, exec migrate.Executor) error {
-				stmts := []string{
-					`ALTER TABLE dispatch_jobs ADD COLUMN lease_epoch INTEGER NOT NULL DEFAULT 0`,
-					`ALTER TABLE dispatch_jobs ADD COLUMN lease_expires_at TEXT`,
-					`ALTER TABLE dispatch_jobs ADD COLUMN lease_ttl INTEGER NOT NULL DEFAULT 0`,
-					`ALTER TABLE dispatch_jobs ADD COLUMN evict_count INTEGER NOT NULL DEFAULT 0`,
-					`CREATE INDEX IF NOT EXISTS idx_dispatch_jobs_lease
-						ON dispatch_jobs (lease_expires_at) WHERE state = 'running'`,
-				}
-				for _, stmt := range stmts {
-					if _, err := exec.Exec(ctx, stmt); err != nil {
+				for _, c := range []struct{ name, ddl string }{
+					{"lease_epoch", `INTEGER NOT NULL DEFAULT 0`},
+					// TEXT, not a numeric timestamp: SQLite has no
+					// timestamp type, every other time column here is
+					// text, and the reclaim predicate compares
+					// lease_expires_at against the driver's own rendering
+					// of a time.Time. See the backfill below for why that
+					// rendering, not ISO-8601, is what has to be matched.
+					{"lease_expires_at", `TEXT`},
+					{"lease_ttl", `INTEGER NOT NULL DEFAULT 0`},
+					{"evict_count", `INTEGER NOT NULL DEFAULT 0`},
+				} {
+					if err := addColumnIfMissing(ctx, exec,
+						"dispatch_jobs", c.name, c.ddl); err != nil {
 						return err
 					}
 				}
 
-				return nil
+				// Adopt the jobs that were already running when the fleet
+				// upgraded. See the postgres migration for why they would
+				// otherwise be stranded permanently: the new column
+				// arrives NULL, ReclaimExpiredLeases requires a non-NULL
+				// expiry, the reaper no longer sweeps stale jobs on a
+				// lease-capable backend, and dequeue claims only pending
+				// and retrying rows.
+				//
+				// COALESCE copies whatever textual timestamp those columns
+				// already hold, so the backfilled value is comparable with
+				// the reclaim predicate by construction rather than by
+				// this statement guessing at a format.
+				//
+				// The last resort is a bound time.Time and NOT strftime,
+				// which would be the obvious choice and is wrong here.
+				// SQLite has no timestamp type, so lease_expires_at <= ?
+				// in ReclaimExpiredLeases is a string comparison, and
+				// grove's sqlitedriver renders a time.Time with Go's
+				// default layout — "2006-01-02 15:04:05.999999999 -0700
+				// MST" — not ISO-8601. A strftime value would sort as
+				// greater than every driver-written timestamp ('T' > ' ')
+				// and the backfilled rows would silently never be
+				// reclaimed, which is the exact bug this backfill exists
+				// to fix. Binding the value makes the driver render it the
+				// same way it renders every other timestamp in the table.
+				//
+				// Idempotent by the IS NULL predicate: a re-run cannot
+				// overwrite an expiry a running worker has since renewed.
+				if _, err := exec.Exec(ctx, `
+					UPDATE dispatch_jobs
+					SET lease_expires_at = COALESCE(heartbeat_at, started_at, ?)
+					WHERE state = 'running' AND lease_expires_at IS NULL`,
+					time.Now().UTC()); err != nil {
+					return err
+				}
+
+				// Created after the backfill so the rows it writes land in
+				// the index as it is built.
+				_, err := exec.Exec(ctx, `
+					CREATE INDEX IF NOT EXISTS idx_dispatch_jobs_lease
+						ON dispatch_jobs (lease_expires_at) WHERE state = 'running'`)
+
+				return err
 			},
 			Down: func(ctx context.Context, exec migrate.Executor) error {
-				stmts := []string{
-					`DROP INDEX IF EXISTS idx_dispatch_jobs_lease`,
-					`ALTER TABLE dispatch_jobs DROP COLUMN lease_epoch`,
-					`ALTER TABLE dispatch_jobs DROP COLUMN lease_expires_at`,
-					`ALTER TABLE dispatch_jobs DROP COLUMN lease_ttl`,
-					`ALTER TABLE dispatch_jobs DROP COLUMN evict_count`,
+				if _, err := exec.Exec(ctx, `DROP INDEX IF EXISTS idx_dispatch_jobs_lease`); err != nil {
+					return err
 				}
-				for _, stmt := range stmts {
-					if _, err := exec.Exec(ctx, stmt); err != nil {
+
+				// Guarded for the same reason Up is: a Down that fails
+				// halfway must be re-runnable.
+				for _, col := range []string{
+					"lease_epoch", "lease_expires_at", "lease_ttl", "evict_count",
+				} {
+					if err := dropColumnIfPresent(ctx, exec, "dispatch_jobs", col); err != nil {
 						return err
 					}
 				}
