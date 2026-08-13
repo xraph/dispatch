@@ -111,7 +111,9 @@ type ResolveInput struct {
 	// anywhere says the estimator was the reason. Callers should log it.
 	//
 	// Optional. Nil discards, which is the right default for a test that
-	// only cares about precedence.
+	// only cares about precedence. Called synchronously inside Resolve on
+	// the enqueue path: it must not block or panic, or it fails or stalls
+	// the enqueue that triggered it.
 	OnError func(source string, err error)
 }
 

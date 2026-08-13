@@ -77,11 +77,17 @@ const (
 	unboundedScanFloor = 16
 
 	// unboundedScanCeiling caps the total members one bounded scan may
-	// read from one queue. Reached only when the head of the index is
-	// dense with members the state/RunAt gate rejects — jobs already
-	// running, or scheduled for the future. Past it the call returns
-	// what it has and the pool polls again, which is strictly better
-	// than converting a pathological index into an unbounded read.
+	// read from one queue. Reached when more than this many
+	// higher-priority members sit at the head of a single queue's index
+	// and are not yet eligible — scheduled ahead of RunAt, or in retry
+	// backoff — with ready work behind them. Measured: with 3000 such
+	// members ahead of 10 ready jobs, three consecutive unbounded polls
+	// each returned zero jobs (2056 commands, 13 ms each), and no
+	// progress was made until the not-yet-eligible members became due.
+	// The window is bounded and cannot livelock, but it is starvation,
+	// not slowdown. This window did not exist in the previous full-scan
+	// implementation; it is a deliberate trade against the full-scan cost
+	// documented above, not an oversight.
 	unboundedScanCeiling = 2048
 )
 

@@ -55,7 +55,8 @@ type DequeueOpts struct {
 	//
 	//	memory    claims from every queue
 	//	postgres  claims nothing (queue = ANY(NULL) matches no row)
-	//	sqlite    claims nothing (queue IN () matches no row)
+	//	sqlite    claims nothing, by an explicit early return before the
+	//	          query is built
 	//	redis     claims nothing — the index is one sorted set per queue
 	//	          name and there has never been a cross-queue index
 	//	mongo     claims nothing, by an explicit early return

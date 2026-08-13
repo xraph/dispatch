@@ -255,8 +255,8 @@ func WithWorkerCapacity(c resource.Set) Option {
 // job too large for this worker is claimed, refused and requeued on
 // every poll rather than left for a worker that fits. Turning leases and
 // resources on together is the natural upgrade and the combination that
-// looks correctly configured while behaving least like it. Build logs a
-// warning when it sees both; see job.LeaseStore.DequeueLeased.
+// looks correctly configured while behaving least like it; see
+// job.LeaseStore.DequeueLeased.
 func WithResourceManager(m resource.Manager) Option {
 	return func(eng *Engine) { eng.resources = m }
 }
