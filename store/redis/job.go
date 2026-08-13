@@ -230,7 +230,34 @@ func (s *Store) GetJob(ctx context.Context, jobID id.JobID) (*job.Job, error) {
 	return fromJobEntity(&e)
 }
 
-// UpdateJob persists changes to an existing job.
+// UpdateJob persists changes to an existing job and keeps the queue index
+// in step with the state it just wrote.
+//
+// The index is what makes a job visible to DequeueJobs at all: EnqueueJob
+// adds a member, the claim removes it, and every state transition after
+// that arrives HERE. A retry from Runner.scheduleRetry, a job handed back
+// by Pool.requeueRateLimited or Pool.requeueUndispatched, a stale job reset
+// by Pool.reapStaleJobs — all of them just set a runnable state and call
+// this. Writing that state without restoring the member leaves a job that
+// GetJob reports as pending and no dequeue can ever see again: it looks
+// healthy in the dashboard and runs nowhere. The other four backends have
+// no equivalent hazard because they have no index — they re-derive
+// candidacy from the row on every query.
+//
+// The two index writes sit on OPPOSITE sides of the entity write, which is
+// deliberate. The stored entity is authoritative — dequeue.go re-checks
+// state and RunAt against it — so a member that should not be there is
+// inert, while a member that is missing is a job that never runs again.
+// Ordering each write so the index errs towards the harmless side means a
+// lost second write cannot strand anything:
+//
+//	becoming runnable — ZADD first, so a failed entity write leaves a
+//	                    spare member the state gate ignores.
+//	becoming final    — ZREM last, so a failed entity write leaves the job
+//	                    both runnable and still indexed.
+//
+// ZADD on a member already present only updates its score, so this is also
+// safe for a job that was never claimed.
 func (s *Store) UpdateJob(ctx context.Context, j *job.Job) error {
 	jID := j.ID.String()
 	key := jobKey(jID)
@@ -248,7 +275,32 @@ func (s *Store) UpdateJob(ctx context.Context, j *job.Job) error {
 		return err
 	}
 	e.UpdatedAt = now()
-	return s.setEntity(ctx, key, e)
+
+	// Nothing in this repository moves a job between queues after enqueue,
+	// so j.Queue is the queue it was indexed under. If that ever changes,
+	// the old queue keeps a member pointing at this job, and this function
+	// has to read the stored entity to learn which queue to clear.
+	qk := queueKey(j.Queue)
+	runnable := j.State == job.StatePending || j.State == job.StateRetrying
+
+	if runnable {
+		z := goredis.Z{Score: jobScore(j.Priority, j.RunAt), Member: jID}
+		if zErr := s.rdb.ZAdd(ctx, qk, z).Err(); zErr != nil {
+			return fmt.Errorf("dispatch/redis: update job index add: %w", zErr)
+		}
+	}
+
+	if setErr := s.setEntity(ctx, key, e); setErr != nil {
+		return fmt.Errorf("dispatch/redis: update job set entity: %w", setErr)
+	}
+
+	if !runnable {
+		if zErr := s.rdb.ZRem(ctx, qk, jID).Err(); zErr != nil {
+			return fmt.Errorf("dispatch/redis: update job index remove: %w", zErr)
+		}
+	}
+
+	return nil
 }
 
 // DeleteJob removes a job by ID.
