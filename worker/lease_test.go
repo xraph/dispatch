@@ -134,6 +134,76 @@ func TestLeaseFencing(t *testing.T) {
 	}
 }
 
+// fakeLeaseStore embeds *memory.Store for every method except RenewLease,
+// which it overrides to return a caller-configured error. This is what
+// lets a test drive the pool's heartbeat/renewal path through a specific
+// outcome — lease lost, or a transient store error — without needing a
+// lease that has genuinely expired or a second worker to steal it.
+type fakeLeaseStore struct {
+	*memory.Store
+
+	renewErr error
+}
+
+// RenewLease shadows the promoted *memory.Store method and always
+// returns the configured error, ignoring every argument.
+func (f *fakeLeaseStore) RenewLease(
+	_ context.Context,
+	_ id.JobID,
+	_ id.WorkerID,
+	_ int,
+	_ time.Time,
+) error {
+	return f.renewErr
+}
+
+// TestPool_SendHeartbeats_CancelsOnLeaseLost is the pool-level half of
+// the fencing proof: TestLeaseFencing above shows the STORE returns
+// job.ErrLeaseLost when the caller no longer holds the lease; this shows
+// the POOL reacts to that return by cancelling the job's context with
+// job.ErrLeaseLost as the cause — the one behaviour this whole task
+// exists to add. Asserting only ctx.Err() != nil would not distinguish
+// this from a shutdown cancellation, so the assertion goes through
+// context.Cause.
+func TestPool_SendHeartbeats_CancelsOnLeaseLost(t *testing.T) {
+	s := &fakeLeaseStore{Store: memory.New(), renewErr: job.ErrLeaseLost}
+	pool := worker.NewPool(s, nil, nil, log.NewNoopLogger())
+
+	jobID := id.NewJobID().String()
+	ctx := pool.TrackJob(jobID, 3, 30*time.Second)
+
+	pool.HeartbeatOnce(context.Background())
+
+	if ctx.Err() == nil {
+		t.Fatalf("job context was not cancelled after RenewLease returned job.ErrLeaseLost")
+	}
+
+	cause := context.Cause(ctx)
+	if !errors.Is(cause, job.ErrLeaseLost) {
+		t.Fatalf("context.Cause(ctx) = %v, want job.ErrLeaseLost", cause)
+	}
+}
+
+// TestPool_SendHeartbeats_KeepsJobAliveOnTransientError is the negative
+// case: a renewal failure that is NOT job.ErrLeaseLost — a transient
+// store blip — must leave the job's context alive. A pool that cancelled
+// on every renewal error would kill healthy jobs whenever the store
+// hiccups, which is exactly what the WARN-not-cancel branch in
+// sendHeartbeats exists to avoid.
+func TestPool_SendHeartbeats_KeepsJobAliveOnTransientError(t *testing.T) {
+	s := &fakeLeaseStore{Store: memory.New(), renewErr: context.DeadlineExceeded}
+	pool := worker.NewPool(s, nil, nil, log.NewNoopLogger())
+
+	jobID := id.NewJobID().String()
+	ctx := pool.TrackJob(jobID, 3, 30*time.Second)
+
+	pool.HeartbeatOnce(context.Background())
+
+	if err := ctx.Err(); err != nil {
+		t.Fatalf("job context was cancelled on a transient renewal error: cause = %v", context.Cause(ctx))
+	}
+}
+
 // storeOnly wraps a job.Store behind the bare interface, so it satisfies
 // job.Store without also satisfying job.LeaseStore even though the
 // concrete memory.Store underneath implements both. Embedding the
