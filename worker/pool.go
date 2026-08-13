@@ -85,6 +85,16 @@ type Pool struct {
 	heartbeatInterval time.Duration
 	staleJobThreshold time.Duration
 
+	// leaseStore is the store's optional lease capability. Nil means the
+	// backend implements only job.Store, and the pool keeps its previous
+	// behaviour: unleased claims, bare heartbeats, threshold reaping.
+	leaseStore job.LeaseStore
+
+	// defaultLeaseTTL is how far a renewal pushes the expiry for jobs
+	// that declare no LeaseTTL of their own. Zero falls back to
+	// staleJobThreshold, then to job.DefaultLeaseTTL.
+	defaultLeaseTTL time.Duration
+
 	// storeCallTimeout caps how long a single store call (dequeue,
 	// heartbeat, reap, update) may hold a driver-pool connection
 	// before being abandoned. Zero means use defaultStoreCallTimeout;
@@ -213,6 +223,40 @@ func WithStoreCallTimeout(d time.Duration) PoolOption {
 	return func(p *Pool) { p.storeCallTimeout = d }
 }
 
+// WithDefaultLeaseTTL sets how far each renewal pushes a job's lease
+// expiry when the job declares no LeaseTTL of its own.
+//
+// This is a liveness window, not a time limit: it should be a small
+// multiple of the heartbeat interval regardless of how long the work
+// takes. When unset the pool uses the configured stale-job threshold, so
+// an existing deployment sees the same reclamation timing it had before
+// leases existed.
+func WithDefaultLeaseTTL(d time.Duration) PoolOption {
+	return func(p *Pool) { p.defaultLeaseTTL = d }
+}
+
+// leaseTTLFor resolves how far a renewal should push this job's lease:
+// the job's own declaration, else the pool default, else the legacy
+// stale-job threshold, else job.DefaultLeaseTTL. The threshold sits in
+// the chain so a deployment that configured only StaleJobThreshold —
+// which is every deployment predating leases — keeps its current timing.
+//
+// j may be nil: the initial grant at claim time has no job to consult
+// yet, so it resolves straight to the pool-level fallbacks.
+func (p *Pool) leaseTTLFor(j *job.Job) time.Duration {
+	if j != nil && j.LeaseTTL > 0 {
+		return j.LeaseTTL
+	}
+	if p.defaultLeaseTTL > 0 {
+		return p.defaultLeaseTTL
+	}
+	if p.staleJobThreshold > 0 {
+		return p.staleJobThreshold
+	}
+
+	return job.DefaultLeaseTTL
+}
+
 // NewPool creates a worker pool.
 func NewPool(
 	store job.Store,
@@ -240,6 +284,12 @@ func NewPool(
 	}
 	if p.maxPollInterval < p.pollInterval {
 		p.maxPollInterval = p.pollInterval
+	}
+	if ls, ok := store.(job.LeaseStore); ok {
+		p.leaseStore = ls
+	} else {
+		logger.Warn("store does not implement job.LeaseStore; " +
+			"per-definition lease TTLs and epoch fencing are disabled")
 	}
 	return p
 }
@@ -464,12 +514,21 @@ func (p *Pool) fetchLoop() {
 		// would either strand work or admit work this worker cannot run.
 		// With no resource manager configured both fields are empty, the
 		// opts are IsUnbounded, and every backend skips its fit predicate.
-		jobs, err := p.store.DequeueJobs(dqCtx, job.DequeueOpts{
+		dqOpts := job.DequeueOpts{
 			Queues:     p.queues,
 			Limit:      held,
 			Budget:     p.dequeueBudget(),
 			CustomKeys: p.offeredCustomKeys(),
-		})
+		}
+		// The grant uses the POOL default TTL, not any per-job value: the
+		// store cannot apply per-job TTL arithmetic at claim time, and the
+		// grant only has to survive until the first renewal one heartbeat
+		// later — which then applies the job's real TTL.
+		if p.leaseStore != nil {
+			dqOpts.WorkerID = p.workerID
+			dqOpts.LeaseUntil = time.Now().UTC().Add(p.leaseTTLFor(nil))
+		}
+		jobs, err := p.store.DequeueJobs(dqCtx, dqOpts)
 		dqCancel()
 		if err != nil {
 			p.releaseSlots(held)
@@ -676,8 +735,8 @@ func (p *Pool) runJob(a admitted) {
 
 	p.extensions.EmitJobStarted(p.cancelCtx, j)
 
-	ctx, cancel := context.WithCancel(p.cancelCtx)
-	p.trackJob(j.ID.String(), cancel, a.lease)
+	ctx, cancel := context.WithCancelCause(p.cancelCtx)
+	p.trackJob(j.ID.String(), cancel, a.lease, j.LeaseEpoch, p.leaseTTLFor(j))
 
 	execErr := p.executor.Execute(ctx, j)
 	if execErr != nil {
@@ -706,29 +765,82 @@ func (p *Pool) heartbeatLoop() {
 	}
 }
 
+// activeSnapshot is one job's liveness bookkeeping as of the moment
+// sendHeartbeats took its snapshot of activeJobs: the epoch and TTL are
+// copied out under the lock so the renewal loop below can run without
+// holding it.
+type activeSnapshot struct {
+	jobID      string
+	leaseEpoch int
+	leaseTTL   time.Duration
+}
+
+// sendHeartbeats keeps every active job's ownership fresh in the store.
+//
+// When the store implements job.LeaseStore, this renews the job's lease
+// with the epoch it was granted at claim time instead of sending a bare
+// liveness heartbeat. A renewal that comes back job.ErrLeaseLost means
+// another worker now holds the job — this one was paused past its lease
+// and reclaimed — so the job is cancelled here, within one heartbeat
+// interval, rather than left to run to completion racing its replacement.
+//
+// Without a lease-capable store this keeps calling HeartbeatJob exactly
+// as before leases existed.
 func (p *Pool) sendHeartbeats() {
 	p.activeMu.Lock()
-	jobIDs := make([]string, 0, len(p.activeJobs))
-	for jobID := range p.activeJobs {
-		jobIDs = append(jobIDs, jobID)
+	snapshots := make([]activeSnapshot, 0, len(p.activeJobs))
+	for jobID, rec := range p.activeJobs {
+		snapshots = append(snapshots, activeSnapshot{
+			jobID:      jobID,
+			leaseEpoch: rec.leaseEpoch,
+			leaseTTL:   rec.leaseTTL,
+		})
 	}
 	p.activeMu.Unlock()
 
-	for _, jobIDStr := range jobIDs {
-		parsedID, parseErr := id.ParseJobID(jobIDStr)
+	for _, snap := range snapshots {
+		parsedID, parseErr := id.ParseJobID(snap.jobID)
 		if parseErr != nil {
-			p.logger.Warn("heartbeat: invalid job id", log.String("job_id", jobIDStr))
+			p.logger.Warn("heartbeat: invalid job id", log.String("job_id", snap.jobID))
 			continue
 		}
-		hbCtx, hbCancel := p.callCtx()
-		err := p.store.HeartbeatJob(hbCtx, parsedID, p.workerID)
-		hbCancel()
-		if err != nil {
-			p.logger.Warn("heartbeat failed",
-				log.String("job_id", jobIDStr),
-				log.String("error", err.Error()),
-			)
+
+		if p.leaseStore == nil {
+			hbCtx, hbCancel := p.callCtx()
+			err := p.store.HeartbeatJob(hbCtx, parsedID, p.workerID)
+			hbCancel()
+			if err != nil {
+				p.logger.Warn("heartbeat failed",
+					log.String("job_id", snap.jobID),
+					log.String("error", err.Error()),
+				)
+			}
+			continue
 		}
+
+		hbCtx, hbCancel := p.callCtx()
+		renewErr := p.leaseStore.RenewLease(
+			hbCtx, parsedID, p.workerID, snap.leaseEpoch, time.Now().UTC().Add(snap.leaseTTL),
+		)
+		hbCancel()
+		if renewErr == nil {
+			continue
+		}
+
+		if errors.Is(renewErr, job.ErrLeaseLost) {
+			p.logger.Warn("lease lost, cancelling job",
+				log.String("job_id", snap.jobID),
+			)
+			p.cancelJob(snap.jobID, job.ErrLeaseLost)
+			continue
+		}
+
+		// A transient store blip must not cancel a healthy job; only a
+		// definitive ErrLeaseLost above does that.
+		p.logger.Warn("lease renewal failed",
+			log.String("job_id", snap.jobID),
+			log.String("error", renewErr.Error()),
+		)
 	}
 }
 
@@ -798,9 +910,26 @@ func (p *Pool) reapStaleJobs() {
 	}
 }
 
-func (p *Pool) trackJob(jobID string, cancel context.CancelFunc, lease resource.Lease) {
+// trackJob records one job's cancel func, resource lease, and job-lease
+// bookkeeping so the heartbeat loop and shutdown path can act on it.
+//
+// leaseEpoch and leaseTTL are the job lease's epoch and renewal window,
+// resolved once here at claim time rather than re-read from the store on
+// every heartbeat.
+func (p *Pool) trackJob(
+	jobID string,
+	cancel context.CancelCauseFunc,
+	lease resource.Lease,
+	leaseEpoch int,
+	leaseTTL time.Duration,
+) {
 	p.activeMu.Lock()
-	p.activeJobs[jobID] = &inflight{cancel: cancel, lease: lease}
+	p.activeJobs[jobID] = &inflight{
+		cancel:     cancel,
+		lease:      lease,
+		leaseEpoch: leaseEpoch,
+		leaseTTL:   leaseTTL,
+	}
 	p.activeMu.Unlock()
 }
 
@@ -826,6 +955,20 @@ func (p *Pool) cancelActiveJobs() {
 
 	for jobID, rec := range p.activeJobs {
 		p.logger.Warn("cancelling active job", log.String("job_id", jobID))
-		rec.cancel()
+		rec.cancel(context.Canceled)
 	}
+}
+
+// cancelJob cancels one in-flight job with a cause the executor and the
+// handler can tell apart from a timeout or a shutdown.
+func (p *Pool) cancelJob(jobID string, cause error) {
+	p.activeMu.Lock()
+	rec, ok := p.activeJobs[jobID]
+	p.activeMu.Unlock()
+
+	if !ok {
+		return
+	}
+
+	rec.cancel(cause)
 }

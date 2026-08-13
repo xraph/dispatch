@@ -32,8 +32,23 @@ type admitted struct {
 // persisted row, shared with the store and serialized to it, and a live
 // lease is process-local state that must never be written down.
 type inflight struct {
-	cancel context.CancelFunc
+	cancel context.CancelCauseFunc
 	lease  resource.Lease
+
+	// leaseEpoch is the lease epoch this worker was granted when it
+	// claimed the job. Every renewal presents it, and a renewal that no
+	// longer matches the row means another worker owns the job now.
+	//
+	// Unlike the resource lease above — which is live process state that
+	// must never be written down — this is the opposite: a process-local
+	// copy of a persisted value, held so renewal need not re-read the row.
+	leaseEpoch int
+
+	// leaseTTL is how far each renewal pushes the expiry out, resolved
+	// once at claim time from the job's own LeaseTTL and the pool's
+	// defaults. Held here so the renewal loop does not issue a GetJob per
+	// job per interval purely to recover a duration it already knew.
+	leaseTTL time.Duration
 }
 
 // dequeueBudget is the capacity ceiling this worker offers the store,
@@ -262,7 +277,7 @@ func (p *Pool) abandon(a admitted) {
 // two paths cannot double-credit the ledger.
 func (p *Pool) finishJob(a admitted) {
 	if rec := p.untrackJob(a.job.ID.String()); rec != nil {
-		rec.cancel()
+		rec.cancel(nil)
 	}
 
 	p.releaseQueueSlot(a.job)
