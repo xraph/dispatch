@@ -15,7 +15,6 @@ import (
 	"fmt"
 	"os"
 	"slices"
-	"sync"
 	"time"
 
 	log "github.com/xraph/go-utils/log"
@@ -85,14 +84,6 @@ type Engine struct {
 	pool       *worker.Pool
 	mws        []mw.Middleware
 	logger     log.Logger
-
-	// stopOnce guards the executor-close path in Stop against a double
-	// call. Stop's other steps (deregister, scheduler stop, dispatcher
-	// stop) already tolerate being run twice — the dispatcher and pool
-	// both check their own started/running flags — but Close has no such
-	// guard of its own, and closing a rung's clients or child processes
-	// twice is not guaranteed safe the way a no-op Stop is.
-	stopOnce sync.Once
 
 	// Workflow subsystem.
 	wfRegistry *workflow.Registry
@@ -719,11 +710,7 @@ func (eng *Engine) Stop(ctx context.Context) error {
 	// pool, so no attempt is still running through a rung when its resources
 	// go away. In-process Close is a no-op; an out-of-process rung releases
 	// its clients and child processes here or leaks them.
-	//
-	// Guarded by stopOnce: a second Stop call must not close every executor
-	// again, since Close is newly reachable here and, unlike the rest of
-	// this method, is not itself idempotent.
-	eng.stopOnce.Do(eng.closeExecutors)
+	eng.closeExecutors()
 
 	return stopErr
 }
