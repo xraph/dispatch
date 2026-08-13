@@ -259,11 +259,11 @@ func (p *Pool) Wake() {
 func (p *Pool) WorkerID() id.WorkerID { return p.workerID }
 
 // Start launches the worker goroutines. It returns immediately.
-func (p *Pool) Start(_ context.Context) error {
+func (p *Pool) Start(ctx context.Context) error {
 	p.mu.Lock()
-	defer p.mu.Unlock()
 
 	if p.running {
+		p.mu.Unlock()
 		return nil
 	}
 	p.running = true
@@ -274,20 +274,6 @@ func (p *Pool) Start(_ context.Context) error {
 		log.Int("concurrency", p.concurrency),
 		log.Any("queues", p.queues),
 	)
-
-	// Sweep sandboxes this worker left behind across a restart before it
-	// takes new work. In-process reclaim is a no-op; an out-of-process rung
-	// would otherwise keep orphaned children or pods alive indefinitely.
-	// Best effort by design: a rung that cannot sweep must not stop the
-	// pool from running the jobs it can still execute.
-	if p.executor != nil {
-		if err := p.executor.Reclaim(p.cancelCtx, p.workerID); err != nil {
-			p.logger.Warn("executor reclaim failed",
-				log.String("worker_id", p.workerID.String()),
-				log.String("error", err.Error()),
-			)
-		}
-	}
 
 	// One fetcher claims jobs in batches sized to the free worker slots;
 	// concurrency worker goroutines execute them. A single poller issues
@@ -319,7 +305,73 @@ func (p *Pool) Start(_ context.Context) error {
 		go p.reaperLoop()
 	}
 
+	p.mu.Unlock()
+
+	// Sweep sandboxes this worker left behind across a restart before it
+	// takes new work. In-process reclaim is a no-op; an out-of-process rung
+	// would otherwise keep orphaned children or pods alive indefinitely.
+	// Best effort by design: a rung that cannot sweep must not stop the
+	// pool from running the jobs it can still execute.
+	//
+	// Run in the background, tracked by p.wg like every other pool
+	// goroutine, so Start returns immediately as documented even when a
+	// rung's Reclaim does real (and potentially slow) process or
+	// filesystem I/O. Outside p.mu: nothing else needs the lock held for
+	// this, and holding it here would block Stop and every other pool
+	// method on a sweep that has no bound of its own.
+	if p.executor != nil {
+		p.wg.Add(1)
+		go p.runReclaimSweep(ctx)
+	}
+
 	return nil
+}
+
+// runReclaimSweep runs the executor reclaim sweep to completion or
+// cancellation, whichever comes first, and reports it to p.wg.
+//
+// The sweep's context is cancelled by either the ctx Start was called with
+// or Pool.Stop (via p.cancelCtx) — whichever fires first — so a blocked
+// rung can always be interrupted: by the caller giving up on Start's ctx,
+// or by the pool being stopped before the sweep finishes.
+func (p *Pool) runReclaimSweep(ctx context.Context) {
+	defer p.wg.Done()
+
+	sweepCtx, cancel := mergeDone(ctx, p.cancelCtx)
+	defer cancel()
+
+	// Reclamation is best-effort cleanup, not a startup precondition: a
+	// rung that cannot sweep must not stop the pool from running the jobs
+	// it can still execute, so an error here is logged, never fatal.
+	if err := p.executor.Reclaim(sweepCtx, p.workerID); err != nil {
+		p.logger.Warn("executor reclaim failed",
+			log.String("worker_id", p.workerID.String()),
+			log.String("error", err.Error()),
+		)
+	}
+}
+
+// mergeDone returns a context cancelled as soon as either a or b is done,
+// and a cancel func the caller must call once it no longer needs the
+// merged context — otherwise the watcher goroutine backing it leaks until
+// whichever of a or b is cancelled last.
+func mergeDone(a, b context.Context) (context.Context, context.CancelFunc) {
+	merged, cancel := context.WithCancel(context.Background())
+
+	stopWatch := make(chan struct{})
+	go func() {
+		select {
+		case <-a.Done():
+		case <-b.Done():
+		case <-stopWatch:
+		}
+		cancel()
+	}()
+
+	return merged, func() {
+		cancel()
+		close(stopWatch)
+	}
 }
 
 // Stop signals all workers to stop and waits for them to finish.
