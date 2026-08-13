@@ -5,8 +5,12 @@ package redis_test
 import (
 	"context"
 	"encoding/json"
+	"fmt"
+	"sync"
 	"testing"
 	"time"
+
+	goredis "github.com/redis/go-redis/v9"
 
 	"github.com/xraph/grove/kv/drivers/redisdriver"
 
@@ -262,5 +266,189 @@ func TestDequeueOrdersNullPrimaryInputHashAsUnpreferred(t *testing.T) {
 				"NOT preferred, never ahead of the job the caller has staged",
 				rawJobNames(got), want)
 		}
+	}
+}
+
+// ──────────────────────────────────────────────────
+// Scan cost
+// ──────────────────────────────────────────────────
+
+// countingHook tallies every command this client sends, pipelined ones
+// individually. A pipeline is one round trip but N commands of Redis
+// CPU, and Redis is single-threaded, so it is the command count — not
+// the round-trip count — that decides whether a deep queue starves
+// enqueues, heartbeats and lease renewals.
+type countingHook struct {
+	mu sync.Mutex
+	n  int
+}
+
+func (h *countingHook) add(n int) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
+	h.n += n
+}
+
+func (h *countingHook) count() int {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
+	return h.n
+}
+
+func (h *countingHook) reset() {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
+	h.n = 0
+}
+
+func (h *countingHook) DialHook(next goredis.DialHook) goredis.DialHook { return next }
+
+func (h *countingHook) ProcessHook(next goredis.ProcessHook) goredis.ProcessHook {
+	return func(ctx context.Context, cmd goredis.Cmder) error {
+		h.add(1)
+
+		return next(ctx, cmd)
+	}
+}
+
+func (h *countingHook) ProcessPipelineHook(next goredis.ProcessPipelineHook) goredis.ProcessPipelineHook {
+	return func(ctx context.Context, cmds []goredis.Cmder) error {
+		h.add(len(cmds))
+
+		return next(ctx, cmds)
+	}
+}
+
+// TestUnboundedDequeueDoesNotScanTheWholeQueue pins the promise the rest
+// of this file cannot: with no resource configuration, a poll must cost
+// what it cost before the resource model existed.
+//
+// The opts here are exactly what worker.Pool sends when nobody has
+// configured anything — Queues and a Limit, no Budget, no CustomKeys, no
+// PreferHashes — so job.DequeueOpts.IsUnbounded is true and the fit
+// predicate is skipped. A caller that filters nothing has no reason to
+// read a job it is not going to return.
+//
+// The bound is on COMMANDS, not on wall time, because the failure this
+// guards is Redis CPU rather than latency at any one worker. The
+// implementation this replaced issued one ZRANGE over the whole index
+// plus one pipelined GET per pending member: at the backlog below that
+// is one ZRANGE and ~2000 GETs against a Limit of 4, growing linearly
+// with the depth of the queue, on every poll of every worker.
+//
+// Mutation-verified: restoring the `ZRange(ctx, key, 0, -1)` full scan
+// fails here with a count above 2000.
+func TestUnboundedDequeueDoesNotScanTheWholeQueue(t *testing.T) {
+	const (
+		queue   = "redis-scan-cost"
+		backlog = 2000
+		limit   = 4
+
+		// Generous on purpose: the point is the difference between a
+		// constant and a term linear in backlog, not a tight count that
+		// breaks the next time the claim grows a command.
+		maxCommands = 150
+	)
+
+	s := setupTestStore(t)
+	ctx := context.Background()
+
+	base := time.Now().UTC().Add(-time.Hour).Truncate(time.Millisecond)
+
+	for i := range backlog {
+		j := newRawFitJob(fmt.Sprintf("backlog-%04d", i), queue,
+			base.Add(time.Duration(i)*time.Millisecond))
+		if err := s.EnqueueJob(ctx, j); err != nil {
+			t.Fatalf("enqueue %d: %v", i, err)
+		}
+	}
+
+	hook := &countingHook{}
+	redisdriver.UnwrapClient(s.KV()).AddHook(hook)
+
+	hook.reset()
+
+	got, err := s.DequeueJobs(ctx, job.DequeueOpts{
+		Queues: []string{queue},
+		Limit:  limit,
+	})
+	if err != nil {
+		t.Fatalf("DequeueJobs: %v", err)
+	}
+
+	if len(got) != limit {
+		t.Fatalf("claimed %d jobs, want %d", len(got), limit)
+	}
+
+	// The bounded window still has to answer the ordering contract over
+	// what it read: these were enqueued at ascending RunAt and equal
+	// priority, so the head of the index is the head of the answer.
+	for i, j := range got {
+		if want := fmt.Sprintf("backlog-%04d", i); j.Name != want {
+			t.Fatalf("claimed %v, want the first %d by RunAt", rawJobNames(got), limit)
+		}
+	}
+
+	if n := hook.count(); n > maxCommands {
+		t.Fatalf("an unbounded dequeue of %d jobs from a %d-deep queue cost %d Redis commands "+
+			"(want <= %d): the scan is proportional to the backlog, so the deeper the queue "+
+			"the more Redis CPU every poll of every worker burns",
+			limit, backlog, n, maxCommands)
+	}
+
+	t.Logf("unbounded dequeue: %d Redis commands at a backlog of %d", hook.count(), backlog)
+}
+
+// TestBoundedDequeueStillSeesPastTheWindow is the other half of the
+// contract above: the bounded window is for callers that filter nothing.
+// A caller with a budget may have to look past the head of the index,
+// because the one job it can run may sit anywhere in it — so the full
+// scan must survive for exactly those callers.
+func TestBoundedDequeueStillSeesPastTheWindow(t *testing.T) {
+	const (
+		queue = "redis-scan-past-window"
+		ahead = 400
+	)
+
+	s := setupTestStore(t)
+	ctx := context.Background()
+
+	base := time.Now().UTC().Add(-time.Hour).Truncate(time.Millisecond)
+
+	// A wall of jobs no small worker can take...
+	for i := range ahead {
+		j := newRawFitJob(fmt.Sprintf("huge-%03d", i), queue,
+			base.Add(time.Duration(i)*time.Millisecond))
+		j.Resources = resource.Set{resource.Memory: 64 * storetest.GiB}
+
+		if err := s.EnqueueJob(ctx, j); err != nil {
+			t.Fatalf("enqueue huge %d: %v", i, err)
+		}
+	}
+
+	// ...and one it can, far enough back that no bounded window reaches it.
+	small := newRawFitJob("small", queue, base.Add(time.Duration(ahead)*time.Millisecond))
+	small.Resources = resource.Set{resource.Memory: storetest.GiB}
+
+	if err := s.EnqueueJob(ctx, small); err != nil {
+		t.Fatalf("enqueue small: %v", err)
+	}
+
+	got, err := s.DequeueJobs(ctx, job.DequeueOpts{
+		Queues: []string{queue},
+		Limit:  4,
+		Budget: resource.Set{resource.Memory: 2 * storetest.GiB},
+	})
+	if err != nil {
+		t.Fatalf("DequeueJobs: %v", err)
+	}
+
+	if len(got) != 1 || got[0].Name != "small" {
+		t.Fatalf("claimed %v, want [small]: a bounded caller must scan past the jobs it "+
+			"cannot run, or a wall of oversized work strands every worker behind it",
+			rawJobNames(got))
 	}
 }

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"time"
 
 	goredis "github.com/redis/go-redis/v9"
 
@@ -42,12 +43,47 @@ import (
 const maxDequeueRounds = 3
 
 // dequeueScanBatch is how many job entities one pipelined read fetches.
-// The scan reads every pending member of the queue index, so it is issued
-// as pipelined GETs in batches rather than as one GET per round trip. A
-// pipeline (not MGET) is deliberate: go-redis splits a pipeline across
-// cluster nodes by slot, whereas a multi-key MGET spanning slots is a
-// CROSSSLOT error.
+// A scan that reads many members issues them as pipelined GETs in batches
+// rather than as one GET per round trip. A pipeline (not MGET) is
+// deliberate: go-redis splits a pipeline across cluster nodes by slot,
+// whereas a multi-key MGET spanning slots is a CROSSSLOT error.
 const dequeueScanBatch = 256
+
+// The two scan modes, and why the cheap one is not just an optimization.
+//
+// A caller that constrains nothing — no Budget, no CustomKeys, no
+// ReservedFor, no PreferHashes — is the pool as it is configured when
+// nobody has turned the resource model on, which is the overwhelming
+// majority of deployments and the one the whole track promised not to
+// regress. Such a caller wants the first Limit ready members of the
+// index in score order, which is exactly what the pre-track ZPopMin
+// gave it, at a cost proportional to Limit rather than to the backlog.
+//
+// The full scan exists only because the fit predicate and the locality
+// term are properties the score cannot express: a job that does not fit
+// may sit anywhere in the index, so "the first Limit members" is not an
+// answer to a bounded caller's question. Those callers opted in, and
+// they pay a cost proportional to the depth of the queues they named.
+//
+// Charging an unconfigured worker that cost is what made a deep queue a
+// self-inflicted outage: Redis is single-threaded, so one worker reading
+// a 100k-member index every poll interval blocks every enqueue,
+// heartbeat and lease renewal behind it, and it does so precisely when
+// the queue is deepest.
+const (
+	// unboundedScanFloor is the smallest window the bounded scan reads,
+	// so a Limit of 1 still tolerates a little junk at the head of the
+	// index without a second round trip.
+	unboundedScanFloor = 16
+
+	// unboundedScanCeiling caps the total members one bounded scan may
+	// read from one queue. Reached only when the head of the index is
+	// dense with members the state/RunAt gate rejects — jobs already
+	// running, or scheduled for the future. Past it the call returns
+	// what it has and the pool polls again, which is strictly better
+	// than converting a pathological index into an unbounded read.
+	unboundedScanCeiling = 2048
+)
 
 // dequeueCandidate is one job that passed the fit predicate, together
 // with the queue index member that has to be won to claim it.
@@ -70,7 +106,9 @@ type dequeueCandidate struct {
 //     precedes truncation, over the whole eligible set — a scan that took
 //     Limit members first and sorted within them would hand a worker with
 //     a small limit arbitrary low-priority work forever, which is what
-//     storetest's LimitTruncatesAfterOrdering pins.
+//     storetest's LimitTruncatesAfterOrdering pins. How much of the index
+//     is read depends on whether the caller filters anything: see the
+//     unboundedScan* constants.
 //   - claimCandidates wins each survivor by removing it from the queue
 //     index, which is what makes the claim exclusive.
 //
@@ -120,71 +158,28 @@ func (s *Store) DequeueJobs(ctx context.Context, opts job.DequeueOpts) ([]*job.J
 // dequeueCandidates returns the top opts.Limit eligible jobs across
 // opts.Queues, already in contract order.
 //
-// It scans every member of each queue's sorted set rather than taking the
-// first Limit by score. The score is a legacy ordering hint — a float
-// packing negated priority and RunAt into one number — and nothing here
-// trusts it: the contract order includes a locality term the score cannot
-// express, and the float's RunAt component loses resolution as priority
-// grows. Ordering is decided by job.DequeueOpts.Less over decoded jobs,
-// so the score only ever affects which entities happen to be read first,
-// never which are returned.
+// The score is a legacy ordering hint — a float packing negated priority
+// and RunAt into one number — and the returned ORDER never trusts it:
+// the contract order includes a locality term the score cannot express,
+// and the float's RunAt component loses resolution as priority grows.
+// Ordering is decided by job.DequeueOpts.Less over decoded jobs.
 //
-// The cost of that is one GET per pending member per call, pipelined in
-// batches. It is the price of expressing the predicate once, in Go, and
-// it is bounded by the depth of the queues the caller named.
+// What the score does decide is WHICH members are read, and that is
+// where the two modes differ. See the unboundedScan* constants: a caller
+// that filters and orders nothing reads a bounded window from the head
+// of the index; every other caller reads the whole index, because a job
+// it can accept may sit anywhere in it.
 func (s *Store) dequeueCandidates(ctx context.Context, opts job.DequeueOpts) ([]dequeueCandidate, error) {
 	t := now()
 	candidates := make([]dequeueCandidate, 0, opts.Limit)
 
 	for _, q := range opts.Queues {
-		ids, err := s.rdb.ZRange(ctx, queueKey(q), 0, -1).Result()
-		if err != nil && !isRedisNil(err) {
-			return nil, fmt.Errorf("dispatch/redis: dequeue scan %q: %w", q, err)
+		found, err := s.scanQueue(ctx, opts, q, t)
+		if err != nil {
+			return nil, err
 		}
 
-		for start := 0; start < len(ids); start += dequeueScanBatch {
-			end := min(start+dequeueScanBatch, len(ids))
-			batch := ids[start:end]
-
-			entities, readErr := s.readJobEntities(ctx, batch)
-			if readErr != nil {
-				return nil, readErr
-			}
-
-			for i, e := range entities {
-				if e == nil {
-					continue // indexed but gone, or unreadable
-				}
-
-				// The index is not a state filter: EnqueueJob adds every
-				// job it writes, including one handed to it already
-				// running, and ReclaimExpiredLeases re-adds jobs it
-				// returned to pending. Only a ready job may be claimed.
-				if st := job.State(e.State); st != job.StatePending && st != job.StateRetrying {
-					continue
-				}
-
-				if !e.RunAt.IsZero() && e.RunAt.After(t) {
-					continue
-				}
-
-				j, convErr := fromJobEntity(e)
-				if convErr != nil {
-					continue
-				}
-
-				// IsUnbounded skips the fit predicate entirely: a caller
-				// not using the resource model claims everything,
-				// including jobs declaring custom resources it could not
-				// possibly satisfy. It governs FILTERING only —
-				// PreferHashes still orders below, even here.
-				if !opts.IsUnbounded() && !opts.Allows(j) {
-					continue
-				}
-
-				candidates = append(candidates, dequeueCandidate{id: batch[i], queue: q, job: j})
-			}
-		}
+		candidates = append(candidates, found...)
 	}
 
 	// Order THEN truncate, across every queue named, exactly as
@@ -196,11 +191,11 @@ func (s *Store) dequeueCandidates(ctx context.Context, opts job.DequeueOpts) ([]
 	// whoever tries: swapping these two statements alone does NOT fail
 	// storetest's LimitTruncatesAfterOrdering, because ZRange happens to
 	// return members in score order and the score happens to encode
-	// priority. The suite only catches the swap once the scan order is
-	// also perturbed — reversing the batch loop makes it fail immediately
-	// with [prio-1 prio-0]. So the safety here rests on this sort, not on
-	// the index, and the test would not warn you if you leaned on the
-	// index instead.
+	// priority. It DOES fail
+	// LocalityDecidesWhichRowsSurviveATightLimit, which was added for
+	// exactly this reason: locality cannot be baked into a score that
+	// was written before the caller's staged set was known, so no scan
+	// order can make truncate-before-sort accidentally right there.
 	sort.SliceStable(candidates, func(i, k int) bool {
 		return opts.Less(candidates[i].job, candidates[k].job)
 	})
@@ -210,6 +205,128 @@ func (s *Store) dequeueCandidates(ctx context.Context, opts job.DequeueOpts) ([]
 	}
 
 	return candidates, nil
+}
+
+// scanQueue returns the eligible members of one queue's index, in the
+// order the index yielded them.
+//
+// A bounded caller reads the whole index. An unbounded one reads a
+// window that starts near Limit and doubles, stopping as soon as it has
+// Limit eligible jobs — so the common case is one ZRANGE and one
+// pipeline of Limit-ish GETs, and the widening only pays for junk the
+// state/RunAt gate actually rejected.
+func (s *Store) scanQueue(
+	ctx context.Context,
+	opts job.DequeueOpts,
+	q string,
+	t time.Time,
+) ([]dequeueCandidate, error) {
+	key := queueKey(q)
+	full := !opts.IsUnbounded() || len(opts.PreferHashes) > 0
+
+	var (
+		out     []dequeueCandidate
+		scanned int64
+		window  = int64(max(opts.Limit, unboundedScanFloor))
+	)
+
+	for {
+		stop := int64(-1) // the whole index
+		if !full {
+			stop = scanned + window - 1
+		}
+
+		ids, err := s.rdb.ZRange(ctx, key, scanned, stop).Result()
+		if err != nil && !isRedisNil(err) {
+			return nil, fmt.Errorf("dispatch/redis: dequeue scan %q: %w", q, err)
+		}
+
+		if len(ids) == 0 {
+			return out, nil
+		}
+
+		found, err := s.eligibleIn(ctx, opts, q, t, ids)
+		if err != nil {
+			return nil, err
+		}
+
+		out = append(out, found...)
+		scanned += int64(len(ids))
+
+		// The full scan asked for everything and got it in one call.
+		if full {
+			return out, nil
+		}
+
+		if len(out) >= opts.Limit ||
+			int64(len(ids)) < window || // index exhausted
+			scanned >= unboundedScanCeiling {
+			return out, nil
+		}
+
+		window = min(window*2, unboundedScanCeiling-scanned)
+		if window <= 0 {
+			return out, nil
+		}
+	}
+}
+
+// eligibleIn decodes the named index members and returns those a worker
+// may claim, positionally in ids order.
+func (s *Store) eligibleIn(
+	ctx context.Context,
+	opts job.DequeueOpts,
+	q string,
+	t time.Time,
+	ids []string,
+) ([]dequeueCandidate, error) {
+	out := make([]dequeueCandidate, 0, len(ids))
+
+	for start := 0; start < len(ids); start += dequeueScanBatch {
+		end := min(start+dequeueScanBatch, len(ids))
+		batch := ids[start:end]
+
+		entities, readErr := s.readJobEntities(ctx, batch)
+		if readErr != nil {
+			return nil, readErr
+		}
+
+		for i, e := range entities {
+			if e == nil {
+				continue // indexed but gone, or unreadable
+			}
+
+			// The index is not a state filter: EnqueueJob adds every job
+			// it writes, including one handed to it already running, and
+			// ReclaimExpiredLeases re-adds jobs it returned to pending.
+			// Only a ready job may be claimed.
+			if st := job.State(e.State); st != job.StatePending && st != job.StateRetrying {
+				continue
+			}
+
+			if !e.RunAt.IsZero() && e.RunAt.After(t) {
+				continue
+			}
+
+			j, convErr := fromJobEntity(e)
+			if convErr != nil {
+				continue
+			}
+
+			// IsUnbounded skips the fit predicate entirely: a caller not
+			// using the resource model claims everything, including jobs
+			// declaring custom resources it could not possibly satisfy.
+			// It governs FILTERING only — PreferHashes still orders
+			// below, even here.
+			if !opts.IsUnbounded() && !opts.Allows(j) {
+				continue
+			}
+
+			out = append(out, dequeueCandidate{id: batch[i], queue: q, job: j})
+		}
+	}
+
+	return out, nil
 }
 
 // readJobEntities fetches one batch of job entities by ID, returning a
