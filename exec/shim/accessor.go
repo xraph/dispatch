@@ -10,7 +10,6 @@ import (
 
 	"github.com/xraph/dispatch/artifact"
 	"github.com/xraph/dispatch/exec"
-	"github.com/xraph/dispatch/store/memory"
 )
 
 // accessor is the artifact.Accessor handed to a handler running inside the
@@ -29,8 +28,8 @@ type accessor struct {
 var _ artifact.Accessor = (*accessor)(nil)
 
 // newAccessorService builds the artifact service a sandboxed handler runs
-// against: a real artifact.Service over a local directory and an in-memory
-// store.
+// against: a real artifact.Service over a local directory and a minimal
+// in-memory store local to this package.
 //
 // The handler therefore exercises the genuine Create/Commit/IfAbsent code
 // path and cannot tell which side of the boundary it is on, while holding
@@ -38,9 +37,17 @@ var _ artifact.Accessor = (*accessor)(nil)
 // not a record of truth; they exist so Commit can return a Ref and
 // Existing can answer within the attempt. The worker outside verifies what
 // actually landed in the directory.
+//
+// memStore, not store/memory, is deliberate: store/memory is the full
+// composite store and transitively imports workflow -> scope ->
+// xraph/forge, which would link go-redis, k8s.io/client-go, a config
+// loader, and an HTTP/QUIC/Prometheus stack into the sandbox binary. The
+// phase's central claim -- this process holds no credential -- has to be
+// provable by reading the import graph, not by tracing which
+// package-level variables happen not to be constructed.
 func newAccessorService(req *exec.Request) *artifact.Service {
 	return artifact.NewService(
-		memory.New(),
+		newMemStore(),
 		NewLocalFS(req.OutputDir),
 		artifact.WithDefaultBucket("shim"),
 	)
