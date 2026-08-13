@@ -55,9 +55,11 @@ const (
 // Main never returns: it calls os.Exit. A handler returning an error is
 // exit 0, since that is a business outcome the Result frame already
 // carries as StatusHandlerError. A nonzero exit means the shim itself
-// could not produce a Result frame at all — a request that failed to
-// decode, most likely — which is the one case the wire protocol cannot
-// report through its own channel.
+// failed the attempt before or instead of running the handler — a request
+// that failed to decode, or one whose fingerprint or handler name did not
+// resolve — which is what lets the parent distinguish those cases from a
+// clean run without having to inspect the frame first: the exit code
+// corroborates what the Result already says.
 func Main(defs ...job.Registrable) {
 	os.Exit(mainExitCode(defs))
 }
@@ -67,6 +69,14 @@ func Main(defs ...job.Registrable) {
 // calls, so a single call to it right at the top of Main — after every
 // defer here has already unwound — is what lets the signal handler and
 // the cancel func clean up on every path.
+//
+// It calls run rather than Run because Run's public contract discards the
+// Result on success, and the exit code has to be derived from that Result:
+// a fingerprint mismatch or an unknown handler makes Run return a nil
+// error (the frame is the report, by design — see Run's doc comment), so
+// err == nil alone cannot tell mainExitCode apart from a clean success.
+// Only StatusHandlerError keeps exit 0; every other non-OK status,
+// including one Run reported without an error, is a nonzero exit.
 func mainExitCode(defs []job.Registrable) int {
 	//nolint:gosec // G115: fd numbers come from a small, non-negative process descriptor space, never from attacker input.
 	in := os.NewFile(uintptr(fdFromEnv(EnvRequestFD, defaultRequestFD)), "dispatch-exec-request")
@@ -80,13 +90,34 @@ func mainExitCode(defs []job.Registrable) int {
 	signal.Notify(sigCh, syscall.SIGTERM)
 	defer signal.Stop(sigCh)
 
+	// done unblocks the goroutine below once mainExitCode is about to
+	// return. signal.Stop alone only unregisters future deliveries; it
+	// neither closes sigCh nor wakes a goroutine already parked on
+	// <-sigCh, so without this the goroutine leaks on every call that
+	// never receives a SIGTERM — which, outside of tests, is every call,
+	// since Main's own os.Exit would otherwise mask the leak by killing
+	// the process before it could accumulate.
+	done := make(chan struct{})
+	defer close(done)
+
 	go func() {
-		if _, ok := <-sigCh; ok {
+		select {
+		case <-sigCh:
 			cancel()
+		case <-done:
 		}
 	}()
 
-	if err := Run(ctx, in, out, defs); err != nil {
+	res, err := run(ctx, in, out, defs)
+	if err != nil {
+		return 1
+	}
+
+	// StatusHandlerError stays exit 0: it is a business outcome, and the
+	// parent reads it from the Result frame, not the exit code.
+	// StatusLaunchFailed is the shim's own failure and must not look like
+	// a clean exit.
+	if res.Status == exec.StatusLaunchFailed {
 		return 1
 	}
 
@@ -122,19 +153,35 @@ func fdFromEnv(name string, def int) int {
 // frame and returning nil, because the frame is the report, not the
 // error: the parent reads Status, not the shim's exit code, to learn what
 // happened.
+//
+// Run discards the Result it produces, keeping its signature exactly what
+// callers (and the brief's test) expect. mainExitCode needs that Result to
+// derive an exit code, which Run's error alone cannot give it — see run.
 func Run(ctx context.Context, in io.Reader, out io.Writer, defs []job.Registrable) error {
+	_, err := run(ctx, in, out, defs)
+
+	return err
+}
+
+// run is Run's implementation, plus the Result it wrote. mainExitCode is
+// the reason this exists as a separate, unexported function: Run's error
+// return is nil for a launch failure by design (the frame is the report),
+// so the only way mainExitCode can tell a launch failure apart from a
+// clean success is to inspect the Result's Status directly, which Run's
+// public contract does not expose.
+func run(ctx context.Context, in io.Reader, out io.Writer, defs []job.Registrable) (*exec.Result, error) {
 	frame, err := wire.Decode(in)
 	if err != nil {
-		return fmt.Errorf("dispatch/exec/shim: read request: %w", err)
+		return nil, fmt.Errorf("dispatch/exec/shim: read request: %w", err)
 	}
 
 	req := frame.Request
 	if req == nil {
-		return errors.New("dispatch/exec/shim: frame carries no request")
+		return nil, errors.New("dispatch/exec/shim: frame carries no request")
 	}
 
 	if verr := req.Validate(); verr != nil {
-		return fmt.Errorf("dispatch/exec/shim: %w", verr)
+		return nil, fmt.Errorf("dispatch/exec/shim: %w", verr)
 	}
 
 	registry := job.NewRegistry()
@@ -144,22 +191,26 @@ func Run(ctx context.Context, in io.Reader, out io.Writer, defs []job.Registrabl
 
 	if req.Fingerprint != "" {
 		if got := exec.Fingerprint(registry.Names()); got != req.Fingerprint {
-			return writeResult(out, &exec.Result{
+			res := &exec.Result{
 				Status: exec.StatusLaunchFailed,
 				HandlerErr: fmt.Sprintf(
 					"fingerprint mismatch: request wants %s, this binary's handler set is %s",
 					req.Fingerprint, got,
 				),
-			})
+			}
+
+			return res, writeResult(out, res)
 		}
 	}
 
 	handler, ok := registry.Get(req.Name)
 	if !ok {
-		return writeResult(out, &exec.Result{
+		res := &exec.Result{
 			Status:     exec.StatusLaunchFailed,
 			HandlerErr: fmt.Sprintf("no handler registered for job %q", req.Name),
-		})
+		}
+
+		return res, writeResult(out, res)
 	}
 
 	svc := newAccessorService(req)
@@ -167,7 +218,7 @@ func Run(ctx context.Context, in io.Reader, out io.Writer, defs []job.Registrabl
 
 	if len(req.PriorOutputs) > 0 {
 		if serr := seedPriorOutputs(ctx, svc, owner, req.PriorOutputs); serr != nil {
-			return fmt.Errorf("dispatch/exec/shim: %w", serr)
+			return nil, fmt.Errorf("dispatch/exec/shim: %w", serr)
 		}
 	}
 
@@ -195,12 +246,12 @@ func Run(ctx context.Context, in io.Reader, out io.Writer, defs []job.Registrabl
 
 	outputs, err := collectOutputs(req.OutputDir)
 	if err != nil {
-		return fmt.Errorf("dispatch/exec/shim: collect outputs: %w", err)
+		return nil, fmt.Errorf("dispatch/exec/shim: collect outputs: %w", err)
 	}
 
 	res.Outputs = outputs
 
-	return writeResult(out, res)
+	return res, writeResult(out, res)
 }
 
 // writeResult encodes and writes the single result frame Run ever
