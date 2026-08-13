@@ -179,6 +179,11 @@ func WithResourceClass(class string) Option {
 
 // WithLeaseTTL sets how long this job's lease survives without renewal.
 //
+// It works on a definition and at an enqueue, and the enqueue wins: a
+// definition declares the TTL its work needs, and a caller who knows this
+// particular job is different overrides it, the same way WithResources
+// overrides a declared requirement.
+//
 // A lease TTL is a liveness window, not a time limit: it should be a small
 // multiple of the heartbeat interval regardless of how long the work takes.
 // Non-positive durations are ignored, because a zero TTL would expire the

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"slices"
 	"sync"
+	"time"
 
 	"github.com/xraph/dispatch/artifact"
 	"github.com/xraph/dispatch/exec"
@@ -56,6 +57,12 @@ type Registry struct {
 	// reason: enqueue works from a job name and a payload.
 	resources map[string]ResourceDecl
 
+	// leaseTTLs holds each job's declared lease TTL, for the same reason
+	// again: EnqueueRaw has a name and a payload, not the typed
+	// definition, so a per-definition TTL is unreachable unless it is
+	// keyed by name here. Absent means the definition declared none.
+	leaseTTLs map[string]time.Duration
+
 	// policies holds each job's execution declaration. The worker needs
 	// it keyed by name for the same reason inputs are: at execution time
 	// the typed definition is long gone.
@@ -68,6 +75,7 @@ func NewRegistry() *Registry {
 		handlers:  make(map[string]HandlerFunc),
 		inputs:    make(map[string][]artifact.InputSpec),
 		resources: make(map[string]ResourceDecl),
+		leaseTTLs: make(map[string]time.Duration),
 		policies:  make(map[string]exec.Policy),
 	}
 }
@@ -113,6 +121,15 @@ func RegisterDefinition[T any](r *Registry, def *Definition[T]) {
 		r.resources[def.Name] = decl
 	}
 
+	// Stored under the same non-zero guard as the resource declaration,
+	// and for the same reason: zero already means "the pool's default"
+	// everywhere downstream, so recording it would only make an absent
+	// declaration indistinguishable from a deliberate one without
+	// changing what any caller does with it.
+	if def.Opts.LeaseTTL > 0 {
+		r.leaseTTLs[def.Name] = def.Opts.LeaseTTL
+	}
+
 	// Unlike inputs and resources, the policy is stored unconditionally:
 	// DefaultOptions gives every definition a non-zero grace period, so a
 	// zero-guard here would never skip anything and would only obscure
@@ -135,6 +152,21 @@ func (r *Registry) Resources(name string) ResourceDecl {
 	decl.Limits = decl.Limits.Clone()
 
 	return decl
+}
+
+// LeaseTTL returns the lease TTL a definition declared, or zero when it
+// declared none.
+//
+// Zero is not a sentinel this has to distinguish: it is what Job.LeaseTTL
+// already means everywhere downstream — Pool.leaseTTLFor falls through to
+// the pool default, then the stale-job threshold, then
+// job.DefaultLeaseTTL — so an unregistered name and a definition that
+// declared nothing correctly resolve the same way.
+func (r *Registry) LeaseTTL(name string) time.Duration {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	return r.leaseTTLs[name]
 }
 
 // Policy returns the execution declaration for a job. An unregistered name

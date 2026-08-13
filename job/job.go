@@ -84,7 +84,9 @@ type Job struct {
 	LeaseExpiresAt *time.Time `json:"lease_expires_at,omitempty"`
 
 	// LeaseTTL is how long each renewal extends the lease for this job,
-	// copied from the definition at enqueue. Zero means the pool's default.
+	// copied at enqueue from the definition's WithLeaseTTL, or from the
+	// enqueue site's when that supplies one. Zero means the pool's
+	// default.
 	//
 	// This is what makes per-definition thresholds work: a 30-second job
 	// and a six-hour job carry different values on their own rows, so one

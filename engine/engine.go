@@ -623,7 +623,21 @@ func (eng *Engine) EnqueueRaw(ctx context.Context, name string, payload []byte, 
 	j.Priority = jobOpts.Priority
 	j.MaxRetries = jobOpts.MaxRetries
 	j.Timeout = jobOpts.Timeout
-	j.LeaseTTL = jobOpts.LeaseTTL
+
+	// A definition declares; an enqueue overrides — the same precedence
+	// resolveResources applies to ResourceFunc and ResourceClass. The
+	// definition's TTL has to come from the registry because EnqueueRaw
+	// has only a name and a payload; without this lookup a definition
+	// declaring job.WithLeaseTTL would silently get the pool default,
+	// which is the whole point of a per-job lease TTL.
+	//
+	// Only a positive enqueue-site value overrides, because zero is not
+	// an override: it is the absence of one, and means "use the pool
+	// default" rather than "cancel what the definition declared".
+	j.LeaseTTL = eng.registry.LeaseTTL(name)
+	if jobOpts.LeaseTTL > 0 {
+		j.LeaseTTL = jobOpts.LeaseTTL
+	}
 	if !jobOpts.RunAt.IsZero() {
 		j.RunAt = jobOpts.RunAt
 	}
