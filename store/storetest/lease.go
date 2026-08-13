@@ -19,11 +19,23 @@ import (
 // the jobs it created, so cases do not interfere. That matters because
 // starting a fresh Postgres or Redis container per subtest would dominate
 // the runtime of the whole suite.
+//
+// The lease is GRANTED by job.Store.DequeueJobs, through
+// job.DequeueOpts.WorkerID and LeaseUntil — there is no separate leased
+// dequeue. That is why every case below claims with DequeueJobs: a
+// backend cannot pass this suite with a grant path that skips the fit
+// predicate, because there is only one path.
 func RunLeaseSuite(t *testing.T, newStore func(t *testing.T) LeaseStore) {
 	t.Helper()
 
-	t.Run("DequeueLeasedGrantsAndBumpsEpoch", func(t *testing.T) {
-		testDequeueLeasedGrantsAndBumpsEpoch(t, newStore(t))
+	t.Run("DequeueGrantsLeaseAndBumpsEpoch", func(t *testing.T) {
+		testDequeueGrantsLeaseAndBumpsEpoch(t, newStore(t))
+	})
+	t.Run("DequeueGrantsNoLeaseWhenLeaseUntilZero", func(t *testing.T) {
+		testDequeueGrantsNoLeaseWhenLeaseUntilZero(t, newStore(t))
+	})
+	t.Run("DequeueRejectsLeaseWithoutWorker", func(t *testing.T) {
+		testDequeueRejectsLeaseWithoutWorker(t, newStore(t))
 	})
 	t.Run("RenewLeaseExtends", func(t *testing.T) {
 		testRenewLeaseExtends(t, newStore(t))
@@ -60,7 +72,7 @@ func RunLeaseSuite(t *testing.T, newStore func(t *testing.T) LeaseStore) {
 	})
 }
 
-func testDequeueLeasedGrantsAndBumpsEpoch(t *testing.T, s LeaseStore) {
+func testDequeueGrantsLeaseAndBumpsEpoch(t *testing.T, s LeaseStore) {
 	ctx := context.Background()
 	worker := id.NewWorkerID()
 	until := time.Now().UTC().Add(time.Minute)
@@ -71,12 +83,17 @@ func testDequeueLeasedGrantsAndBumpsEpoch(t *testing.T, s LeaseStore) {
 		t.Fatalf("enqueue: %v", err)
 	}
 
-	got, err := s.DequeueLeased(ctx, []string{queue}, 10, worker, until)
+	got, err := s.DequeueJobs(ctx, job.DequeueOpts{
+		Queues:     []string{queue},
+		Limit:      10,
+		WorkerID:   worker,
+		LeaseUntil: until,
+	})
 	if err != nil {
-		t.Fatalf("DequeueLeased: %v", err)
+		t.Fatalf("DequeueJobs: %v", err)
 	}
 	if len(got) != 1 {
-		t.Fatalf("DequeueLeased returned %d jobs, want 1", len(got))
+		t.Fatalf("DequeueJobs returned %d jobs, want 1", len(got))
 	}
 
 	d := got[0]
@@ -98,6 +115,132 @@ func testDequeueLeasedGrantsAndBumpsEpoch(t *testing.T, s LeaseStore) {
 	if d.StartedAt == nil {
 		t.Error("StartedAt = nil, want it set at dequeue")
 	}
+
+	// The grant must have been PERSISTED by the claim, not merely decorated
+	// onto the returned copy. A backend that granted as a follow-up write
+	// would still pass every assertion above; this is the one that fails if
+	// the row itself is running with no lease, which is the state
+	// ReclaimExpiredLeases is entitled to take back.
+	stored, err := s.GetJob(ctx, j.ID)
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if stored.LeaseEpoch != d.LeaseEpoch {
+		t.Errorf("stored LeaseEpoch = %d, want %d", stored.LeaseEpoch, d.LeaseEpoch)
+	}
+	if stored.WorkerID != worker {
+		t.Errorf("stored WorkerID = %s, want %s", stored.WorkerID, worker)
+	}
+	if stored.LeaseExpiresAt == nil {
+		t.Error("stored LeaseExpiresAt = nil, want the granted expiry")
+	}
+}
+
+// testDequeueGrantsNoLeaseWhenLeaseUntilZero pins the backward-
+// compatibility guarantee: an opt-out caller must see exactly the
+// behaviour DequeueJobs had before leases existed.
+//
+// Without this case a backend that granted unconditionally — writing the
+// zero worker and bumping the epoch on every claim — passes every other
+// case in this file, and every caller that never asked for a lease would
+// have its jobs reclaimed out from under it on the next sweep.
+func testDequeueGrantsNoLeaseWhenLeaseUntilZero(t *testing.T, s LeaseStore) {
+	ctx := context.Background()
+	const queue = "lease-not-granted"
+
+	j := PendingJob("not-granted", queue, 0)
+	if err := s.EnqueueJob(ctx, j); err != nil {
+		t.Fatalf("enqueue: %v", err)
+	}
+
+	// Read the baseline back from the store rather than trusting the
+	// in-memory job: a backend that defaults lease_epoch differently at
+	// insert would otherwise look like it bumped.
+	before, err := s.GetJob(ctx, j.ID)
+	if err != nil {
+		t.Fatalf("get before claim: %v", err)
+	}
+
+	// No WorkerID and no LeaseUntil — the opts a pool sends today.
+	got, err := s.DequeueJobs(ctx, job.DequeueOpts{Queues: []string{queue}, Limit: 1})
+	if err != nil {
+		t.Fatalf("DequeueJobs: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("DequeueJobs returned %d jobs, want 1", len(got))
+	}
+
+	d := got[0]
+	if d.State != job.StateRunning {
+		t.Errorf("State = %s, want %s", d.State, job.StateRunning)
+	}
+	if d.LeaseEpoch != before.LeaseEpoch {
+		t.Errorf("LeaseEpoch = %d, want it unchanged at %d", d.LeaseEpoch, before.LeaseEpoch)
+	}
+	if d.LeaseExpiresAt != nil {
+		t.Errorf("LeaseExpiresAt = %v, want nil — no lease was asked for", d.LeaseExpiresAt)
+	}
+	if !d.WorkerID.IsNil() {
+		t.Errorf("WorkerID = %s, want it unset — no lease was asked for", d.WorkerID)
+	}
+
+	stored, err := s.GetJob(ctx, j.ID)
+	if err != nil {
+		t.Fatalf("get after claim: %v", err)
+	}
+	if stored.LeaseEpoch != before.LeaseEpoch {
+		t.Errorf("stored LeaseEpoch = %d, want it unchanged at %d",
+			stored.LeaseEpoch, before.LeaseEpoch)
+	}
+	if stored.LeaseExpiresAt != nil {
+		t.Errorf("stored LeaseExpiresAt = %v, want nil", stored.LeaseExpiresAt)
+	}
+	if !stored.WorkerID.IsNil() {
+		t.Errorf("stored WorkerID = %s, want it unset", stored.WorkerID)
+	}
+}
+
+// testDequeueRejectsLeaseWithoutWorker covers the one incoherent request:
+// a grant with no holder.
+//
+// RenewLease matches on worker ID, so a lease held by the zero worker can
+// never be renewed — the job would be claimed, expire, be reclaimed, and
+// go round again forever. That presents as a queue that never drains
+// rather than as an error, so the store refuses the claim instead.
+func testDequeueRejectsLeaseWithoutWorker(t *testing.T, s LeaseStore) {
+	ctx := context.Background()
+	const queue = "lease-no-worker"
+
+	j := PendingJob("no-worker", queue, 0)
+	if err := s.EnqueueJob(ctx, j); err != nil {
+		t.Fatalf("enqueue: %v", err)
+	}
+
+	got, err := s.DequeueJobs(ctx, job.DequeueOpts{
+		Queues: []string{queue},
+		Limit:  1,
+		// WorkerID deliberately unset.
+		LeaseUntil: time.Now().UTC().Add(time.Minute),
+	})
+	if !errors.Is(err, job.ErrLeaseWithoutWorker) {
+		t.Fatalf("DequeueJobs with LeaseUntil and no WorkerID = %v, want %v",
+			err, job.ErrLeaseWithoutWorker)
+	}
+	if len(got) != 0 {
+		t.Errorf("DequeueJobs returned %d jobs, want 0 — a refused claim must claim nothing",
+			len(got))
+	}
+
+	// The refusal must come before any write: the job is still there for a
+	// correctly configured worker to take.
+	after, err := s.GetJob(ctx, j.ID)
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if after.State != job.StatePending {
+		t.Errorf("State = %s, want %s — the refused claim wrote to the job",
+			after.State, job.StatePending)
+	}
 }
 
 func testRenewLeaseExtends(t *testing.T, s LeaseStore) {
@@ -110,9 +253,14 @@ func testRenewLeaseExtends(t *testing.T, s LeaseStore) {
 	if err := s.EnqueueJob(ctx, j); err != nil {
 		t.Fatalf("enqueue: %v", err)
 	}
-	got, err := s.DequeueLeased(ctx, []string{queue}, 1, worker, now.Add(30*time.Second))
+	got, err := s.DequeueJobs(ctx, job.DequeueOpts{
+		Queues:     []string{queue},
+		Limit:      1,
+		WorkerID:   worker,
+		LeaseUntil: now.Add(30 * time.Second),
+	})
 	if err != nil || len(got) != 1 {
-		t.Fatalf("DequeueLeased: %v (n=%d)", err, len(got))
+		t.Fatalf("DequeueJobs: %v (n=%d)", err, len(got))
 	}
 
 	extended := now.Add(10 * time.Minute)
@@ -149,9 +297,14 @@ func testRenewLeaseRejectsStaleEpoch(t *testing.T, s LeaseStore) {
 	if err := s.EnqueueJob(ctx, j); err != nil {
 		t.Fatalf("enqueue: %v", err)
 	}
-	got, err := s.DequeueLeased(ctx, []string{queue}, 1, worker, now.Add(time.Minute))
+	got, err := s.DequeueJobs(ctx, job.DequeueOpts{
+		Queues:     []string{queue},
+		Limit:      1,
+		WorkerID:   worker,
+		LeaseUntil: now.Add(time.Minute),
+	})
 	if err != nil || len(got) != 1 {
-		t.Fatalf("DequeueLeased: %v (n=%d)", err, len(got))
+		t.Fatalf("DequeueJobs: %v (n=%d)", err, len(got))
 	}
 
 	err = s.RenewLease(ctx, got[0].ID, worker, got[0].LeaseEpoch-1, now.Add(time.Hour))
@@ -172,9 +325,14 @@ func testRenewLeaseRejectsWrongWorker(t *testing.T, s LeaseStore) {
 	if err := s.EnqueueJob(ctx, j); err != nil {
 		t.Fatalf("enqueue: %v", err)
 	}
-	got, err := s.DequeueLeased(ctx, []string{queue}, 1, worker, now.Add(time.Minute))
+	got, err := s.DequeueJobs(ctx, job.DequeueOpts{
+		Queues:     []string{queue},
+		Limit:      1,
+		WorkerID:   worker,
+		LeaseUntil: now.Add(time.Minute),
+	})
 	if err != nil || len(got) != 1 {
-		t.Fatalf("DequeueLeased: %v (n=%d)", err, len(got))
+		t.Fatalf("DequeueJobs: %v (n=%d)", err, len(got))
 	}
 
 	err = s.RenewLease(ctx, got[0].ID, other, got[0].LeaseEpoch, now.Add(time.Hour))
@@ -241,9 +399,13 @@ func testReclaimSkipsLiveLease(t *testing.T, s LeaseStore) {
 	if err := s.EnqueueJob(ctx, j); err != nil {
 		t.Fatalf("enqueue: %v", err)
 	}
-	if _, err := s.DequeueLeased(ctx, []string{queue}, 1, worker,
-		time.Now().UTC().Add(time.Hour)); err != nil {
-		t.Fatalf("DequeueLeased: %v", err)
+	if _, err := s.DequeueJobs(ctx, job.DequeueOpts{
+		Queues:     []string{queue},
+		Limit:      1,
+		WorkerID:   worker,
+		LeaseUntil: time.Now().UTC().Add(time.Hour),
+	}); err != nil {
+		t.Fatalf("DequeueJobs: %v", err)
 	}
 
 	got, err := s.ReclaimExpiredLeases(ctx, 100)
@@ -270,9 +432,14 @@ func testReclaimFencesPreviousHolder(t *testing.T, s LeaseStore) {
 	if err := s.EnqueueJob(ctx, j); err != nil {
 		t.Fatalf("enqueue: %v", err)
 	}
-	got, err := s.DequeueLeased(ctx, []string{queue}, 1, worker, now.Add(-time.Second))
+	got, err := s.DequeueJobs(ctx, job.DequeueOpts{
+		Queues:     []string{queue},
+		Limit:      1,
+		WorkerID:   worker,
+		LeaseUntil: now.Add(-time.Second),
+	})
 	if err != nil || len(got) != 1 {
-		t.Fatalf("DequeueLeased: %v (n=%d)", err, len(got))
+		t.Fatalf("DequeueJobs: %v (n=%d)", err, len(got))
 	}
 	heldEpoch := got[0].LeaseEpoch
 

@@ -60,6 +60,11 @@ const maxDequeueRounds = 8
 // finds no candidate, not a single write command is sent. A job that does
 // not fit is never written to — the predicate is a conjunct of the
 // claiming update itself, not a filter over claimed documents.
+//
+// When opts.Grants() the lease fields are part of that same per-document
+// update, never a follow-up write: per-document atomicity is what makes
+// the claim exclusive, and a job running with no lease is a job
+// ReclaimExpiredLeases is entitled to take back.
 func (s *Store) DequeueJobs(ctx context.Context, opts job.DequeueOpts) ([]*job.Job, error) {
 	// A worker computing zero free slots must claim zero jobs, never the
 	// whole queue. Matches the SQL backends' LIMIT 0.
@@ -77,6 +82,10 @@ func (s *Store) DequeueJobs(ctx context.Context, opts job.DequeueOpts) ([]*job.J
 	// backend performs. See job.DequeueOpts.Queues.
 	if len(opts.Queues) == 0 {
 		return nil, nil
+	}
+
+	if err := opts.Validate(); err != nil {
+		return nil, fmt.Errorf("dispatch/mongo: dequeue jobs: %w", err)
 	}
 
 	for range maxDequeueRounds {
@@ -238,6 +247,11 @@ func (s *Store) claimCandidates(
 // _id: the fit predicate must be evaluated as part of the claim, so a job
 // that does not fit is never written to even if it somehow reached the
 // candidate list.
+//
+// The lease grant, when opts asks for one, is part of THIS update
+// document. findAndModify applies the whole document atomically, so the
+// winner of the race is leased in the instant it is claimed and there is
+// no moment at which the job is running without a lease.
 func (s *Store) claimOne(
 	ctx context.Context,
 	opts job.DequeueOpts,
@@ -247,12 +261,20 @@ func (s *Store) claimOne(
 	filter := dequeueFilter(opts, t)
 	filter["_id"] = jobID
 
-	update := bson.M{
-		"$set": bson.M{
-			"state":      string(job.StateRunning),
-			"started_at": t,
-			"updated_at": t,
-		},
+	set := bson.M{
+		"state":      string(job.StateRunning),
+		"started_at": t,
+		"updated_at": t,
+	}
+	update := bson.M{"$set": set}
+
+	if opts.Grants() {
+		set["worker_id"] = opts.WorkerID.String()
+		set["lease_expires_at"] = opts.LeaseUntil.UTC()
+		// $inc rather than a computed value: the epoch is the fence and
+		// must advance from whatever the document currently holds, which
+		// only the document knows.
+		update["$inc"] = bson.M{"lease_epoch": 1}
 	}
 
 	updateOpts := options.FindOneAndUpdate().SetReturnDocument(options.After)

@@ -122,72 +122,11 @@ redis.call('SET', KEYS[1], ARGV[2])
 return 1
 `)
 
-// DequeueLeased claims up to limit ready jobs and grants each a lease.
-//
-// This stays a plain read-modify-write, unlike renewal and reclaim.
-// ZPopMin already removed the job from the queue's sorted set before this
-// function ever reads the entity, so no other worker can reach it by any
-// path this store exposes — there is nothing left to race against, and
-// no epoch compare is needed to make the grant safe.
-func (s *Store) DequeueLeased(
-	ctx context.Context,
-	queues []string,
-	limit int,
-	workerID id.WorkerID,
-	leaseUntil time.Time,
-) ([]*job.Job, error) {
-	t := now()
-	until := leaseUntil.UTC()
-	// max(limit, 0): a non-positive limit must not panic make() with a
-	// negative capacity. The loop below already returns nothing for
-	// limit <= 0 (len(jobs) >= limit is true from the first iteration),
-	// matching DequeueJobs' existing behavior for the same input.
-	jobs := make([]*job.Job, 0, max(limit, 0))
-
-	for _, q := range queues {
-		if len(jobs) >= limit {
-			break
-		}
-		remaining := limit - len(jobs)
-
-		members, err := s.rdb.ZPopMin(ctx, queueKey(q), int64(remaining)).Result()
-		if err != nil {
-			return nil, fmt.Errorf("dispatch/redis: dequeue leased zpopmin: %w", err)
-		}
-
-		for _, z := range members {
-			jID, ok := z.Member.(string)
-			if !ok {
-				continue
-			}
-
-			key := jobKey(jID)
-			var e jobEntity
-			if getErr := s.getEntity(ctx, key, &e); getErr != nil {
-				continue // popped from the queue but the entity is gone; skip it
-			}
-
-			e.State = string(job.StateRunning)
-			e.StartedAt = &t
-			e.WorkerID = workerID.String()
-			e.LeaseEpoch++
-			e.LeaseExpiresAt = &until
-			e.UpdatedAt = t
-
-			if setErr := s.setEntity(ctx, key, &e); setErr != nil {
-				return nil, fmt.Errorf("dispatch/redis: dequeue leased update: %w", setErr)
-			}
-
-			j, convErr := fromJobEntity(&e)
-			if convErr != nil {
-				return nil, convErr
-			}
-			jobs = append(jobs, j)
-		}
-	}
-
-	return jobs, nil
-}
+// The grant is not in this file: it travels on job.DequeueOpts and is
+// applied by claimCandidates, in the same read-modify-write that writes
+// the claimed job as running, so a leased claim carries the fit predicate
+// and the ordering like any other. See store/redis/dequeue.go for why
+// that write needs no compare-and-set of its own while the two below do.
 
 // RenewLease extends the lease only if the caller still holds it.
 //

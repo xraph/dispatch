@@ -42,6 +42,10 @@ func (s *Store) EnqueueJob(ctx context.Context, j *job.Job) error {
 // UPDATE ... WHERE id IN (SELECT ... FOR UPDATE SKIP LOCKED) shape that
 // makes the claim atomic is unchanged; the predicate is simply another
 // conjunct of the inner SELECT's WHERE.
+//
+// When opts.Grants() the lease columns are additional assignments in that
+// same UPDATE's SET clause, never a follow-up statement: a job running
+// with no lease is a job ReclaimExpiredLeases is entitled to take back.
 func (s *Store) DequeueJobs(ctx context.Context, opts job.DequeueOpts) ([]*job.Job, error) {
 	// A worker computing zero free slots must claim zero jobs, never the
 	// whole queue. Postgres would already return nothing for LIMIT 0, but
@@ -49,6 +53,10 @@ func (s *Store) DequeueJobs(ctx context.Context, opts job.DequeueOpts) ([]*job.J
 	// neither is worth a round trip.
 	if opts.Limit <= 0 {
 		return nil, nil
+	}
+
+	if err := opts.Validate(); err != nil {
+		return nil, fmt.Errorf(errPrefix+"dequeue jobs: %w", err)
 	}
 
 	query, args := buildDequeueQuery(opts)
@@ -91,16 +99,19 @@ var budgetColumns = []struct {
 	{resource.GPU, "req_gpu_milli"},
 }
 
-// dequeueSQL is the claim statement with three things filled in: the fit
-// predicate, the ordering, and the limit placeholder. The ordering is
-// substituted twice because the inner SELECT decides WHICH rows the LIMIT
-// keeps and the outer SELECT decides the order they come back in —
-// ordering only the outer one would hand a small-limit worker an
-// arbitrary slice of the eligible set in tidy order.
+// dequeueSQL is the claim statement with four things filled in: the lease
+// grant, the fit predicate, the ordering, and the limit placeholder. The
+// ordering is substituted twice because the inner SELECT decides WHICH
+// rows the LIMIT keeps and the outer SELECT decides the order they come
+// back in — ordering only the outer one would hand a small-limit worker
+// an arbitrary slice of the eligible set in tidy order.
+//
+// The grant is a suffix of the SET clause rather than a statement of its
+// own, which is what makes "claimed" and "leased" the same event.
 const dequeueSQL = `
 		WITH dequeued AS (
 			UPDATE dispatch_jobs
-			SET state = 'running', started_at = NOW(), updated_at = NOW()
+			SET state = 'running', started_at = NOW(), updated_at = NOW()%s
 			WHERE id IN (
 				SELECT id FROM dispatch_jobs
 				WHERE state IN ('pending', 'retrying')
@@ -128,11 +139,33 @@ func buildDequeueQuery(opts job.DequeueOpts) (query string, args []any) {
 		return "$" + strconv.Itoa(len(args))
 	}
 
+	grant := buildLeaseGrant(opts, bind)
 	fit := buildFitPredicate(opts, bind)
 	order := buildDequeueOrder(opts, bind)
 	limit := bind(opts.Limit)
 
-	return fmt.Sprintf(dequeueSQL, fit, order, limit, order), args
+	return fmt.Sprintf(dequeueSQL, grant, fit, order, limit, order), args
+}
+
+// buildLeaseGrant renders the lease assignments appended to the claim's
+// SET clause, or "" when opts grants no lease.
+//
+// Empty is the whole backward-compatibility guarantee: a caller that does
+// not opt in emits the statement it emitted before leases existed and
+// leaves worker_id, lease_epoch and lease_expires_at exactly as they were.
+//
+// lease_epoch = lease_epoch + 1 rather than a bound value, because the
+// epoch is the fence: it must advance from whatever the row currently
+// holds, which only the row knows. Reading it and writing back a computed
+// successor would be the read-modify-write this statement exists to avoid.
+func buildLeaseGrant(opts job.DequeueOpts, bind func(any) string) string {
+	if !opts.Grants() {
+		return ""
+	}
+
+	return ",\n\t\t\t    worker_id = " + bind(opts.WorkerID.String()) +
+		",\n\t\t\t    lease_epoch = lease_epoch + 1" +
+		",\n\t\t\t    lease_expires_at = " + bind(opts.LeaseUntil.UTC())
 }
 
 // buildFitPredicate renders the conjuncts that decide WHICH jobs may be

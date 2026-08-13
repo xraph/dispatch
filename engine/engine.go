@@ -257,15 +257,13 @@ func WithWorkerCapacity(c resource.Set) Option {
 // turn the enqueue-time unschedulable check on. See WithWorkerCapacity
 // for why that is opt-in and separate.
 //
-// WARNING — leases. A pool that dequeues through job.LeaseStore calls
-// DequeueLeased(queues, limit), which carries no budget, no custom-key
-// containment and no locality. Every guarantee this manager provides at
-// the STORE is absent on that path: the pool still admits locally, so a
-// job too large for this worker is claimed, refused and requeued on
-// every poll rather than left for a worker that fits. Turning leases and
-// resources on together is the natural upgrade and the combination that
-// looks correctly configured while behaving least like it; see
-// job.LeaseStore.DequeueLeased.
+// Leases compose with this. The grant travels on job.DequeueOpts
+// (WorkerID and LeaseUntil), so a claim that takes a lease is an
+// ordinary claim that also writes the lease columns — it carries the
+// budget, the custom-key containment and the locality preference like
+// any other. There is one dequeue path per backend and it is the one
+// this manager constrains. Turning leases and resources on together is
+// the natural upgrade, and it is a supported one.
 func WithResourceManager(m resource.Manager) Option {
 	return func(eng *Engine) { eng.resources = m }
 }
@@ -477,17 +475,13 @@ func Build(d *dispatch.Dispatcher, opts ...Option) (*Engine, error) {
 		// WithWorkerCapacity.
 		//
 		// No construction-time warning about leases is emitted here, and
-		// the omission is deliberate rather than an oversight. The
-		// combination that loses every guarantee this manager provides is
-		// a pool that DEQUEUES through job.LeaseStore, and no such pool
-		// exists in this tree yet — worker.Pool has exactly one dequeue
-		// path and it is DequeueJobs. Warning on the only fact that is
-		// observable today, "the store happens to implement LeaseStore",
-		// would fire for every postgres, sqlite, mongo and redis
-		// deployment that turns resources on, about something none of
-		// them are doing. The guard is stated where the widening will
-		// happen instead: job.LeaseStore.DequeueLeased and
-		// WithResourceManager.
+		// there is no longer anything to warn about. The lease grant
+		// travels on job.DequeueOpts, so worker.Pool's single dequeue
+		// path — DequeueJobs — is also the path that takes a lease, and
+		// it carries the budget, the custom keys and the locality
+		// preference whether or not a lease is being granted. There is no
+		// second entry point that could claim a job this worker cannot
+		// run. See WithResourceManager and job.LeaseStore.
 	}
 
 	if len(eng.workerCustomKeys) > 0 {

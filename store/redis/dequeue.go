@@ -116,7 +116,9 @@ type dequeueCandidate struct {
 //     is read depends on whether the caller filters anything: see the
 //     unboundedScan* constants.
 //   - claimCandidates wins each survivor by removing it from the queue
-//     index, which is what makes the claim exclusive.
+//     index, which is what makes the claim exclusive, then writes it back
+//     as running — carrying the lease grant when opts.Grants(), in that
+//     same write.
 //
 // A job that does not fit is never removed from the index and never
 // written to: it stays pending and untouched for the next worker that
@@ -138,6 +140,10 @@ func (s *Store) DequeueJobs(ctx context.Context, opts job.DequeueOpts) ([]*job.J
 		return nil, nil
 	}
 
+	if err := opts.Validate(); err != nil {
+		return nil, fmt.Errorf("dispatch/redis: dequeue jobs: %w", err)
+	}
+
 	for range maxDequeueRounds {
 		candidates, err := s.dequeueCandidates(ctx, opts)
 		if err != nil {
@@ -148,7 +154,7 @@ func (s *Store) DequeueJobs(ctx context.Context, opts job.DequeueOpts) ([]*job.J
 			return nil, nil
 		}
 
-		claimed, err := s.claimCandidates(ctx, candidates)
+		claimed, err := s.claimCandidates(ctx, opts, candidates)
 		if err != nil {
 			return nil, err
 		}
@@ -386,10 +392,8 @@ func (s *Store) readJobEntities(ctx context.Context, ids []string) ([]*jobEntity
 // server executes it indivisibly, and of any number of workers racing for
 // one member exactly one gets a reply of 1. Everyone else gets 0 and
 // moves on empty-handed — never a second claim of the same job. That is
-// the same guarantee ZPopMin gave (also one atomic command, also
-// removal-is-the-claim), and it interoperates with the ZPopMin that
-// DequeueLeased still uses: a pop and a rem of the same member cannot
-// both succeed.
+// the same guarantee the ZPopMin this store used before gave: also one
+// atomic command, also removal-is-the-claim.
 //
 // ZREM rather than ZPopMin because ZPopMin chooses its own members by
 // score, which would mean popping jobs this caller has already decided do
@@ -403,7 +407,22 @@ func (s *Store) readJobEntities(ctx context.Context, ids []string) ([]*jobEntity
 // own; this is the identical window the previous ZPopMin implementation
 // had, and a crash inside it leaves the job exactly as a crash after
 // ZPopMin did.
-func (s *Store) claimCandidates(ctx context.Context, candidates []dequeueCandidate) ([]*job.Job, error) {
+//
+// THE LEASE GRANT BELONGS TO THAT SAME WRITE, and stays a plain
+// read-modify-write for exactly the reason above rather than becoming a
+// second SET or a Lua compare-and-set. Winning the ZREM already removed
+// the job from every path any other worker could reach it by, so there is
+// nothing left to race against and no epoch to compare. What must not
+// happen is granting after the running write returns: RenewLease and
+// ReclaimExpiredLeases guard their writes on the epoch, so a job written
+// as running-without-a-lease is one a concurrent reclaim may legitimately
+// take, and the second write would then resurrect a claim the fence had
+// already revoked.
+func (s *Store) claimCandidates(
+	ctx context.Context,
+	opts job.DequeueOpts,
+	candidates []dequeueCandidate,
+) ([]*job.Job, error) {
 	pipe := s.rdb.Pipeline()
 
 	rems := make([]*goredis.IntCmd, len(candidates))
@@ -443,6 +462,13 @@ func (s *Store) claimCandidates(ctx context.Context, candidates []dequeueCandida
 		e.State = string(job.StateRunning)
 		e.StartedAt = &t
 		e.UpdatedAt = t
+
+		if opts.Grants() {
+			until := opts.LeaseUntil.UTC()
+			e.WorkerID = opts.WorkerID.String()
+			e.LeaseEpoch++
+			e.LeaseExpiresAt = &until
+		}
 
 		if setErr := s.setEntity(ctx, key, &e); setErr != nil {
 			return nil, fmt.Errorf("dispatch/redis: dequeue update: %w", setErr)

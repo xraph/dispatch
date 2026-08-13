@@ -12,93 +12,13 @@ import (
 	"github.com/xraph/dispatch/job"
 )
 
-// DequeueLeased claims up to limit ready jobs and grants each a lease.
+// The compile-time check that this store provides the lease capability
+// lives in store.go alongside the other interface assertions.
 //
-// Mongo cannot update-and-return many documents atomically, so this loops
-// FindOneAndUpdate, each iteration its own atomic claim — which is what
-// keeps two workers from taking one job.
-//
-// It deliberately does NOT carry the resource-aware fit predicate or the
-// locality ordering that DequeueJobs gained: LeaseStore takes queues and
-// a limit, not DequeueOpts. Widening the lease path is its own change.
-func (s *Store) DequeueLeased(
-	ctx context.Context,
-	queues []string,
-	limit int,
-	workerID id.WorkerID,
-	leaseUntil time.Time,
-) ([]*job.Job, error) {
-	if limit <= 0 {
-		return nil, nil
-	}
-
-	t := now()
-	jobs := make([]*job.Job, 0, limit)
-
-	for len(jobs) < limit {
-		j, err := s.dequeueOneLeased(ctx, queues, t, workerID, leaseUntil.UTC())
-		if err != nil {
-			return nil, err
-		}
-		if j == nil {
-			break // nothing ready
-		}
-		jobs = append(jobs, j)
-	}
-
-	return jobs, nil
-}
-
-// dequeueOneLeased claims a single ready job and grants it a lease.
-func (s *Store) dequeueOneLeased(
-	ctx context.Context,
-	queues []string,
-	t time.Time,
-	workerID id.WorkerID,
-	leaseUntil time.Time,
-) (*job.Job, error) {
-	col := s.mdb.Collection(colJobs)
-	filter := bson.M{
-		"state":  bson.M{"$in": []string{string(job.StatePending), string(job.StateRetrying)}},
-		"queue":  bson.M{"$in": queues},
-		"run_at": bson.M{"$lte": t},
-	}
-	update := bson.M{
-		"$set": bson.M{
-			"state":            string(job.StateRunning),
-			"started_at":       t,
-			"updated_at":       t,
-			"worker_id":        workerID.String(),
-			"lease_expires_at": leaseUntil,
-		},
-		"$inc": bson.M{"lease_epoch": 1},
-	}
-	opts := options.FindOneAndUpdate().
-		SetReturnDocument(options.After).
-		SetSort(bson.D{
-			{Key: "priority", Value: -1},
-			{Key: "run_at", Value: 1},
-		})
-
-	var m jobModel
-	err := withRetry(ctx, defaultRetry, func(ctx context.Context) error {
-		return col.FindOneAndUpdate(ctx, filter, update, opts).Decode(&m)
-	})
-	if err != nil {
-		if isNoDocuments(err) {
-			return nil, nil
-		}
-
-		return nil, fmt.Errorf("dispatch/mongo: dequeue leased: %w", err)
-	}
-
-	j, convErr := fromJobModel(&m)
-	if convErr != nil {
-		return nil, fmt.Errorf("dispatch/mongo: dequeue leased convert: %w", convErr)
-	}
-
-	return j, nil
-}
+// The grant itself is not in this file: it travels on job.DequeueOpts and
+// is applied by claimOne, inside the same FindOneAndUpdate that claims the
+// document, so a leased claim carries the fit predicate and the ordering
+// like any other. This file holds only what a lease needs afterwards.
 
 // RenewLease extends the lease only if the caller still holds it.
 func (s *Store) RenewLease(

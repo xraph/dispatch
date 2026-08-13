@@ -43,6 +43,10 @@ func (s *Store) EnqueueJob(ctx context.Context, j *job.Job) error {
 // here — the fit predicate is simply another conjunct of the inner
 // SELECT's WHERE, so a job that does not fit is never written to. It stays
 // pending and untouched for the next worker that does have room.
+//
+// When opts.Grants() the lease columns are additional assignments in that
+// same UPDATE's SET clause, never a follow-up statement: a job running
+// with no lease is a job ReclaimExpiredLeases is entitled to take back.
 func (s *Store) DequeueJobs(ctx context.Context, opts job.DequeueOpts) ([]*job.Job, error) {
 	// A worker computing zero free slots must claim zero jobs, never the
 	// whole queue. This early return is load-bearing on SQLite rather than
@@ -60,6 +64,10 @@ func (s *Store) DequeueJobs(ctx context.Context, opts job.DequeueOpts) ([]*job.J
 	// query that could run without a queue list.
 	if len(opts.Queues) == 0 {
 		return nil, nil
+	}
+
+	if err := opts.Validate(); err != nil {
+		return nil, fmt.Errorf("dispatch/sqlite: dequeue jobs: %w", err)
 	}
 
 	query, args := buildDequeueQuery(opts, time.Now().UTC())
@@ -131,10 +139,13 @@ var budgetColumns = []struct {
 	{resource.GPU, "req_gpu_milli"},
 }
 
-// dequeueSQL is the claim statement with five things filled in: the
-// started_at and updated_at placeholders, the queue list, the run_at
-// placeholder, the fit predicate, the ordering, and the limit
-// placeholder.
+// dequeueSQL is the claim statement with everything the caller decides
+// filled in: the started_at and updated_at placeholders, the lease grant,
+// the queue list, the run_at placeholder, the fit predicate, the ordering,
+// and the limit placeholder.
+//
+// The grant is a suffix of the SET clause rather than a statement of its
+// own, which is what makes "claimed" and "leased" the same event.
 //
 // Unlike the Postgres statement this mirrors, the ordering appears once,
 // not twice: there is no outer SELECT to order because SQLite has no
@@ -159,7 +170,7 @@ var budgetColumns = []struct {
 // TestDequeueSelectsPreferredOverNullHashUnderLimit pin it here too.
 const dequeueSQL = `
 		UPDATE dispatch_jobs
-		SET state = 'running', started_at = %s, updated_at = %s
+		SET state = 'running', started_at = %s, updated_at = %s%s
 		WHERE id IN (
 			SELECT id FROM dispatch_jobs
 			WHERE state IN ('pending', 'retrying')
@@ -190,6 +201,7 @@ func buildDequeueQuery(opts job.DequeueOpts, now time.Time) (query string, args 
 	}
 
 	startedAt, updatedAt := bind(now), bind(now)
+	grant := buildLeaseGrant(opts, bind)
 
 	queues := make([]string, len(opts.Queues))
 	for i, q := range opts.Queues {
@@ -202,8 +214,32 @@ func buildDequeueQuery(opts job.DequeueOpts, now time.Time) (query string, args 
 	limit := bind(opts.Limit)
 
 	return fmt.Sprintf(dequeueSQL,
-		startedAt, updatedAt, strings.Join(queues, ","), runAt, fit, order, limit,
+		startedAt, updatedAt, grant, strings.Join(queues, ","), runAt, fit, order, limit,
 	), args
+}
+
+// buildLeaseGrant renders the lease assignments appended to the claim's
+// SET clause, or "" when opts grants no lease.
+//
+// Empty is the whole backward-compatibility guarantee: a caller that does
+// not opt in emits the statement it emitted before leases existed and
+// leaves worker_id, lease_epoch and lease_expires_at exactly as they were.
+//
+// lease_epoch = lease_epoch + 1 rather than a bound value, because the
+// epoch is the fence: it must advance from whatever the row currently
+// holds, which only the row knows. Reading it and writing back a computed
+// successor would be the read-modify-write this statement exists to avoid.
+//
+// It binds between updated_at and the queue list because `?` is
+// positional here — see buildDequeueQuery.
+func buildLeaseGrant(opts job.DequeueOpts, bind func(any) string) string {
+	if !opts.Grants() {
+		return ""
+	}
+
+	return ",\n\t\t    worker_id = " + bind(opts.WorkerID.String()) +
+		",\n\t\t    lease_epoch = lease_epoch + 1" +
+		",\n\t\t    lease_expires_at = " + bind(opts.LeaseUntil.UTC())
 }
 
 // buildFitPredicate renders the conjuncts that decide WHICH jobs may be

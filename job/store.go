@@ -160,6 +160,47 @@ type DequeueOpts struct {
 	// constraint here — a targeted claim that could bypass Budget would
 	// reintroduce exactly the overcommit this predicate prevents.
 	ReservedFor *id.JobID
+
+	// WorkerID is the worker taking the lease. It is required when
+	// LeaseUntil is set and ignored otherwise.
+	WorkerID id.WorkerID
+
+	// LeaseUntil, when non-zero, makes the claim grant a lease: the
+	// claimed rows get WorkerID, this expiry, and an incremented
+	// lease_epoch, in the same statement that claims them.
+	//
+	// A zero value grants no lease and leaves every lease column
+	// untouched, which is exactly how DequeueJobs behaved before leases
+	// existed. That is the backward-compatibility guarantee: a caller
+	// that does not opt in cannot be affected by this.
+	//
+	// The grant must be part of the claim, not a second write. A job that
+	// is running with no lease yet is a job the reclaim loop is entitled
+	// to take back.
+	LeaseUntil time.Time
+}
+
+// Grants reports whether o asks the claim to grant a lease. Backends test
+// intent through this rather than open-coding the zero check five times.
+func (o DequeueOpts) Grants() bool {
+	return !o.LeaseUntil.IsZero()
+}
+
+// Validate reports whether o is a coherent request, and is the one place
+// every backend checks before it writes anything.
+//
+// The only incoherent combination is a grant with no holder. A lease
+// granted to the zero worker can never be renewed, because RenewLease
+// matches on worker ID — so the job would be claimed, left to expire, and
+// reclaimed on every cycle forever, which presents as a queue that never
+// drains rather than as an error. Refusing the claim turns a silent
+// livelock into a caller bug reported at the call that caused it.
+func (o DequeueOpts) Validate() error {
+	if o.Grants() && o.WorkerID.IsNil() {
+		return ErrLeaseWithoutWorker
+	}
+
+	return nil
 }
 
 // IsUnbounded reports whether o restricts WHICH jobs may be claimed.
@@ -350,6 +391,15 @@ type Store interface {
 	// A job that does not fit stays pending and untouched, available to
 	// the next worker that does have room for it.
 	//
+	// When opts.Grants() the same statement also grants a lease: the
+	// claimed rows get opts.WorkerID, opts.LeaseUntil, and an incremented
+	// lease_epoch, and the returned jobs carry the epoch they were
+	// granted. The grant is part of the claim for the same reason the fit
+	// test is — a job running with no lease yet is a job
+	// LeaseStore.ReclaimExpiredLeases is entitled to take back. Opts that
+	// do not grant leave every lease column untouched. A grant with no
+	// WorkerID is refused with ErrLeaseWithoutWorker and claims nothing.
+	//
 	// Every backend must pass storetest.RunDequeueSuite, which is the
 	// contract this signature only sketches.
 	DequeueJobs(ctx context.Context, opts DequeueOpts) ([]*Job, error)
@@ -392,40 +442,18 @@ type Store interface {
 // over a nanosecond integer — and SQLite, Mongo, and Redis have no
 // interval type at all. Passing a timestamp means every backend only
 // writes a value, and lease policy lives in one place.
+//
+// The GRANT is deliberately not here. It travels on DequeueOpts instead
+// (WorkerID and LeaseUntil), so a leased claim is an ordinary claim that
+// also writes the lease columns and therefore carries the budget, the
+// custom-key containment, the locality preference and the reservation
+// like any other. A second dequeue entry point taking (queues, limit)
+// existed here until the two paths had to be kept in sync by hand; it
+// carried none of those, so turning leases and resources on together —
+// the natural upgrade — claimed jobs that could not fit and requeued
+// them on every poll. This interface is what a backend adds ON TOP of
+// Store to make that grant renewable and reclaimable.
 type LeaseStore interface {
-	// DequeueLeased claims up to limit ready jobs, sets them running,
-	// assigns workerID, increments lease_epoch, and sets lease_expires_at
-	// to leaseUntil. The returned jobs carry the epoch they were granted.
-	//
-	// leaseUntil is a short initial grant that only has to survive until
-	// the holder's first renewal; the renewal then extends it using the
-	// job's own LeaseTTL.
-	//
-	// WARNING — this signature takes (queues, limit), NOT DequeueOpts, so
-	// it carries no Budget, no CustomKeys, no ReservedFor and no
-	// PreferHashes. Every guarantee the resource model provides AT THE
-	// STORE is absent on this path, and nothing reports it: a pool that
-	// dequeues through here claims a 64 GiB job onto a 4 GiB worker, the
-	// local admission ledger refuses it, and it is requeued — on every
-	// poll, by every worker, instead of being left for one that fits.
-	// Custom-key containment and locality are simply gone.
-	//
-	// That is the combination the resource model exists to prevent, and
-	// it is the natural upgrade: leases and resources are both things an
-	// operator turns on when a fleet gets big enough to need them, and
-	// together they look correctly configured while behaving least like
-	// it. Nothing in this tree calls DequeueLeased yet. Whoever wires a
-	// pool to it MUST widen this to DequeueOpts first — see
-	// engine.WithResourceManager, which states the same warning from the
-	// other side.
-	DequeueLeased(
-		ctx context.Context,
-		queues []string,
-		limit int,
-		workerID id.WorkerID,
-		leaseUntil time.Time,
-	) ([]*Job, error)
-
 	// RenewLease extends the lease to leaseUntil, but only if the job is
 	// still running, still assigned to workerID, and still at epoch.
 	//

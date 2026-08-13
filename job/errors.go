@@ -20,4 +20,12 @@ var (
 	// LeaseStore, so per-definition lease TTLs and epoch fencing are
 	// unavailable.
 	ErrLeaseNotSupported = errors.New("dispatch/job: store does not implement job.LeaseStore")
+
+	// ErrLeaseWithoutWorker means a dequeue asked for a lease
+	// (DequeueOpts.LeaseUntil) without naming the worker that would hold
+	// it. It is a programming error, not a degenerate case: RenewLease
+	// matches on worker ID, so a lease held by the zero worker can never
+	// be renewed and the job would be claimed and reclaimed on every
+	// cycle forever. Backends refuse the claim rather than granting it.
+	ErrLeaseWithoutWorker = errors.New("dispatch/job: DequeueOpts.LeaseUntil set without WorkerID")
 )

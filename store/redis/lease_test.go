@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/xraph/dispatch/id"
+	"github.com/xraph/dispatch/job"
 	"github.com/xraph/dispatch/store/storetest"
 )
 
@@ -57,9 +58,14 @@ func TestLeaseLargeDurationRoundTrip(t *testing.T) {
 	worker := id.NewWorkerID()
 	now := time.Now().UTC()
 
-	got, err := s.DequeueLeased(ctx, []string{queue}, 1, worker, now.Add(time.Minute))
+	got, err := s.DequeueJobs(ctx, job.DequeueOpts{
+		Queues:     []string{queue},
+		Limit:      1,
+		WorkerID:   worker,
+		LeaseUntil: now.Add(time.Minute),
+	})
 	if err != nil || len(got) != 1 {
-		t.Fatalf("DequeueLeased: %v (n=%d)", err, len(got))
+		t.Fatalf("DequeueJobs: %v (n=%d)", err, len(got))
 	}
 	if got[0].Timeout != bigDuration {
 		t.Fatalf("Timeout after dequeue = %v, want %v", got[0].Timeout, bigDuration)
@@ -115,9 +121,14 @@ func TestLeaseLargeDurationRoundTrip(t *testing.T) {
 		t.Errorf("LeaseTTL after reclaim = %v, want %v (exact)", afterReclaim.LeaseTTL, bigDuration)
 	}
 
-	requeued, err := s.DequeueLeased(ctx, []string{queue}, 1, worker, now.Add(time.Minute))
+	requeued, err := s.DequeueJobs(ctx, job.DequeueOpts{
+		Queues:     []string{queue},
+		Limit:      1,
+		WorkerID:   worker,
+		LeaseUntil: now.Add(time.Minute),
+	})
 	if err != nil {
-		t.Fatalf("DequeueLeased after reclaim: %v", err)
+		t.Fatalf("DequeueJobs after reclaim: %v", err)
 	}
 	if !storetest.Contains(requeued, j.ID) {
 		t.Fatalf("reclaimed job %s was not requeued", j.ID)

@@ -2,7 +2,6 @@ package memory
 
 import (
 	"context"
-	"sort"
 	"time"
 
 	"github.com/xraph/dispatch/id"
@@ -10,71 +9,11 @@ import (
 )
 
 // Compile-time check that the memory store provides the lease capability.
+//
+// The grant itself is not here: it travels on job.DequeueOpts and is
+// applied by DequeueJobs, under the same write lock that performs the
+// claim. This file holds only what a lease needs afterwards.
 var _ job.LeaseStore = (*Store)(nil)
-
-// DequeueLeased claims up to limit ready jobs and grants each a lease.
-func (m *Store) DequeueLeased(
-	_ context.Context,
-	queues []string,
-	limit int,
-	workerID id.WorkerID,
-	leaseUntil time.Time,
-) ([]*job.Job, error) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	queueSet := make(map[string]struct{}, len(queues))
-	for _, q := range queues {
-		queueSet[q] = struct{}{}
-	}
-
-	now := time.Now().UTC()
-
-	candidates := make([]*job.Job, 0, len(m.jobs))
-	for _, j := range m.jobs {
-		if j.State != job.StatePending && j.State != job.StateRetrying {
-			continue
-		}
-		if !j.RunAt.IsZero() && j.RunAt.After(now) {
-			continue
-		}
-		if len(queueSet) > 0 {
-			if _, ok := queueSet[j.Queue]; !ok {
-				continue
-			}
-		}
-		candidates = append(candidates, j)
-	}
-
-	sort.Slice(candidates, func(i, k int) bool {
-		if candidates[i].Priority != candidates[k].Priority {
-			return candidates[i].Priority > candidates[k].Priority
-		}
-
-		return candidates[i].RunAt.Before(candidates[k].RunAt)
-	})
-
-	if limit > 0 && len(candidates) > limit {
-		candidates = candidates[:limit]
-	}
-
-	result := make([]*job.Job, len(candidates))
-	for i, j := range candidates {
-		started := now
-		until := leaseUntil
-
-		j.State = job.StateRunning
-		j.StartedAt = &started
-		j.WorkerID = workerID
-		j.LeaseEpoch++
-		j.LeaseExpiresAt = &until
-		j.UpdatedAt = now
-
-		result[i] = cloneJob(j)
-	}
-
-	return result, nil
-}
 
 // RenewLease extends the lease only if the caller still holds it.
 func (m *Store) RenewLease(

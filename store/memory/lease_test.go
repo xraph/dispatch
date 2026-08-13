@@ -37,17 +37,17 @@ func TestLeaseConformance(t *testing.T) {
 
 // TestLeaseStoreDoesNotAliasResourceMap covers the same class of bug as
 // TestMemoryStoreDoesNotAliasResourceMap (resource_test.go), but for the
-// lease-granting paths: DequeueLeased and ReclaimExpiredLeases both used to
-// hand back a job built from a shallow struct copy, aliasing Resources,
-// ResourceLimits, Payload, and ArtifactBindings against the stored job. A
-// worker mutating its leased job's Resources would silently rewrite the
-// stored requirement.
+// lease-granting paths: the leased claim and ReclaimExpiredLeases both
+// used to hand back a job built from a shallow struct copy, aliasing
+// Resources, ResourceLimits, Payload, and ArtifactBindings against the
+// stored job. A worker mutating its leased job's Resources would silently
+// rewrite the stored requirement.
 //
 // The shared lease conformance suite in store/storetest/lease.go does not
 // check this — it runs against backends where a shallow struct copy isn't
 // even the mechanism, so this case lives here instead.
 func TestLeaseStoreDoesNotAliasResourceMap(t *testing.T) {
-	t.Run("DequeueLeased", func(t *testing.T) {
+	t.Run("DequeueJobsWithGrant", func(t *testing.T) {
 		st := memory.New()
 		ctx := context.Background()
 		worker := id.NewWorkerID()
@@ -59,16 +59,21 @@ func TestLeaseStoreDoesNotAliasResourceMap(t *testing.T) {
 			t.Fatalf("EnqueueJob() error = %v", err)
 		}
 
-		got, err := st.DequeueLeased(ctx, []string{queue}, 1, worker, time.Now().UTC().Add(time.Minute))
+		got, err := st.DequeueJobs(ctx, job.DequeueOpts{
+			Queues:     []string{queue},
+			Limit:      1,
+			WorkerID:   worker,
+			LeaseUntil: time.Now().UTC().Add(time.Minute),
+		})
 		if err != nil {
-			t.Fatalf("DequeueLeased() error = %v", err)
+			t.Fatalf("DequeueJobs() error = %v", err)
 		}
 		if len(got) != 1 {
-			t.Fatalf("DequeueLeased() returned %d jobs, want 1", len(got))
+			t.Fatalf("DequeueJobs() returned %d jobs, want 1", len(got))
 		}
 
-		// A caller mutating what DequeueLeased handed back must not rewrite
-		// the stored job.
+		// A caller mutating what the claim handed back must not rewrite the
+		// stored job.
 		got[0].Resources[resource.Memory] = 1
 
 		stored, err := st.GetJob(ctx, j.ID)
@@ -76,7 +81,7 @@ func TestLeaseStoreDoesNotAliasResourceMap(t *testing.T) {
 			t.Fatalf("GetJob() error = %v", err)
 		}
 		if stored.Resources[resource.Memory] != 8<<30 {
-			t.Fatalf("DequeueLeased aliased the stored map: memory = %d",
+			t.Fatalf("the leased claim aliased the stored map: memory = %d",
 				stored.Resources[resource.Memory])
 		}
 	})

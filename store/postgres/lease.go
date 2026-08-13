@@ -10,60 +10,12 @@ import (
 )
 
 // Compile-time check that the postgres store provides the lease capability.
-var _ job.LeaseStore = (*Store)(nil)
-
-// DequeueLeased claims up to limit ready jobs, grants each a lease held by
-// workerID, and returns them with the epoch they were granted.
 //
-// This is DequeueJobs plus the lease grant, in the same statement. Doing
-// the grant as a second write would leave a window in which a job is
-// running with no lease, and the reclaim loop would take it back.
-func (s *Store) DequeueLeased(
-	ctx context.Context,
-	queues []string,
-	limit int,
-	workerID id.WorkerID,
-	leaseUntil time.Time,
-) ([]*job.Job, error) {
-	var models []jobModel
-	err := s.pgdb.NewRaw(`
-		WITH dequeued AS (
-			UPDATE dispatch_jobs
-			SET state = 'running',
-			    started_at = NOW(),
-			    updated_at = NOW(),
-			    worker_id = $3,
-			    lease_epoch = lease_epoch + 1,
-			    lease_expires_at = $4
-			WHERE id IN (
-				SELECT id FROM dispatch_jobs
-				WHERE state IN ('pending', 'retrying')
-				  AND queue = ANY($1)
-				  AND run_at <= NOW()
-				ORDER BY priority DESC, run_at ASC
-				FOR UPDATE SKIP LOCKED
-				LIMIT $2
-			)
-			RETURNING *
-		)
-		SELECT * FROM dequeued ORDER BY priority DESC, run_at ASC`,
-		queues, limit, workerID.String(), leaseUntil.UTC(),
-	).Scan(ctx, &models)
-	if err != nil {
-		return nil, fmt.Errorf(errPrefix+"dequeue leased: %w", err)
-	}
-
-	jobs := make([]*job.Job, 0, len(models))
-	for i := range models {
-		j, convErr := fromJobModel(&models[i])
-		if convErr != nil {
-			return nil, fmt.Errorf(errPrefix+"dequeue leased convert: %w", convErr)
-		}
-		jobs = append(jobs, j)
-	}
-
-	return jobs, nil
-}
+// The grant itself is not here: it travels on job.DequeueOpts and is
+// compiled into DequeueJobs' claim statement by buildLeaseGrant, so a
+// leased claim carries the fit predicate and the ordering like any other.
+// This file holds only what a lease needs afterwards.
+var _ job.LeaseStore = (*Store)(nil)
 
 // RenewLease extends the lease only if the caller still holds it.
 func (s *Store) RenewLease(

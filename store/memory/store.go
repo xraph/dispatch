@@ -2,6 +2,7 @@ package memory
 
 import (
 	"context"
+	"fmt"
 	"sort"
 	"sync"
 	"time"
@@ -137,9 +138,17 @@ func (m *Store) EnqueueJob(_ context.Context, j *job.Job) error {
 // rather than reading zero as "unlimited". The fit predicate itself is
 // job.DequeueOpts.Allows / Less, not reimplemented here, so this store
 // stays the reference the SQL backends are checked against.
+//
+// When opts.Grants() the claim also grants a lease. The whole claim runs
+// under one write lock, so the grant is part of it: the job is never
+// visible to ReclaimExpiredLeases as running-without-a-lease.
 func (m *Store) DequeueJobs(_ context.Context, opts job.DequeueOpts) ([]*job.Job, error) {
 	if opts.Limit <= 0 {
 		return nil, nil
+	}
+
+	if err := opts.Validate(); err != nil {
+		return nil, fmt.Errorf("dispatch/memory: dequeue jobs: %w", err)
 	}
 
 	m.mu.Lock()
@@ -193,7 +202,20 @@ func (m *Store) DequeueJobs(_ context.Context, opts job.DequeueOpts) ([]*job.Job
 		j.State = job.StateRunning
 		n := now
 		j.StartedAt = &n
-		// Return a copy so callers can mutate without racing with the store.
+		j.UpdatedAt = now
+
+		if opts.Grants() {
+			until := opts.LeaseUntil
+			j.WorkerID = opts.WorkerID
+			j.LeaseEpoch++
+			j.LeaseExpiresAt = &until
+		}
+
+		// Return a copy so callers can mutate without racing with the
+		// store. cloneJob deep-copies Resources, ResourceLimits, Payload
+		// and ArtifactBindings; a shallow struct copy here would let a
+		// worker mutating its claimed job rewrite the stored requirement
+		// (TestLeaseStoreDoesNotAliasResourceMap).
 		result[i] = cloneJob(j)
 	}
 

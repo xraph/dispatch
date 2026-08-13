@@ -54,67 +54,14 @@ func withBusyRetry(ctx context.Context, fn func() error) error {
 	return err
 }
 
-// DequeueLeased claims up to limit ready jobs and grants each a lease held
-// by workerID, in one statement so no job is ever running without a lease.
-func (s *Store) DequeueLeased(
-	ctx context.Context,
-	queues []string,
-	limit int,
-	workerID id.WorkerID,
-	leaseUntil time.Time,
-) ([]*job.Job, error) {
-	now := time.Now().UTC()
-
-	placeholders := make([]string, len(queues))
-	args := make([]any, 0, len(queues)+6)
-	// SET clause: started_at, updated_at, worker_id, lease_expires_at.
-	args = append(args, now, now, workerID.String(), leaseUntil.UTC())
-	for i, q := range queues {
-		placeholders[i] = "?"
-		args = append(args, q)
-	}
-	args = append(args, now, limit) // run_at <=, LIMIT
-
-	query := fmt.Sprintf(`
-		UPDATE dispatch_jobs
-		SET state = 'running',
-		    started_at = ?,
-		    updated_at = ?,
-		    worker_id = ?,
-		    lease_expires_at = ?,
-		    lease_epoch = lease_epoch + 1
-		WHERE id IN (
-			SELECT id FROM dispatch_jobs
-			WHERE state IN ('pending', 'retrying')
-			  AND queue IN (%s)
-			  AND run_at <= ?
-			ORDER BY priority DESC, run_at ASC
-			LIMIT ?
-		)
-		RETURNING *`,
-		strings.Join(placeholders, ","),
-	)
-
-	var models []jobModel
-	err := withBusyRetry(ctx, func() error {
-		models = nil
-		return s.sdb.NewRaw(query, args...).Scan(ctx, &models)
-	})
-	if err != nil {
-		return nil, fmt.Errorf("dispatch/sqlite: dequeue leased: %w", err)
-	}
-
-	jobs := make([]*job.Job, 0, len(models))
-	for i := range models {
-		j, convErr := fromJobModel(&models[i])
-		if convErr != nil {
-			return nil, fmt.Errorf("dispatch/sqlite: dequeue leased convert: %w", convErr)
-		}
-		jobs = append(jobs, j)
-	}
-
-	return jobs, nil
-}
+// The compile-time check that this store provides the lease capability
+// lives in store.go alongside the other interface assertions.
+//
+// The grant itself is not in this file: it travels on job.DequeueOpts and
+// is compiled into DequeueJobs' claim statement by buildLeaseGrant, so a
+// leased claim carries the fit predicate and the ordering like any other.
+// This file holds only what a lease needs afterwards, plus the SQLITE_BUSY
+// retry those writes and the claim share.
 
 // RenewLease extends the lease only if the caller still holds it.
 func (s *Store) RenewLease(
