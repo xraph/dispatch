@@ -137,25 +137,20 @@ func (c *Cache) releaseHold(h *hold) {
 	h.bytes = 0
 }
 
-// wake asks the manager's waiters to re-check after an entry stopped
-// being leased.
+// wake tells the manager this cache has something to give that it did
+// not a moment ago.
 //
-// That entry just became evictable, so an Acquire that already asked
-// this cache to reclaim, was told "everything is pinned", and went to
-// sleep can now be satisfied. The manager broadcasts when a lease is
-// released and on nothing else — it cannot observe a change in what its
-// reclaimers are holding — so a zero-unit lease taken and immediately
-// released is the smallest honest way to say so: it moves no capacity
-// in either direction and costs two turns of the manager's mutex.
+// An entry whose last stager let go is evictable now, and nothing about
+// that released a lease, so the manager has no way to notice on its
+// own. Manager.Wake carries a generation the acquirer re-checks under
+// the lock, which is what makes this survive the window where the
+// acquirer is mid-reclaim and not yet waiting — a plain broadcast there
+// would be heard by nobody.
 //
-// Without it, a stager blocked behind a fully leased cache would sleep
-// until its deadline even though the space it needs was freed a
-// millisecond later, and the job would requeue for no reason.
+// Without it a stager blocked behind a fully leased cache sleeps to its
+// deadline even though the space it needed was freed a millisecond
+// later, and the job requeues for no reason: the worker goes quiet
+// instead of failing.
 func (c *Cache) wake() {
-	l, ok := c.resources.TryAcquire(holdOwner, nil)
-	if !ok {
-		return
-	}
-
-	l.Release()
+	c.resources.Wake()
 }

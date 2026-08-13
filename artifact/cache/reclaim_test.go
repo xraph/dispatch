@@ -3,6 +3,7 @@ package cache_test
 import (
 	"context"
 	"os"
+	"sync"
 	"testing"
 	"time"
 
@@ -327,6 +328,93 @@ func TestBlockedStageWakesWhenAnEntryIsReleased(t *testing.T) {
 	}
 
 	assertLedgerBalanced(t, mgr)
+}
+
+// TestConcurrentStageAndReclaim runs the two paths that touch the entry
+// table against each other under -race: stagers pinning, using and
+// releasing entries while jobs reclaim the same volume out from under
+// them.
+//
+// It is looking for three things a single-threaded test cannot see. A
+// deadlock, because Reclaim takes the table lock and then the manager's
+// while Acquire is holding neither and Available must hold only the
+// first. A path handed back for a file eviction already unlinked, which
+// is what the pin-or-retry loop in Stage exists to prevent. And a
+// ledger that stops matching its leases, which is what a reclaimer
+// crediting the manager itself would produce.
+func TestConcurrentStageAndReclaim(t *testing.T) {
+	const (
+		objects = 8
+		stagers = 6
+		rounds  = 40
+	)
+
+	mgr := resource.NewManager(resource.Set{resource.Disk: 45})
+	c := managedCache(t, mgr, objects, entrySize)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	var wg sync.WaitGroup
+
+	for s := range stagers {
+		wg.Add(1)
+
+		go func(s int) {
+			defer wg.Done()
+
+			for r := range rounds {
+				ref := artifact.Ref{
+					Bucket: "m",
+					Key:    objectKey((s + r) % objects),
+					Size:   entrySize,
+				}
+
+				path, _, release, err := c.Stage(ctx, ref)
+				if err != nil {
+					t.Errorf("stager %d round %d: %v", s, r, err)
+
+					return
+				}
+
+				// The whole point of a lease: while it is held, the file
+				// is there. A reclaimer taking it would show up here.
+				if _, serr := os.Stat(path); serr != nil {
+					t.Errorf("stager %d round %d: staged path unusable: %v", s, r, serr)
+				}
+
+				release()
+			}
+		}(s)
+	}
+
+	// A job competing for the same volume, redeeming the disk the cache
+	// is holding.
+	wg.Add(1)
+
+	go func() {
+		defer wg.Done()
+
+		for range rounds {
+			lease, err := mgr.Acquire(ctx, "job", resource.Set{resource.Disk: 20})
+			if err != nil {
+				t.Errorf("job admission: %v", err)
+
+				return
+			}
+
+			lease.Release()
+		}
+	}()
+
+	wg.Wait()
+
+	assertLedgerBalanced(t, mgr)
+
+	if used, avail := c.Used(), c.Available(resource.Disk); avail > used {
+		t.Fatalf("Available(disk) = %d exceeds Used() = %d — the cache is offering bytes it does not hold",
+			avail, used)
+	}
 }
 
 // TestCachedBytesAdmitAJobThatWouldNotFit is the property the whole

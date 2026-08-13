@@ -2,7 +2,6 @@ package cache
 
 import (
 	"sync"
-	"time"
 )
 
 // entry is one cached object on disk.
@@ -21,8 +20,15 @@ type entry struct {
 	// leases counts the stagers currently using this entry. An entry with
 	// leases > 0 must never be evicted: a running handler holds its path.
 	leases int
-	// lastUsed drives least-recent-use eviction.
-	lastUsed time.Time
+	// coords are the coordinate aliases resolving to this entry, so
+	// eviction can drop them by name instead of scanning every alias in
+	// the table.
+	coords []string
+	// prev, next and evictable thread the eviction list. An entry is on
+	// that list exactly while nothing holds it; evictable says so,
+	// because a list of one has nil on both sides.
+	prev, next *entry
+	evictable  bool
 }
 
 // entryTable holds the cache's in-memory view of what is on disk.
@@ -31,10 +37,27 @@ type entry struct {
 // authoritative. byCoord maps an artifact's storage coordinates to a hash
 // so a ref whose content_hash is still NULL — every freshly registered
 // artifact — can hit the cache on its second stage.
+//
+// Everything here is O(1). Eviction runs on the admission path, where a
+// worker has one poll interval to free what a claimed job needs, and a
+// scan of the table per victim would put the cost of one eviction in
+// proportion to how warm the cache is. A 20 GiB cache of 100 KiB
+// objects is 200k entries: scanning made a single eviction cost
+// milliseconds, so a batch could free tens of megabytes and the disk a
+// worker offered as free-plus-reclaimable stopped being redeemable at
+// exactly the size where it mattered.
 type entryTable struct {
 	mu      sync.Mutex
 	byHash  map[string]*entry
 	byCoord map[string]string
+
+	// head and tail are the eviction list, most recently released
+	// first, so the tail is always the victim and finding it is a
+	// pointer read. Only unleased entries are linked, which is what
+	// makes that true without a scan past the pinned ones.
+	head, tail *entry
+	// evictable totals the bytes on that list.
+	evictable int64
 }
 
 func newEntryTable() *entryTable {
@@ -92,11 +115,10 @@ func (t *entryTable) put(e *entry, coord string) *entry {
 	if !ok {
 		live = e
 		t.byHash[e.hash] = e
+		t.link(e)
 	}
 
-	if coord != "" {
-		t.byCoord[coord] = live.hash
-	}
+	t.aliasLocked(coord, live)
 
 	return live
 }
@@ -110,19 +132,38 @@ func (t *entryTable) alias(coord, hash string) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 
-	t.byCoord[coord] = hash
+	if e, ok := t.byHash[hash]; ok {
+		t.aliasLocked(coord, e)
+	}
 }
 
-// lease pins an entry and marks it recently used.
+// aliasLocked records a coordinate against an entry, once.
+//
+// The repeat check is not an optimisation: every cache hit on a
+// content-hashed ref re-aliases the same coordinate, and appending each
+// time would grow the entry's coords slice for as long as the entry
+// lives. A coordinate that moves to a different entry leaves its name
+// behind on the old one, which costs nothing — eviction only deletes an
+// alias that still resolves to the entry being evicted.
+func (t *entryTable) aliasLocked(coord string, e *entry) {
+	if coord == "" || t.byCoord[coord] == e.hash {
+		return
+	}
+
+	t.byCoord[coord] = e.hash
+	e.coords = append(e.coords, coord)
+}
+
+// lease pins an entry and takes it off the eviction list.
 //
 // It reports false when the entry is no longer in the table, which
 // means eviction took it: the file is gone and its bytes have been
 // credited back to the manager, so the caller must go and stage it
 // again rather than pin a corpse. Checking membership under the same
 // lock that evictLRU removes under is what makes the two mutually
-// exclusive — either this pins the entry first and eviction skips it,
-// or eviction wins and this fails.
-func (t *entryTable) lease(e *entry, now time.Time) bool {
+// exclusive — either this pins the entry first and eviction cannot see
+// it, or eviction wins and this fails.
+func (t *entryTable) lease(e *entry) bool {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 
@@ -131,14 +172,21 @@ func (t *entryTable) lease(e *entry, now time.Time) bool {
 	}
 
 	e.leases++
-	e.lastUsed = now
+
+	if e.leases == 1 {
+		t.unlink(e)
+	}
 
 	return true
 }
 
 // release unpins an entry and reports whether that was its last lease.
-// Only that release changes what eviction could free, so only that one
-// is worth waking a blocked acquirer for.
+//
+// The last release puts the entry back at the head of the eviction
+// list, which is what "recently used" means here: an entry's place in
+// the queue is set by when it stopped being used, not by when it was
+// picked up. Only that release changes what eviction could free, so
+// only that one is worth waking a blocked acquirer for.
 func (t *entryTable) release(e *entry) bool {
 	t.mu.Lock()
 	defer t.mu.Unlock()
@@ -149,40 +197,59 @@ func (t *entryTable) release(e *entry) bool {
 
 	e.leases--
 
-	return e.leases == 0
+	if e.leases > 0 {
+		return false
+	}
+
+	// An entry only leaves the table by eviction and eviction never
+	// takes a leased one, so this one is still there — belt and braces
+	// against a future path that is not so careful.
+	if t.byHash[e.hash] == e {
+		t.link(e)
+	}
+
+	return true
 }
 
-// evictLRU removes the least recently used unleased entry and returns it.
-// It returns nil when every entry is leased.
+// evictLRU removes the least recently used unleased entry and returns
+// it. It returns nil when every entry is leased.
 func (t *entryTable) evictLRU() *entry {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 
-	var victim *entry
-
-	for _, e := range t.byHash {
-		if e.leases > 0 {
-			continue
-		}
-
-		if victim == nil || e.lastUsed.Before(victim.lastUsed) {
-			victim = e
-		}
-	}
-
+	victim := t.tail
 	if victim == nil {
 		return nil
 	}
 
-	delete(t.byHash, victim.hash)
-
-	for coord, hash := range t.byCoord {
-		if hash == victim.hash {
-			delete(t.byCoord, coord)
-		}
-	}
+	t.forget(victim)
 
 	return victim
+}
+
+// drain empties the table and returns everything that was in it,
+// leased entries included, for the caller to delete and account for.
+//
+// Taking the entries out under the lock is what makes Purge safe
+// against a concurrent eviction: an entry leaves the table exactly
+// once, so its hold is released exactly once, and the two paths cannot
+// both claim the same bytes.
+func (t *entryTable) drain() []*entry {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	out := make([]*entry, 0, len(t.byHash))
+	for _, e := range t.byHash {
+		out = append(out, e)
+		t.unlink(e)
+
+		e.coords = nil
+	}
+
+	t.byHash = make(map[string]*entry)
+	t.byCoord = make(map[string]string)
+
+	return out
 }
 
 // evictableBytes totals the entries that could be evicted right now.
@@ -192,26 +259,67 @@ func (t *entryTable) evictableBytes() int64 {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 
-	var total int64
+	return t.evictable
+}
 
-	for _, e := range t.byHash {
-		if e.leases == 0 {
-			total += e.size
+// forget removes an entry from the table entirely: the eviction list,
+// the hash index, and every alias that still resolves to it.
+func (t *entryTable) forget(e *entry) {
+	t.unlink(e)
+	delete(t.byHash, e.hash)
+
+	for _, coord := range e.coords {
+		if t.byCoord[coord] == e.hash {
+			delete(t.byCoord, coord)
 		}
 	}
 
-	return total
+	e.coords = nil
 }
 
-// all returns a snapshot of every entry.
-func (t *entryTable) all() []*entry {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-
-	out := make([]*entry, 0, len(t.byHash))
-	for _, e := range t.byHash {
-		out = append(out, e)
+// link puts an entry at the head of the eviction list.
+func (t *entryTable) link(e *entry) {
+	if e.evictable {
+		return
 	}
 
-	return out
+	e.evictable = true
+	e.prev = nil
+	e.next = t.head
+
+	if t.head != nil {
+		t.head.prev = e
+	}
+
+	t.head = e
+
+	if t.tail == nil {
+		t.tail = e
+	}
+
+	t.evictable += e.size
+}
+
+// unlink takes an entry off the eviction list.
+func (t *entryTable) unlink(e *entry) {
+	if !e.evictable {
+		return
+	}
+
+	e.evictable = false
+
+	if e.prev != nil {
+		e.prev.next = e.next
+	} else {
+		t.head = e.next
+	}
+
+	if e.next != nil {
+		e.next.prev = e.prev
+	} else {
+		t.tail = e.prev
+	}
+
+	e.prev, e.next = nil, nil
+	t.evictable -= e.size
 }

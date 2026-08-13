@@ -11,7 +11,6 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
-	"time"
 
 	"github.com/zeebo/blake3"
 	"golang.org/x/sync/singleflight"
@@ -36,6 +35,12 @@ const (
 // hashPrefix labels the digest so the algorithm is visible wherever a
 // hash is stored or logged.
 const hashPrefix = "blake3:"
+
+// maxStageAttempts bounds Stage's re-download loop. Each attempt means
+// an entry was evicted between being staged and being pinned, which
+// takes a cache under enough pressure that the next attempt is unlikely
+// to fare better.
+const maxStageAttempts = 8
 
 // Cache stages artifacts to local disk, content-addressed and bounded by
 // a byte budget. It is safe for concurrent use.
@@ -194,7 +199,6 @@ func (c *Cache) resetTmp() error {
 // accounting exists to close. The cost is a re-download.
 func (c *Cache) rebuild() error {
 	root := filepath.Join(c.dir, hashDir)
-	now := time.Now()
 
 	err := filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
@@ -221,11 +225,10 @@ func (c *Cache) rebuild() error {
 
 		// One file per hash on disk, so this never collides.
 		_ = c.entries.put(&entry{
-			hash:     hashPrefix + d.Name(),
-			path:     path,
-			size:     info.Size(),
-			hold:     h,
-			lastUsed: now,
+			hash: hashPrefix + d.Name(),
+			path: path,
+			size: info.Size(),
+			hold: h,
 		}, "")
 
 		return nil
@@ -259,10 +262,17 @@ func (c *Cache) Stage(ctx context.Context, ref artifact.Ref) (path, hash string,
 	// path whose file has just been unlinked — and whose bytes the
 	// manager has already credited to someone else — is worse than
 	// paying for the download again.
-	for {
+	//
+	// Bounded, because the retry is only correct while it is rare. An
+	// entry evicted before its own stager can pin it means the cache is
+	// thrashing hard enough that this artifact will not survive being
+	// fetched however many times we try, and a job that fails saying so
+	// beats one that downloads forever under a context with no
+	// deadline.
+	for range maxStageAttempts {
 		// Fast path: a ref that already knows its hash, or coordinates
 		// we have staged before.
-		if e, ok := c.lookup(ref, coord); ok && c.entries.lease(e, time.Now()) {
+		if e, ok := c.lookup(ref, coord); ok && c.entries.lease(e) {
 			return e.path, e.hash, c.releaseFunc(e), nil
 		}
 
@@ -280,7 +290,7 @@ func (c *Cache) Stage(ctx context.Context, ref artifact.Ref) (path, hash string,
 			return "", "", nil, fmt.Errorf("dispatch/artifact/cache: unexpected flight result %T", res)
 		}
 
-		if c.entries.lease(e, time.Now()) {
+		if c.entries.lease(e) {
 			return e.path, e.hash, c.releaseFunc(e), nil
 		}
 
@@ -289,6 +299,9 @@ func (c *Cache) Stage(ctx context.Context, ref artifact.Ref) (path, hash string,
 				ref.Bucket, ref.Key, cerr)
 		}
 	}
+
+	return "", "", nil, fmt.Errorf("%w: %s/%s was evicted before it could be used, %d times running",
+		ErrBudgetExceeded, ref.Bucket, ref.Key, maxStageAttempts)
 }
 
 // lookup resolves a cached entry by hash, then by coordinates.
@@ -416,11 +429,10 @@ func (c *Cache) download(ctx context.Context, ref artifact.Ref, coord string) (*
 	}
 
 	e := &entry{
-		hash:     hash,
-		path:     final,
-		size:     written,
-		hold:     h,
-		lastUsed: time.Now(),
+		hash: hash,
+		path: final,
+		size: written,
+		hold: h,
 	}
 
 	// A racing download of the same bytes under different coordinates
@@ -554,12 +566,15 @@ func (c *Cache) Reclaim(ctx context.Context, key string, need int64) (int64, err
 // Available reports the bytes eviction could free right now, satisfying
 // resource.Reclaimer.
 //
-// It reads the entry table and nothing else. Reclaim reaches the
-// manager — releasing a lease is how it gives bytes back — but only
-// after it has let go of the table lock, so the two locks are taken in
-// sequence and never nested. Totalling the leases here instead of the
-// entries would nest them the other way round, on the one call the
-// manager makes while a caller is mid-Acquire. That is the deadlock.
+// It reads the entry table and nothing else. The guarantee this cache
+// keeps is that the table lock and the manager's lock are never held at
+// the same time — not that one is always taken first; rebuild takes
+// them in the opposite sequence and is safe for exactly that reason.
+// Reclaim lets go of the table before releasing a lease. Totalling the
+// leases here instead of the entry sizes would break the rule on the
+// one call the manager makes while a caller is mid-Acquire, and hold
+// the table under the manager's lock while Reclaim waits for the table.
+// That is the deadlock.
 func (c *Cache) Available(key string) int64 {
 	if key != resource.Disk {
 		return 0
@@ -577,13 +592,17 @@ func (c *Cache) removeQuietly(path string) {
 }
 
 // Purge removes every cached file and returns its bytes to the manager.
+//
+// The table is drained under its own lock rather than replaced, so an
+// eviction running at the same time cannot pick an entry this loop has
+// already released: each entry leaves the table once and its hold goes
+// back once. It still assumes no live stagers — Purge deletes files
+// out from under anything holding one, which was always its contract.
 func (c *Cache) Purge() error {
-	for _, e := range c.entries.all() {
+	for _, e := range c.entries.drain() {
 		c.removeQuietly(e.path)
 		c.releaseHold(e.hold)
 	}
-
-	c.entries = newEntryTable()
 
 	if err := os.RemoveAll(filepath.Join(c.dir, hashDir)); err != nil {
 		return fmt.Errorf("dispatch/artifact/cache: purge: %w", err)

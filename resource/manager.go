@@ -81,6 +81,16 @@ type Manager interface {
 
 	// RegisterReclaimer installs the reclaim policy for one key.
 	RegisterReclaimer(key string, r Reclaimer)
+	// Wake tells blocked acquirers that a reclaimer's holdings changed
+	// — that something now reclaimable was not a moment ago.
+	//
+	// The manager broadcasts when a lease is released and on nothing
+	// else, and it cannot see inside a reclaimer. An artifact cache
+	// whose last stager lets go of an entry has just made those bytes
+	// evictable without releasing anything, so the acquirer that asked
+	// for them, was told "everything is pinned", and went to sleep will
+	// sleep to its deadline unless it is told to look again.
+	Wake()
 }
 
 // ManagerOption configures a manager.
@@ -103,6 +113,13 @@ type manager struct {
 	capacity   Set
 	used       Set
 	reclaimers map[string]Reclaimer
+	// reclaimGen counts Wake calls. A broadcast only reaches a waiter
+	// already inside cond.Wait, and the window this has to cross —
+	// reclaimLocked running with the lock dropped — is precisely when
+	// the acquirer is not yet waiting. So the signal is left as state
+	// the acquirer re-checks under the lock rather than as an event it
+	// has to be present for.
+	reclaimGen uint64
 
 	nextID int64
 	leases map[int64]*lease
@@ -141,6 +158,25 @@ func (m *manager) RegisterReclaimer(key string, r Reclaimer) {
 	}
 
 	m.reclaimers[key] = r
+}
+
+// Wake records that a reclaimer's holdings changed and wakes the
+// waiters.
+//
+// The counter is the part that matters. reclaimLocked drops this lock
+// across Reclaim, because eviction does I/O and calls back in to
+// release a lease, and a caller that completes a whole wake cycle
+// inside that window would otherwise broadcast to nobody: the acquirer
+// is between "you have nothing to give me" and cond.Wait, and it goes
+// to sleep having missed the one thing that would have helped it.
+// Bumping a generation the acquirer re-reads under the lock turns that
+// lost edge into state it cannot miss.
+func (m *manager) Wake() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	m.reclaimGen++
+	m.cond.Broadcast()
 }
 
 func (m *manager) Capacity() Set {
@@ -238,11 +274,35 @@ func (m *manager) Acquire(ctx context.Context, owner string, want Set) (Lease, e
 				ErrCapacityExceeded, want.Exceeds(m.freeLocked()), err)
 		}
 
+		// Read before reclaimLocked, compared after: that call is the
+		// only place this loop lets go of the lock, so it is the only
+		// window a Wake can land in unheard.
+		gen := m.reclaimGen
+
 		if m.reclaimLocked(ctx, want) {
 			continue
 		}
 
+		if m.reclaimGen != gen {
+			// A reclaimer gained something while we were asking a
+			// different question. Ask again rather than sleep on an
+			// answer that is already stale.
+			continue
+		}
+
+		if ctx.Err() != nil {
+			// The deadline may have passed while reclaimLocked had this
+			// lock dropped, and watchContext broadcasts exactly once —
+			// to nobody, since we were not waiting yet. Going into Wait
+			// now would be waiting forever for a wake-up that has
+			// already happened. Round the loop instead and let the
+			// check at the top return the error.
+			continue
+		}
+
 		// Nothing reclaimable on any short key. Only a release can help.
+		// Nothing above releases the lock, so the ctx watcher's
+		// broadcast cannot slip past between that check and this wait.
 		m.cond.Wait()
 	}
 
