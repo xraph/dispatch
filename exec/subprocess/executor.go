@@ -553,11 +553,16 @@ func (e *Executor) buildEnv(req *exec.Request) []string {
 // and its own wait status for what happened to the process. A deadline
 // expiry is reported as StatusTimeout regardless of what the frame says —
 // timedOut is only ever set by the waitLoop above after it has already
-// checked, non-blockingly, that the process had not already finished on
-// its own; by the time classify sees timedOut, the kill is what actually
-// happened, not a coin flip this function has to second-guess. Short of
-// that, a decoded frame is authoritative for the status it reports, unless
-// the process still died on a signal — a frame claiming StatusOK from a
+// checked, non-blockingly, that waitCh was not already deliverable, so the
+// uniform-random select tie that used to reach classify directly is
+// resolved before timedOut is ever set. That check is on the channel, not
+// the process: if the child happened to exit microseconds earlier and the
+// Wait() goroutine simply had not yet delivered to waitCh, timedOut still
+// ends up true and killProcess no-ops on an already-gone process. The
+// window this leaves is reap-and-deliver latency, not the width of a
+// select's random pick — narrowed, not eliminated. Short of that, a
+// decoded frame is authoritative for the status it reports, unless the
+// process still died on a signal — a frame claiming StatusOK from a
 // process that was, in fact, killed is not to be believed, so the process
 // status wins that disagreement. Absent a usable frame entirely — the shim
 // never got the chance to report, or its report was cut off mid-write —

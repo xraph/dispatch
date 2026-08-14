@@ -46,13 +46,41 @@ func sysProcAttr() *syscall.SysProcAttr {
 // Go statements, and the waitLoop fix above (checking waitCh before
 // setting timedOut) removes the specific interleaving that used to make
 // that gap wide enough to matter in practice.
+//
+// Two trades this makes, both deliberate:
+//
+// A non-ErrProcessDone probe error falls through to attempt the group
+// kill anyway rather than returning it. waitLoop has no way to make
+// progress other than waitCh eventually firing, so a killGroup that gives
+// up here would not fail the attempt — it would hang Run indefinitely
+// instead, waiting on a kill that was never sent to a process that is
+// never going to exit on its own. That is strictly worse than attempting
+// a kill that might itself fail: today, signalling this package's own
+// child, there is no path that produces a non-ErrProcessDone error here,
+// but Task 5 adds a Credential with a dedicated uid, and a uid boundary
+// makes EPERM a real possibility the moment that lands. A failed kill is
+// recoverable — classify still has the process's actual wait status to
+// report from, whatever it turns out to be; a kill that was never
+// attempted is not.
+//
+// An ErrProcessDone probe result returns immediately, without ever
+// reaching the group kill below — which means a leader reaped in the gap
+// between waitLoop's own check and this probe leaves any surviving
+// grandchildren unswept, where the old unconditional syscall.Kill(-pid,
+// ...) (pid == pgid here) would still have reached them, since a pgid
+// stays valid as long as any member of the group is still alive, leader
+// or not. Attempting the kill anyway in that case was considered and
+// rejected: it would mean signalling a pgid derived from a pid the kernel
+// may already have handed to an unrelated process group, which is the
+// exact hazard this probe exists to avoid — reaching a stray grandchild is
+// not worth reintroducing that. This narrows an already-partial guarantee
+// rather than removing a complete one: a grandchild left behind by a
+// tracked process that exited cleanly on its own, before killProcess was
+// ever called at all, was already unreachable by this function (see the
+// drainGrace comment in Run).
 func killGroup(cmd *osexec.Cmd) error {
-	if err := cmd.Process.Signal(syscall.Signal(0)); err != nil {
-		if errors.Is(err, os.ErrProcessDone) {
-			return nil
-		}
-
-		return err
+	if err := cmd.Process.Signal(syscall.Signal(0)); err != nil && errors.Is(err, os.ErrProcessDone) {
+		return nil
 	}
 
 	return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
