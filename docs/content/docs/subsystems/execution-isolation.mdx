@@ -59,8 +59,10 @@ var Tessellate = job.NewDefinition("tessellate.model",
 
 `exec.Isolate` sets the minimum level. `exec.GracePeriod` sets how long a
 sandbox gets to exit cleanly after being signalled before it is killed
-outright — later rungs use this for their kill ladder; the in-process
-executor ignores it, since there's no process to signal. `exec.Image`
+outright — `exec/subprocess`'s kill ladder already uses this today (see
+"Deadlines are enforced, not just cancelled" below), and later
+out-of-process rungs will too; the in-process executor ignores it, since
+there's no process to signal. `exec.Image`
 overrides the container image an out-of-process rung launches, for a handler
 that needs something other than the worker's own image. `exec.AllowDowngrade`
 is covered next.
@@ -122,9 +124,12 @@ subprocessExecutor := subprocess.New(
     subprocess.WithUser(65534, 65534), // never the worker's own uid — see below
 )
 
-eng := engine.Build(d,
+eng, err := engine.Build(d,
     engine.WithExecutor(subprocessExecutor),
 )
+if err != nil {
+    log.Fatal(err)
+}
 ```
 
 The in-process executor is always present as the default, so a deployment
@@ -155,8 +160,10 @@ if err := engine.RegisterAll(eng, defs...); err != nil {
 
 `RegisterAll` validates every definition's policy before registering any of
 them, so a rejected set leaves the registry as it was rather than half
-populated. This is also the seam a future out-of-process entrypoint uses: it
-can be handed the same `[]job.Registrable` without ever holding an `*Engine`.
+populated. This is also the seam `shim.Main` already uses, today, as the
+subprocess rung's out-of-process entrypoint (see "The subprocess rung"
+below): it is handed the same `[]job.Registrable` without ever holding an
+`*Engine`.
 
 ## The subprocess rung
 
@@ -167,10 +174,15 @@ refuses to start without one unless the operator explicitly opts out (see
 "The dedicated uid is mandatory" below) — with POSIX resource limits
 applied, and a kill ladder enforces the deadline instead of trusting the
 handler to notice a cancelled context. The child never receives the
-worker's environment or its memory, so it cannot read credentials that live
-there; the dedicated uid is what stops it from reading the ones that live
-on disk instead — the worker's own config file, a mounted secret — since
-the child shares the worker's filesystem view.
+worker's memory, and not its environment wholesale either — only a fixed
+allowlist (`PATH`, `HOME`, `TMPDIR`) is copied across, everything else
+comes from the request's own `Env`, constructed rather than inherited —
+so it cannot read a credential that lived only in some other worker
+environment variable. `HOME` is in that allowlist, though, which is
+exactly what locates `~/.aws` below; the dedicated uid is what actually
+stops the child from reading credentials that live on disk — the
+worker's own config file, a mounted secret, `~/.aws` — since the child
+shares the worker's filesystem view.
 
 <Callout type="warn">
   It does not stop the file from reaching the network or another tenant's
