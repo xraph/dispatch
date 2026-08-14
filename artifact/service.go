@@ -278,6 +278,65 @@ func (s *Service) Create(
 	name string,
 	opts ...CreateOption,
 ) (*CommitWriter, error) {
+	return s.create(ctx, owner, attempt, name, "", opts...)
+}
+
+// CreateFenced is Create, except the storage key additionally
+// incorporates fenceToken, so two callers racing to commit the same
+// (owner, attempt, name) under different fenceTokens can never collide
+// on the same backend object.
+//
+// This exists for a caller whose own claim to "the current holder of
+// (owner, attempt)" is itself fenced — a worker committing an
+// out-of-process rung's outputs under a lease epoch is the motivating
+// case (see worker.Runner.commitOutputFile). Two workers can each
+// believe they hold the same job at the same RetryCount at once: a
+// lease reclaim races a worker that has not yet noticed its lease
+// expired and is still finishing a long attempt. Create's key is a
+// pure function of (owner, attempt, name), so both would resolve to
+// the identical backend object — whichever Commit lands second would
+// silently overwrite the first's bytes, behind a store row that still
+// claims the first writer's size, with no error surfaced to anyone. A
+// distinct fenceToken per holder (their lease epoch) gives each
+// holder its own object instead: the loser's write lands next to the
+// winner's rather than on top of it, and the store's own uniqueness
+// check on (backend, bucket, key) can then only ever reject an actual
+// repeat of the SAME holder recommitting the SAME name, never one
+// holder clobbering another's bytes purely by losing a race.
+//
+// fenceToken is never recorded on Link or Artifact — Attempt keeps
+// meaning exactly what it means everywhere else in this package — it
+// only ever changes the storage key most callers never see. A caller
+// with no fence to offer should use Create; an empty fenceToken here
+// is refused rather than silently behaving like Create, so a caller
+// that meant to fence but passed a zero value fails loudly instead of
+// losing the protection without noticing.
+func (s *Service) CreateFenced(
+	ctx context.Context,
+	owner OwnerRef,
+	attempt int,
+	name string,
+	fenceToken string,
+	opts ...CreateOption,
+) (*CommitWriter, error) {
+	if fenceToken == "" {
+		return nil, fmt.Errorf("dispatch/artifact: create fenced %q: empty fence token", name)
+	}
+
+	return s.create(ctx, owner, attempt, name, fenceToken, opts...)
+}
+
+// create is the shared implementation behind Create and CreateFenced.
+// An empty fenceToken makes it behave exactly as Create always has;
+// Create is a thin wrapper passing exactly that.
+func (s *Service) create(
+	ctx context.Context,
+	owner OwnerRef,
+	attempt int,
+	name string,
+	fenceToken string,
+	opts ...CreateOption,
+) (*CommitWriter, error) {
 	if !s.Enabled() {
 		return nil, ErrNoBackend
 	}
@@ -305,6 +364,9 @@ func (s *Service) Create(
 
 	bucket := s.defaultBucket
 	key := s.EphemeralKey(owner, attempt, name)
+	if fenceToken != "" {
+		key = path.Join(key, fenceToken)
+	}
 
 	w, err := s.backend.Create(ctx, bucket, key)
 	if err != nil {

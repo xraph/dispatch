@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -50,6 +51,29 @@ const maxLaunchAttempts = 5
 // entries expire as well and the map cannot grow with every such job for the
 // life of the process.
 const launchAttemptTTL = 30 * time.Minute
+
+// scratchDirPrefix names every scratch directory prepareOutputDir
+// creates. sweepStaleScratchDirs matches on it so Reclaim only ever
+// removes directories this package itself created, never an unrelated
+// entry that happens to share a temp root.
+const scratchDirPrefix = "dispatch-out-"
+
+// staleScratchDirAge is how old a leftover scratch directory must be
+// before sweepStaleScratchDirs removes it. Generous on purpose: Reclaim
+// runs once at worker startup, so this only ever removes directories a
+// PREVIOUS process left behind by dying before its own deferred cleanup
+// ran — not one a currently running sibling process sharing the same
+// scratch root is still writing into.
+const staleScratchDirAge = time.Hour
+
+// errFenceLost marks a commit-outputs failure caused specifically by
+// the lease fence, as opposed to an ordinary artifact-plane failure —
+// see commitOutputs and terminalFor's classification of its error.
+var errFenceLost = errors.New("dispatch/worker: lease fence lost")
+
+// errDuplicateOutputName marks two files under one OutputDir that would
+// commit under the identical name — see collectOutputEntries.
+var errDuplicateOutputName = errors.New("dispatch/worker: duplicate output name")
 
 // Runner executes a single job attempt: it selects an executor from the
 // job's policy, runs the attempt through the middleware chain, then
@@ -138,11 +162,19 @@ func (r *Runner) WithArtifacts(svc *artifact.Service, scratchRoot string) *Runne
 }
 
 // Reclaim asks every configured executor to release sandboxes this worker
-// leaked across a restart. The pool calls it once at startup.
+// leaked across a restart, and removes stale scratch output directories
+// a previous process left behind. The pool calls it once at startup.
 //
 // Failures are joined rather than fatal: a rung that cannot sweep should not
 // stop the worker from running the jobs it can still execute.
 func (r *Runner) Reclaim(ctx context.Context, workerID id.WorkerID) error {
+	// Independent of executors/artifacts being configured on THIS Runner:
+	// a scratch directory can only have been created by a Runner that did
+	// have both, but this process may be starting fresh after a restart
+	// that changed configuration, and the directories a prior process
+	// left under the same scratch root are still there regardless.
+	r.sweepStaleScratchDirs()
+
 	if r.executors == nil {
 		return nil
 	}
@@ -276,20 +308,65 @@ func (r *Runner) terminalFor(j *job.Job) (middleware.Handler, error) {
 
 		// Commit what the sandbox actually left on disk before reporting
 		// the attempt as done. This runs ahead of the lease-fenced terminal
-		// write Execute makes afterward (see abandonLostLease) rather than
-		// after it — deliberately: a commit here lands under this
-		// attempt's own attempt-scoped ephemeral key, the same key space
-		// every in-process handler's Accessor.Create already writes to
-		// mid-attempt, so it never collides with or overwrites anything a
-		// winning attempt owns. If the lease already moved on, updateJob
-		// still returns ErrLeaseLost and abandonLostLease still discards
-		// the outcome — the commit just becomes an orphaned-ephemeral row
-		// the existing sweeper collects, exactly the fate that comment
-		// already documents for any other handler side effect. Only a
-		// genuinely failed attempt (res.Status != StatusOK) skips this.
+		// write Execute makes afterward (see abandonLostLease), not gated
+		// on it — but it is gated on the SAME fence, read rather than
+		// rewritten: commitOutputs' own first act is to check
+		// context.Cause(ctx), which the pool's heartbeat loop sets the
+		// moment it learns this worker no longer holds the job's lease
+		// (see Pool.sendHeartbeats / cancelJob). A fenced-out attempt must
+		// not commit outputs as though it still owned the job merely
+		// because the sandbox itself finished and reported success — so
+		// when the fence is already gone, nothing here writes anything,
+		// to the artifact store or otherwise. commitOutputs rechecks the
+		// same fence before every individual file it commits, and rolls
+		// back whatever this call already committed the moment either
+		// that check or a write itself fails, so a losing attempt commits
+		// everything it is entitled to or nothing at all — never a
+		// partial set a later reader could mistake for complete.
+		//
+		// Distinct storage keys additionally protect the case the gate
+		// cannot: two holders whose fence checks both still passed,
+		// racing to finish within the same narrow window. commitOutputs
+		// commits under CreateFenced with this worker's lease epoch as
+		// the fence token when one is available, so two holders at the
+		// same nominal attempt can never resolve to the same backend
+		// object — a losing writer's bytes land beside a winner's, never
+		// on top of them.
+		//
+		// Only a genuinely failed attempt (res.Status != StatusOK) skips
+		// this outright.
 		if executor.Level() > exec.LevelNone && res.Status == exec.StatusOK {
-			if commitErr := r.commitOutputs(ctx, j, req, res); commitErr != nil {
-				return fmt.Errorf("dispatch/worker: commit outputs for job %s: %w", j.ID, commitErr)
+			if commitErr := r.commitOutputs(ctx, j, req); commitErr != nil {
+				if errors.Is(commitErr, errFenceLost) {
+					// Must NOT become an *exec.Error with
+					// StatusLaunchFailed: handleFailure routes that
+					// status through requeueAfterLaunchFailure, which
+					// writes via the plain, UNFENCED store.UpdateJob —
+					// exactly the write a fenced-out attempt must never
+					// make, since it could stomp whatever the actual
+					// current holder has already done to the row. An
+					// ordinary wrapped error instead takes the normal
+					// retry path, whose own scheduleRetry already calls
+					// the FENCED updateJob and already routes
+					// ErrLeaseLost to abandonLostLease — the same
+					// protection every other kind of failure racing a
+					// reclaim relies on today; this is not a new
+					// mechanism, just this failure declining to bypass it.
+					return fmt.Errorf("dispatch/worker: job %s: %w", j.ID, commitErr)
+				}
+
+				// An ordinary commit failure — a duplicate output name,
+				// a backend error — is an artifact-plane fault, not a
+				// verdict on the handler's own work: the handler already
+				// ran to completion and reported success. Routing it
+				// through StatusLaunchFailed keeps it off the job's real
+				// retry budget, since a non-idempotent handler should not
+				// pay for storage being unavailable, and bounds a
+				// deterministic failure (see collectOutputEntries' own
+				// duplicate-name check) at maxLaunchAttempts instead of
+				// burning the whole retry schedule on something retrying
+				// can never fix.
+				return &exec.Error{Status: exec.StatusLaunchFailed, Msg: commitErr.Error()}
 			}
 		}
 
@@ -355,6 +432,52 @@ func (r *Runner) prepareOutputDir(j *job.Job) (dir string, cleanup func(), err e
 	return dir, cleanup, nil
 }
 
+// sweepStaleScratchDirs removes scratch directories prepareOutputDir
+// left behind because the worker process that created them died before
+// its own deferred cleanup ran. It is best-effort: a removal failure is
+// logged, not returned, since one stuck directory must not stop Reclaim
+// from doing the rest of what it does at startup.
+//
+// Only entries under scratchDirPrefix are touched, and only ones older
+// than staleScratchDirAge — the name filter keeps this from ever
+// looking at anything this package did not create itself, and the age
+// filter keeps it from racing a sibling process's own in-flight
+// attempt that happens to share the same scratch root.
+func (r *Runner) sweepStaleScratchDirs() {
+	root := r.scratchRoot
+	if root == "" {
+		root = os.TempDir()
+	}
+
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		// Best-effort: an unreadable or (already-gone) scratch root is
+		// not something Reclaim should fail startup over.
+		return
+	}
+
+	cutoff := time.Now().Add(-staleScratchDirAge)
+
+	for _, entry := range entries {
+		if !entry.IsDir() || !strings.HasPrefix(entry.Name(), scratchDirPrefix) {
+			continue
+		}
+
+		info, infoErr := entry.Info()
+		if infoErr != nil || info.ModTime().After(cutoff) {
+			continue
+		}
+
+		stale := filepath.Join(root, entry.Name())
+		if rmErr := os.RemoveAll(stale); rmErr != nil {
+			r.logger.Warn("failed to remove stale scratch directory",
+				log.String("dir", stale),
+				log.String("error", rmErr.Error()),
+			)
+		}
+	}
+}
+
 // resolvePriorOutputs returns one PriorOutput per name any earlier
 // attempt of j already committed, keeping the highest-attempt link when
 // more than one attempt produced the same name — the same tie-break
@@ -409,24 +532,30 @@ func (r *Runner) resolvePriorOutputs(ctx context.Context, j *job.Job) ([]exec.Pr
 	return prior, nil
 }
 
-// commitOutputs walks req.OutputDir for the files the sandbox actually
-// left behind and commits each one through the artifact service,
-// linking it to j as an output of this attempt.
+// outputEntry is one regular file collectOutputEntries found on disk,
+// ready to commit under name.
+type outputEntry struct {
+	name string
+	path string
+}
+
+// commitOutputs commits the regular files the sandbox actually left in
+// req.OutputDir through the artifact service, linking each to j as an
+// output of this attempt.
 //
-// It is driven entirely by what is really on disk, never by res.Outputs:
-// that claim crossed a process boundary a compromised handler fully
-// controls, so a name, size, or hash it reports is not evidence that
-// anything landed in the artifact store. A handler that lists an output
-// it never wrote gets no artifact row for it, because commitOutputs
-// never consults the claim to decide what to commit — only to carry
-// forward a declared content type when a walked file's name happens to
-// match one.
+// It is driven entirely by what collectOutputEntries finds really on
+// disk, never by anything the sandbox itself reported: a claim crossed
+// a process boundary a compromised handler fully controls, so nothing
+// about it — a name, a size, a hash, a content type — is evidence that
+// anything actually landed anywhere. A handler that claims an output it
+// never wrote gets no artifact row for it, because nothing here ever
+// reads such a claim to decide what to commit.
 //
 // If the artifact plane is disabled, this logs once at debug and does
 // nothing: the sandbox's outputs are discarded along with the scratch
 // directory, exactly as they were before out-of-process committing
 // existed.
-func (r *Runner) commitOutputs(ctx context.Context, j *job.Job, req *exec.Request, res *exec.Result) error {
+func (r *Runner) commitOutputs(ctx context.Context, j *job.Job, req *exec.Request) error {
 	if r.artifacts == nil || !r.artifacts.Enabled() {
 		r.logger.Debug("artifact plane disabled; not committing sandbox outputs",
 			log.String("job_id", j.ID.String()),
@@ -436,78 +565,249 @@ func (r *Runner) commitOutputs(ctx context.Context, j *job.Job, req *exec.Reques
 		return nil
 	}
 
-	claimed := make(map[string]exec.OutputFile, len(res.Outputs))
-	for _, o := range res.Outputs {
-		claimed[o.Name] = o
+	// Checked before anything else: the pool's heartbeat loop cancels
+	// ctx with job.ErrLeaseLost the moment it learns this worker no
+	// longer holds the job's lease (Pool.sendHeartbeats / cancelJob).
+	// Reading that here — not renewing or rewriting anything
+	// lease_fence.go or the pool itself owns — is the commit gate: if
+	// the fence is already gone, nothing below ever runs.
+	if cause := context.Cause(ctx); cause != nil {
+		return fmt.Errorf("%w: %w", errFenceLost, cause)
+	}
+
+	entries, err := collectOutputEntries(req.OutputDir)
+	if err != nil {
+		return err
+	}
+
+	if len(entries) == 0 {
+		return nil
 	}
 
 	owner := artifact.OwnerRef{Kind: artifact.OwnerJob, ID: j.ID.String()}
 
-	walkErr := filepath.WalkDir(req.OutputDir, func(path string, d fs.DirEntry, walkEntryErr error) error {
+	return r.commitOutputEntries(ctx, owner, j.RetryCount, fenceToken(ctx), entries)
+}
+
+// collectOutputEntries walks dir for the regular files a sandbox left
+// behind, returning one outputEntry per unique base name in a
+// deterministic order.
+//
+// Non-regular entries — symlinks, FIFOs, sockets, devices — are skipped
+// without ever being opened. WalkDir reports each entry's type from an
+// Lstat taken at listing time, so a symlink is identified and skipped
+// here, before any path derived from it is ever handed to a file-open
+// call anywhere in this package. Opening what a symlink resolves to
+// would let a compromised handler point one at anything this worker
+// process can read — its own config, cloud credentials, a mounted
+// service-account token — and have the bytes published as an ordinary
+// job output; opening a FIFO with no writer on the other end blocks
+// forever, wedging a worker goroutine, which is just as fatal on a
+// smaller scale. Both are excluded by the same type check, which is
+// what makes it sufficient on its own: a directory-entry check alone
+// (d.IsDir()) catches neither, since both report false for it.
+//
+// Dot-prefixed files are a rung's own uncommitted temp files (see
+// exec/shim's LocalFS) or otherwise hidden by convention. A dot-prefixed
+// directory is skipped with fs.SkipDir specifically, not a bare nil:
+// WalkDir descends into a directory regardless of what the callback
+// returns for it unless told SkipDir, so returning nil for a hidden
+// directory would still walk — and still commit — whatever non-hidden
+// files happen to live inside it.
+//
+// Two files at different paths sharing one base name are reported as
+// errDuplicateOutputName rather than letting the second silently
+// resolve to the same committed name as the first: Create's own name
+// parameter may not contain a path separator, so any nested directory
+// structure under OutputDir is necessarily flattened to its leaf name
+// by the time it reaches the artifact plane, and two leaves colliding
+// is a structural problem this function must surface, not paper over
+// by committing whichever one the walk happened to visit last.
+func collectOutputEntries(dir string) ([]outputEntry, error) {
+	var entries []outputEntry
+	seenAt := make(map[string]string)
+
+	walkErr := filepath.WalkDir(dir, func(path string, d fs.DirEntry, walkEntryErr error) error {
 		if walkEntryErr != nil {
 			return walkEntryErr
 		}
 
-		// Dot-prefixed entries are a rung's own uncommitted temp files
-		// (see exec/shim's LocalFS), never a finished output.
-		if d.IsDir() || strings.HasPrefix(d.Name(), ".") {
+		if d.IsDir() {
+			if strings.HasPrefix(d.Name(), ".") {
+				return fs.SkipDir
+			}
+
 			return nil
 		}
 
-		return r.commitOutputFile(ctx, owner, j.RetryCount, d.Name(), path, claimed[d.Name()])
+		if strings.HasPrefix(d.Name(), ".") {
+			return nil
+		}
+
+		if !d.Type().IsRegular() {
+			return nil
+		}
+
+		name := d.Name()
+		if prior, dup := seenAt[name]; dup {
+			return fmt.Errorf("dispatch/worker: %q and %q would both commit as output %q: %w",
+				prior, path, name, errDuplicateOutputName)
+		}
+		seenAt[name] = path
+
+		entries = append(entries, outputEntry{name: name, path: path})
+
+		return nil
 	})
 	if walkErr != nil {
 		if errors.Is(walkErr, fs.ErrNotExist) {
 			// The handler removed its own OutputDir, or wrote nothing to
 			// it. Either way there is nothing to commit.
-			return nil
+			return nil, nil
 		}
 
-		return fmt.Errorf("dispatch/worker: walk output directory: %w", walkErr)
+		return nil, fmt.Errorf("dispatch/worker: walk output directory: %w", walkErr)
+	}
+
+	// Sorted so which entries have already landed if a later one fails
+	// is deterministic, for commitOutputEntries' own rollback, rather
+	// than dependent on the filesystem's own directory-listing order.
+	sort.Slice(entries, func(i, k int) bool { return entries[i].name < entries[k].name })
+
+	return entries, nil
+}
+
+// fenceToken returns the lease epoch ctx carries, stringified, or "" if
+// ctx carries no fence at all — a bare Runner driven without a Pool, or
+// a store that does not implement job.LeaseStore. It is read-only: this
+// neither renews nor otherwise touches anything leaseFenceFromContext's
+// own package (lease_fence.go) owns.
+func fenceToken(ctx context.Context) string {
+	fence, ok := leaseFenceFromContext(ctx)
+	if !ok {
+		return ""
+	}
+
+	return strconv.Itoa(fence.epoch)
+}
+
+// commitOutputEntries commits each entry through the artifact service
+// under token — see artifact.Service.CreateFenced — checking the lease
+// fence again before every individual commit, and rolling back
+// everything this call has already committed the instant any one step
+// fails: a fence loss, a backend error. A losing attempt therefore
+// commits either everything it is entitled to or nothing at all; a
+// retry is never blocked by a stray row a failed earlier pass left
+// behind.
+func (r *Runner) commitOutputEntries(
+	ctx context.Context,
+	owner artifact.OwnerRef,
+	attempt int,
+	token string,
+	entries []outputEntry,
+) error {
+	committed := make([]artifact.Ref, 0, len(entries))
+
+	rollback := func() {
+		if len(committed) == 0 {
+			return
+		}
+
+		// Detached with its own short timeout rather than derived from
+		// ctx: ctx may itself be why rollback is happening (a cancelled
+		// or fence-lost context), and cleanup must still get a chance to
+		// run in that case, not fail immediately on the same cancellation
+		// it exists to clean up after.
+		cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+		defer cancel()
+
+		for _, ref := range committed {
+			if delErr := r.artifacts.Backend().Delete(cleanupCtx, ref); delErr != nil {
+				r.logger.Warn("failed to roll back a partially committed output",
+					log.String("artifact_id", ref.ID.String()),
+					log.String("error", delErr.Error()),
+				)
+			}
+		}
+	}
+
+	for _, entry := range entries {
+		if cause := context.Cause(ctx); cause != nil {
+			rollback()
+
+			return fmt.Errorf("%w: %w", errFenceLost, cause)
+		}
+
+		ref, err := r.commitOutputFile(ctx, owner, attempt, token, entry.name, entry.path)
+		if err != nil {
+			rollback()
+
+			return err
+		}
+
+		committed = append(committed, ref)
 	}
 
 	return nil
 }
 
-// commitOutputFile reads one file the walk in commitOutputs found on
-// disk and commits its actual bytes through the artifact service. claim
-// supplies only a content-type hint, when the sandbox reported one for
-// this name; the size and hash the artifact row ends up with come from
-// what CommitWriter actually saw pass through it, never from claim.
+// commitOutputFile reads one file collectOutputEntries found on disk
+// and commits its actual bytes through the artifact service, returning
+// the ref it was recorded under. The size, hash, and content type the
+// resulting artifact row carries all come from what the backend
+// actually saw pass through it while committing these exact bytes —
+// nothing here is influenced by anything the sandbox itself claimed
+// about its outputs.
 func (r *Runner) commitOutputFile(
 	ctx context.Context,
 	owner artifact.OwnerRef,
 	attempt int,
+	token string,
 	name, path string,
-	claim exec.OutputFile,
-) error {
-	f, err := os.Open(path)
+) (artifact.Ref, error) {
+	f, err := openRegularNoFollow(path)
 	if err != nil {
-		return fmt.Errorf("dispatch/worker: open output %q: %w", name, err)
+		return artifact.Ref{}, fmt.Errorf("dispatch/worker: open output %q: %w", name, err)
 	}
 	defer f.Close()
 
-	var opts []artifact.CreateOption
-	if claim.ContentType != "" {
-		opts = append(opts, artifact.ContentType(claim.ContentType))
+	// A second, TOCTOU-closing layer behind collectOutputEntries' own
+	// Lstat-based filter (see its doc comment): openRegularNoFollow
+	// already refuses to follow a symlink at the final path component on
+	// platforms that support it, and this confirms what was actually
+	// opened is still a plain regular file even so — catching the entry
+	// that was one when listed but has since become something else.
+	info, statErr := f.Stat()
+	if statErr != nil {
+		return artifact.Ref{}, fmt.Errorf("dispatch/worker: stat output %q: %w", name, statErr)
 	}
 
-	w, err := r.artifacts.Create(ctx, owner, attempt, name, opts...)
+	if !info.Mode().IsRegular() {
+		return artifact.Ref{}, fmt.Errorf("dispatch/worker: output %q is no longer a regular file", name)
+	}
+
+	var w *artifact.CommitWriter
+	if token != "" {
+		w, err = r.artifacts.CreateFenced(ctx, owner, attempt, name, token)
+	} else {
+		w, err = r.artifacts.Create(ctx, owner, attempt, name)
+	}
 	if err != nil {
-		return fmt.Errorf("dispatch/worker: create output %q: %w", name, err)
+		return artifact.Ref{}, fmt.Errorf("dispatch/worker: create output %q: %w", name, err)
 	}
 
-	if _, err := io.Copy(w, f); err != nil {
+	if _, copyErr := io.Copy(w, f); copyErr != nil {
 		_ = w.Abort() //nolint:errcheck // best-effort cleanup; the write error below is what the caller acts on
 
-		return fmt.Errorf("dispatch/worker: write output %q: %w", name, err)
+		return artifact.Ref{}, fmt.Errorf("dispatch/worker: write output %q: %w", name, copyErr)
 	}
 
-	if _, err := w.Commit(ctx); err != nil {
-		return fmt.Errorf("dispatch/worker: commit output %q: %w", name, err)
+	ref, err := w.Commit(ctx)
+	if err != nil {
+		return artifact.Ref{}, fmt.Errorf("dispatch/worker: commit output %q: %w", name, err)
 	}
 
-	return nil
+	return ref, nil
 }
 
 // updateJob persists j's terminal state, fenced on the lease this worker
