@@ -131,3 +131,35 @@ func TestBuildEnvCarriesRlimits(t *testing.T) {
 		})
 	}
 }
+
+// TestBuildEnvDoesNotInheritTheParentEnvironment proves buildEnv's fixed
+// PATH/HOME/TMPDIR allowlist (see its own doc comment, and spec §6's "the
+// child's environment is constructed, not inherited") actually excludes
+// everything else in the worker's own environment, not just everything
+// this test happens to think of. A sentinel set in this test process's own
+// environment stands in for a credential the worker might carry — a DSN,
+// an API key — and must not reach the child's constructed environment.
+//
+// Nothing else in this package's suite would catch a regression here: the
+// rlimit tests above never configure WithEnv and don't need to (rlimit
+// vars are unconditional), TestRunSuccess and its neighbors do configure
+// WithEnv but only ever assert on the attempt's Status, never on what
+// buildEnv actually sent, and a child that received the entire parent
+// os.Environ() would still run those fixtures to completion successfully.
+// A review round demonstrated exactly that: replacing the allowlist with a
+// full os.Environ() copy passed the whole phase test suite clean.
+func TestBuildEnvDoesNotInheritTheParentEnvironment(t *testing.T) {
+	const sentinel = "DISPATCH_TEST_PARENT_ONLY_SENTINEL"
+	t.Setenv(sentinel, "leaked-credential-value")
+
+	e := &Executor{}
+	env := e.buildEnv(&exec.Request{})
+
+	for _, kv := range env {
+		if strings.HasPrefix(kv, sentinel+"=") {
+			t.Fatalf("buildEnv() = %v, contains %q — the child's environment must be "+
+				"constructed from an allowlist, not inherited from the worker's own os.Environ()",
+				env, kv)
+		}
+	}
+}
