@@ -19,6 +19,24 @@ func WithExecutor(e exec.Executor) Option {
 	}
 }
 
+// WithScratchRoot sets the root directory an out-of-process attempt's
+// scratch OutputDir is created under (worker.Runner.WithArtifacts).
+//
+// It only has an effect once the artifact plane is also configured
+// (WithArtifacts): a scratch OutputDir exists to be committed through the
+// artifact plane, and Task 8's stale-scratch-directory sweep
+// (worker.Runner.Reclaim) is itself gated off entirely when the Runner
+// has no artifact plane. Setting this with no artifact plane configured
+// sets a value Build never reads — see Build's own comment at the call
+// site for why that is left as a config-time warning for callers to
+// raise, not an engine-level error.
+//
+// Leaving it unset defaults to os.TempDir(), exactly as worker.Runner
+// does on its own.
+func WithScratchRoot(dir string) Option {
+	return func(eng *Engine) { eng.scratchRoot = dir }
+}
+
 // Executors returns the configured executor registry.
 func (eng *Engine) Executors() *exec.Registry { return eng.executors }
 

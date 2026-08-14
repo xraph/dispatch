@@ -42,6 +42,11 @@ type Config struct {
 	// Resources configures the worker's resource model.
 	Resources ResourceConfig `json:"resources" mapstructure:"resources" yaml:"resources"`
 
+	// Execution configures which isolation rungs beyond the in-process
+	// default are available to job definitions that declare a stronger
+	// minimum via job.WithExecution.
+	Execution ExecutionConfig `json:"execution" mapstructure:"execution" yaml:"execution"`
+
 	// EnableDWP enables the Dispatch Wire Protocol for real-time
 	// client communication (WebSocket, SSE, HTTP RPC).
 	EnableDWP bool `default:"false" json:"enable_dwp" mapstructure:"enable_dwp" yaml:"enable_dwp"`
@@ -108,6 +113,118 @@ type ArtifactCacheConfig struct {
 	// capacity rather than a private ceiling inside the cache, so it is
 	// the same number a job's disk requirement is admitted against.
 	Budget int64 `json:"budget" mapstructure:"budget" yaml:"budget"`
+}
+
+// ExecutionConfig configures which execution rungs beyond the always-
+// present in-process default a deployment makes available.
+//
+// A job definition declares the isolation it needs with
+// job.WithExecution(exec.Isolate(...)); this block decides which rungs
+// EXIST to satisfy that declaration — it never changes what any
+// definition asks for, and it never lets a declaration that cannot be
+// satisfied run anyway. engine.RegisterChecked already refuses a policy
+// nothing configured here can satisfy (exec.ErrNoExecutor), unless the
+// definition itself opted into exec.AllowDowngrade — that per-definition
+// choice is deliberately not something this block can override, because a
+// config-wide override would be exactly the silent downgrade
+// RegisterChecked exists to prevent.
+//
+// The whole block is additive and opt-in: a deployment that configures
+// none of it registers no extra executor, and every job keeps running
+// in-process exactly as it does today.
+type ExecutionConfig struct {
+	// Subprocess configures the out-of-process rung (exec.LevelProcess) —
+	// the handler runs in a re-exec'd child process instead of the
+	// worker's own address space. A zero value (Enabled: false, the
+	// default) registers nothing.
+	Subprocess SubprocessConfig `json:"subprocess" mapstructure:"subprocess" yaml:"subprocess"`
+}
+
+// SubprocessConfig configures exec/subprocess.Executor.
+//
+// This rung refuses to launch outside Unix (exec/subprocess's checkLaunch
+// and Available); the extension checks Available itself at startup, so
+// enabling this on an unsupported platform fails registration once,
+// loudly, instead of failing every job's first launch attempt at
+// runtime.
+type SubprocessConfig struct {
+	// Enabled registers the subprocess executor with the engine. Without
+	// it, nothing else in this struct has any effect.
+	Enabled bool `default:"false" json:"enabled" mapstructure:"enabled" yaml:"enabled"`
+
+	// Binary overrides the path to the binary the executor re-execs for
+	// every attempt. Empty resolves os.Executable() — the worker's own
+	// binary — which is correct for every deployment that has not split
+	// the sandboxed handlers into a separate build.
+	Binary string `json:"binary" mapstructure:"binary" yaml:"binary"`
+
+	// User and Group are the uid/gid the child process runs as
+	// (subprocess.WithUser). Both must be set together, or neither: a
+	// uid with no configured gid is rejected at startup rather than
+	// silently running the child under the worker's own primary group.
+	//
+	// Zero means "not configured" rather than uid/gid 0 — this config
+	// surface has no way to request running the child as root, which is
+	// deliberate: it is never the isolation this rung exists to provide.
+	User  int `json:"user" mapstructure:"user" yaml:"user"`
+	Group int `json:"group" mapstructure:"group" yaml:"group"`
+
+	// AllowSameUser permits User to name the worker's own uid
+	// (subprocess.WithAllowSameUser). Without it, a configured User equal
+	// to the worker's own uid makes every attempt refuse to launch — a
+	// deliberate security default (see WithAllowSameUser) that this
+	// config surface passes through rather than working around: nothing
+	// here defaults it to true, so a configuration mistake cannot
+	// silently defeat it.
+	AllowSameUser bool `default:"false" json:"allow_same_user" mapstructure:"allow_same_user" yaml:"allow_same_user"`
+
+	// ScratchDir is the root directory both the child process's working
+	// directory (subprocess.WithScratchDir) and, when the artifact plane
+	// is also enabled, the Runner's scratch OutputDir
+	// (engine.WithScratchRoot) are created under. Empty means
+	// os.TempDir() for both, their own independent defaults.
+	//
+	// Configuring this with the artifact plane OFF is not an error: the
+	// child still gets a scratch working directory, but nothing commits
+	// its outputs and PriorOutputs stays empty, exactly as
+	// worker.Runner.WithArtifacts documents for a nil service — the
+	// extension logs a warning at startup so that is a deliberate choice,
+	// not a silent one.
+	ScratchDir string `json:"scratch_dir" mapstructure:"scratch_dir" yaml:"scratch_dir"`
+
+	// Rlimits configures POSIX resource limits applied to the child
+	// (subprocess.WithRlimits). Fields are in bytes (AddressSpace, FSize)
+	// or counts (NoFile, NProc, Core); zero leaves that limit at whatever
+	// the worker itself runs with. There is no unit-suffixed string
+	// parsing here (no "16GB") — this repo takes no new dependency to
+	// provide one, and every other byte-valued config field
+	// (ArtifactCacheConfig.Budget, resource.Set) is already a plain
+	// integer for the same reason.
+	Rlimits RlimitsConfig `json:"rlimits" mapstructure:"rlimits" yaml:"rlimits"`
+
+	// StrictRlimits makes a configured rlimit that did not actually take
+	// effect a launch failure instead of a silently ignored warning (see
+	// subprocess.WithStrictRlimits).
+	StrictRlimits bool `default:"false" json:"strict_rlimits" mapstructure:"strict_rlimits" yaml:"strict_rlimits"`
+}
+
+// RlimitsConfig configures the child process's POSIX resource limits. See
+// subprocess.Rlimits for what each field does; the field names and units
+// here mirror it exactly.
+type RlimitsConfig struct {
+	// AddressSpace caps RLIMIT_AS in bytes.
+	AddressSpace int64 `json:"address_space" mapstructure:"address_space" yaml:"address_space"`
+	// NoFile caps RLIMIT_NOFILE, the open file descriptor count.
+	NoFile int64 `json:"nofile" mapstructure:"nofile" yaml:"nofile"`
+	// NProc caps RLIMIT_NPROC, the number of processes the child's uid
+	// may run.
+	NProc int64 `json:"nproc" mapstructure:"nproc" yaml:"nproc"`
+	// Core caps RLIMIT_CORE. Accepted for API symmetry; subprocess forces
+	// the child's actual core limit to zero unconditionally regardless of
+	// this value — see subprocess.Rlimits.Core.
+	Core int64 `json:"core" mapstructure:"core" yaml:"core"`
+	// FSize caps RLIMIT_FSIZE in bytes.
+	FSize int64 `json:"fsize" mapstructure:"fsize" yaml:"fsize"`
 }
 
 // ResourceConfig configures how this worker's capacity is derived and

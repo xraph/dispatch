@@ -149,6 +149,12 @@ type Engine struct {
 	// extraExecutors accumulates executors added via WithExecutor until
 	// buildExecutors assembles them into executors.
 	extraExecutors []exec.Executor
+	// scratchRoot is the root directory an out-of-process attempt's
+	// scratch OutputDir is created under (worker.Runner.WithArtifacts).
+	// Empty means worker.Runner's own default, os.TempDir(). See
+	// WithScratchRoot for why it only takes effect alongside the artifact
+	// plane.
+	scratchRoot string
 }
 
 // Option configures an Engine.
@@ -431,6 +437,21 @@ func Build(d *dispatch.Dispatcher, opts ...Option) (*Engine, error) {
 		eng.registry, eng.extensions, eng.jobStore, eng.dlqService,
 		eng.bo, eng.executors, logger, allMws...,
 	)
+
+	// An out-of-process rung gets no scratch directory, no PriorOutputs,
+	// and commits nothing unless this runs: WithArtifacts is what turns
+	// on worker.Runner's scratch-dir creation, output committing, and
+	// startup sweep of directories a previous process left behind. Gated
+	// on eng.artifacts specifically — not on whether an extra executor is
+	// configured — because that is the same condition
+	// worker.Runner.commitOutputs and Reclaim already gate themselves on;
+	// calling this with a nil svc would be a no-op by their own contract,
+	// so there is nothing to lose by keeping the condition here identical
+	// to theirs rather than trying to also know about every executor
+	// WithExecutor might have added.
+	if eng.artifacts != nil {
+		runner.WithArtifacts(eng.artifacts, eng.scratchRoot)
+	}
 
 	poolOpts := []worker.PoolOption{
 		worker.WithPoolConcurrency(config.Concurrency),

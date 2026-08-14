@@ -249,6 +249,17 @@ func (e *Extension) init(fapp forge.App) error {
 		}
 	}
 
+	// Execution rungs beyond the in-process default are resolved after
+	// the artifact plane, not before: resolveExecutionOptions checks
+	// e.artifacts to decide whether a configured scratch directory will
+	// actually be read (see its own comment), and that has to reflect
+	// the artifact plane's FINAL state, not a guess made ahead of it.
+	execOpts, execErr := e.resolveExecutionOptions()
+	if execErr != nil {
+		return execErr
+	}
+	engOpts = append(engOpts, execOpts...)
+
 	if e.resources != nil {
 		engOpts = append(engOpts, engine.WithResourceManager(e.resources))
 

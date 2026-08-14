@@ -30,3 +30,12 @@ func checkLaunch(o options) error {
 
 	return nil
 }
+
+// Available reports whether this platform can run the subprocess rung at
+// all — always true on Unix. checkLaunch above catches the same class of
+// problem (a launch that would gut this rung's isolation), but only once
+// Run is actually called for a job attempt. Configuration code should
+// call Available before ever constructing an Executor, so a deployment
+// that asks for this rung fails once, loudly, at startup — not job by
+// job, on every attempt's launch failure, once it is already running.
+func Available() error { return nil }
