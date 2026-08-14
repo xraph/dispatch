@@ -7,12 +7,19 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
+	"io/fs"
+	"os"
+	"path/filepath"
+	"sort"
+	"strings"
 	"sync"
 	"time"
 
 	log "github.com/xraph/go-utils/log"
 
 	"github.com/xraph/dispatch"
+	"github.com/xraph/dispatch/artifact"
 	"github.com/xraph/dispatch/backoff"
 	"github.com/xraph/dispatch/dlq"
 	"github.com/xraph/dispatch/exec"
@@ -61,6 +68,17 @@ type Runner struct {
 	mw         middleware.Middleware
 	logger     log.Logger
 
+	// artifacts is the artifact plane an out-of-process rung's outputs
+	// are committed through, and PriorOutputs is resolved from. Nil
+	// leaves both off — see WithArtifacts.
+	artifacts *artifact.Service
+
+	// scratchRoot is the directory an out-of-process attempt's scratch
+	// OutputDir is created under. Empty means os.TempDir(), resolved at
+	// request time rather than here so a change to the process's temp
+	// directory after construction still takes effect.
+	scratchRoot string
+
 	// launchMu guards launches. One Runner is shared by every worker
 	// goroutine in the pool, so the counter is mutex-guarded rather than
 	// living on the job value.
@@ -99,6 +117,24 @@ func NewRunner(
 		logger:     logger,
 		launches:   make(map[string]launchAttempt),
 	}
+}
+
+// WithArtifacts configures the artifact plane an out-of-process rung
+// commits its outputs through, and the root directory its scratch
+// OutputDir is created under. It returns r so callers can chain it onto
+// NewRunner.
+//
+// Never calling this, or passing a nil or disabled svc, leaves output
+// committing off: an out-of-process attempt still gets a fresh, empty
+// OutputDir that is removed once the attempt ends, but PriorOutputs
+// stays empty and nothing the sandbox wrote is committed — exactly
+// Runner's behaviour before this existed. An empty scratchRoot defaults
+// to os.TempDir().
+func (r *Runner) WithArtifacts(svc *artifact.Service, scratchRoot string) *Runner {
+	r.artifacts = svc
+	r.scratchRoot = scratchRoot
+
+	return r
 }
 
 // Reclaim asks every configured executor to release sandboxes this worker
@@ -190,7 +226,39 @@ func (r *Runner) terminalFor(j *job.Job) (middleware.Handler, error) {
 	}
 
 	return func(ctx context.Context) error {
-		res, runErr := executor.Run(ctx, r.request(j, policy))
+		req := r.request(j, policy)
+
+		// A rung above in-process gets a scratch directory to write its
+		// outputs into and, when the artifact plane is configured, every
+		// output an earlier attempt of this job already committed. Without
+		// the latter the sandbox's in-memory store has no notion of prior
+		// attempts and Existing/IfAbsent would answer "no" every time,
+		// silently redoing work a previous attempt already finished.
+		if executor.Level() > exec.LevelNone {
+			dir, cleanup, dirErr := r.prepareOutputDir(j)
+			if dirErr != nil {
+				return &exec.Error{Status: exec.StatusLaunchFailed, Msg: dirErr.Error()}
+			}
+			defer cleanup()
+
+			req.OutputDir = dir
+
+			if r.artifacts != nil && r.artifacts.Enabled() {
+				prior, priorErr := r.resolvePriorOutputs(ctx, j)
+				if priorErr != nil {
+					return &exec.Error{Status: exec.StatusLaunchFailed, Msg: priorErr.Error()}
+				}
+
+				req.PriorOutputs = prior
+			} else {
+				r.logger.Debug("artifact plane disabled; running without prior outputs",
+					log.String("job_id", j.ID.String()),
+					log.String("job_name", j.Name),
+				)
+			}
+		}
+
+		res, runErr := executor.Run(ctx, req)
 		if runErr != nil {
 			// Run reserves its error return for launch failures: the handler
 			// never ran, so the retry budget must not pay for it.
@@ -204,6 +272,25 @@ func (r *Runner) terminalFor(j *job.Job) (middleware.Handler, error) {
 			}
 
 			return &exec.Error{Status: exec.StatusLaunchFailed, Msg: runErr.Error()}
+		}
+
+		// Commit what the sandbox actually left on disk before reporting
+		// the attempt as done. This runs ahead of the lease-fenced terminal
+		// write Execute makes afterward (see abandonLostLease) rather than
+		// after it — deliberately: a commit here lands under this
+		// attempt's own attempt-scoped ephemeral key, the same key space
+		// every in-process handler's Accessor.Create already writes to
+		// mid-attempt, so it never collides with or overwrites anything a
+		// winning attempt owns. If the lease already moved on, updateJob
+		// still returns ErrLeaseLost and abandonLostLease still discards
+		// the outcome — the commit just becomes an orphaned-ephemeral row
+		// the existing sweeper collects, exactly the fate that comment
+		// already documents for any other handler side effect. Only a
+		// genuinely failed attempt (res.Status != StatusOK) skips this.
+		if executor.Level() > exec.LevelNone && res.Status == exec.StatusOK {
+			if commitErr := r.commitOutputs(ctx, j, req, res); commitErr != nil {
+				return fmt.Errorf("dispatch/worker: commit outputs for job %s: %w", j.ID, commitErr)
+			}
 		}
 
 		return res.Err()
@@ -234,6 +321,193 @@ func (r *Runner) request(j *job.Job, policy exec.Policy) *exec.Request {
 	}
 
 	return req
+}
+
+// prepareOutputDir creates a fresh, empty scratch directory for one
+// out-of-process attempt to write its outputs into, under r.scratchRoot
+// — os.TempDir() when that is unset.
+//
+// The returned cleanup removes the directory and must be deferred by the
+// caller regardless of how the attempt ends: a stray directory per
+// out-of-process attempt would otherwise accumulate on disk for the life
+// of the worker process.
+func (r *Runner) prepareOutputDir(j *job.Job) (dir string, cleanup func(), err error) {
+	root := r.scratchRoot
+	if root == "" {
+		root = os.TempDir()
+	}
+
+	dir, err = os.MkdirTemp(root, "dispatch-out-"+j.ID.String()+"-")
+	if err != nil {
+		return "", func() {}, fmt.Errorf("dispatch/worker: create output directory: %w", err)
+	}
+
+	cleanup = func() {
+		if rmErr := os.RemoveAll(dir); rmErr != nil {
+			r.logger.Warn("failed to remove scratch output directory",
+				log.String("job_id", j.ID.String()),
+				log.String("dir", dir),
+				log.String("error", rmErr.Error()),
+			)
+		}
+	}
+
+	return dir, cleanup, nil
+}
+
+// resolvePriorOutputs returns one PriorOutput per name any earlier
+// attempt of j already committed, keeping the highest-attempt link when
+// more than one attempt produced the same name — the same tie-break
+// FindLinkByName applies for a single-name lookup.
+//
+// This is the worker-side half of PriorOutputs (see exec.PriorOutput):
+// an out-of-process rung's artifact store is in-memory and local to one
+// attempt, with no notion of earlier ones, so without this a retried
+// handler's Existing/IfAbsent check would answer "no" every time and
+// quietly redo work a previous attempt had already finished.
+func (r *Runner) resolvePriorOutputs(ctx context.Context, j *job.Job) ([]exec.PriorOutput, error) {
+	owner := artifact.OwnerRef{Kind: artifact.OwnerJob, ID: j.ID.String()}
+
+	links, err := r.artifacts.Store().ListLinks(ctx, owner)
+	if err != nil {
+		return nil, fmt.Errorf("dispatch/worker: list prior links for job %s: %w", j.ID, err)
+	}
+
+	best := make(map[string]*artifact.Link, len(links))
+	for _, link := range links {
+		if link.Role != artifact.RoleOutput {
+			continue
+		}
+
+		if cur, ok := best[link.Name]; !ok || link.Attempt > cur.Attempt {
+			best[link.Name] = link
+		}
+	}
+
+	if len(best) == 0 {
+		return nil, nil
+	}
+
+	// Sorted so the request a given job history produces is deterministic
+	// rather than following map iteration order.
+	names := make([]string, 0, len(best))
+	for name := range best {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+
+	prior := make([]exec.PriorOutput, 0, len(names))
+	for _, name := range names {
+		a, getErr := r.artifacts.Get(ctx, best[name].ArtifactID)
+		if getErr != nil {
+			return nil, fmt.Errorf("dispatch/worker: resolve prior output %q for job %s: %w", name, j.ID, getErr)
+		}
+
+		prior = append(prior, exec.PriorOutput{Name: name, Ref: a.Ref()})
+	}
+
+	return prior, nil
+}
+
+// commitOutputs walks req.OutputDir for the files the sandbox actually
+// left behind and commits each one through the artifact service,
+// linking it to j as an output of this attempt.
+//
+// It is driven entirely by what is really on disk, never by res.Outputs:
+// that claim crossed a process boundary a compromised handler fully
+// controls, so a name, size, or hash it reports is not evidence that
+// anything landed in the artifact store. A handler that lists an output
+// it never wrote gets no artifact row for it, because commitOutputs
+// never consults the claim to decide what to commit — only to carry
+// forward a declared content type when a walked file's name happens to
+// match one.
+//
+// If the artifact plane is disabled, this logs once at debug and does
+// nothing: the sandbox's outputs are discarded along with the scratch
+// directory, exactly as they were before out-of-process committing
+// existed.
+func (r *Runner) commitOutputs(ctx context.Context, j *job.Job, req *exec.Request, res *exec.Result) error {
+	if r.artifacts == nil || !r.artifacts.Enabled() {
+		r.logger.Debug("artifact plane disabled; not committing sandbox outputs",
+			log.String("job_id", j.ID.String()),
+			log.String("job_name", j.Name),
+		)
+
+		return nil
+	}
+
+	claimed := make(map[string]exec.OutputFile, len(res.Outputs))
+	for _, o := range res.Outputs {
+		claimed[o.Name] = o
+	}
+
+	owner := artifact.OwnerRef{Kind: artifact.OwnerJob, ID: j.ID.String()}
+
+	walkErr := filepath.WalkDir(req.OutputDir, func(path string, d fs.DirEntry, walkEntryErr error) error {
+		if walkEntryErr != nil {
+			return walkEntryErr
+		}
+
+		// Dot-prefixed entries are a rung's own uncommitted temp files
+		// (see exec/shim's LocalFS), never a finished output.
+		if d.IsDir() || strings.HasPrefix(d.Name(), ".") {
+			return nil
+		}
+
+		return r.commitOutputFile(ctx, owner, j.RetryCount, d.Name(), path, claimed[d.Name()])
+	})
+	if walkErr != nil {
+		if errors.Is(walkErr, fs.ErrNotExist) {
+			// The handler removed its own OutputDir, or wrote nothing to
+			// it. Either way there is nothing to commit.
+			return nil
+		}
+
+		return fmt.Errorf("dispatch/worker: walk output directory: %w", walkErr)
+	}
+
+	return nil
+}
+
+// commitOutputFile reads one file the walk in commitOutputs found on
+// disk and commits its actual bytes through the artifact service. claim
+// supplies only a content-type hint, when the sandbox reported one for
+// this name; the size and hash the artifact row ends up with come from
+// what CommitWriter actually saw pass through it, never from claim.
+func (r *Runner) commitOutputFile(
+	ctx context.Context,
+	owner artifact.OwnerRef,
+	attempt int,
+	name, path string,
+	claim exec.OutputFile,
+) error {
+	f, err := os.Open(path)
+	if err != nil {
+		return fmt.Errorf("dispatch/worker: open output %q: %w", name, err)
+	}
+	defer f.Close()
+
+	var opts []artifact.CreateOption
+	if claim.ContentType != "" {
+		opts = append(opts, artifact.ContentType(claim.ContentType))
+	}
+
+	w, err := r.artifacts.Create(ctx, owner, attempt, name, opts...)
+	if err != nil {
+		return fmt.Errorf("dispatch/worker: create output %q: %w", name, err)
+	}
+
+	if _, err := io.Copy(w, f); err != nil {
+		_ = w.Abort() //nolint:errcheck // best-effort cleanup; the write error below is what the caller acts on
+
+		return fmt.Errorf("dispatch/worker: write output %q: %w", name, err)
+	}
+
+	if _, err := w.Commit(ctx); err != nil {
+		return fmt.Errorf("dispatch/worker: commit output %q: %w", name, err)
+	}
+
+	return nil
 }
 
 // updateJob persists j's terminal state, fenced on the lease this worker
