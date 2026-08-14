@@ -86,6 +86,9 @@ func RunLeaseSuite(t *testing.T, newStore func(t *testing.T) LeaseStore) {
 	t.Run("UpdateLeasedJobPreservesLeaseColumnsAgainstAStaleSnapshot", func(t *testing.T) {
 		testUpdateLeasedJobPreservesLeaseColumnsAgainstAStaleSnapshot(t, newStore(t))
 	})
+	t.Run("UpdateLeasedJobRunnableWriteIsDequeueable", func(t *testing.T) {
+		testUpdateLeasedJobRunnableWriteIsDequeueable(t, newStore(t))
+	})
 }
 
 func testDequeueGrantsLeaseAndBumpsEpoch(t *testing.T, s LeaseStore) {
@@ -909,5 +912,67 @@ func testUpdateLeasedJobPreservesLeaseColumnsAgainstAStaleSnapshot(t *testing.T,
 	}
 	if !timeEqual(after.HeartbeatAt, beforeWrite.HeartbeatAt) {
 		t.Errorf("HeartbeatAt = %v, want it unchanged at %v", after.HeartbeatAt, beforeWrite.HeartbeatAt)
+	}
+}
+
+// testUpdateLeasedJobRunnableWriteIsDequeueable covers the case every
+// prior UpdateLeasedJob case missed: all of them write a TERMINAL state,
+// and a backend whose fenced write persists the row's own storage without
+// also restoring whatever index the original claim removed the job from
+// would pass every one of them while still stranding a retried job
+// forever. scheduleRetry is the call site that writes a runnable state
+// (StateRetrying) through this method, so this claims a job, fences a
+// write back to StateRetrying with a due RunAt, and asserts a second
+// DequeueJobs on the SAME queue returns it. Dequeue is queue-scoped, so
+// counting its result is safe per the suite's own rule even though this
+// runs against a store shared with every other case.
+func testUpdateLeasedJobRunnableWriteIsDequeueable(t *testing.T, s LeaseStore) {
+	ctx := context.Background()
+	worker := id.NewWorkerID()
+	now := time.Now().UTC()
+	const queue = "lease-update-runnable"
+
+	j := PendingJob("update-runnable", queue, 0)
+	if err := s.EnqueueJob(ctx, j); err != nil {
+		t.Fatalf("enqueue: %v", err)
+	}
+	got, err := s.DequeueJobs(ctx, job.DequeueOpts{
+		Queues:     []string{queue},
+		Limit:      1,
+		WorkerID:   worker,
+		LeaseUntil: now.Add(time.Minute),
+	})
+	if err != nil || len(got) != 1 {
+		t.Fatalf("DequeueJobs: %v (n=%d)", err, len(got))
+	}
+	claimed := got[0]
+
+	claimed.State = job.StateRetrying
+	claimed.RunAt = now.Add(-time.Second) // already due
+	claimed.LastError = "transient, retrying"
+
+	if updErr := s.UpdateLeasedJob(ctx, claimed, worker, claimed.LeaseEpoch); updErr != nil {
+		t.Fatalf("UpdateLeasedJob: %v", updErr)
+	}
+
+	// A row report alone is not enough — GetJob would show StateRetrying
+	// whether or not the backend's own claim index (a Redis ZSET; nothing
+	// analogous on the SQL/Mongo backends, which re-derive candidacy from
+	// the row) still points at it. Only a second dequeue proves the job
+	// is actually reachable again.
+	again, err := s.DequeueJobs(ctx, job.DequeueOpts{
+		Queues:     []string{queue},
+		Limit:      1,
+		WorkerID:   id.NewWorkerID(),
+		LeaseUntil: now.Add(time.Minute),
+	})
+	if err != nil {
+		t.Fatalf("second DequeueJobs: %v", err)
+	}
+	if len(again) != 1 {
+		t.Fatalf("second DequeueJobs returned %d jobs, want 1 — the retried job is unreachable", len(again))
+	}
+	if again[0].ID != claimed.ID {
+		t.Errorf("second DequeueJobs returned job %s, want %s", again[0].ID, claimed.ID)
 	}
 }

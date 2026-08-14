@@ -32,7 +32,7 @@ func TestLeaseConformance(t *testing.T) {
 // an int64 at all — not a rounding error, a hard unmarshal failure on the
 // very next read of the row.
 //
-// None of the 12 conformance cases exercise a duration anywhere near that
+// None of the 20 conformance cases exercise a duration anywhere near that
 // size, which is why the suite never caught it. This test uses a
 // Timeout/LeaseTTL of 200 days (comfortably past the 2^53ns boundary) and
 // asserts both fields come back byte-for-byte exact after a renewal and

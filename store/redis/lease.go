@@ -72,20 +72,37 @@ import (
 // UpdateLeasedJob, below, is that write. It reuses renewLeaseScript
 // itself — the fence it needs (still running, still this worker, still
 // this epoch) is identical to RenewLease's — so the runner's terminal
-// writes now go through the same compare-and-set family as renewal and
-// can no longer race it on the same job. That closes the reachable
-// instance of this window, but not the general case: UpdateJob remains
-// unfenced by design (see job.LeaseStore.UpdateLeasedJob — the reaper's
-// legacy path, rate-limit and shutdown requeues must stay unfenced, or
-// reclaiming a dead worker's job would deadlock on that worker's own
-// epoch), so a caller that reaches UpdateJob directly for a job whose
-// lease has moved on — bypassing the pool and UpdateLeasedJob entirely —
-// can still race these scripts. A full-blob compare-and-swap (checking
-// the entire previous blob byte-for-byte, not just three fields, before
-// the SET) would close that general case too, but is still rejected for
-// the reason it always was: it would make renewal fail on any unrelated
-// concurrent write, including perfectly legitimate ones, and a spurious
-// ErrLeaseLost is exactly what makes a pool cancel a healthy running job.
+// writes now go through the same compare-and-set FAMILY as renewal and
+// reclaim: whichever of the three lands second on a given job sees a
+// state, worker_id, or lease_epoch that has already moved and backs off
+// cleanly, instead of blind-overwriting a write it never saw. Concretely,
+// that means a genuine RECLAIM can no longer be lost to a zombie's
+// terminal write racing it — the split-brain this whole track exists to
+// close.
+//
+// It does NOT close the general read/SET race described two paragraphs
+// up, and does not attempt to: UpdateLeasedJob is itself a Go-side
+// read-modify-write, with the identical round-trip window between its own
+// GET and its own script call. A RenewLease landing in that window passes
+// UpdateLeasedJob's compare-and-set (state/worker_id/lease_epoch are
+// exactly what it expects) and has the expiry it just pushed forward
+// silently overwritten by UpdateLeasedJob's older copy — the same failure
+// mode UpdateJob always had against these scripts, just between two
+// different methods that both now use them. What's closed is one
+// specific, previously-reachable instance: a zombie's own terminal write
+// no longer wins against the RECLAIM that fenced it. UpdateJob itself
+// remains unfenced by design (see job.LeaseStore.UpdateLeasedJob — the
+// reaper's legacy path, rate-limit and shutdown requeues must stay
+// unfenced, or reclaiming a dead worker's job would deadlock on that
+// worker's own epoch), so a caller that reaches UpdateJob directly for a
+// job whose lease has moved on — bypassing the pool and UpdateLeasedJob
+// entirely — can still race every script in this file. A full-blob
+// compare-and-swap (checking the entire previous blob byte-for-byte, not
+// just three fields, before the SET) would narrow both windows further,
+// but is still rejected for the reason it always was: it would make
+// renewal fail on any unrelated concurrent write, including perfectly
+// legitimate ones, and a spurious ErrLeaseLost is exactly what makes a
+// pool cancel a healthy running job.
 
 // renewLeaseScript extends a lease only when the caller still holds it.
 //
@@ -337,7 +354,8 @@ func (s *Store) claimExpired(ctx context.Context, jID string, epoch int, blob []
 // fence the two need is identical (still running, still this worker,
 // still this epoch), so reusing the script means the runner's terminal
 // writes now go through the exact same compare-and-set family as
-// renewal and cannot race it on this job. See the file comment above.
+// renewal and reclaim. See the file comment above for exactly what that
+// does and does not close.
 //
 // lease_epoch, lease_expires_at, worker_id, and heartbeat_at are copied
 // from the entity Go just read, never from j: j is the caller's stale
@@ -345,6 +363,17 @@ func (s *Store) claimExpired(ctx context.Context, jID string, epoch int, blob []
 // expiry forward. Writing j's copy of any of those back would roll the
 // current holder's lease backwards even though the script's epoch check
 // passes — see job.LeaseStore.UpdateLeasedJob.
+//
+// It also mirrors UpdateJob's queue-index discipline (store/redis/job.go),
+// which this method must not skip just because its own write is
+// conditional. DequeueJobs claims a job with a ZPopMin off queueKey and
+// never puts the member back on its own — see dequeue.go — so ANY write
+// that lands a job in a runnable state (pending or retrying, the outcome
+// of scheduleRetry) must restore the queue member, or the job becomes
+// permanently unreachable: visible through GetJob, claimed by no future
+// dequeue. handleSuccess and sendToDLQ happen to write terminal states,
+// which never need the index touched at all, but that is a property of
+// today's callers, not a license for this method to assume it.
 func (s *Store) UpdateLeasedJob(ctx context.Context, j *job.Job, workerID id.WorkerID, epoch int) error {
 	key := jobKey(j.ID.String())
 
@@ -372,6 +401,30 @@ func (s *Store) UpdateLeasedJob(ctx context.Context, j *job.Job, workerID id.Wor
 		return fmt.Errorf("dispatch/redis: update leased job marshal: %w", marshalErr)
 	}
 
+	// ZADD happens BEFORE the script; ZREM happens AFTER it — the same
+	// asymmetric ordering UpdateJob uses, and for the same reason. The
+	// stored entity is authoritative (dequeue re-checks state against
+	// it), so a spare member sitting ahead of a write that has not
+	// landed yet is inert; removing a member before the write is
+	// confirmed would risk stranding a job that turns out to still be
+	// legitimately runnable. Unlike UpdateJob's unconditional write, this
+	// one can fail its compare-and-set — but that failure mode is exactly
+	// as harmless for the ZADD side: a job whose fenced write was refused
+	// is still 'running', which was never a queue member to begin with
+	// (the claim popped it), so a spare pending/retrying-scored member
+	// pointing at a running entity is inert until dequeue's own state
+	// check discards it.
+	jID := j.ID.String()
+	qk := queueKey(next.Queue)
+	runnable := job.State(next.State) == job.StatePending || job.State(next.State) == job.StateRetrying
+
+	if runnable {
+		z := goredis.Z{Score: jobScore(next.Priority, next.RunAt), Member: jID}
+		if zErr := s.rdb.ZAdd(ctx, qk, z).Err(); zErr != nil {
+			return fmt.Errorf("dispatch/redis: update leased job index add: %w", zErr)
+		}
+	}
+
 	res, err := renewLeaseScript.Run(ctx, s.rdb,
 		[]string{key},
 		workerID.String(),
@@ -381,13 +434,21 @@ func (s *Store) UpdateLeasedJob(ctx context.Context, j *job.Job, workerID id.Wor
 	if err != nil && !errors.Is(err, goredis.Nil) {
 		return fmt.Errorf("dispatch/redis: update leased job: %w", err)
 	}
-	if res == 1 {
-		return nil
+	if res != 1 {
+		// The read above found the row, so a failed compare-and-set here
+		// means the lease moved on between that read and the script
+		// running — not that the row is gone. dispatch.ErrJobNotFound is
+		// reserved for the case caught above, where the row was already
+		// missing. Nothing was written, so any ZADD above is left as the
+		// harmless spare member described there; there is nothing to undo.
+		return job.ErrLeaseLost
 	}
 
-	// The read above found the row, so a failed compare-and-set here
-	// means the lease moved on between that read and the script running
-	// — not that the row is gone. dispatch.ErrJobNotFound is reserved
-	// for the case caught above, where the row was already missing.
-	return job.ErrLeaseLost
+	if !runnable {
+		if zErr := s.rdb.ZRem(ctx, qk, jID).Err(); zErr != nil {
+			return fmt.Errorf("dispatch/redis: update leased job index remove: %w", zErr)
+		}
+	}
+
+	return nil
 }
