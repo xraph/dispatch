@@ -35,9 +35,13 @@ const (
 //
 // Epoch is the fencing token. It increments on every grant and every
 // reclamation, so a worker that was reclaimed while paused holds a stale
-// epoch and every write it attempts is rejected. Without it, a worker
-// resuming from a long GC pause would keep writing to a job another
-// worker now owns.
+// epoch. RenewLease, the grant inside DequeueJobs, and
+// ReclaimExpiredLeases check the epoch, so that worker's next renewal
+// fails and the pool cancels the job within one heartbeat interval.
+// UpdateJob does not check it: it is a whole-row write with no epoch
+// predicate, so a stale holder's direct writes are not currently
+// refused. Without the renewal check, a worker resuming from a long GC
+// pause would keep renewing a lease on a job another worker now owns.
 type Lease struct {
 	// JobID is the leased job.
 	JobID id.JobID
