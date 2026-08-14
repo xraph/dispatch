@@ -133,15 +133,28 @@ func TestKillLadderReapsAHelperAfterACooperativeLeaderExits(t *testing.T) {
 		t.Fatalf("Run() = %v", err)
 	}
 	// The leader itself dies within a poll interval or two of SIGTERM
-	// landing, well under 300ms after the deadline fires. A regression
-	// back to leader-only liveness would let Run() return that quickly —
-	// deadline (300ms) plus a handful of milliseconds — because it would
-	// treat the leader's own exit as "nothing left to wait for." The fix
-	// keeps Run() blocked for the full grace period instead, since the
-	// helper is still there; requiring elapsed to clear deadline+grace
-	// (300ms+1s, with slack) is what distinguishes the two.
+	// landing, well under 300ms after the deadline fires. Naively, a
+	// regression back to leader-only liveness ought to make Run() return
+	// that quickly too — deadline (300ms) plus a handful of milliseconds —
+	// since it would treat the leader's own exit as "nothing left to wait
+	// for" and never reach the group SIGKILL. In practice this lower bound
+	// does NOT reliably catch that regression, and crediting it as the
+	// thing that does (an earlier version of this comment did) is false:
+	// Run() also waits, separately, on drainGrace (executor.go) for
+	// stdout/stderr to close, and this fixture's surviving helper keeps
+	// those descriptors open regardless of which way terminate's own
+	// liveness check goes. Mutating waitGroupEmpty back to leader-only —
+	// reintroducing the exact bug this test exists to catch — measured
+	// elapsed at 3.31s here, held entirely by that unrelated 3s drainGrace
+	// floor, comfortably clearing 1100ms despite the regression. The
+	// assertion that actually catches it is the ESRCH check below: a
+	// leader-only liveness check never sends the helper SIGKILL, so it is
+	// still alive when Run() returns, which only that check observes. This
+	// bound is kept anyway as a sanity check that grace is actually
+	// awaited rather than skipped outright (see the upper bound just
+	// below it) — it is just not this bug's regression net.
 	if elapsed < 1100*time.Millisecond {
-		t.Errorf("Run() took %v; returned before the group SIGKILL had a chance to run — the pre-fix bug returned in ~12ms once the leader alone exited", elapsed)
+		t.Errorf("Run() took %v; returned before the group SIGKILL had a chance to run", elapsed)
 	}
 	if elapsed > 8*time.Second {
 		t.Errorf("Run() took %v; grace was not bounded", elapsed)
