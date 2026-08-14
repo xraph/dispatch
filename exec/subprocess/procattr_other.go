@@ -7,10 +7,13 @@ import (
 	"syscall"
 )
 
-// sysProcAttr is a no-op outside Unix: process groups are a POSIX concept
-// this rung does not emulate anywhere else, and this package does not
-// otherwise claim to support a non-Unix platform.
-func sysProcAttr() *syscall.SysProcAttr { return nil }
+// sysProcAttr is a no-op outside Unix: process groups and Credential-based
+// uid dropping are both POSIX concepts this rung does not emulate anywhere
+// else, and this package does not otherwise claim to support a non-Unix
+// platform. checkLaunch (limits_other.go) is what actually refuses Run on
+// this platform, so this stub is never reached in practice — it exists
+// only so the package still compiles here.
+func sysProcAttr(options) *syscall.SysProcAttr { return nil }
 
 // killGroup falls back to killing the process directly outside Unix,
 // since there is no process group to address as a whole.

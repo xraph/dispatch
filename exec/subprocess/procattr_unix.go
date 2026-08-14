@@ -14,11 +14,33 @@ import (
 // killGroup below needs it right now: without it, killing the tracked
 // process leaves anything it spawned running, which is the classic silent
 // failure of this design — the deadline appears to have worked while the
-// real work continues in the background. Task 5 extends this same
-// SysProcAttr with a Credential for the dedicated low-privilege uid; this
-// task only sets the process group.
-func sysProcAttr() *syscall.SysProcAttr {
-	return &syscall.SysProcAttr{Setpgid: true}
+// real work continues in the background.
+//
+// When a user is configured, this also sets Credential so the child drops
+// to that uid/gid before exec. checkLaunch (limits_unix.go) is what
+// refuses to reach here at all when the configured uid matches the
+// worker's own without WithAllowSameUser; sysProcAttr itself does not
+// re-derive that policy, it just builds the attribute struct.
+//
+// Credential.NoSetGroups is always true. Without it, os/exec also calls
+// setgroups(2) to clear supplementary groups, which requires privilege
+// (CAP_SETGID on Linux, root on Darwin) independent of whether Uid/Gid
+// differ from the caller's own — so even WithAllowSameUser's same-uid
+// case would fail to launch whenever the worker itself is not root, which
+// is every dev machine and every CI run here. The isolation this task
+// provides is the primary uid/gid boundary; supplementary-group
+// inheritance is outside its scope.
+func sysProcAttr(o options) *syscall.SysProcAttr {
+	attr := &syscall.SysProcAttr{Setpgid: true}
+	if o.hasUser {
+		attr.Credential = &syscall.Credential{
+			Uid:         uint32(o.uid), //nolint:gosec // G115: operator-configured via WithUser, never attacker input.
+			Gid:         uint32(o.gid), //nolint:gosec // G115: operator-configured via WithUser, never attacker input.
+			NoSetGroups: true,
+		}
+	}
+
+	return attr
 }
 
 // killGroup sends SIGKILL to the child's whole process group rather than

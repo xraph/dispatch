@@ -32,15 +32,13 @@ const (
 	resultFD  = 4
 )
 
-// options holds every Option's effect. Some fields — the configured user,
-// AllowSameUser, and Rlimits — are not yet enforced: setting the process's
-// credentials and resource limits is Task 5's job, and the kill ladder's
-// SIGTERM-then-grace-period-then-SIGKILL sequence is Task 6's. This task
-// carries their configuration through so those tasks only have to wire
-// behaviour onto values that already exist, not invent a new option API.
-// The child's process group is the one piece of SysProcAttr this task does
-// set (see sysProcAttr in procattr_unix.go): Task 5 still owns the
-// Credential half of the same struct, for the dedicated uid.
+// options holds every Option's effect. The configured user and Rlimits are
+// now enforced: checkLaunch (limits_unix.go / limits_other.go) refuses to
+// start when the uid matches the worker's own without AllowSameUser,
+// sysProcAttr (procattr_unix.go) sets Credential from uid/gid, and
+// buildEnv below passes rlimits to the child, which shim.Main applies via
+// syscall.Setrlimit. The kill ladder's SIGTERM-then-grace-period-then-
+// SIGKILL sequence is still Task 6's job.
 type options struct {
 	binary        string
 	args          []string
@@ -117,9 +115,10 @@ func WithLogger(l log.Logger) Option {
 	return func(o *options) { o.logger = l }
 }
 
-// WithRlimits configures POSIX resource limits for the child. Task 5
-// applies these; this task only carries the value from configuration
-// through to the point Task 5 needs it.
+// WithRlimits configures POSIX resource limits for the child. buildEnv
+// passes non-zero fields to the child as environment variables, and
+// shim.Main applies them via syscall.Setrlimit before running the
+// handler — see the Rlimits doc comment for why that happens child-side.
 func WithRlimits(r Rlimits) Option {
 	return func(o *options) {
 		o.rlimits = r
@@ -139,12 +138,17 @@ func WithScratchDir(path string) Option {
 }
 
 // Rlimits configures the POSIX resource limits applied to the child
-// process. Go cannot set a child's rlimits through SysProcAttr, so Task 5
-// applies these child-side, in shim.Main, from environment variables the
-// parent sets. Zero means "leave the limit at whatever the worker itself
-// runs with."
+// process. Go cannot set a child's rlimits through SysProcAttr, so
+// buildEnv passes these child-side as environment variables (see
+// shim.EnvRlimitAS and friends), and shim.Main applies them via
+// syscall.Setrlimit before running the handler. Zero means "leave the
+// limit at whatever the worker itself runs with."
 type Rlimits struct {
-	// AddressSpace caps RLIMIT_AS in bytes.
+	// AddressSpace caps RLIMIT_AS in bytes. Note Darwin's kernel rejects
+	// setrlimit(RLIMIT_AS, ...) outright (EINVAL) regardless of value —
+	// shim.Main logs and continues rather than failing the attempt when
+	// that happens, since the rest of the isolation (uid boundary,
+	// process-group kill, the other limits) still holds.
 	AddressSpace int64
 	// NoFile caps RLIMIT_NOFILE, the open file descriptor count.
 	NoFile int64
@@ -152,10 +156,11 @@ type Rlimits struct {
 	// may run — a second line of defence against a forking exploit even
 	// with the process group killed on timeout.
 	NProc int64
-	// Core caps RLIMIT_CORE. Task 5 forces this to zero regardless of
-	// what is configured here, so a segfaulting parser cannot dump the
-	// input that crashed it, and the worker's memory alongside it, to
-	// disk.
+	// Core caps RLIMIT_CORE. buildEnv forces the child's actual limit to
+	// zero unconditionally, regardless of what is set here, so a
+	// segfaulting parser cannot dump the input that crashed it, and the
+	// worker's memory alongside it, to disk. This field is accepted for
+	// API symmetry with the other limits but has no effect.
 	Core int64
 	// FSize caps RLIMIT_FSIZE in bytes, bounding how much a runaway
 	// handler can write before the kernel kills it outright.
@@ -203,6 +208,17 @@ func (e *Executor) Level() exec.Level { return exec.LevelProcess }
 func (e *Executor) Run(ctx context.Context, req *exec.Request) (*exec.Result, error) {
 	if err := req.Validate(); err != nil {
 		return nil, fmt.Errorf("dispatch/exec/subprocess: invalid request: %w", err)
+	}
+
+	// checkLaunch refuses before any pipe or process exists: on Unix, a
+	// configured uid matching the worker's own without WithAllowSameUser;
+	// on every other platform, unconditionally, since this rung has no
+	// isolation to offer there. See limits_unix.go / limits_other.go.
+	if err := checkLaunch(e.opts); err != nil {
+		return &exec.Result{
+			Status:     exec.StatusLaunchFailed,
+			HandlerErr: err.Error(),
+		}, nil
 	}
 
 	// The request pipe: reqR becomes the child's fd 3, reqW is ours to
@@ -275,7 +291,7 @@ func (e *Executor) Run(ctx context.Context, req *exec.Request) (*exec.Result, er
 	cmd.ExtraFiles = []*os.File{reqR, resW} // index 0 -> fd 3, index 1 -> fd 4, matching requestFD/resultFD above
 	cmd.Stdout = outW
 	cmd.Stderr = errW
-	cmd.SysProcAttr = sysProcAttr() // Setpgid, so killProcess below can reach the whole group, not just this one process
+	cmd.SysProcAttr = sysProcAttr(e.opts) // Setpgid, so killProcess below can reach the whole group, not just this one process; Credential when a user is configured
 
 	if err := cmd.Start(); err != nil {
 		reqR.Close()
@@ -516,11 +532,12 @@ func writeRequest(w *os.File, req *exec.Request) error {
 // os.Environ(): only a fixed allowlist (PATH, HOME, TMPDIR) is copied from
 // the worker's own environment, then the executor's configured base
 // (WithEnv), then the request's own Env, which wins any conflict since it
-// is the most specific source. The fd variables are set last and cannot be
-// overridden by any of the above, because their values are fixed by how
-// ExtraFiles was built above, not something any caller should influence.
+// is the most specific source. The fd and rlimit variables are set last
+// and cannot be overridden by any of the above, because their values are
+// fixed by how ExtraFiles and options.rlimits were built, not something
+// any caller should influence.
 func (e *Executor) buildEnv(req *exec.Request) []string {
-	merged := make(map[string]string, len(e.opts.env)+len(req.Env)+5)
+	merged := make(map[string]string, len(e.opts.env)+len(req.Env)+10)
 
 	for _, k := range [...]string{"PATH", "HOME", "TMPDIR"} {
 		if v, ok := os.LookupEnv(k); ok {
@@ -536,6 +553,31 @@ func (e *Executor) buildEnv(req *exec.Request) []string {
 
 	merged[shim.EnvRequestFD] = strconv.Itoa(requestFD)
 	merged[shim.EnvResultFD] = strconv.Itoa(resultFD)
+
+	// RLIMIT_CORE is forced to zero unconditionally, regardless of
+	// whether WithRlimits was ever called: a segfaulting parser would
+	// otherwise dump a core containing the malicious input and the
+	// process's own memory to disk. The rest are only sent when
+	// configured, and only per field — zero means "leave the limit at
+	// whatever the worker itself runs with" (see the Rlimits doc
+	// comment). shim.Main applies all of these child-side via
+	// syscall.Setrlimit, since Go cannot set a child's rlimits through
+	// SysProcAttr.
+	merged[shim.EnvRlimitCore] = "0"
+	if e.opts.hasRlimits {
+		if e.opts.rlimits.AddressSpace != 0 {
+			merged[shim.EnvRlimitAS] = strconv.FormatInt(e.opts.rlimits.AddressSpace, 10)
+		}
+		if e.opts.rlimits.NoFile != 0 {
+			merged[shim.EnvRlimitNoFile] = strconv.FormatInt(e.opts.rlimits.NoFile, 10)
+		}
+		if e.opts.rlimits.NProc != 0 {
+			merged[shim.EnvRlimitNProc] = strconv.FormatInt(e.opts.rlimits.NProc, 10)
+		}
+		if e.opts.rlimits.FSize != 0 {
+			merged[shim.EnvRlimitFSize] = strconv.FormatInt(e.opts.rlimits.FSize, 10)
+		}
+	}
 
 	out := make([]string, 0, len(merged))
 	for k, v := range merged {

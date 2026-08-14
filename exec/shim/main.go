@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"syscall"
@@ -45,6 +46,21 @@ const (
 	// defaultResultFD is the descriptor Main writes to absent an
 	// EnvResultFD override.
 	defaultResultFD = 4
+
+	// EnvRlimitAS, EnvRlimitNoFile, EnvRlimitNProc, EnvRlimitCore, and
+	// EnvRlimitFSize name the environment variables the parent uses to
+	// pass POSIX resource limits into the child. Go cannot set a child's
+	// rlimits through os/exec's SysProcAttr, so the parent (see buildEnv
+	// in exec/subprocess) passes the desired values here, and Main
+	// applies them itself via syscall.Setrlimit — see applyRlimits —
+	// before running anything. Each is unset when the parent has no
+	// value to send, except EnvRlimitCore, which the parent always sends
+	// as "0".
+	EnvRlimitAS     = "DISPATCH_RLIMIT_AS"
+	EnvRlimitNoFile = "DISPATCH_RLIMIT_NOFILE"
+	EnvRlimitNProc  = "DISPATCH_RLIMIT_NPROC"
+	EnvRlimitCore   = "DISPATCH_RLIMIT_CORE"
+	EnvRlimitFSize  = "DISPATCH_RLIMIT_FSIZE"
 )
 
 // Main is the sandboxed child's entrypoint. It builds a bare job.Registry
@@ -78,6 +94,12 @@ func Main(defs ...job.Registrable) {
 // Only StatusHandlerError keeps exit 0; every other non-OK status,
 // including one Run reported without an error, is a nonzero exit.
 func mainExitCode(defs []job.Registrable) int {
+	// Applied before anything else touches the request: RLIMIT_CORE in
+	// particular exists to stop a segfaulting handler from dumping the
+	// input that crashed it (and the process's own memory) to disk, which
+	// only holds if the limit is in place before the handler ever runs.
+	applyRlimits()
+
 	//nolint:gosec // G115: fd numbers come from a small, non-negative process descriptor space, never from attacker input.
 	in := os.NewFile(uintptr(fdFromEnv(EnvRequestFD, defaultRequestFD)), "dispatch-exec-request")
 	//nolint:gosec // G115: fd numbers come from a small, non-negative process descriptor space, never from attacker input.
@@ -138,6 +160,81 @@ func fdFromEnv(name string, def int) int {
 	}
 
 	return n
+}
+
+// rlimitSpec pairs the environment variable the parent sets with the raw
+// setrlimit(2) resource number and a label for diagnostics.
+type rlimitSpec struct {
+	env      string
+	resource int
+	label    string
+}
+
+// rlimitSpecs lists every limit applyRlimits knows how to apply.
+//
+// RLIMIT_NPROC's resource number is hardcoded rather than named from the
+// syscall package because Go's syscall package does not export
+// RLIMIT_NPROC at all, on any platform — it was trimmed from the
+// generated zerrors tables along with RLIMIT_MEMLOCK and RLIMIT_RSS. The
+// number itself is not portable either: Linux's <bits/resource.h> puts it
+// at 6, while Darwin and the rest of the BSD family put it at 7. This
+// rung's CI runs on Linux and its developers on Darwin, so those are the
+// two values handled explicitly; runtime.GOOS is read once here rather
+// than behind a build tag because nothing else in this function needs
+// per-platform source files.
+func rlimitSpecs() []rlimitSpec {
+	nproc := 6 // Linux RLIMIT_NPROC
+	if runtime.GOOS == "darwin" {
+		nproc = 7 // Darwin/BSD RLIMIT_NPROC
+	}
+
+	return []rlimitSpec{
+		// Applied first: this is the one limit the parent always sends,
+		// and it is the one the worker's own security promise depends
+		// on most directly.
+		{EnvRlimitCore, syscall.RLIMIT_CORE, "RLIMIT_CORE"},
+		{EnvRlimitAS, syscall.RLIMIT_AS, "RLIMIT_AS"},
+		{EnvRlimitNoFile, syscall.RLIMIT_NOFILE, "RLIMIT_NOFILE"},
+		{EnvRlimitFSize, syscall.RLIMIT_FSIZE, "RLIMIT_FSIZE"},
+		{EnvRlimitNProc, nproc, "RLIMIT_NPROC"},
+	}
+}
+
+// applyRlimits reads every limit the parent set in the environment (see
+// EnvRlimitAS and friends) and applies it via syscall.Setrlimit before the
+// handler ever runs.
+//
+// A limit whose env var is unset is left alone — that is how buildEnv
+// says "no opinion" for anything but RLIMIT_CORE, which it always sends.
+// A limit that fails to apply is logged to stderr and skipped rather than
+// treated as a launch failure: unlike checkLaunch's platform refusal in
+// exec/subprocess (an all-or-nothing decision about whether this rung has
+// anything to offer at all), an individual rlimit is one layer among
+// several — the uid boundary and the process-group kill are still in
+// effect regardless. Making it fatal would also make this rung unusable
+// in practice on Darwin, whose kernel rejects setrlimit(RLIMIT_AS, ...)
+// outright (EINVAL) no matter what value is requested; failing the whole
+// launch over a limit the current kernel does not support at all is worse
+// than proceeding with the rest of the isolation intact and saying so.
+func applyRlimits() {
+	for _, s := range rlimitSpecs() {
+		v, ok := os.LookupEnv(s.env)
+		if !ok {
+			continue
+		}
+
+		n, err := strconv.ParseInt(v, 10, 64)
+		if err != nil || n < 0 {
+			fmt.Fprintf(os.Stderr, "dispatch/exec/shim: %s value %q is invalid, skipping\n", s.label, v)
+			continue
+		}
+
+		//nolint:gosec // G115: n is validated non-negative above; it comes from the parent's own constructed environment, never attacker input.
+		lim := &syscall.Rlimit{Cur: uint64(n), Max: uint64(n)}
+		if err := syscall.Setrlimit(s.resource, lim); err != nil {
+			fmt.Fprintf(os.Stderr, "dispatch/exec/shim: setrlimit %s=%d failed, continuing without it: %v\n", s.label, n, err)
+		}
+	}
 }
 
 // Run is the testable core of the shim: it reads one exec.Request from in,
