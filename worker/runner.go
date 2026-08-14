@@ -168,11 +168,12 @@ func (r *Runner) WithArtifacts(svc *artifact.Service, scratchRoot string) *Runne
 // Failures are joined rather than fatal: a rung that cannot sweep should not
 // stop the worker from running the jobs it can still execute.
 func (r *Runner) Reclaim(ctx context.Context, workerID id.WorkerID) error {
-	// Independent of executors/artifacts being configured on THIS Runner:
-	// a scratch directory can only have been created by a Runner that did
-	// have both, but this process may be starting fresh after a restart
-	// that changed configuration, and the directories a prior process
-	// left under the same scratch root are still there regardless.
+	// Unconditional here, but not unconditional in effect: this Runner's
+	// own scratch directories can only exist if it has an artifact plane
+	// configured (see WithArtifacts), and sweepStaleScratchDirs' own
+	// first line returns immediately when it does not — a Runner without
+	// one has no scratch root of its own to sweep, and must not go
+	// looking through os.TempDir() on a config it never opted into.
 	r.sweepStaleScratchDirs()
 
 	if r.executors == nil {
@@ -747,9 +748,12 @@ func collectOutputEntries(dir string) ([]outputEntry, error) {
 		return nil, fmt.Errorf("dispatch/worker: walk output directory: %w", walkErr)
 	}
 
-	// Sorted so which entries have already landed if a later one fails
-	// is deterministic, for commitOutputEntries' own rollback, rather
-	// than dependent on the filesystem's own directory-listing order.
+	// Sorted so a partial commit's boundary — which entries land before a
+	// later one fails, and so which ones commitOutputFile's own
+	// FindCommitted check will recognise as already-done on a retry — is
+	// a deterministic function of name, not of the filesystem's own
+	// directory-listing order, which is unspecified and can vary between
+	// platforms or even between runs on the same one.
 	sort.Slice(entries, func(i, k int) bool { return entries[i].name < entries[k].name })
 
 	return entries, nil
