@@ -5,6 +5,7 @@ package subprocess_test
 import (
 	"context"
 	"os"
+	"strings"
 	"testing"
 
 	"github.com/xraph/dispatch/exec"
@@ -76,14 +77,72 @@ func TestRlimitsAreAppliedChildSide(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Run() = %v", err)
 	}
-	// A NoFile limit of 3 is below what any real process can operate
-	// under (fd 0/1/2 alone exhaust it before fd 3/4 for the wire
-	// protocol are even reached), so the shim must fail somehow — either
-	// it never gets far enough to report OK, or the parent classifies the
-	// process ending badly as killed/launch_failed. What matters is that
-	// StatusOK is unreachable, which it would not be if the limit had
-	// been silently dropped.
+	// Lowering RLIMIT_NOFILE does not close or invalidate descriptors
+	// already open at the time it takes effect — fd 0/1/2 (inherited)
+	// and fd 3/4 (the wire protocol, opened by the parent before exec)
+	// all survive a soft limit of 3 that comes later, in applyRlimits.
+	// What a limit of 3 does is make the *next* open() the shim's own
+	// runtime needs (a network poller fd, a temp file, anything) fail,
+	// which is early and unconditional enough in a live Go program that
+	// the shim cannot reach StatusOK afterwards. That is the actual
+	// mechanism this asserts on: not descriptors 3/4 becoming unusable,
+	// but nothing further being allocatable.
 	if res.Status == exec.StatusOK {
 		t.Error("Status = ok; a RLIMIT_NOFILE of 3 should have made the child unable to run at all, so the limit was not applied")
+	}
+}
+
+// TestStrictRlimitsFailsLaunchOnUnexpectedFailure proves WithStrictRlimits
+// turns an rlimit failure into StatusLaunchFailed end to end, through a
+// real forked child rather than shim's own in-process unit tests (see
+// exec/shim/rlimit_unix_test.go for why those stick to values that never
+// reach a real Setrlimit call). NoFile: -1 is deliberately a value
+// applyRlimits rejects before ever calling Setrlimit — see
+// TestSameUserIsRefusedByDefault's neighbors for why a value that
+// actually depends on kernel-specific hard limits would be less portable
+// than this.
+func TestStrictRlimitsFailsLaunchOnUnexpectedFailure(t *testing.T) {
+	e := subprocess.New(
+		subprocess.WithBinary(os.Args[0]),
+		subprocess.WithEnv(map[string]string{"DISPATCH_EXEC_SHIM_TEST": "1"}),
+		subprocess.WithRlimits(subprocess.Rlimits{NoFile: -1}),
+		subprocess.WithStrictRlimits(),
+	)
+
+	res, err := e.Run(context.Background(), request(t, exectest.JobOK, struct{}{}))
+	if err != nil {
+		t.Fatalf("Run() = %v", err)
+	}
+	if res.Status != exec.StatusLaunchFailed {
+		t.Errorf("Status = %q, want launch_failed", res.Status)
+	}
+	if !strings.Contains(res.HandlerErr, "RLIMIT_NOFILE") {
+		t.Errorf("HandlerErr = %q, want it to name RLIMIT_NOFILE", res.HandlerErr)
+	}
+}
+
+// TestStrictRlimitsToleratesKnownUnsupported proves WithStrictRlimits does
+// not turn a platform's own structural refusal of a limit into a launch
+// failure. The AddressSpace value here is deliberately generous (2GiB) so
+// that on a platform where RLIMIT_AS is actually settable (Linux, in
+// particular this rung's CI) it simply succeeds rather than crashing this
+// small handler; on Darwin, syscall.Setrlimit(RLIMIT_AS, ...) fails with
+// EINVAL unconditionally regardless of value, which isKnownUnsupported
+// classifies as structural rather than a misconfiguration WithStrictRlimits
+// should catch. Either way the expected outcome is the same: StatusOK.
+func TestStrictRlimitsToleratesKnownUnsupported(t *testing.T) {
+	e := subprocess.New(
+		subprocess.WithBinary(os.Args[0]),
+		subprocess.WithEnv(map[string]string{"DISPATCH_EXEC_SHIM_TEST": "1"}),
+		subprocess.WithRlimits(subprocess.Rlimits{AddressSpace: 2 << 30}),
+		subprocess.WithStrictRlimits(),
+	)
+
+	res, err := e.Run(context.Background(), request(t, exectest.JobOK, struct{}{}))
+	if err != nil {
+		t.Fatalf("Run() = %v", err)
+	}
+	if res.Status != exec.StatusOK {
+		t.Fatalf("Status = %q, want ok (err %q) — a platform's own refusal to support RLIMIT_AS must not be treated as a WithStrictRlimits failure", res.Status, res.HandlerErr)
 	}
 }

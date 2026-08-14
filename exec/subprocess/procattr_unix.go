@@ -22,21 +22,39 @@ import (
 // worker's own without WithAllowSameUser; sysProcAttr itself does not
 // re-derive that policy, it just builds the attribute struct.
 //
-// Credential.NoSetGroups is always true. Without it, os/exec also calls
-// setgroups(2) to clear supplementary groups, which requires privilege
-// (CAP_SETGID on Linux, root on Darwin) independent of whether Uid/Gid
-// differ from the caller's own — so even WithAllowSameUser's same-uid
-// case would fail to launch whenever the worker itself is not root, which
-// is every dev machine and every CI run here. The isolation this task
-// provides is the primary uid/gid boundary; supplementary-group
-// inheritance is outside its scope.
+// Credential.NoSetGroups is true only when both uid and gid already equal
+// the caller's own — the WithAllowSameUser dev/CI path, where the
+// Credential is otherwise a no-op. That is the only case where it is
+// needed: os/exec calls setgroups(2) to clear supplementary groups
+// whenever NoSetGroups is false and Credential.Groups is nil (see
+// exec_linux.go and exec_libc2.go's shared "if !cred.NoSetGroups"
+// guard), and setgroups requires privilege (CAP_SETGID on Linux, root on
+// Darwin) independent of whether Uid/Gid actually change — so without
+// this exception, even WithAllowSameUser's same-uid case would fail to
+// launch whenever the worker itself is not root, which is every dev
+// machine and every CI run here.
+//
+// Whenever uid or gid genuinely differ from the caller's own, this is
+// false, so setgroups does run and the child's supplementary groups are
+// actually cleared rather than silently inherited. That launch already
+// requires the same privilege setgroups does (only root/CAP_SETUID can
+// change to a different uid at all), so this does not introduce a new
+// privilege requirement — it only skips the clear in the one case where
+// the process doing the dropping has no such privilege to begin with,
+// and dropping is a no-op anyway. Getting this backwards is a real
+// containment gap, not a cosmetic one: a worker running as root with
+// supplementary group "docker" (common for a systemd unit that also
+// manages containers) would otherwise hand every "sandboxed" child that
+// same group membership — and therefore group-write access to
+// /var/run/docker.sock, i.e. root on the host — regardless of the uid it
+// was dropped to.
 func sysProcAttr(o options) *syscall.SysProcAttr {
 	attr := &syscall.SysProcAttr{Setpgid: true}
 	if o.hasUser {
 		attr.Credential = &syscall.Credential{
 			Uid:         uint32(o.uid), //nolint:gosec // G115: operator-configured via WithUser, never attacker input.
 			Gid:         uint32(o.gid), //nolint:gosec // G115: operator-configured via WithUser, never attacker input.
-			NoSetGroups: true,
+			NoSetGroups: o.uid == os.Getuid() && o.gid == os.Getgid(),
 		}
 	}
 

@@ -50,6 +50,7 @@ type options struct {
 	logger        log.Logger
 	rlimits       Rlimits
 	hasRlimits    bool
+	strictRlimits bool
 	scratchDir    string
 }
 
@@ -89,9 +90,15 @@ func WithEnv(env map[string]string) Option {
 	}
 }
 
-// WithUser configures the uid and gid the child runs as. Task 5 enforces
-// this and refuses to start when it matches the worker's own uid, unless
-// WithAllowSameUser is also given.
+// WithUser configures the uid and gid the child runs as, dropped via
+// Credential on sysProcAttr before exec. Run refuses to start when uid
+// matches the worker's own, unless WithAllowSameUser is also given — see
+// its doc comment for why.
+//
+// This only bounds the primary uid and gid. The child still keeps every
+// supplementary group the worker's own OS account belongs to; see the
+// package doc comment's "The uid/gid boundary" section for why that
+// matters and what to do about it.
 func WithUser(uid, gid int) Option {
 	return func(o *options) {
 		o.uid = uid
@@ -100,9 +107,10 @@ func WithUser(uid, gid int) Option {
 	}
 }
 
-// WithAllowSameUser permits WithUser to name the worker's own uid. Without
-// it, Task 5's enforcement refuses to start, because a child running as
-// the worker can read every credential the isolation exists to hide.
+// WithAllowSameUser permits WithUser to name the worker's own uid.
+// Without it, Run refuses to start, because a child running as the
+// worker can read every credential the isolation exists to hide —
+// ~/.aws, /var/run/secrets, the Dispatch config itself.
 func WithAllowSameUser() Option {
 	return func(o *options) { o.allowSameUser = true }
 }
@@ -124,6 +132,30 @@ func WithRlimits(r Rlimits) Option {
 		o.rlimits = r
 		o.hasRlimits = true
 	}
+}
+
+// WithStrictRlimits makes an rlimit that Setrlimit could not apply a
+// launch failure instead of a warning — but only when the failure is
+// unexpected. shim.Main (applyRlimits) still treats a platform's own
+// structural refusal to support a given limit at all as a warning
+// regardless of this option: Darwin rejecting RLIMIT_AS unconditionally
+// is the standing example, and there is nothing a caller-supplied value
+// could have done differently about that, so making it fatal here would
+// only make WithRlimits{AddressSpace: ...} unusable on Darwin rather than
+// catch a real misconfiguration. What this does catch: a value that
+// exceeds the process's own hard limit (EPERM on a platform that does
+// support the resource), or any other Setrlimit failure this rung has
+// not already special-cased as platform-structural.
+//
+// Without this, a configured rlimit that fails to apply is logged to the
+// child's stderr and otherwise ignored — see the Rlimits doc comment —
+// which is invisible by default unless WithLogger is also configured,
+// since WithLogger's own default discards output silently. An operator
+// who wants a guarantee that a configured limit actually took effect,
+// not just an attempt at one, should use this rather than relying on
+// stderr being watched.
+func WithStrictRlimits() Option {
+	return func(o *options) { o.strictRlimits = true }
 }
 
 // WithScratchDir sets the directory under which each attempt gets a fresh
@@ -577,6 +609,9 @@ func (e *Executor) buildEnv(req *exec.Request) []string {
 		if e.opts.rlimits.FSize != 0 {
 			merged[shim.EnvRlimitFSize] = strconv.FormatInt(e.opts.rlimits.FSize, 10)
 		}
+	}
+	if e.opts.strictRlimits {
+		merged[shim.EnvRlimitStrict] = "1"
 	}
 
 	out := make([]string, 0, len(merged))
