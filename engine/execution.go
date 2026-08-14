@@ -23,13 +23,18 @@ func WithExecutor(e exec.Executor) Option {
 // scratch OutputDir is created under (worker.Runner.WithArtifacts).
 //
 // It only has an effect once the artifact plane is also configured
-// (WithArtifacts): a scratch OutputDir exists to be committed through the
-// artifact plane, and Task 8's stale-scratch-directory sweep
-// (worker.Runner.Reclaim) is itself gated off entirely when the Runner
-// has no artifact plane. Setting this with no artifact plane configured
-// sets a value Build never reads — see Build's own comment at the call
-// site for why that is left as a config-time warning for callers to
-// raise, not an engine-level error.
+// (WithArtifacts): Build only ever passes this value to the Runner
+// alongside eng.artifacts (see Build's own runner.WithArtifacts call),
+// so with no artifact plane configured this sets a value Build never
+// reads and the Runner's scratch directories fall back to os.TempDir()
+// regardless. That is not because scratch-dir creation or its startup
+// sweep are themselves gated on the artifact plane — they are not, and
+// both run for any out-of-process attempt either way (see
+// worker.Runner.prepareOutputDir and Reclaim) — it is purely this
+// option's own value never reaching the Runner. The extension package's
+// resolveExecutionOptions logs a startup warning for exactly this
+// configuration (a configured scratch_dir with the artifact plane off),
+// so that stays a deliberate, visible choice rather than a silent one.
 //
 // Leaving it unset defaults to os.TempDir(), exactly as worker.Runner
 // does on its own.

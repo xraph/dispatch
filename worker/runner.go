@@ -58,12 +58,18 @@ const launchAttemptTTL = 30 * time.Minute
 // entry that happens to share a temp root.
 const scratchDirPrefix = "dispatch-out-"
 
-// staleScratchDirAge is how old a leftover scratch directory must be
-// before sweepStaleScratchDirs removes it. Generous on purpose: Reclaim
-// runs once at worker startup, so this only ever removes directories a
-// PREVIOUS process left behind by dying before its own deferred cleanup
-// ran — not one a currently running sibling process sharing the same
-// scratch root is still writing into.
+// staleScratchDirAge is how old a leftover scratch directory must be,
+// on top of its owning PID no longer being alive, before
+// sweepStaleScratchDirs removes it. It is a courtesy tie-break only —
+// what actually protects a currently running sibling's directory is
+// processAlive(pid) matching the PID sweepStaleScratchDirs parses out of
+// the directory's own name (parseScratchDirPID), not age: a live process
+// writing inside its directory does not advance the directory's own
+// mtime, so age alone cannot tell a stale directory from one a live
+// process is still using (see sweepStaleScratchDirs' own doc comment).
+// This constant only narrows the sliver of a window between MkdirTemp
+// creating the directory and the owning process actually beginning to
+// use it, once ownership has already ruled the PID dead.
 const staleScratchDirAge = time.Hour
 
 // errFenceLost marks a commit-outputs failure caused specifically by
@@ -168,12 +174,17 @@ func (r *Runner) WithArtifacts(svc *artifact.Service, scratchRoot string) *Runne
 // Failures are joined rather than fatal: a rung that cannot sweep should not
 // stop the worker from running the jobs it can still execute.
 func (r *Runner) Reclaim(ctx context.Context, workerID id.WorkerID) error {
-	// Unconditional here, but not unconditional in effect: this Runner's
-	// own scratch directories can only exist if it has an artifact plane
-	// configured (see WithArtifacts), and sweepStaleScratchDirs' own
-	// first line returns immediately when it does not — a Runner without
-	// one has no scratch root of its own to sweep, and must not go
-	// looking through os.TempDir() on a config it never opted into.
+	// Unconditional, and deliberately so: prepareOutputDir creates a
+	// scratch directory for ANY out-of-process attempt (executor.Level()
+	// > exec.LevelNone), whether or not this Runner has an artifact plane
+	// configured — see WithArtifacts' own doc comment. A Runner with no
+	// artifact plane still leaks exactly the same "dispatch-out-…"
+	// directories on a hard crash, so the sweep has to run regardless of
+	// r.artifacts to reclaim them; gating it the way commitOutputs is
+	// gated would leave those directories on disk forever. The sweep is
+	// safe to run unconditionally because it only ever touches entries
+	// matching scratchDirPrefix — nothing else sharing the scratch root
+	// is at risk.
 	r.sweepStaleScratchDirs()
 
 	if r.executors == nil {
@@ -210,10 +221,28 @@ func (r *Runner) Close() error {
 	return errors.Join(errs...)
 }
 
-// Execute runs a job through the middleware chain and its executor.
-// On success: marks completed, emits JobCompleted.
-// On failure with retries remaining: marks retrying with backoff, emits JobRetrying.
-// On failure with retries exhausted: marks failed, pushes to DLQ, emits JobFailed + JobDLQ.
+// Execute runs a job through the middleware chain and its executor, then
+// routes the outcome through handleFailure/handleSuccess. The terminal
+// write depends on which of several shapes the outcome takes:
+//   - Success: marks completed, emits JobCompleted.
+//   - A launch failure (the handler never ran) with launch attempts
+//     remaining: sets StatePending with a backoff delay and emits
+//     nothing — see requeueAfterLaunchFailure. It does not consume the
+//     job's own retry budget.
+//   - A launch failure that exhausts maxLaunchAttempts, or any failure
+//     marked permanent (dispatch.ErrPermanent, or exec.Error.Permanent
+//     for a rung that cannot carry a Go error chain): DLQs immediately —
+//     on the FIRST attempt if that is when permanence was discovered,
+//     not only "after exhausting retries." Marks failed, pushes to DLQ,
+//     emits JobFailed + JobDLQ.
+//   - An ordinary failure with retries remaining: marks retrying with
+//     backoff, emits JobRetrying.
+//   - An ordinary failure with retries exhausted: marks failed, pushes
+//     to DLQ, emits JobFailed + JobDLQ, same as the permanent case.
+//   - Any of the terminal writes above losing the race to
+//     job.ErrLeaseLost: abandonLostLease writes nothing to the store at
+//     all — the current lease holder's own write must stand untouched —
+//     and only emits JobFailed so extensions still observe the loss.
 func (r *Runner) Execute(ctx context.Context, j *job.Job) error {
 	terminal, err := r.terminalFor(j)
 	if err != nil {
@@ -497,13 +526,17 @@ func (r *Runner) prepareOutputDir(j *job.Job) (dir string, cleanup func(), err e
 // logged, not returned, since one stuck directory must not stop Reclaim
 // from doing the rest of what it does at startup.
 //
-// It does nothing at all when this Runner has no artifact plane
-// configured: nothing this Runner does creates or commits scratch
-// output without one (see WithArtifacts), so a Runner without one has
-// no basis for deciding anything found here is its own business to
-// remove — and calling Reclaim on such a Runner must not reach into a
-// scratch root a differently-configured sibling process is legitimately
-// using.
+// It runs regardless of whether this Runner has an artifact plane
+// configured: prepareOutputDir creates a scratch directory for any
+// out-of-process attempt independent of r.artifacts (only committing
+// those outputs is gated on it — see WithArtifacts and commitOutputs),
+// so a Runner without an artifact plane leaks the identical
+// "dispatch-out-…" directories on a crash and needs the identical sweep.
+// This is safe to run unconditionally, including for a Runner that never
+// configured an out-of-process executor at all: only entries matching
+// scratchDirPrefix with a well-formed embedded PID (parseScratchDirPID)
+// are ever touched, so a scratch root this Runner never wrote into is
+// left alone by construction, not by a config check.
 //
 // Ownership, not age, is what decides whether a directory is touched:
 // a directory whose embedded PID (see parseScratchDirPID) belongs to a
@@ -515,10 +548,6 @@ func (r *Runner) prepareOutputDir(j *job.Job) (dir string, cleanup func(), err e
 // MkdirTemp creating the directory and the owning process actually
 // beginning to use it.
 func (r *Runner) sweepStaleScratchDirs() {
-	if r.artifacts == nil || !r.artifacts.Enabled() {
-		return
-	}
-
 	root := r.scratchRoot
 	if root == "" {
 		root = os.TempDir()
@@ -799,12 +828,19 @@ func fenceToken(ctx context.Context) string {
 //
 // A failure partway through leaves whatever already landed in place:
 // nothing here rolls a prior success back. That is deliberate, not an
-// omission — see commitOutputFile's own doc comment for why undoing a
-// partial commit is worse than leaving it. A losing attempt may
-// therefore end this call with some entries committed and others not;
-// what matters is that every name it DOES leave committed stays valid
-// and reusable, by this same attempt's own retry or by
-// resolvePriorOutputs on a later one.
+// omission — an earlier version of this function did roll back, by
+// deleting the backend bytes it had just written, which left the
+// artifact row's link behind pointing at nothing. resolvePriorOutputs,
+// FindExisting, and IfAbsent all read that link, not the bytes, so a
+// retried handler consulting PriorOutputs was told "already done, skip
+// regenerating it" for data that had just been deleted. Leaving a
+// partial success in place instead, and giving commitOutputFile
+// (FindCommitted) a way to recognise its own earlier work as a no-op
+// rather than a collision, is what a retry actually converges against. A
+// losing attempt may therefore end this call with some entries committed
+// and others not; what matters is that every name it DOES leave
+// committed stays valid and reusable, by this same attempt's own retry
+// or by resolvePriorOutputs on a later one.
 func (r *Runner) commitOutputEntries(
 	ctx context.Context,
 	owner artifact.OwnerRef,
@@ -827,11 +863,15 @@ func (r *Runner) commitOutputEntries(
 
 // commitOutputFile reads one file collectOutputEntries found on disk
 // and commits its actual bytes through the artifact service, returning
-// the ref it was recorded under. The size, hash, and content type the
-// resulting artifact row carries all come from what the backend
+// the ref it was recorded under. The size and content type the
+// resulting artifact row carries both come from what the backend
 // actually saw pass through it while committing these exact bytes —
 // nothing here is influenced by anything the sandbox itself claimed
-// about its outputs.
+// about its outputs. There is no hash: artifact.ObjectInfo carries no
+// content hash for Commit to record, and CommitWriter.Commit never
+// populates Artifact.ContentHash on this path — that field is only ever
+// assigned on the input-staging path (artifact/staging/middleware.go),
+// not here.
 //
 // It checks FindCommitted first and treats a hit as a no-op success
 // rather than re-writing anything: a commit failure is classified as

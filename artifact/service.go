@@ -19,8 +19,12 @@ const DefaultEphemeralPrefix = "ephemeral"
 
 // Service is the operational face of the artifact plane. It pairs a Store
 // with a Backend and owns the rules that keep the two consistent:
-// registration is idempotent, ephemeral keys embed the attempt, and an
-// artifact row is never written without its link.
+// registration is idempotent, ephemeral keys embed the attempt, and — on
+// the CommitWriter path (Create/CreateFenced/Commit) — an artifact row is
+// never written without its link. Register is the exception: it writes a
+// durable row for a pre-existing backend object with a nil link, which
+// Store.CreateArtifact's own contract supports, since there is no
+// job/attempt to link it to yet.
 type Service struct {
 	store   Store
 	backend Backend

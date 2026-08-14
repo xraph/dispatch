@@ -53,12 +53,16 @@ type QueueManager interface {
 // defaultStoreCallTimeout caps how long a single store roundtrip
 // (DequeueJobs, HeartbeatJob, ReapStaleJobs, UpdateJob) is allowed
 // to run before the worker abandons it. Without this, a slow Mongo /
-// Postgres session selection would let dequeue calls stack on the
-// shared driver pool until every connection is checked out — which
-// is exactly the cascade that produces "context deadline exceeded"
-// floods at boot. 5 seconds is generous enough for a healthy
-// roundtrip and tight enough that 10 workers polling every second
-// can't pile up more than 50 in-flight calls at once.
+// Postgres session selection would let calls stack on the shared driver
+// pool until every connection is checked out — which is exactly the
+// cascade that produces "context deadline exceeded" floods at boot.
+// DequeueJobs comes from the single fetchLoop poller (see its own doc
+// comment below), not one call per worker goroutine, but
+// HeartbeatJob/UpdateJob can still arrive from up to `concurrency`
+// worker goroutines at once, each tending its own active job. 5 seconds
+// is generous enough for a healthy roundtrip and tight enough that a
+// pool of 10 concurrent workers can't pile up more than a few dozen
+// in-flight calls at once.
 const defaultStoreCallTimeout = 5 * time.Second
 
 // DefaultReapInterval is how often the pool scans for expired leases.
@@ -159,7 +163,8 @@ func WithPoolQueues(queues []string) PoolOption {
 	return func(p *Pool) { p.queues = queues }
 }
 
-// WithPollInterval sets how often workers poll for new jobs.
+// WithPollInterval sets how often the pool's single fetcher (fetchLoop)
+// polls the store for new jobs.
 func WithPollInterval(d time.Duration) PoolOption {
 	return func(p *Pool) { p.pollInterval = d }
 }
@@ -177,8 +182,15 @@ func WithHeartbeatInterval(d time.Duration) PoolOption {
 }
 
 // WithStaleJobThreshold sets the threshold after which running jobs
-// without a heartbeat are considered stale and reaped. A zero value
-// disables stale job reaping.
+// without a heartbeat are considered stale and reaped, on the legacy
+// SELECT-then-UPDATE path a backend implementing only job.Store falls
+// back to (reapStaleJobsLegacy). It has no effect on any first-party
+// backend: every one of them (memory, mongo, postgres, redis, sqlite)
+// implements job.LeaseStore, so reapStaleJobs routes to
+// reclaimExpiredLeases instead, which reclaims purely by lease expiry
+// (job.LeaseTTL / WithDefaultLeaseTTL) and never reads this value. A
+// zero value disables reaping outright, on either path — see
+// reapStaleJobs and reclaimExpiredLeases.
 func WithStaleJobThreshold(d time.Duration) PoolOption {
 	return func(p *Pool) { p.staleJobThreshold = d }
 }

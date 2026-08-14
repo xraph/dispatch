@@ -438,17 +438,24 @@ func Build(d *dispatch.Dispatcher, opts ...Option) (*Engine, error) {
 		eng.bo, eng.executors, logger, allMws...,
 	)
 
-	// An out-of-process rung gets no scratch directory, no PriorOutputs,
-	// and commits nothing unless this runs: WithArtifacts is what turns
-	// on worker.Runner's scratch-dir creation, output committing, and
-	// startup sweep of directories a previous process left behind. Gated
-	// on eng.artifacts specifically — not on whether an extra executor is
-	// configured — because that is the same condition
-	// worker.Runner.commitOutputs and Reclaim already gate themselves on;
-	// calling this with a nil svc would be a no-op by their own contract,
-	// so there is nothing to lose by keeping the condition here identical
-	// to theirs rather than trying to also know about every executor
-	// WithExecutor might have added.
+	// An out-of-process rung gets a scratch directory regardless of
+	// whether this runs — worker.Runner creates one for any attempt whose
+	// executor is above exec.LevelNone, artifact plane or not — and
+	// worker.Runner.Reclaim's startup sweep of directories a previous
+	// process left behind now runs unconditionally too, for the same
+	// reason. What this call actually turns on is PriorOutputs and output
+	// committing (worker.Runner.commitOutputs), which is the one thing
+	// genuinely gated on having somewhere to commit to. Gated on
+	// eng.artifacts specifically — not on whether an extra executor is
+	// configured — because that is the same condition commitOutputs
+	// itself gates on; calling this with a nil svc would be a no-op by
+	// its own contract, so there is nothing to lose by keeping the
+	// condition here identical rather than trying to also know about
+	// every executor WithExecutor might have added. One side effect worth
+	// knowing: eng.scratchRoot only ever reaches the Runner through this
+	// call's second argument, so with no artifact plane configured a
+	// Runner's scratch directories fall back to os.TempDir() even if
+	// WithScratchRoot named something else.
 	if eng.artifacts != nil {
 		runner.WithArtifacts(eng.artifacts, eng.scratchRoot)
 	}

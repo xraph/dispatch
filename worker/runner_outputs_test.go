@@ -961,24 +961,28 @@ func TestRunner_ReclaimSweepsOnlyScratchDirsWithNoLiveOwner(t *testing.T) {
 	}
 }
 
-// TestRunner_ReclaimDoesNotSweepWithoutAnArtifactPlane is finding 4's
-// second requirement: a Runner with no artifact plane configured
-// creates no scratch directories of its own (see terminalFor —
-// PriorOutputs/committing are gated on r.artifacts, not the scratch
-// directory itself, but a Runner that never commits has no basis for
-// deciding a directory under a SHARED scratch root belongs to it) and
-// must not reach into that root at all, even for an entry that would
-// otherwise look definitely stale to it.
+// TestRunner_ReclaimSweepsWithoutAnArtifactPlaneToo pins the corrected
+// behaviour from the comment/doc drift sweep: prepareOutputDir creates a
+// scratch directory for ANY out-of-process attempt regardless of
+// whether this Runner has an artifact plane configured (see
+// terminalFor — only PriorOutputs and committing are gated on
+// r.artifacts, not scratch-directory creation itself, exactly as
+// WithArtifacts' own doc comment says). A Runner with no artifact plane
+// therefore leaks the identical "dispatch-out-…" directories on a crash
+// as one with a plane configured, and Reclaim's sweep has to run for it
+// too or those directories are never reclaimed at all — the exact gap
+// an earlier version of this test enshrined as intentional by asserting
+// the opposite.
 //
-// scratchRoot only has one setter — WithArtifacts — so a Runner with
-// no artifact plane at all necessarily also has no configured
-// scratchRoot and falls back to the process's real os.TempDir(). That
-// is the exact case finding 4 described: nothing here is a fabricated
-// test-only path, it is what sweepStaleScratchDirs actually resolves
-// to when a bare Runner (no WithArtifacts) calls Reclaim. TMPDIR is
-// redirected via t.Setenv so the test can observe it without touching
-// the real system temp directory.
-func TestRunner_ReclaimDoesNotSweepWithoutAnArtifactPlane(t *testing.T) {
+// scratchRoot only has one setter — WithArtifacts — so a Runner with no
+// artifact plane at all necessarily also has no configured scratchRoot
+// and falls back to the process's real os.TempDir(). That is the exact
+// case this test exercises: nothing here is a fabricated test-only
+// path, it is what sweepStaleScratchDirs actually resolves to when a
+// bare Runner (no WithArtifacts) calls Reclaim. TMPDIR is redirected via
+// t.Setenv so the test can observe it without touching the real system
+// temp directory.
+func TestRunner_ReclaimSweepsWithoutAnArtifactPlaneToo(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("os.TempDir() does not read TMPDIR on windows")
 	}
@@ -1001,9 +1005,21 @@ func TestRunner_ReclaimDoesNotSweepWithoutAnArtifactPlane(t *testing.T) {
 		t.Fatalf("chtimes staleDead: %v", err)
 	}
 
+	// A live-owner directory in the same root must still survive even
+	// with no artifact plane configured: ownership, not the presence of
+	// an artifact plane, is what protects a sibling's in-use directory.
+	oldButAlive := filepath.Join(root, fmt.Sprintf("dispatch-out-%d-job-def-111111", os.Getpid()))
+	if err := os.Mkdir(oldButAlive, 0o750); err != nil {
+		t.Fatalf("mkdir oldButAlive: %v", err)
+	}
+	if err := os.Chtimes(oldButAlive, oldTime, oldTime); err != nil {
+		t.Fatalf("chtimes oldButAlive: %v", err)
+	}
+
 	reg := job.NewRegistry()
-	// No WithArtifacts call at all, so r.scratchRoot is unset — exactly
-	// the configuration whose Reclaim must not touch os.TempDir().
+	// No WithArtifacts call at all, so r.scratchRoot is unset and falls
+	// back to os.TempDir() — exactly the configuration the sweep must
+	// still reach into now.
 	runner := worker.NewRunner(
 		reg, ext.NewRegistry(log.NewNoopLogger()), newFakeJobStore(), nil,
 		backoff.NewExponential(time.Second, time.Hour), exec.NewRegistry(inproc.New(reg)), log.NewNoopLogger(),
@@ -1013,9 +1029,12 @@ func TestRunner_ReclaimDoesNotSweepWithoutAnArtifactPlane(t *testing.T) {
 		t.Fatalf("Reclaim() = %v, want nil", err)
 	}
 
-	if _, err := os.Stat(staleDead); err != nil {
-		t.Errorf("a Runner with no artifact plane swept a scratch dir under os.TempDir() it has no basis to own: %v",
-			err)
+	if _, err := os.Stat(staleDead); !os.IsNotExist(err) {
+		t.Errorf("a Runner with no artifact plane left a dead-owner scratch dir behind (stat err = %v) — "+
+			"it leaks the identical directories a Runner with a plane does and must sweep them too", err)
+	}
+	if _, err := os.Stat(oldButAlive); err != nil {
+		t.Errorf("a live-owner scratch dir was removed despite no artifact plane being configured: %v", err)
 	}
 }
 
