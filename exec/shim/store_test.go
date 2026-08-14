@@ -254,24 +254,107 @@ func TestMemStore_ConcurrentCreateArtifact(t *testing.T) {
 	}
 }
 
+// shimAllowedModules lists the exact third-party (and xraph/go-utils)
+// module roots exec/shim's dependency closure may reach, besides the Go
+// standard library and dispatch's own packages (shimAllowedDispatchPackages,
+// below). A dependency matches an entry here if it equals the entry or
+// sits under it (e.g. "go.uber.org/zap/zapcore" under "go.uber.org/zap"):
+// that is ordinary internal structure of an already-allowed module, not a
+// new one, and stays permissive across a version bump that adds or renames
+// an internal subpackage of something already here.
+//
+// This list is small and meant to stay that way — see
+// TestShimLinksNoInfrastructure's own doc comment for why it exists as an
+// allowlist rather than a denylist.
+var shimAllowedModules = []string{
+	"github.com/vmihailenco/msgpack",   // wire.Encode/Decode's frame encoding
+	"github.com/vmihailenco/tagparser", // msgpack's own struct-tag parser
+	"github.com/zeebo/blake3",          // artifact content hashing
+	"github.com/klauspost/cpuid",       // blake3's SIMD dispatch
+	"go.jetify.com/typeid",             // ID generation
+	"github.com/gofrs/uuid",            // typeid's underlying uuid generator
+	"go.uber.org/zap",                  // logging
+	"go.uber.org/multierr",             // zap's error-joining helper
+	"github.com/xraph/go-utils/log",    // the log.Logger interface dispatch itself uses
+}
+
+// shimAllowedDispatchPackages lists the exact dispatch packages exec/shim's
+// dependency closure may reach. Deliberately NOT a prefix match on
+// "github.com/xraph/dispatch": that would let github.com/xraph/dispatch/store
+// pass silently just because it shares the module root, which is exactly
+// the shape of gap this test exists to close (see the doc comment below).
+var shimAllowedDispatchPackages = map[string]bool{
+	"github.com/xraph/dispatch":           true,
+	"github.com/xraph/dispatch/artifact":  true,
+	"github.com/xraph/dispatch/exec":      true,
+	"github.com/xraph/dispatch/exec/shim": true, // the package under test itself
+	"github.com/xraph/dispatch/exec/wire": true,
+	"github.com/xraph/dispatch/id":        true,
+	"github.com/xraph/dispatch/job":       true,
+	"github.com/xraph/dispatch/resource":  true,
+}
+
+// shimDepIsStdlib reports whether dep is a standard-library import,
+// including its own internal/... and vendor/... packages (crypto/tls's
+// vendored copy of x/crypto, for instance). A module path always has a
+// dot in its first path segment (a domain, e.g. "github.com" or
+// "go.uber.org"); the standard library never does.
+func shimDepIsStdlib(dep string) bool {
+	first, _, _ := strings.Cut(dep, "/")
+
+	return !strings.Contains(first, ".")
+}
+
 // TestShimLinksNoInfrastructure fails if the sandbox binary gains an
 // import that could reach a credential, a socket, or a config file. The
 // phase's central claim is that this process holds none of those, and
 // that claim should be checkable by inspection rather than by tracing
 // which package-level variables happen not to be constructed.
+//
+// This is an allowlist, not a denylist. A denylist of forbidden substrings
+// ("go-redis", "client-go", ...) only catches infrastructure clients this
+// test's author already thought to name — a review round added
+// `import _ "github.com/jackc/pgx/v5"` to this package and the previous
+// denylist version of this test passed clean: ten pgx packages entered the
+// closure, including pgconn (which holds connection credentials), and none
+// of them matched "go-redis", "client-go", "confy", or "xraph/forge". An
+// allowlist inverts the failure mode: anything not already known to be one
+// of the handful of packages this sandbox actually needs — msgpack,
+// blake3, typeid, zap, go-utils/log, and dispatch's own small, explicitly
+// enumerated internal set — fails closed instead of open.
 func TestShimLinksNoInfrastructure(t *testing.T) {
 	out, err := osexec.CommandContext(context.Background(), "go", "list", "-deps", "github.com/xraph/dispatch/exec/shim").Output()
 	if err != nil {
 		t.Skipf("go list unavailable: %v", err)
 	}
 
-	forbidden := []string{"go-redis", "client-go", "confy", "xraph/forge"}
+	for _, dep := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		if dep == "" || shimDepIsStdlib(dep) {
+			continue
+		}
 
-	for _, dep := range strings.Split(string(out), "\n") {
-		for _, bad := range forbidden {
-			if strings.Contains(dep, bad) {
-				t.Errorf("exec/shim links %q, which must not be reachable from a sandbox", dep)
+		if strings.HasPrefix(dep, "github.com/xraph/dispatch") {
+			if !shimAllowedDispatchPackages[dep] {
+				t.Errorf("exec/shim links dispatch package %q, which is outside the sandbox's allowed "+
+					"closure (shimAllowedDispatchPackages) — a sandbox process must not reach dispatch/store "+
+					"or any other package that can hold a credential", dep)
 			}
+
+			continue
+		}
+
+		allowed := false
+		for _, prefix := range shimAllowedModules {
+			if dep == prefix || strings.HasPrefix(dep, prefix+"/") {
+				allowed = true
+				break
+			}
+		}
+		if !allowed {
+			t.Errorf("exec/shim links %q, which is outside the sandbox's allowed closure "+
+				"(shimAllowedModules) — a sandbox process must hold no infrastructure client "+
+				"(a database driver, a cache client, a config loader); if this is a deliberate new "+
+				"dependency, add its module root here only after confirming it holds none", dep)
 		}
 	}
 }
