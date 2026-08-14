@@ -9,6 +9,7 @@ import (
 
 	goredis "github.com/redis/go-redis/v9"
 
+	"github.com/xraph/dispatch"
 	"github.com/xraph/dispatch/id"
 	"github.com/xraph/dispatch/job"
 )
@@ -53,16 +54,38 @@ import (
 // overwrite whatever UpdateJob just wrote with Go's now-stale copy of
 // that field. The epoch check makes the *lease* compare-and-set atomic;
 // it does not make every write to the row serialize with every other
-// write. Nothing in this codebase calls UpdateJob concurrently with
-// RenewLease or ReclaimExpiredLeases on the same job today — that needs a
-// lease-aware pool loop, which is later work — so this window is
-// currently unreachable, not closed. A full-blob compare-and-swap
-// (checking the entire previous blob byte-for-byte, not just three
-// fields, before the SET) would close it, but was rejected: it would
-// make renewal fail on any unrelated concurrent write, including
-// perfectly legitimate ones, and a spurious ErrLeaseLost is exactly what
-// makes a pool cancel a perfectly healthy running job. Narrow and
-// currently-unreachable beats wrong and load-bearing.
+// write.
+//
+// This paragraph used to claim that window was "currently unreachable,
+// not closed," because nothing called UpdateJob concurrently with
+// RenewLease or ReclaimExpiredLeases on the same job. That premise was
+// wrong, and worker/runner.go's terminal writes are the disproof: a
+// worker whose lease had already been reclaimed — a live holder was
+// mid-attempt, renewing on schedule — still called the unfenced UpdateJob
+// from handleSuccess, scheduleRetry, or sendToDLQ, using a claim-time job
+// snapshot. It won the race, rolled lease_epoch backwards, and marked the
+// job completed while the reclaiming worker was still executing it. The
+// "lease-aware pool loop" this comment said would be later work is
+// exactly what RenewLease-on-heartbeat already was; the missing piece was
+// never the pool loop, it was a fenced write for the runner to call.
+//
+// UpdateLeasedJob, below, is that write. It reuses renewLeaseScript
+// itself — the fence it needs (still running, still this worker, still
+// this epoch) is identical to RenewLease's — so the runner's terminal
+// writes now go through the same compare-and-set family as renewal and
+// can no longer race it on the same job. That closes the reachable
+// instance of this window, but not the general case: UpdateJob remains
+// unfenced by design (see job.LeaseStore.UpdateLeasedJob — the reaper's
+// legacy path, rate-limit and shutdown requeues must stay unfenced, or
+// reclaiming a dead worker's job would deadlock on that worker's own
+// epoch), so a caller that reaches UpdateJob directly for a job whose
+// lease has moved on — bypassing the pool and UpdateLeasedJob entirely —
+// can still race these scripts. A full-blob compare-and-swap (checking
+// the entire previous blob byte-for-byte, not just three fields, before
+// the SET) would close that general case too, but is still rejected for
+// the reason it always was: it would make renewal fail on any unrelated
+// concurrent write, including perfectly legitimate ones, and a spurious
+// ErrLeaseLost is exactly what makes a pool cancel a healthy running job.
 
 // renewLeaseScript extends a lease only when the caller still holds it.
 //
@@ -301,4 +324,70 @@ func (s *Store) claimExpired(ctx context.Context, jID string, epoch int, blob []
 	}
 
 	return res == 1, nil
+}
+
+// UpdateLeasedJob persists j only while the caller still holds the
+// lease.
+//
+// This is the read-modify-write the column-exclusion shape forces: a
+// whole-entity SET can't express "every field except these four," so Go
+// reads the current entity, overlays only j's business fields onto it —
+// never a pre-serialized blob built from j alone — and hands the result
+// to renewLeaseScript for the same compare-and-set RenewLease uses. The
+// fence the two need is identical (still running, still this worker,
+// still this epoch), so reusing the script means the runner's terminal
+// writes now go through the exact same compare-and-set family as
+// renewal and cannot race it on this job. See the file comment above.
+//
+// lease_epoch, lease_expires_at, worker_id, and heartbeat_at are copied
+// from the entity Go just read, never from j: j is the caller's stale
+// snapshot, and every renewal since it was taken has pushed the real
+// expiry forward. Writing j's copy of any of those back would roll the
+// current holder's lease backwards even though the script's epoch check
+// passes — see job.LeaseStore.UpdateLeasedJob.
+func (s *Store) UpdateLeasedJob(ctx context.Context, j *job.Job, workerID id.WorkerID, epoch int) error {
+	key := jobKey(j.ID.String())
+
+	var cur jobEntity
+	if getErr := s.getEntity(ctx, key, &cur); getErr != nil {
+		if isNotFound(getErr) {
+			return dispatch.ErrJobNotFound
+		}
+		return fmt.Errorf("dispatch/redis: update leased job get: %w", getErr)
+	}
+
+	next, err := toJobEntity(j)
+	if err != nil {
+		return err
+	}
+
+	next.LeaseEpoch = cur.LeaseEpoch
+	next.LeaseExpiresAt = cur.LeaseExpiresAt
+	next.WorkerID = cur.WorkerID
+	next.HeartbeatAt = cur.HeartbeatAt
+	next.UpdatedAt = now()
+
+	blob, marshalErr := json.Marshal(next)
+	if marshalErr != nil {
+		return fmt.Errorf("dispatch/redis: update leased job marshal: %w", marshalErr)
+	}
+
+	res, err := renewLeaseScript.Run(ctx, s.rdb,
+		[]string{key},
+		workerID.String(),
+		epoch,
+		blob,
+	).Int64()
+	if err != nil && !errors.Is(err, goredis.Nil) {
+		return fmt.Errorf("dispatch/redis: update leased job: %w", err)
+	}
+	if res == 1 {
+		return nil
+	}
+
+	// The read above found the row, so a failed compare-and-set here
+	// means the lease moved on between that read and the script running
+	// — not that the row is gone. dispatch.ErrJobNotFound is reserved
+	// for the case caught above, where the row was already missing.
+	return job.ErrLeaseLost
 }

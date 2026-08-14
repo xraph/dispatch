@@ -4,6 +4,7 @@ import (
 	"context"
 	"time"
 
+	"github.com/xraph/dispatch"
 	"github.com/xraph/dispatch/id"
 	"github.com/xraph/dispatch/job"
 )
@@ -83,4 +84,44 @@ func (m *Store) ReclaimExpiredLeases(_ context.Context, limit int) ([]*job.Job, 
 	}
 
 	return reclaimed, nil
+}
+
+// UpdateLeasedJob persists j only while the caller still holds the
+// lease — still running, still assigned to workerID, still at epoch.
+// Otherwise it returns job.ErrLeaseLost and leaves the stored job
+// untouched.
+//
+// Only the business fields move. lease_epoch, lease_expires_at,
+// worker_id, and heartbeat_at are copied from the CURRENTLY STORED job,
+// never from j: j is the caller's stale snapshot, and every renewal
+// since it was taken has pushed the real expiry forward. Overwriting
+// that with j's copy would roll the winner's lease backwards even
+// though the epoch check passed — see job.LeaseStore.UpdateLeasedJob.
+func (m *Store) UpdateLeasedJob(_ context.Context, j *job.Job, workerID id.WorkerID, epoch int) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	cur, ok := m.jobs[j.ID.String()]
+	if !ok {
+		return dispatch.ErrJobNotFound
+	}
+	if cur.State != job.StateRunning || cur.WorkerID != workerID || cur.LeaseEpoch != epoch {
+		return job.ErrLeaseLost
+	}
+
+	leaseEpoch := cur.LeaseEpoch
+	leaseExpiresAt := cur.LeaseExpiresAt
+	leaseWorkerID := cur.WorkerID
+	heartbeatAt := cur.HeartbeatAt
+
+	cp := cloneJob(j)
+	cp.LeaseEpoch = leaseEpoch
+	cp.LeaseExpiresAt = leaseExpiresAt
+	cp.WorkerID = leaseWorkerID
+	cp.HeartbeatAt = heartbeatAt
+	cp.UpdatedAt = time.Now().UTC()
+
+	m.jobs[j.ID.String()] = cp
+
+	return nil
 }

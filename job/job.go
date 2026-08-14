@@ -76,11 +76,12 @@ type Job struct {
 
 	// LeaseEpoch is the fencing token for the current lease. It increments
 	// on every grant and every reclamation. RenewLease, the grant inside
-	// DequeueJobs, and ReclaimExpiredLeases all check it, so a worker
-	// holding a stale epoch fails to renew and the pool cancels the job
-	// within one heartbeat interval. UpdateJob does not check it: that is
-	// a whole-row write with no epoch predicate, so a stale holder's
-	// direct writes are not currently refused.
+	// DequeueJobs, ReclaimExpiredLeases, and UpdateLeasedJob all check
+	// it, so a worker holding a stale epoch fails to renew — and the pool
+	// cancels the job within one heartbeat interval — or has its terminal
+	// write refused outright. UpdateJob does not check it: that is a
+	// whole-row write with no epoch predicate, so a caller that wants the
+	// fence must use UpdateLeasedJob instead.
 	LeaseEpoch int `json:"lease_epoch"`
 
 	// LeaseExpiresAt is when the current lease lapses if not renewed.

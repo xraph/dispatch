@@ -495,4 +495,33 @@ type LeaseStore interface {
 	// The claim and the read are one atomic statement, so two pools
 	// reclaiming concurrently cannot both take the same job.
 	ReclaimExpiredLeases(ctx context.Context, limit int) ([]*Job, error)
+
+	// UpdateLeasedJob persists j only while the caller still holds the
+	// lease.
+	//
+	// The write applies iff the row is still running, still assigned to
+	// workerID, and still at epoch. Otherwise it returns ErrLeaseLost and
+	// leaves the row untouched — the lease has moved on, and a worker
+	// that no longer owns a job has no coherent claim to make about it.
+	//
+	// It writes the same columns as UpdateJob EXCEPT the lease-owned
+	// ones: lease_epoch, lease_expires_at, worker_id, and heartbeat_at
+	// are never written here. Those have exactly three writers — the
+	// grant in DequeueJobs, RenewLease, and ReclaimExpiredLeases — and
+	// this method deliberately is not a fourth.
+	//
+	// j is the caller's claim-time (or otherwise stale) snapshot, so
+	// j.LeaseExpiresAt is whatever the expiry was when this worker last
+	// read the row — every renewal since has pushed the real value
+	// forward. A whole-row write that passed the epoch predicate would
+	// still roll the expiry backwards, shortening the current holder's
+	// lease by however long this caller ran. Excluding the lease-owned
+	// columns is what makes the epoch predicate a genuine fence rather
+	// than a check that only looks like one.
+	//
+	// A missing row returns dispatch.ErrJobNotFound rather than
+	// ErrLeaseLost: zero rows affected by the fence predicate means "the
+	// lease moved on", but a row that no longer exists was never a
+	// question of who holds it.
+	UpdateLeasedJob(ctx context.Context, j *Job, workerID id.WorkerID, epoch int) error
 }

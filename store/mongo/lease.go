@@ -8,6 +8,7 @@ import (
 	"go.mongodb.org/mongo-driver/v2/bson"
 	"go.mongodb.org/mongo-driver/v2/mongo/options"
 
+	"github.com/xraph/dispatch"
 	"github.com/xraph/dispatch/id"
 	"github.com/xraph/dispatch/job"
 )
@@ -122,4 +123,110 @@ func (s *Store) ReclaimExpiredLeases(ctx context.Context, limit int) ([]*job.Job
 	}
 
 	return jobs, nil
+}
+
+// UpdateLeasedJob persists j only while the caller still holds the
+// lease.
+//
+// Unlike UpdateJob's ReplaceOne, this is an UpdateOne with the fence
+// predicate IN THE FILTER and a $set of named business fields — no
+// read-modify-write needed, and the document is never replaced wholesale.
+// worker_id, lease_epoch, lease_expires_at, and heartbeat_at are never
+// assigned in $set: j is the caller's stale snapshot, so writing its copy
+// of lease_expires_at back would roll the current holder's expiry
+// backwards even though the filter's epoch check passed.
+//
+// resource_requests and resource_limits mirror toJobModel's zero-Set
+// handling: a zero Set is $unset rather than $set to an empty document,
+// matching the "absent key, not an empty subdocument" contract UpdateJob
+// keeps via bson "omitempty" on ReplaceOne.
+func (s *Store) UpdateLeasedJob(ctx context.Context, j *job.Job, workerID id.WorkerID, epoch int) error {
+	m := toJobModel(j)
+	m.UpdatedAt = now()
+
+	col := s.mdb.Collection(colJobs)
+
+	filter := bson.M{
+		"_id":         m.ID,
+		"state":       string(job.StateRunning),
+		"worker_id":   workerID.String(),
+		"lease_epoch": epoch,
+	}
+
+	set := bson.M{
+		"name":               m.Name,
+		"queue":              m.Queue,
+		"payload":            m.Payload,
+		"state":              m.State,
+		"priority":           m.Priority,
+		"max_retries":        m.MaxRetries,
+		"retry_count":        m.RetryCount,
+		"last_error":         m.LastError,
+		"scope_app_id":       m.ScopeAppID,
+		"scope_org_id":       m.ScopeOrgID,
+		"run_at":             m.RunAt,
+		"started_at":         m.StartedAt,
+		"completed_at":       m.CompletedAt,
+		"timeout":            m.Timeout,
+		"created_at":         m.CreatedAt,
+		"updated_at":         m.UpdatedAt,
+		"lease_ttl":          m.LeaseTTL,
+		"evict_count":        m.EvictCount,
+		"req_cpu_milli":      m.ReqCPUMilli,
+		"req_memory_bytes":   m.ReqMemoryBytes,
+		"req_disk_bytes":     m.ReqDiskBytes,
+		"req_gpu_milli":      m.ReqGPUMilli,
+		"req_custom_keys":    m.ReqCustomKeys,
+		"resource_class":     m.ResourceClass,
+		"input_bytes":        m.InputBytes,
+		"primary_input_hash": m.PrimaryInputHash,
+	}
+
+	unset := bson.M{}
+	if m.ResourceRequests.IsZero() {
+		unset["resource_requests"] = ""
+	} else {
+		set["resource_requests"] = m.ResourceRequests
+	}
+	if m.ResourceLimits.IsZero() {
+		unset["resource_limits"] = ""
+	} else {
+		set["resource_limits"] = m.ResourceLimits
+	}
+
+	update := bson.M{"$set": set}
+	if len(unset) > 0 {
+		update["$unset"] = unset
+	}
+
+	var matched int64
+	err := withRetry(ctx, defaultRetry, func(ctx context.Context) error {
+		r, updErr := col.UpdateOne(ctx, filter, update)
+		if updErr != nil {
+			return updErr
+		}
+		matched = r.MatchedCount
+
+		return nil
+	})
+	if err != nil {
+		return fmt.Errorf("dispatch/mongo: update leased job: %w", err)
+	}
+	if matched > 0 {
+		return nil
+	}
+
+	// Zero matches means either the fence predicate failed (the lease
+	// moved on) or the document is gone. Only the latter is
+	// ErrJobNotFound; the former is ErrLeaseLost, the entire point of
+	// this method.
+	count, countErr := col.CountDocuments(ctx, bson.M{"_id": m.ID})
+	if countErr != nil {
+		return fmt.Errorf("dispatch/mongo: update leased job existence check: %w", countErr)
+	}
+	if count == 0 {
+		return dispatch.ErrJobNotFound
+	}
+
+	return job.ErrLeaseLost
 }

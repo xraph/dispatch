@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/xraph/dispatch"
 	"github.com/xraph/dispatch/id"
 	"github.com/xraph/dispatch/job"
 )
@@ -148,4 +149,86 @@ func (s *Store) ReclaimExpiredLeases(ctx context.Context, limit int) ([]*job.Job
 	}
 
 	return jobs, nil
+}
+
+// updateLeasedJobSQL writes every business column UpdateJob writes,
+// fenced on the row being still running, still assigned to the caller's
+// workerID, and still at the caller's epoch. Same shape as Postgres'
+// equivalent statement, character for character in intent.
+//
+// lease_epoch, lease_expires_at, worker_id, and heartbeat_at are
+// deliberately absent from the SET list. j is the caller's stale
+// snapshot, and writing j.LeaseExpiresAt back would roll the real expiry
+// backwards even behind a passing epoch predicate. Those four columns
+// have exactly three writers (the grant in DequeueJobs, RenewLease, and
+// ReclaimExpiredLeases); this statement is deliberately not a fourth.
+const updateLeasedJobSQL = `
+		UPDATE dispatch_jobs
+		SET name = ?, queue = ?, payload = ?, state = ?, priority = ?,
+		    max_retries = ?, retry_count = ?, last_error = ?,
+		    scope_app_id = ?, scope_org_id = ?, run_at = ?,
+		    started_at = ?, completed_at = ?, timeout = ?,
+		    lease_ttl = ?, evict_count = ?, created_at = ?,
+		    updated_at = ?,
+		    req_cpu_milli = ?, req_memory_bytes = ?, req_disk_bytes = ?,
+		    req_gpu_milli = ?, req_custom_keys = ?,
+		    resource_requests = ?, resource_limits = ?,
+		    resource_class = ?, input_bytes = ?, primary_input_hash = ?
+		WHERE id = ?
+		  AND state = 'running'
+		  AND worker_id = ?
+		  AND lease_epoch = ?`
+
+// UpdateLeasedJob persists j only while the caller still holds the
+// lease.
+func (s *Store) UpdateLeasedJob(ctx context.Context, j *job.Job, workerID id.WorkerID, epoch int) error {
+	m, err := toJobModel(j)
+	if err != nil {
+		return err
+	}
+
+	now := time.Now().UTC()
+
+	var rows int64
+	execErr := withBusyRetry(ctx, func() error {
+		res, err := s.sdb.NewRaw(updateLeasedJobSQL,
+			m.Name, m.Queue, m.Payload, m.State, m.Priority,
+			m.MaxRetries, m.RetryCount, m.LastError,
+			m.ScopeAppID, m.ScopeOrgID, m.RunAt,
+			m.StartedAt, m.CompletedAt, m.Timeout,
+			m.LeaseTTL, m.EvictCount, m.CreatedAt,
+			now,
+			m.ReqCPUMilli, m.ReqMemoryBytes, m.ReqDiskBytes,
+			m.ReqGPUMilli, m.ReqCustomKeys,
+			m.ResourceRequests, m.ResourceLimits,
+			m.ResourceClass, m.InputBytes, m.PrimaryInputHash,
+			m.ID, workerID.String(), epoch,
+		).Exec(ctx)
+		if err != nil {
+			return err
+		}
+		rows, _ = res.RowsAffected() //nolint:errcheck // driver always returns nil
+		return nil
+	})
+	if execErr != nil {
+		return fmt.Errorf("dispatch/sqlite: update leased job: %w", execErr)
+	}
+
+	if rows > 0 {
+		return nil
+	}
+
+	// Zero rows means either the fence predicate failed (the lease moved
+	// on) or the row is gone. Only the latter is ErrJobNotFound; the
+	// former is ErrLeaseLost, the entire point of this method.
+	exists := new(jobModel)
+	existErr := s.sdb.NewSelect(exists).Where("id = ?", m.ID).Limit(1).Scan(ctx)
+	if existErr != nil {
+		if isNoRows(existErr) {
+			return dispatch.ErrJobNotFound
+		}
+		return fmt.Errorf("dispatch/sqlite: update leased job existence check: %w", existErr)
+	}
+
+	return job.ErrLeaseLost
 }
