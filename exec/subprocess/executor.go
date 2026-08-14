@@ -388,12 +388,35 @@ waitLoop:
 		case <-waitCh:
 			break waitLoop
 		case <-deadlineCh:
-			timedOut = true
 			deadlineCh = nil // this case must not fire again once handled
+			// select "chooses uniformly at random among those that can
+			// proceed" (Go spec), so if the process finished on its own in
+			// the same instant the timer fired, this case can still win
+			// even though waitCh is already deliverable. A cooperative
+			// handler makes that a live outcome, not a theoretical one:
+			// the shim traps SIGTERM today and cancels its own handler
+			// context, and Task 6 adds the SIGTERM half of the kill
+			// ladder here, so "the tracked process exits right as the
+			// deadline fires" only gets more common, not less. Checking
+			// waitCh non-blockingly resolves the tie deterministically in
+			// favour of what actually happened to the process, instead of
+			// leaving classify to guess from a frame and a signal after
+			// the fact.
+			select {
+			case <-waitCh:
+				break waitLoop
+			default:
+			}
+			timedOut = true
 			killProcess(cmd)
 		case <-ctxDoneCh:
-			callerDone = true
 			ctxDoneCh = nil // ditto, so we do not spin once ctx is done
+			select {
+			case <-waitCh:
+				break waitLoop
+			default:
+			}
+			callerDone = true
 			killProcess(cmd)
 		}
 	}
@@ -527,14 +550,18 @@ func (e *Executor) buildEnv(req *exec.Request) []string {
 // into a Result.
 //
 // The rule: the parent trusts the child's frame for what the handler did,
-// and its own wait status for what happened to the process. A decoded
-// frame from a process that was not signalled is authoritative for the
-// status it reports — including when timedOut is set, see below. When the
-// process was signalled, its wait status overrides the frame even if the
-// frame claims StatusOK: a report of success from a process that was, in
-// fact, killed is not to be believed. Absent a usable frame entirely — the
-// shim never got the chance to report, or its report was cut off mid-write
-// — the process's own exit code or signal is all there is to classify by.
+// and its own wait status for what happened to the process. A deadline
+// expiry is reported as StatusTimeout regardless of what the frame says —
+// timedOut is only ever set by the waitLoop above after it has already
+// checked, non-blockingly, that the process had not already finished on
+// its own; by the time classify sees timedOut, the kill is what actually
+// happened, not a coin flip this function has to second-guess. Short of
+// that, a decoded frame is authoritative for the status it reports, unless
+// the process still died on a signal — a frame claiming StatusOK from a
+// process that was, in fact, killed is not to be believed, so the process
+// status wins that disagreement. Absent a usable frame entirely — the shim
+// never got the chance to report, or its report was cut off mid-write —
+// the process's own exit code or signal is all there is to classify by.
 func (e *Executor) classify(
 	req *exec.Request,
 	frame *wire.Frame,
@@ -544,25 +571,6 @@ func (e *Executor) classify(
 	timedOut, callerCanceled bool,
 ) *exec.Result {
 	exitCode, signal, signaled := processOutcome(ps)
-	frameOK := frameErr == nil && frame != nil && frame.Result != nil
-
-	// A decoded frame from a process that was not signalled wins even over
-	// timedOut. The Go spec says select "chooses uniformly at random among
-	// [the ready cases]", so when the tracked process finishes at the same
-	// instant the deadline timer fires, the waitLoop above can pick the
-	// timer case over an already-ready waitCh. A process that was actually
-	// killed always reports Signaled() true — there is no way to kill it
-	// and have it look like a clean exit — so timedOut with signaled false
-	// means only "the timer fired", never "the kill did anything." Trusting
-	// the frame here is what keeps that race from turning a successful
-	// attempt into a StatusTimeout that burns a retry it never needed.
-	if frameOK && !signaled {
-		res := *frame.Result
-		res.ExitCode = exitCode
-		res.Signal = 0
-
-		return &res
-	}
 
 	if timedOut {
 		return &exec.Result{
@@ -573,27 +581,32 @@ func (e *Executor) classify(
 		}
 	}
 
-	if frameOK { // signaled is true here, or the branch above would have returned
-		res := frame.Result
-
-		return &exec.Result{
-			Status: exec.StatusKilled,
-			HandlerErr: fmt.Sprintf(
-				"dispatch/exec/subprocess: process killed by signal %d after reporting %s",
-				signal, res.Status,
-			),
-			ExitCode: exitCode,
-			Signal:   signal,
-			Usage:    res.Usage,
-			// Outputs and Permanent carry through even though the process
-			// was signalled: a handler killed right after committing its
-			// artifacts should not have them become invisible, and a
-			// permanent failure it already flagged should not silently
-			// turn retryable just because the signal arrived a moment
-			// later than the report did.
-			Outputs:   res.Outputs,
-			Permanent: res.Permanent,
+	if frameErr == nil && frame != nil && frame.Result != nil {
+		res := *frame.Result
+		if signaled {
+			return &exec.Result{
+				Status: exec.StatusKilled,
+				HandlerErr: fmt.Sprintf(
+					"dispatch/exec/subprocess: process killed by signal %d after reporting %s",
+					signal, res.Status,
+				),
+				ExitCode: exitCode,
+				Signal:   signal,
+				Usage:    res.Usage,
+				// Outputs and Permanent carry through even though the
+				// process was signalled: a handler killed right after
+				// committing its artifacts should not have them become
+				// invisible, and a permanent failure it already flagged
+				// should not silently turn retryable just because the
+				// signal arrived a moment later than the report did.
+				Outputs:   res.Outputs,
+				Permanent: res.Permanent,
+			}
 		}
+		res.ExitCode = exitCode
+		res.Signal = 0
+
+		return &res
 	}
 
 	reason := "no result frame"
@@ -637,9 +650,15 @@ func processOutcome(ps *os.ProcessState) (exitCode, signal int, signaled bool) {
 	return ws.ExitStatus(), 0, false
 }
 
-// Reclaim is a no-op for this rung: a child dies with its parent's
-// process group when the worker itself dies (nothing survives a worker
-// crash to leak), so there is nothing for a later worker to sweep up.
+// Reclaim is a no-op for this rung. That is no longer because nothing can
+// leak: the child used to share the worker's own process group, which
+// would let a signal aimed at the worker's whole group reach it too, but
+// now that it is its own group leader (see sysProcAttr in
+// procattr_unix.go, Setpgid), a worker that dies mid-attempt can leave an
+// orphaned child running with nothing left to signal it. Actually sweeping
+// those up is deferred — it needs a worker identity stable across
+// restarts, which this rung does not have today; see the SDD ledger's
+// Phase 3 note on the same gap for the stronger rungs.
 func (e *Executor) Reclaim(context.Context, id.WorkerID) error { return nil }
 
 // Close releases the executor's own resources. Subprocess holds none —

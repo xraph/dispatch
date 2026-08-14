@@ -3,6 +3,8 @@
 package subprocess
 
 import (
+	"errors"
+	"os"
 	osexec "os/exec"
 	"syscall"
 )
@@ -28,6 +30,30 @@ func sysProcAttr() *syscall.SysProcAttr {
 // Task 6's job. What matters here is that whichever signal is sent reaches
 // every descendant the tracked process forked, not only the process this
 // package started directly.
+//
+// The probe before the kill exists because a raw syscall.Kill(-pid, ...)
+// has no idea whether pid still names the process this package started.
+// os.Process.wait marks the process done (doRelease(statusDone)) and takes
+// a write lock on its own sigMu *before* it calls wait4 — the syscall that
+// actually lets the kernel hand the pid to someone else — specifically so
+// that Process.Signal, which read-locks the same sigMu, cannot land on a
+// reused pid once that has happened. Routing through cmd.Process.Signal
+// first reuses that same fencing instead of re-deriving it, which
+// syscall.Kill alone has none of. It does not close the window entirely —
+// there is still a gap between this check succeeding and the raw
+// syscall.Kill call below — but it narrows it from "however long the
+// waitLoop select takes to notice the process exited" down to a couple of
+// Go statements, and the waitLoop fix above (checking waitCh before
+// setting timedOut) removes the specific interleaving that used to make
+// that gap wide enough to matter in practice.
 func killGroup(cmd *osexec.Cmd) error {
+	if err := cmd.Process.Signal(syscall.Signal(0)); err != nil {
+		if errors.Is(err, os.ErrProcessDone) {
+			return nil
+		}
+
+		return err
+	}
+
 	return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
 }
