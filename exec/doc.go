@@ -8,8 +8,10 @@
 // escalating ladder: in-process, subprocess, OCI container, and Kubernetes
 // Job-per-task.
 //
-// exec is a leaf package. It imports only id, scope, and the root dispatch
-// package — never job, worker, or engine — so that job.Options can carry an
-// execution [Policy] without an import cycle. This mirrors how artifact is
-// positioned for input declarations.
+// exec is a leaf package. It imports only id and artifact within this
+// module — never job, worker, engine, scope, or the root dispatch
+// package — so that job.Options can carry an execution [Policy] without
+// an import cycle. This mirrors how artifact is itself positioned for
+// input declarations. See deps_test.go for the guard that keeps this
+// list accurate.
 package exec

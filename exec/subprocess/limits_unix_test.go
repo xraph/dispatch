@@ -181,10 +181,11 @@ func TestRlimitsAreAppliedChildSide(t *testing.T) {
 // real forked child rather than shim's own in-process unit tests (see
 // exec/shim/rlimit_unix_test.go for why those stick to values that never
 // reach a real Setrlimit call). NoFile: -1 is deliberately a value
-// applyRlimits rejects before ever calling Setrlimit — see
-// TestSameUserIsRefusedByDefault's neighbors for why a value that
-// actually depends on kernel-specific hard limits would be less portable
-// than this.
+// applyRlimits rejects before ever calling Setrlimit — see that same
+// file's TestApplyOneUnverifiedResourceIsAFailure and its neighbors for
+// why a value that actually depends on kernel-specific hard limits (a
+// real NoFile ceiling, say) would be less portable across this rung's
+// supported platforms than a value rejected up front.
 func TestStrictRlimitsFailsLaunchOnUnexpectedFailure(t *testing.T) {
 	e := subprocess.New(
 		subprocess.WithBinary(os.Args[0]),

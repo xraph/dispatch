@@ -32,8 +32,13 @@ type Usage struct {
 }
 
 // OutputFile describes one artifact the handler produced, as claimed by
-// the sandbox. The worker verifies the claim against what is actually on
-// disk before recording anything.
+// the sandbox. The worker never reads this to decide what to commit: it
+// is driven entirely by collectOutputEntries walking req.OutputDir on
+// disk (worker/runner.go's commitOutputs), so a claim listed here that
+// does not correspond to a real file on disk is simply never consulted,
+// not checked and rejected. This field exists for whatever future
+// consumer wants the sandbox's own account of what it wrote — logging, a
+// mismatch warning — not as an input to the commit decision.
 type OutputFile struct {
 	Name        string
 	Size        int64

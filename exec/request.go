@@ -33,8 +33,11 @@ type PriorOutput struct {
 }
 
 // Request is one execution attempt, fully described. Everything the
-// handler needs crosses the boundary in this value; nothing is inherited
-// from the worker's environment.
+// handler needs crosses the boundary in this value. The environment is
+// not inherited wholesale from the worker: an out-of-process rung
+// constructs the child's environment from Env plus a small fixed
+// allowlist (PATH, HOME, TMPDIR) copied from the worker's own — see Env
+// below and exec/subprocess.Executor.buildEnv.
 type Request struct {
 	JobID   id.JobID
 	Name    string
@@ -62,8 +65,15 @@ type Request struct {
 	ScopeAppID string
 	ScopeOrgID string
 
-	// Env is passed to out-of-process rungs. It is constructed, never
-	// inherited, so the sandbox does not receive the worker's environment.
+	// Env is passed to out-of-process rungs. It is not the worker's
+	// os.Environ() handed through: exec/subprocess.Executor.buildEnv
+	// builds the child's environment from this map plus its own
+	// configured base, never starting from the worker's full environment.
+	// It does still copy a fixed allowlist of PATH, HOME, and TMPDIR from
+	// the worker's own environment ahead of this map — HOME in
+	// particular is what locates ~/.aws and similar credential paths, so
+	// the dedicated uid this rung requires, not environment exclusion
+	// alone, is what actually keeps the child from reading them.
 	Env map[string]string
 }
 

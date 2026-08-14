@@ -5,25 +5,30 @@ package shim
 // package shim (internal), not shim_test — same rationale as
 // internal_test.go: mainExitCode's strict-vs-warning routing and
 // isKnownUnsupported/joinRlimitFailures are unexported. This file is
-// unix-tagged, unlike internal_test.go, specifically so it can be more
-// aggressive about exercising the real rlimit path (env vars,
-// mainExitCode's early-return branch) without needing this test binary
-// to also build on non-Unix platforms it does not target.
+// unix-tagged for the same practical reason internal_test.go is (see its
+// own doc comment): the rlimit path this file exercises — env vars,
+// mainExitCode's early-return branch, applyOne, isKnownUnsupported — is
+// built from syscall.Setrlimit and the RLIMIT_* constants, which do not
+// exist in Go's syscall package on Windows.
 //
-// What this file does NOT do: call applyRlimits with a value that would
-// actually succeed against a real resource like RLIMIT_AS or
-// RLIMIT_NOFILE. callMainExitCode (internal_test.go) runs mainExitCode
-// in this test binary's own process, not a forked child — a rlimit that
-// actually took effect here would permanently lower it for every
-// subsequent test in this same test binary run, since rlimits can only
-// be lowered without privilege, never raised back. Every case below uses
-// a value that fails before syscall.Setrlimit is ever called (a negative
-// number), which is safe by construction. The cases that need a real
-// Setrlimit outcome — proving WithStrictRlimits doesn't fire for a
-// platform's own structural refusal, or does fire for a real failure —
-// are exec/subprocess's TestStrictRlimitsFailsLaunchOnUnexpectedFailure
-// and TestStrictRlimitsToleratesKnownUnsupported (limits_unix_test.go),
-// which fork a real child and so cannot pollute this process.
+// What this file does NOT do: call applyRlimits, or applyOne directly,
+// with a value that would actually succeed against a real resource like
+// RLIMIT_AS or RLIMIT_NOFILE. callMainExitCode (internal_test.go) runs
+// mainExitCode in this test binary's own process, not a forked child — a
+// rlimit that actually took effect here would permanently lower it for
+// every subsequent test in this same test binary run, since rlimits can
+// only be lowered without privilege, never raised back. Most cases below
+// use a value applyRlimits rejects before ever calling Setrlimit (a
+// negative number); TestApplyOneUnverifiedResourceIsAFailure is the
+// exception — it uses a positive, plausible-looking value ("12345") and
+// is still safe, because its synthetic rlimitSpec sets resourceOK false,
+// which makes applyOne return a failure without ever reaching Setrlimit
+// regardless of what the value is. The cases that need a real Setrlimit
+// outcome — proving WithStrictRlimits doesn't fire for a platform's own
+// structural refusal, or does fire for a real failure — are
+// exec/subprocess's TestStrictRlimitsFailsLaunchOnUnexpectedFailure and
+// TestStrictRlimitsToleratesKnownUnsupported (limits_unix_test.go), which
+// fork a real child and so cannot pollute this process.
 
 import (
 	"context"

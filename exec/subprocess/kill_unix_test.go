@@ -4,6 +4,7 @@ package subprocess_test
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -48,10 +49,18 @@ func TestKillLadderReachesAHandlerIgnoringSIGTERM(t *testing.T) {
 // not merely the one process this package tracks directly. The
 // envGroupKill fixture (main_test.go) ignores SIGTERM outright and forks
 // a grandchild that does nothing but sleep, so the only way both ever die
-// is the ladder's SIGKILL half reaching the whole group — exactly the
-// case a missing Setpgid, or a kill aimed at the wrong target, would fail
-// silently on: Run would still return (the leader dies either way), but
-// the grandchild would be left running.
+// is the ladder's SIGKILL half reaching the whole group.
+//
+// A missing Setpgid would not fail silently on just the grandchild: with
+// no Setpgid the child stays a member of the worker's own process group
+// rather than becoming its own group leader, so terminate's pgid — the
+// child's pid — names no group at all. killGroup's SIGTERM send and the
+// escalation's raw syscall.Kill(-pgid, SIGKILL) both then return ESRCH,
+// waitGroupEmpty's very first probe reports the group already "empty",
+// and terminate returns without ever escalating. Neither the leader nor
+// the grandchild is signalled by this package at all in that case — Run
+// still returns once the deadline's own bookkeeping decides the attempt,
+// not because anything here reaped either process.
 func TestKillLadderKillsTheWholeProcessGroup(t *testing.T) {
 	req := request(t, exectest.JobOK, struct{}{})
 	req.Deadline = time.Now().Add(300 * time.Millisecond)
@@ -171,7 +180,28 @@ func TestKillLadderReapsAHelperAfterACooperativeLeaderExits(t *testing.T) {
 		t.Fatalf("parse helper pid %q: %v", raw, perr)
 	}
 
-	if kerr := syscall.Kill(pid, 0); kerr != syscall.ESRCH {
+	// The helper is a grandchild from this test process's point of view —
+	// forked by the leader, not by us — so once the leader is gone it is
+	// reparented and reaped by whatever subreaper the OS hands it to, not
+	// necessarily promptly relative to Run() returning. syscall.Kill(pid,
+	// 0) reports success, not ESRCH, for a zombie that has already died
+	// to SIGKILL but not yet been reaped: the process table entry is
+	// still there. A single check right after Run() returns raced that
+	// reaping under parallel-package load and flaked once in CI despite
+	// the helper genuinely having been killed. Polling for up to a
+	// couple of seconds waits out the reap without weakening what this
+	// asserts — the helper still has to actually be gone, just not
+	// instantaneously.
+	deadline := time.Now().Add(2 * time.Second)
+	var kerr error
+	for {
+		kerr = syscall.Kill(pid, 0)
+		if errors.Is(kerr, syscall.ESRCH) || time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if !errors.Is(kerr, syscall.ESRCH) {
 		t.Errorf("syscall.Kill(%d, 0) = %v, want ESRCH — a leader that exits on SIGTERM must not let its own uncooperative helper survive", pid, kerr)
 	}
 }
@@ -232,15 +262,20 @@ func TestKillLadderSendsSIGTERMBeforeGraceElapses(t *testing.T) {
 }
 
 // TestKillLadderClassifiesACooperativeTimeoutCorrectly is the C2
-// regression test. Every other timeout test in this package uses a
-// handler that ignores cancellation (IgnoreCtx: true); this one does not,
-// so it is the only test that drives classify's timedOut-overrides-the-
-// frame rule (executor.go) through a real process instead of the
-// synthetic inputs internal_test.go uses. With IgnoreCtx: false, JobSlow
-// honours ctx.Done() and returns promptly, the shim writes a Result frame
-// and exits 0 — frameOK && !signaled — while the parent's own deadline
-// still independently fires and sets timedOut, which classify must let
-// win regardless of what the frame says.
+// regression test, package-local to exec/subprocess. Every OTHER timeout
+// test in this file uses a handler that ignores cancellation (IgnoreCtx:
+// true); this one does not, so within this file it is the only test that
+// drives classify's timedOut-overrides-the-frame rule (executor.go)
+// through a real process instead of the synthetic inputs
+// internal_test.go uses. It is not the only such test in the module,
+// though: exectest's conformance suite (exec/exectest/suite.go) runs the
+// same shape twice more against this rung — testDeadlineEnforcedCooperative
+// and testDeadlineEnforcedSwallowedCancellation — as part of
+// TestSubprocessConformance. With IgnoreCtx: false, JobSlow honours
+// ctx.Done() and returns promptly, the shim writes a Result frame and
+// exits 0 — frameOK && !signaled — while the parent's own deadline still
+// independently fires and sets timedOut, which classify must let win
+// regardless of what the frame says.
 func TestKillLadderClassifiesACooperativeTimeoutCorrectly(t *testing.T) {
 	req := request(t, exectest.JobSlow, exectest.SlowPayload{SleepMillis: 60000, IgnoreCtx: false})
 	req.Deadline = time.Now().Add(300 * time.Millisecond)

@@ -11,10 +11,14 @@
 //
 // This is Dispatch's exec.LevelProcess rung: a crash, a panic, or a
 // memory-unsafe parser going off the rails takes down the child, not the
-// worker, and the child never receives the worker's environment, so it
-// cannot read credentials it was never handed. It is not a sandbox in the
-// mount/network/seccomp sense — that is exec.LevelSandboxed, a stronger
-// rung built on the same wire protocol.
+// worker, and the child does not receive the worker's environment
+// wholesale — buildEnv constructs it from the request's own Env plus a
+// small fixed allowlist (PATH, HOME, TMPDIR) copied from the worker's,
+// never a plain pass-through of os.Environ() — so it cannot read a
+// credential that lived only in a worker environment variable outside
+// that allowlist. It is not a sandbox in the mount/network/seccomp sense
+// — that is exec.LevelSandboxed, a stronger rung built on the same wire
+// protocol.
 //
 // # The uid/gid boundary
 //

@@ -38,15 +38,21 @@ const (
 	envSleepOnly = "DISPATCH_EXEC_SLEEP_ONLY_TEST"
 
 	// envGroupKill selects a fixture for the kill ladder's own test
-	// (kill_unix_test.go): it reads the request, forks a grandchild that
-	// ignores SIGTERM and sleeps far longer than this fixture's own
-	// SIGTERM-ignoring sleep (envLongSleep, not envSleepOnly — see its own
-	// doc comment for why), writes that grandchild's pid to a file in the
-	// request's OutputDir, ignores SIGTERM itself, and then sleeps. Only
-	// the ladder's SIGKILL half — sent to the whole process group, not
-	// just this fixture — can end either process, which is what makes
-	// this the fixture that catches a missing Setpgid: without it,
-	// SIGKILL would reach this process but not the grandchild.
+	// (kill_unix_test.go): it ignores SIGTERM itself FIRST — before
+	// forking anything, the safer order, closing the window where a
+	// SIGTERM landing between fork and signal.Ignore would kill it
+	// outright — then forks a grandchild that ignores SIGTERM and sleeps
+	// far longer than this fixture's own SIGTERM-ignoring sleep
+	// (envLongSleep, not envSleepOnly — see its own doc comment for why),
+	// writes that grandchild's pid to a file in the request's OutputDir,
+	// and sleeps. Only the ladder's SIGKILL half — sent to the whole
+	// process group, not just this fixture — can end either process,
+	// which is what makes this the fixture that catches a missing
+	// Setpgid: without it, this process never becomes its own group
+	// leader, terminate's pgid (its pid) names no real group, both the
+	// SIGTERM and the escalating SIGKILL come back ESRCH, and NEITHER
+	// process — not this one, not the grandchild — is ever signalled by
+	// the ladder at all.
 	envGroupKill = "DISPATCH_EXEC_GROUP_KILL_TEST"
 
 	// envLongSleep selects a fixture that ignores SIGTERM and sleeps for
