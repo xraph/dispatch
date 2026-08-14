@@ -20,6 +20,7 @@ func newExecutor(t *testing.T) *subprocess.Executor {
 	return subprocess.New(
 		subprocess.WithBinary(os.Args[0]),
 		subprocess.WithEnv(map[string]string{"DISPATCH_EXEC_SHIM_TEST": "1"}),
+		subprocess.WithAllowSameUser(), // CI cannot drop privileges; these tests are not about the uid boundary
 	)
 }
 
@@ -123,7 +124,7 @@ func TestRunUnknownHandlerIsLaunchFailure(t *testing.T) {
 }
 
 func TestRunMissingBinaryIsLaunchFailure(t *testing.T) {
-	e := subprocess.New(subprocess.WithBinary("/nonexistent/dispatch-worker"))
+	e := subprocess.New(subprocess.WithBinary("/nonexistent/dispatch-worker"), subprocess.WithAllowSameUser())
 	res, err := e.Run(context.Background(), request(t, exectest.JobOK, struct{}{}))
 
 	// Either shape is acceptable, but it must be classified as a launch
@@ -185,6 +186,7 @@ func TestRunGrandchildCannotWedgeTheDrain(t *testing.T) {
 	e := subprocess.New(
 		subprocess.WithBinary(os.Args[0]),
 		subprocess.WithEnv(map[string]string{envLeakChild: "1"}),
+		subprocess.WithAllowSameUser(), // CI cannot drop privileges; this test is not about the uid boundary
 	)
 
 	res, elapsed := runBounded(context.Background(), t, e, request(t, exectest.JobOK, struct{}{}), 8*time.Second)
@@ -210,6 +212,7 @@ func TestRunRequestWriteIsInterruptedByDeadline(t *testing.T) {
 	e := subprocess.New(
 		subprocess.WithBinary(os.Args[0]),
 		subprocess.WithEnv(map[string]string{envSleepOnly: "1"}),
+		subprocess.WithAllowSameUser(), // CI cannot drop privileges; this test is not about the uid boundary
 	)
 
 	req := request(t, exectest.JobOK, struct{ Value string }{Value: strings.Repeat("x", 1<<20)})

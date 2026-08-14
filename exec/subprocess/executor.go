@@ -34,8 +34,9 @@ const (
 
 // options holds every Option's effect. The configured user and Rlimits are
 // now enforced: checkLaunch (limits_unix.go / limits_other.go) refuses to
-// start when the uid matches the worker's own without AllowSameUser,
-// sysProcAttr (procattr_unix.go) sets Credential from uid/gid, and
+// start when no uid is configured, or when the configured uid matches the
+// worker's own, in either case without AllowSameUser, sysProcAttr
+// (procattr_unix.go) sets Credential from uid/gid, and
 // buildEnv below passes rlimits to the child, which shim.Main applies via
 // syscall.Setrlimit. The kill ladder's SIGTERM-then-grace-period-then-
 // SIGKILL sequence runs in terminate (kill_unix.go), called from
@@ -92,9 +93,10 @@ func WithEnv(env map[string]string) Option {
 }
 
 // WithUser configures the uid and gid the child runs as, dropped via
-// Credential on sysProcAttr before exec. Run refuses to start when uid
-// matches the worker's own, unless WithAllowSameUser is also given — see
-// its doc comment for why.
+// Credential on sysProcAttr before exec. Run refuses to start when no uid
+// is configured at all, and also when one is configured that matches the
+// worker's own, unless WithAllowSameUser is also given — see its doc
+// comment for why.
 //
 // A uid or gid that genuinely differs from the worker's own also clears
 // the child's supplementary groups, along with the primary uid/gid — see
@@ -110,10 +112,14 @@ func WithUser(uid, gid int) Option {
 	}
 }
 
-// WithAllowSameUser permits WithUser to name the worker's own uid.
-// Without it, Run refuses to start, because a child running as the
-// worker can read every credential the isolation exists to hide —
-// ~/.aws, /var/run/secrets, the Dispatch config itself.
+// WithAllowSameUser is the single opt-out for running this rung
+// unisolated on the uid boundary. Without it, Run refuses to start in
+// either of the two shapes that leave the child running as the worker's
+// own uid: WithUser never called at all, or WithUser naming the worker's
+// own uid explicitly. Both leave the child able to read every credential
+// the isolation exists to hide — ~/.aws, /var/run/secrets, the Dispatch
+// config itself — so both share this one switch rather than each getting
+// its own.
 func WithAllowSameUser() Option {
 	return func(o *options) { o.allowSameUser = true }
 }
@@ -253,10 +259,11 @@ func (e *Executor) Run(ctx context.Context, req *exec.Request) (*exec.Result, er
 		return nil, fmt.Errorf("dispatch/exec/subprocess: invalid request: %w", err)
 	}
 
-	// checkLaunch refuses before any pipe or process exists: on Unix, a
-	// configured uid matching the worker's own without WithAllowSameUser;
-	// on every other platform, unconditionally, since this rung has no
-	// isolation to offer there. See limits_unix.go / limits_other.go.
+	// checkLaunch refuses before any pipe or process exists: on Unix, no
+	// uid configured at all, or a configured uid matching the worker's
+	// own, neither without WithAllowSameUser; on every other platform,
+	// unconditionally, since this rung has no isolation to offer there.
+	// See limits_unix.go / limits_other.go.
 	if err := checkLaunch(e.opts); err != nil {
 		return &exec.Result{
 			Status:     exec.StatusLaunchFailed,

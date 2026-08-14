@@ -45,32 +45,34 @@ func (e *Extension) resolveExecutionOptions() ([]engine.Option, error) {
 		return nil, fmt.Errorf("dispatch: execution.subprocess is enabled but %w", err)
 	}
 
-	// The same-uid question, asked here through the identical helper
-	// checkLaunch itself calls (subprocess.SameUserRefused), so this check
-	// and checkLaunch's cannot drift apart silently. Without it, a config
-	// naming the worker's own uid passes startup clean and then fails to
-	// launch every single job forever — requeued, reaped off its expired
-	// lease, and re-leased, until it exhausts the launch-attempt cap and
-	// DLQs, which happens per job, in production, long after this
-	// function returned nil.
-	if cfg.User != 0 && subprocess.SameUserRefused(cfg.User, cfg.AllowSameUser) {
+	// The uid question, asked here through the identical helpers
+	// checkLaunch itself uses (subprocess.SameUserRefused, and hasUser via
+	// cfg.User == 0), so this check and checkLaunch's cannot drift apart
+	// silently. Without it, a config naming the worker's own uid — or
+	// naming none at all — passes startup clean and then fails to launch
+	// every single job forever — requeued, reaped off its expired lease,
+	// and re-leased, until it exhausts the launch-attempt cap and DLQs,
+	// which happens per job, in production, long after this function
+	// returned nil.
+	//
+	// Both shapes — no uid configured, and a configured uid equal to the
+	// worker's own — are refused unless allow_same_user opts in: one
+	// switch for "I know this is unisolated," not a warning for one shape
+	// and a hard refusal for the other. See checkLaunch
+	// (exec/subprocess/limits_unix.go) for why they are treated alike.
+	if cfg.User == 0 {
+		if !cfg.AllowSameUser {
+			return nil, errors.New(
+				"dispatch: execution.subprocess is enabled with no user configured; the sandboxed " +
+					"child would run as the worker's own uid, with the worker's own read access to " +
+					"its credentials and filesystem — set execution.subprocess.user, or " +
+					"execution.subprocess.allow_same_user to accept running unisolated")
+		}
+	} else if subprocess.SameUserRefused(cfg.User, cfg.AllowSameUser) {
 		return nil, fmt.Errorf(
 			"dispatch: execution.subprocess.user %d matches the worker's own uid; "+
 				"running the child as the worker defeats this rung's isolation — set "+
 				"execution.subprocess.allow_same_user to allow it", cfg.User)
-	}
-
-	// No uid configured at all is a distinct, weaker misconfiguration from
-	// the one above: it is not refused, because it is a legitimate (if
-	// unusual) choice, but it silently gives up most of the rung's value
-	// — see doc.go's own "defeats most of this rung's purpose" — so it
-	// gets a warning the same way an inert scratch_dir does below, not
-	// silence.
-	if cfg.User == 0 && e.Logger() != nil {
-		e.Logger().Warn("dispatch: execution.subprocess is enabled with no user configured; " +
-			"the sandboxed child runs as the worker's own uid, with the worker's own read " +
-			"access to its credentials and filesystem, which defeats most of this rung's " +
-			"purpose — see execution.subprocess.user")
 	}
 
 	opts, err := e.buildSubprocessOptions(cfg)

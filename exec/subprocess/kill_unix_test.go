@@ -60,6 +60,7 @@ func TestKillLadderKillsTheWholeProcessGroup(t *testing.T) {
 	e := subprocess.New(
 		subprocess.WithBinary(os.Args[0]),
 		subprocess.WithEnv(map[string]string{envGroupKill: "1"}),
+		subprocess.WithAllowSameUser(), // CI cannot drop privileges; this test is not about the uid boundary
 	)
 
 	start := time.Now()
@@ -121,6 +122,7 @@ func TestKillLadderReapsAHelperAfterACooperativeLeaderExits(t *testing.T) {
 	e := subprocess.New(
 		subprocess.WithBinary(os.Args[0]),
 		subprocess.WithEnv(map[string]string{envLeaderExitsHelperSurvives: "1"}),
+		subprocess.WithAllowSameUser(), // CI cannot drop privileges; this test is not about the uid boundary
 	)
 
 	start := time.Now()
@@ -179,6 +181,7 @@ func TestKillLadderSendsSIGTERMBeforeGraceElapses(t *testing.T) {
 	e := subprocess.New(
 		subprocess.WithBinary(os.Args[0]),
 		subprocess.WithEnv(map[string]string{envSigtermMarker: "1"}),
+		subprocess.WithAllowSameUser(), // CI cannot drop privileges; this test is not about the uid boundary
 	)
 
 	start := time.Now()

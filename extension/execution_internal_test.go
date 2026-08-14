@@ -6,8 +6,6 @@ import (
 	"reflect"
 	"testing"
 
-	log "github.com/xraph/go-utils/log"
-
 	"github.com/xraph/dispatch/exec"
 	"github.com/xraph/dispatch/exec/subprocess"
 	"github.com/xraph/dispatch/id"
@@ -37,6 +35,7 @@ func TestResolveExecutionOptionsDisabledByDefault(t *testing.T) {
 func TestResolveExecutionOptionsEnablesSubprocess(t *testing.T) {
 	e := New()
 	e.config.Execution.Subprocess.Enabled = true
+	e.config.Execution.Subprocess.AllowSameUser = true // no user configured; see TestResolveExecutionOptionsRefusesMissingUserAtStartup
 
 	opts, err := e.resolveExecutionOptions()
 	if err != nil {
@@ -54,6 +53,7 @@ func TestResolveExecutionOptionsScratchDirAddsSecondOption(t *testing.T) {
 	e := New()
 	e.config.Execution.Subprocess.Enabled = true
 	e.config.Execution.Subprocess.ScratchDir = t.TempDir()
+	e.config.Execution.Subprocess.AllowSameUser = true // no user configured; see TestResolveExecutionOptionsRefusesMissingUserAtStartup
 
 	opts, err := e.resolveExecutionOptions()
 	if err != nil {
@@ -99,46 +99,50 @@ func TestResolveExecutionOptionsAllowsSameUserExplicitly(t *testing.T) {
 	}
 }
 
-// TestResolveExecutionOptionsWarnsOnMissingUser proves enabling the rung
-// with no uid configured — the minimal `execution: {subprocess: {enabled:
-// true}}` — logs a WARN. Without one, an operator has no signal that the
-// sandboxed child runs as the worker's own uid, with full read access to
-// its credentials and filesystem, which exec/subprocess's own doc.go
-// calls the thing that "defeats most of this rung's purpose."
-func TestResolveExecutionOptionsWarnsOnMissingUser(t *testing.T) {
-	tl := log.NewTestLogger().(*log.TestLogger)
-
+// TestResolveExecutionOptionsRefusesMissingUserAtStartup proves enabling
+// the rung with no uid configured — the minimal `execution: {subprocess:
+// {enabled: true}}` — refuses to start HERE, at startup, rather than
+// warning and letting every job silently run unisolated. This used to be a
+// WARN, on the theory that leaving `user` unset was a legitimate if weak
+// choice; it is treated the same as a configured uid equal to the
+// worker's own instead, because both leave the child with full read
+// access to the worker's credentials and filesystem — see checkLaunch
+// (exec/subprocess/limits_unix.go) and doc.go's "uid/gid boundary"
+// section.
+func TestResolveExecutionOptionsRefusesMissingUserAtStartup(t *testing.T) {
 	e := New()
-	e.SetLogger(tl)
 	e.config.Execution.Subprocess.Enabled = true
+
+	_, err := e.resolveExecutionOptions()
+	if err == nil {
+		t.Fatal("resolveExecutionOptions() = nil error, want one for no uid configured")
+	}
+}
+
+// TestResolveExecutionOptionsAllowsMissingUserExplicitly is the mirror of
+// TestResolveExecutionOptionsAllowsSameUserExplicitly for the other shape
+// checkLaunch refuses: allow_same_user lifts the no-uid refusal too, since
+// it is the single escape hatch for both.
+func TestResolveExecutionOptionsAllowsMissingUserExplicitly(t *testing.T) {
+	e := New()
+	e.config.Execution.Subprocess.Enabled = true
+	e.config.Execution.Subprocess.AllowSameUser = true
 
 	if _, err := e.resolveExecutionOptions(); err != nil {
 		t.Fatalf("resolveExecutionOptions() = %v, want nil", err)
 	}
-
-	if tl.CountLogs("WARN") == 0 {
-		t.Error("no WARN logged for execution.subprocess enabled with no user configured")
-	}
 }
 
-// TestResolveExecutionOptionsNoWarnWhenUserConfigured is the negative
-// case for the above: a properly configured uid must not also trigger
-// the missing-user warning.
-func TestResolveExecutionOptionsNoWarnWhenUserConfigured(t *testing.T) {
-	tl := log.NewTestLogger().(*log.TestLogger)
-
+// TestResolveExecutionOptionsSucceedsWhenUserConfigured is the negative
+// case for the above: a properly configured uid must not be refused.
+func TestResolveExecutionOptionsSucceedsWhenUserConfigured(t *testing.T) {
 	e := New()
-	e.SetLogger(tl)
 	e.config.Execution.Subprocess.Enabled = true
 	e.config.Execution.Subprocess.User = 65532
 	e.config.Execution.Subprocess.Group = 65532
 
 	if _, err := e.resolveExecutionOptions(); err != nil {
 		t.Fatalf("resolveExecutionOptions() = %v, want nil", err)
-	}
-
-	if tl.CountLogs("WARN") != 0 {
-		t.Errorf("CountLogs(WARN) = %d, want 0 — a configured user must not warn", tl.CountLogs("WARN"))
 	}
 }
 

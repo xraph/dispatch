@@ -56,6 +56,46 @@ func TestSameUserAllowedExplicitly(t *testing.T) {
 	}
 }
 
+// TestNoUserIsRefusedByDefault proves checkLaunch refuses to start when no
+// uid is configured at all — not just when a configured uid happens to
+// match the worker's own. Without this, `execution.subprocess.enabled:
+// true` with no `user` set would run the child as the worker's own uid
+// silently: it defeats the uid boundary in exactly the same way a
+// configured same-uid does, so it is refused the same way, not merely
+// warned about.
+func TestNoUserIsRefusedByDefault(t *testing.T) {
+	e := subprocess.New(
+		subprocess.WithBinary(os.Args[0]),
+		subprocess.WithEnv(map[string]string{"DISPATCH_EXEC_SHIM_TEST": "1"}),
+	)
+
+	res, err := e.Run(context.Background(), request(t, exectest.JobOK, struct{}{}))
+	switch {
+	case err != nil: // acceptable: refused at launch
+	case res.Status != exec.StatusLaunchFailed:
+		t.Fatalf("Status = %q, want launch_failed — no uid configured guts this rung", res.Status)
+	}
+}
+
+// TestNoUserAllowedExplicitly proves WithAllowSameUser lifts the no-uid
+// refusal above too, not just the same-uid one: it is the single opt-out
+// for both shapes of running this rung unisolated.
+func TestNoUserAllowedExplicitly(t *testing.T) {
+	e := subprocess.New(
+		subprocess.WithBinary(os.Args[0]),
+		subprocess.WithEnv(map[string]string{"DISPATCH_EXEC_SHIM_TEST": "1"}),
+		subprocess.WithAllowSameUser(),
+	)
+
+	res, err := e.Run(context.Background(), request(t, exectest.JobOK, struct{}{}))
+	if err != nil {
+		t.Fatalf("Run() = %v", err)
+	}
+	if res.Status != exec.StatusOK {
+		t.Fatalf("Status = %q, want ok (err %q)", res.Status, res.HandlerErr)
+	}
+}
+
 // TestSameUserRefusedMatchesCheckLaunch pins subprocess.SameUserRefused
 // to checkLaunch's own actual launch-time decision. checkLaunch calls
 // SameUserRefused itself (see limits_unix.go), so in principle this test
@@ -114,6 +154,7 @@ func TestRlimitsAreAppliedChildSide(t *testing.T) {
 		subprocess.WithBinary(os.Args[0]),
 		subprocess.WithEnv(map[string]string{"DISPATCH_EXEC_SHIM_TEST": "1"}),
 		subprocess.WithRlimits(subprocess.Rlimits{NoFile: 3}),
+		subprocess.WithAllowSameUser(), // CI cannot drop privileges; this test is not about the uid boundary
 	)
 
 	res, err := e.Run(context.Background(), request(t, exectest.JobOK, struct{}{}))
@@ -150,6 +191,7 @@ func TestStrictRlimitsFailsLaunchOnUnexpectedFailure(t *testing.T) {
 		subprocess.WithEnv(map[string]string{"DISPATCH_EXEC_SHIM_TEST": "1"}),
 		subprocess.WithRlimits(subprocess.Rlimits{NoFile: -1}),
 		subprocess.WithStrictRlimits(),
+		subprocess.WithAllowSameUser(), // CI cannot drop privileges; this test is not about the uid boundary
 	)
 
 	res, err := e.Run(context.Background(), request(t, exectest.JobOK, struct{}{}))
@@ -179,6 +221,7 @@ func TestStrictRlimitsToleratesKnownUnsupported(t *testing.T) {
 		subprocess.WithEnv(map[string]string{"DISPATCH_EXEC_SHIM_TEST": "1"}),
 		subprocess.WithRlimits(subprocess.Rlimits{AddressSpace: 2 << 30}),
 		subprocess.WithStrictRlimits(),
+		subprocess.WithAllowSameUser(), // CI cannot drop privileges; this test is not about the uid boundary
 	)
 
 	res, err := e.Run(context.Background(), request(t, exectest.JobOK, struct{}{}))

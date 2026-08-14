@@ -18,10 +18,13 @@
 //
 // # The uid/gid boundary
 //
-// WithUser configures a dedicated, low-privilege uid/gid for the child;
-// without one, the child runs as the worker's own uid and can read
-// anything the worker can, which defeats most of this rung's purpose —
-// see WithUser and WithAllowSameUser.
+// WithUser configures a dedicated, low-privilege uid/gid for the child.
+// It is required, not advisory: without one, the child would run as the
+// worker's own uid and could read anything the worker can — the Dispatch
+// config file on disk among it, which is where database credentials
+// typically live, not just the worker's environment — so Run refuses to
+// start at all unless WithAllowSameUser opts into that explicitly. See
+// WithUser and WithAllowSameUser.
 //
 // A genuine uid drop — WithUser naming anything other than the worker's
 // own uid — clears supplementary groups along with it: dropping to a

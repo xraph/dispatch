@@ -169,12 +169,13 @@ type SubprocessConfig struct {
 	User  int `json:"user" mapstructure:"user" yaml:"user"`
 	Group int `json:"group" mapstructure:"group" yaml:"group"`
 
-	// AllowSameUser permits User to name the worker's own uid
-	// (subprocess.WithAllowSameUser). Without it, a configured User equal
-	// to the worker's own uid makes every attempt refuse to launch — a
-	// deliberate security default (see WithAllowSameUser) that this
-	// config surface passes through rather than working around: nothing
-	// here defaults it to true, so a configuration mistake cannot
+	// AllowSameUser is the single opt-out for running this rung unisolated
+	// on the uid boundary (subprocess.WithAllowSameUser): it permits User
+	// to name the worker's own uid, and it permits leaving User unset
+	// entirely. Without it, either shape makes every attempt refuse to
+	// launch — a deliberate security default (see WithAllowSameUser) that
+	// this config surface passes through rather than working around:
+	// nothing here defaults it to true, so a configuration mistake cannot
 	// silently defeat it.
 	AllowSameUser bool `default:"false" json:"allow_same_user" mapstructure:"allow_same_user" yaml:"allow_same_user"`
 
