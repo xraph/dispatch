@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"reflect"
 	"sync"
 	"testing"
 	"time"
@@ -69,6 +70,21 @@ func RunLeaseSuite(t *testing.T, newStore func(t *testing.T) LeaseStore) {
 	})
 	t.Run("LeaseTTLRoundTrips", func(t *testing.T) {
 		testLeaseTTLRoundTrips(t, newStore(t))
+	})
+	t.Run("UpdateLeasedJobAppliesAtHeldEpoch", func(t *testing.T) {
+		testUpdateLeasedJobAppliesAtHeldEpoch(t, newStore(t))
+	})
+	t.Run("UpdateLeasedJobRejectsStaleEpoch", func(t *testing.T) {
+		testUpdateLeasedJobRejectsStaleEpoch(t, newStore(t))
+	})
+	t.Run("UpdateLeasedJobRejectsWrongWorker", func(t *testing.T) {
+		testUpdateLeasedJobRejectsWrongWorker(t, newStore(t))
+	})
+	t.Run("UpdateLeasedJobRejectsWhenNoLongerRunning", func(t *testing.T) {
+		testUpdateLeasedJobRejectsWhenNoLongerRunning(t, newStore(t))
+	})
+	t.Run("UpdateLeasedJobPreservesLeaseColumnsAgainstAStaleSnapshot", func(t *testing.T) {
+		testUpdateLeasedJobPreservesLeaseColumnsAgainstAStaleSnapshot(t, newStore(t))
 	})
 }
 
@@ -600,5 +616,298 @@ func testLeaseTTLRoundTrips(t *testing.T, s LeaseStore) {
 	// job to the default.
 	if got.LeaseTTL != 6*time.Hour {
 		t.Errorf("LeaseTTL = %v, want %v", got.LeaseTTL, 6*time.Hour)
+	}
+}
+
+// timeEqual compares two *time.Time fields the way GetJob round-trips
+// them: both nil, or both non-nil and equal instants. Plain == on the
+// pointers would compare addresses, and reflect.DeepEqual on a bare
+// time.Time can trip over a monotonic reading that a store round-trip
+// already strips — Equal is the contract these fields actually promise.
+func timeEqual(a, b *time.Time) bool {
+	if a == nil || b == nil {
+		return a == b
+	}
+
+	return a.Equal(*b)
+}
+
+// testUpdateLeasedJobAppliesAtHeldEpoch is the positive case: a worker
+// that still holds the epoch it was granted at claim time gets its
+// terminal write applied.
+func testUpdateLeasedJobAppliesAtHeldEpoch(t *testing.T, s LeaseStore) {
+	ctx := context.Background()
+	worker := id.NewWorkerID()
+	now := time.Now().UTC()
+	const queue = "lease-update-applies"
+
+	j := PendingJob("update-applies", queue, 0)
+	if err := s.EnqueueJob(ctx, j); err != nil {
+		t.Fatalf("enqueue: %v", err)
+	}
+	got, err := s.DequeueJobs(ctx, job.DequeueOpts{
+		Queues:     []string{queue},
+		Limit:      1,
+		WorkerID:   worker,
+		LeaseUntil: now.Add(time.Minute),
+	})
+	if err != nil || len(got) != 1 {
+		t.Fatalf("DequeueJobs: %v (n=%d)", err, len(got))
+	}
+
+	claimed := got[0]
+	claimed.State = job.StateCompleted
+	completedAt := now
+	claimed.CompletedAt = &completedAt
+	claimed.LastError = "" // a business field, round-tripped like any other
+
+	if updErr := s.UpdateLeasedJob(ctx, claimed, worker, claimed.LeaseEpoch); updErr != nil {
+		t.Fatalf("UpdateLeasedJob: %v", updErr)
+	}
+
+	after, err := s.GetJob(ctx, claimed.ID)
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if after.State != job.StateCompleted {
+		t.Errorf("State = %s, want %s", after.State, job.StateCompleted)
+	}
+	if after.CompletedAt == nil {
+		t.Fatal("CompletedAt = nil, want it set")
+	}
+	// The write must have gone through at the epoch the caller named —
+	// UpdateLeasedJob never bumps it, only the grant and reclaim do.
+	if after.LeaseEpoch != claimed.LeaseEpoch {
+		t.Errorf("LeaseEpoch = %d after the write, want it unchanged at %d",
+			after.LeaseEpoch, claimed.LeaseEpoch)
+	}
+}
+
+// testUpdateLeasedJobRejectsStaleEpoch covers a worker presenting an
+// epoch older than the one the row currently holds. The row must be
+// byte-identical afterwards — a refused fenced write is not merely
+// "did not apply the intended change," it is "touched nothing at all."
+func testUpdateLeasedJobRejectsStaleEpoch(t *testing.T, s LeaseStore) {
+	ctx := context.Background()
+	worker := id.NewWorkerID()
+	now := time.Now().UTC()
+	const queue = "lease-update-stale-epoch"
+
+	j := PendingJob("update-stale-epoch", queue, 0)
+	if err := s.EnqueueJob(ctx, j); err != nil {
+		t.Fatalf("enqueue: %v", err)
+	}
+	got, err := s.DequeueJobs(ctx, job.DequeueOpts{
+		Queues:     []string{queue},
+		Limit:      1,
+		WorkerID:   worker,
+		LeaseUntil: now.Add(time.Minute),
+	})
+	if err != nil || len(got) != 1 {
+		t.Fatalf("DequeueJobs: %v (n=%d)", err, len(got))
+	}
+	claimed := got[0]
+
+	before, err := s.GetJob(ctx, claimed.ID)
+	if err != nil {
+		t.Fatalf("get before: %v", err)
+	}
+
+	attempt := *claimed
+	attempt.State = job.StateCompleted
+
+	err = s.UpdateLeasedJob(ctx, &attempt, worker, claimed.LeaseEpoch-1)
+	if !errors.Is(err, job.ErrLeaseLost) {
+		t.Fatalf("UpdateLeasedJob with stale epoch = %v, want %v", err, job.ErrLeaseLost)
+	}
+
+	after, err := s.GetJob(ctx, claimed.ID)
+	if err != nil {
+		t.Fatalf("get after: %v", err)
+	}
+	if !reflect.DeepEqual(before, after) {
+		t.Errorf("row changed after a refused fenced write:\nbefore = %+v\nafter  = %+v", before, after)
+	}
+}
+
+// testUpdateLeasedJobRejectsWrongWorker covers a worker presenting the
+// held epoch but the wrong worker ID — the same epoch reused by a
+// process that never legitimately held it, or a claim-time snapshot
+// misattributed to the wrong caller.
+func testUpdateLeasedJobRejectsWrongWorker(t *testing.T, s LeaseStore) {
+	ctx := context.Background()
+	worker := id.NewWorkerID()
+	other := id.NewWorkerID()
+	now := time.Now().UTC()
+	const queue = "lease-update-wrong-worker"
+
+	j := PendingJob("update-wrong-worker", queue, 0)
+	if err := s.EnqueueJob(ctx, j); err != nil {
+		t.Fatalf("enqueue: %v", err)
+	}
+	got, err := s.DequeueJobs(ctx, job.DequeueOpts{
+		Queues:     []string{queue},
+		Limit:      1,
+		WorkerID:   worker,
+		LeaseUntil: now.Add(time.Minute),
+	})
+	if err != nil || len(got) != 1 {
+		t.Fatalf("DequeueJobs: %v (n=%d)", err, len(got))
+	}
+	claimed := got[0]
+
+	before, err := s.GetJob(ctx, claimed.ID)
+	if err != nil {
+		t.Fatalf("get before: %v", err)
+	}
+
+	attempt := *claimed
+	attempt.State = job.StateCompleted
+
+	err = s.UpdateLeasedJob(ctx, &attempt, other, claimed.LeaseEpoch)
+	if !errors.Is(err, job.ErrLeaseLost) {
+		t.Fatalf("UpdateLeasedJob from another worker = %v, want %v", err, job.ErrLeaseLost)
+	}
+
+	after, err := s.GetJob(ctx, claimed.ID)
+	if err != nil {
+		t.Fatalf("get after: %v", err)
+	}
+	if !reflect.DeepEqual(before, after) {
+		t.Errorf("row changed after a refused fenced write:\nbefore = %+v\nafter  = %+v", before, after)
+	}
+}
+
+// testUpdateLeasedJobRejectsWhenNoLongerRunning covers a job that has
+// already left the running state — completion does not bump lease_epoch
+// or reassign worker_id, so a naive predicate that checked only those two
+// would let a second write land on an already-terminal row.
+func testUpdateLeasedJobRejectsWhenNoLongerRunning(t *testing.T, s LeaseStore) {
+	ctx := context.Background()
+	worker := id.NewWorkerID()
+	now := time.Now().UTC()
+	const queue = "lease-update-not-running"
+
+	j := PendingJob("update-not-running", queue, 0)
+	if err := s.EnqueueJob(ctx, j); err != nil {
+		t.Fatalf("enqueue: %v", err)
+	}
+	got, err := s.DequeueJobs(ctx, job.DequeueOpts{
+		Queues:     []string{queue},
+		Limit:      1,
+		WorkerID:   worker,
+		LeaseUntil: now.Add(time.Minute),
+	})
+	if err != nil || len(got) != 1 {
+		t.Fatalf("DequeueJobs: %v (n=%d)", err, len(got))
+	}
+	claimed := got[0]
+	epoch := claimed.LeaseEpoch
+
+	claimed.State = job.StateCompleted
+	if updErr := s.UpdateLeasedJob(ctx, claimed, worker, epoch); updErr != nil {
+		t.Fatalf("first UpdateLeasedJob: %v", updErr)
+	}
+
+	// The job is completed now: still assigned to worker, still at
+	// epoch — completion touches neither — but no longer running. A
+	// second fenced write must be refused on state alone.
+	retry := *claimed
+	retry.LastError = "a second write attempt"
+
+	err = s.UpdateLeasedJob(ctx, &retry, worker, epoch)
+	if !errors.Is(err, job.ErrLeaseLost) {
+		t.Fatalf("UpdateLeasedJob on a non-running job = %v, want %v", err, job.ErrLeaseLost)
+	}
+}
+
+// testUpdateLeasedJobPreservesLeaseColumnsAgainstAStaleSnapshot is the
+// case a naive whole-row-plus-predicate implementation fails. The lease
+// is granted, renewed several times so lease_expires_at moves well
+// ahead of the claim-time value, and then the fenced write is issued
+// with the ORIGINAL stale snapshot — exactly what worker/runner.go does,
+// since j is captured once at claim time and never refreshed. The
+// passing epoch predicate must not be mistaken for permission to write
+// j's copy of the lease columns back: lease_expires_at, lease_epoch,
+// worker_id, and heartbeat_at must come out exactly as they were right
+// before this call, not rolled back to what the stale snapshot said,
+// while the business column this call actually changed must have moved.
+func testUpdateLeasedJobPreservesLeaseColumnsAgainstAStaleSnapshot(t *testing.T, s LeaseStore) {
+	ctx := context.Background()
+	worker := id.NewWorkerID()
+	now := time.Now().UTC()
+	const queue = "lease-update-stale-expiry"
+
+	j := PendingJob("update-stale-expiry", queue, 0)
+	if err := s.EnqueueJob(ctx, j); err != nil {
+		t.Fatalf("enqueue: %v", err)
+	}
+
+	// Grant properly through DequeueJobs rather than hand-constructing
+	// the divergence — hand-constructing would test the fixture, not
+	// this method.
+	got, err := s.DequeueJobs(ctx, job.DequeueOpts{
+		Queues:     []string{queue},
+		Limit:      1,
+		WorkerID:   worker,
+		LeaseUntil: now.Add(30 * time.Second),
+	})
+	if err != nil || len(got) != 1 {
+		t.Fatalf("DequeueJobs: %v (n=%d)", err, len(got))
+	}
+	staleSnapshot := got[0]
+	epoch := staleSnapshot.LeaseEpoch
+
+	// Renew several times so the store's lease_expires_at (and
+	// heartbeat_at, which every backend's RenewLease also advances)
+	// moves well past what staleSnapshot remembers.
+	extended := now
+	for range 3 {
+		extended = extended.Add(time.Hour)
+		if renewErr := s.RenewLease(ctx, staleSnapshot.ID, worker, epoch, extended); renewErr != nil {
+			t.Fatalf("RenewLease: %v", renewErr)
+		}
+	}
+
+	beforeWrite, err := s.GetJob(ctx, staleSnapshot.ID)
+	if err != nil {
+		t.Fatalf("get before write: %v", err)
+	}
+
+	// The worker finishes and hands the fenced write its ORIGINAL,
+	// now-stale claim-time snapshot.
+	stale := *staleSnapshot
+	stale.State = job.StateCompleted
+	completedAt := now
+	stale.CompletedAt = &completedAt
+
+	if updErr := s.UpdateLeasedJob(ctx, &stale, worker, epoch); updErr != nil {
+		t.Fatalf("UpdateLeasedJob: %v", updErr)
+	}
+
+	after, err := s.GetJob(ctx, staleSnapshot.ID)
+	if err != nil {
+		t.Fatalf("get after: %v", err)
+	}
+
+	// The business column this call actually changed moved.
+	if after.State != job.StateCompleted {
+		t.Errorf("State = %s, want %s", after.State, job.StateCompleted)
+	}
+
+	// Every lease-owned column is exactly what it was right before the
+	// fenced write — not what the stale claim-time snapshot said.
+	if !timeEqual(after.LeaseExpiresAt, beforeWrite.LeaseExpiresAt) {
+		t.Errorf("LeaseExpiresAt = %v, want it unchanged at %v (not rolled back to the claim-time %v)",
+			after.LeaseExpiresAt, beforeWrite.LeaseExpiresAt, staleSnapshot.LeaseExpiresAt)
+	}
+	if after.LeaseEpoch != beforeWrite.LeaseEpoch {
+		t.Errorf("LeaseEpoch = %d, want it unchanged at %d", after.LeaseEpoch, beforeWrite.LeaseEpoch)
+	}
+	if after.WorkerID != beforeWrite.WorkerID {
+		t.Errorf("WorkerID = %s, want it unchanged at %s", after.WorkerID, beforeWrite.WorkerID)
+	}
+	if !timeEqual(after.HeartbeatAt, beforeWrite.HeartbeatAt) {
+		t.Errorf("HeartbeatAt = %v, want it unchanged at %v", after.HeartbeatAt, beforeWrite.HeartbeatAt)
 	}
 }
