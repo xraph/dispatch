@@ -35,12 +35,42 @@ func (e *Extension) resolveExecutionOptions() ([]engine.Option, error) {
 		return nil, nil
 	}
 
-	// Available reports the identical condition Run's own checkLaunch
-	// refuses on, but here it is caught once, at startup, instead of on
-	// every job's first launch attempt once the deployment is already
-	// running.
+	// Available only answers a platform question — can this OS run the
+	// rung at all — not a per-configuration one. It does NOT catch a
+	// configured uid equal to the worker's own; that is checkLaunch's own
+	// refusal, and on its own it would not run until the first job
+	// actually launches. Caught once, at startup, instead of on every
+	// job's first launch attempt once the deployment is already running.
 	if err := subprocess.Available(); err != nil {
 		return nil, fmt.Errorf("dispatch: execution.subprocess is enabled but %w", err)
+	}
+
+	// The same-uid question, asked here through the identical helper
+	// checkLaunch itself calls (subprocess.SameUserRefused), so this check
+	// and checkLaunch's cannot drift apart silently. Without it, a config
+	// naming the worker's own uid passes startup clean and then fails to
+	// launch every single job forever — requeued, reaped off its expired
+	// lease, and re-leased, until it exhausts the launch-attempt cap and
+	// DLQs, which happens per job, in production, long after this
+	// function returned nil.
+	if cfg.User != 0 && subprocess.SameUserRefused(cfg.User, cfg.AllowSameUser) {
+		return nil, fmt.Errorf(
+			"dispatch: execution.subprocess.user %d matches the worker's own uid; "+
+				"running the child as the worker defeats this rung's isolation — set "+
+				"execution.subprocess.allow_same_user to allow it", cfg.User)
+	}
+
+	// No uid configured at all is a distinct, weaker misconfiguration from
+	// the one above: it is not refused, because it is a legitimate (if
+	// unusual) choice, but it silently gives up most of the rung's value
+	// — see doc.go's own "defeats most of this rung's purpose" — so it
+	// gets a warning the same way an inert scratch_dir does below, not
+	// silence.
+	if cfg.User == 0 && e.Logger() != nil {
+		e.Logger().Warn("dispatch: execution.subprocess is enabled with no user configured; " +
+			"the sandboxed child runs as the worker's own uid, with the worker's own read " +
+			"access to its credentials and filesystem, which defeats most of this rung's " +
+			"purpose — see execution.subprocess.user")
 	}
 
 	opts, err := e.buildSubprocessOptions(cfg)

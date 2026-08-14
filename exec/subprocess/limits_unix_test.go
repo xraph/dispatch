@@ -56,6 +56,49 @@ func TestSameUserAllowedExplicitly(t *testing.T) {
 	}
 }
 
+// TestSameUserRefusedMatchesCheckLaunch pins subprocess.SameUserRefused
+// to checkLaunch's own actual launch-time decision. checkLaunch calls
+// SameUserRefused itself (see limits_unix.go), so in principle this test
+// cannot fail unless a future edit gives the two functions independent
+// logic again — which is exactly the drift extension.resolveExecutionOptions
+// (extension/execution.go) depends on not happening: it calls
+// SameUserRefused to fail fast at startup, and that check is only correct
+// for as long as it asks the identical question checkLaunch asks at
+// Run() time.
+func TestSameUserRefusedMatchesCheckLaunch(t *testing.T) {
+	tests := []struct {
+		name          string
+		allowSameUser bool
+	}{
+		{"refused without AllowSameUser", false},
+		{"allowed with AllowSameUser", true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			predicted := subprocess.SameUserRefused(os.Getuid(), tt.allowSameUser)
+
+			opts := []subprocess.Option{
+				subprocess.WithBinary(os.Args[0]),
+				subprocess.WithEnv(map[string]string{"DISPATCH_EXEC_SHIM_TEST": "1"}),
+				subprocess.WithUser(os.Getuid(), os.Getgid()),
+			}
+			if tt.allowSameUser {
+				opts = append(opts, subprocess.WithAllowSameUser())
+			}
+
+			e := subprocess.New(opts...)
+			res, err := e.Run(context.Background(), request(t, exectest.JobOK, struct{}{}))
+
+			refused := err != nil || res.Status == exec.StatusLaunchFailed
+			if refused != predicted {
+				t.Fatalf("SameUserRefused(%d, %v) = %v, but the actual launch's refusal = %v — "+
+					"the two have drifted apart", os.Getuid(), tt.allowSameUser, predicted, refused)
+			}
+		})
+	}
+}
+
 // TestRlimitsAreAppliedChildSide proves a configured Rlimits value
 // actually reaches the child: RLIMIT_NOFILE is used rather than
 // RLIMIT_AS or RLIMIT_CORE because it is the one limit in this set that

@@ -217,7 +217,21 @@ func (r *Runner) Close() error {
 func (r *Runner) Execute(ctx context.Context, j *job.Job) error {
 	terminal, err := r.terminalFor(j)
 	if err != nil {
-		return err
+		// terminalFor fails before the middleware chain — and therefore
+		// r.mw — ever runs, so returning err bare here, as this used to,
+		// bypasses handleFailure entirely: no LastError, no retry
+		// bookkeeping, no DLQ, nothing but a Debug log from Pool.runJob.
+		// The job sits at StateRunning until its lease expires, gets
+		// reaped, and is re-leased to try again — forever, for a policy
+		// that cannot become satisfiable no matter how many times it is
+		// retried. Routing it through handleFailure here is what turns
+		// that into a real terminal write; see terminalFor's own wrap of
+		// exec.Registry.Select's error with dispatch.ErrPermanent for why
+		// this then reaches the DLQ in one step rather than being retried.
+		now := time.Now().UTC()
+		j.UpdatedAt = now
+
+		return r.handleFailure(ctx, j, err, now)
 	}
 
 	start := time.Now()
@@ -255,7 +269,13 @@ func (r *Runner) terminalFor(j *job.Job) (middleware.Handler, error) {
 	policy := r.registry.Policy(j.Name)
 	executor, err := r.executors.Select(policy)
 	if err != nil {
-		return nil, fmt.Errorf("dispatch/worker: select executor for job %q: %w", j.Name, err)
+		// A policy no configured executor satisfies cannot become
+		// satisfiable by retrying — the same reasoning already applied to
+		// exec.ErrInvalidRequest below, wrapped with dispatch.ErrPermanent
+		// so Execute's caller sends this straight to the DLQ instead of
+		// requeuing a job that will discover the identical
+		// misconfiguration on every future attempt.
+		return nil, fmt.Errorf("%w: dispatch/worker: select executor for job %q: %w", dispatch.ErrPermanent, j.Name, err)
 	}
 
 	return func(ctx context.Context) error {

@@ -217,6 +217,52 @@ func TestRunner_RunErrorWrappingInvalidRequestGoesToDLQ(t *testing.T) {
 	}
 }
 
+// TestRunner_UnsatisfiablePolicyReachesDLQ guards the fix for a job whose
+// declared execution policy no configured executor can satisfy: before
+// this fix, terminalFor's error from exec.Registry.Select came straight
+// back out of Execute without ever reaching handleFailure, so the job
+// was never marked failed, never retried, and never persisted — it sat
+// at StateRunning until its lease expired and got reaped, then re-leased
+// to discover the identical, permanently unsatisfiable policy again, in
+// an unbounded loop. Mutation check: reverting Execute to `return err`
+// for terminalFor's error (bypassing handleFailure) makes this test fail
+// with store.updates == 0 and State still StateRunning.
+func TestRunner_UnsatisfiablePolicyReachesDLQ(t *testing.T) {
+	reg := job.NewRegistry()
+	job.NewDefinition("test.job",
+		func(context.Context, struct{}) error { return nil },
+		job.WithExecution(exec.Isolate(exec.LevelProcess)),
+	).Register(reg)
+
+	// No process-level executor registered: only the in-process default,
+	// which cannot satisfy exec.LevelProcess.
+	executors := exec.NewRegistry(inproc.New(reg))
+
+	runner, store := newTestRunner(t, reg, executors)
+
+	j := &job.Job{ID: id.NewJobID(), Name: "test.job", State: job.StateRunning, MaxRetries: 3}
+	err := runner.Execute(context.Background(), j)
+	if err == nil {
+		t.Fatal("Execute() = nil, want a failure")
+	}
+	if !errors.Is(err, exec.ErrNoExecutor) {
+		t.Errorf("Execute() = %v, want it to wrap %v", err, exec.ErrNoExecutor)
+	}
+	if !errors.Is(err, dispatch.ErrPermanent) {
+		t.Errorf("Execute() = %v, want it to wrap %v", err, dispatch.ErrPermanent)
+	}
+	if j.State != job.StateFailed {
+		t.Errorf("State = %q, want %q — an unsatisfiable policy must reach a terminal state, not loop forever",
+			j.State, job.StateFailed)
+	}
+	if j.LastError == "" {
+		t.Error("LastError was never recorded")
+	}
+	if store.updates == 0 {
+		t.Error("the job was never persisted — it would sit at StateRunning until its lease expired, forever")
+	}
+}
+
 func TestRunner_HandlerErrorConsumesRetries(t *testing.T) {
 	sentinel := errors.New("bad file")
 

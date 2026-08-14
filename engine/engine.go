@@ -582,16 +582,24 @@ func Build(d *dispatch.Dispatcher, opts ...Option) (*Engine, error) {
 
 // Register registers a typed job definition with the engine.
 //
-// Use RegisterChecked when the definition declares artifact inputs and
-// you want the declaration validated against the staging budget.
+// Use RegisterChecked when the definition declares artifact inputs, or an
+// execution policy (job.WithExecution), and you want either validated —
+// the staging budget for the former, and for the latter, that some
+// configured executor can actually satisfy it. Register itself performs
+// neither check: a definition declaring exec.Isolate(exec.LevelProcess)
+// with no rung configured to provide it registers cleanly here and only
+// fails the first time a worker actually tries to run it, which is
+// exactly the startup-error-versus-silently-hung-job choice
+// RegisterChecked exists to take out of a caller's hands.
 func Register[T any](eng *Engine, def *job.Definition[T]) {
 	job.RegisterDefinition(eng.registry, def)
 }
 
 // RegisterChecked registers a definition and validates its artifact
 // declarations and execution policy, so a job that could never be staged
-// or could never be isolated as it requires fails here rather than on
-// every worker that picks it up.
+// or could never be isolated as it requires fails here — at registration,
+// on a developer's machine — rather than on every worker that picks it
+// up.
 func RegisterChecked[T any](eng *Engine, def *job.Definition[T]) error {
 	if err := eng.ValidateArtifactInputs(def.Name, def.Opts.Inputs); err != nil {
 		return err

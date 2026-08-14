@@ -6,6 +6,8 @@ import (
 	"reflect"
 	"testing"
 
+	log "github.com/xraph/go-utils/log"
+
 	"github.com/xraph/dispatch/exec"
 	"github.com/xraph/dispatch/exec/subprocess"
 	"github.com/xraph/dispatch/id"
@@ -59,6 +61,84 @@ func TestResolveExecutionOptionsScratchDirAddsSecondOption(t *testing.T) {
 	}
 	if len(opts) != 2 {
 		t.Fatalf("resolveExecutionOptions() = %d options, want 2 (WithExecutor + WithScratchRoot)", len(opts))
+	}
+}
+
+// TestResolveExecutionOptionsRefusesSameUserAtStartup proves the
+// resolveExecutionOptions fix: a config naming the worker's own uid, with
+// no allow_same_user, must fail HERE, at startup — not pass cleanly and
+// then fail launch on every single job, forever, discovered only in
+// production. subprocess.Available alone cannot catch this (it is a
+// platform check, not a per-config one); this exercises the separate
+// same-uid check added alongside it.
+func TestResolveExecutionOptionsRefusesSameUserAtStartup(t *testing.T) {
+	e := New()
+	e.config.Execution.Subprocess.Enabled = true
+	e.config.Execution.Subprocess.User = os.Getuid()
+	e.config.Execution.Subprocess.Group = os.Getgid()
+
+	_, err := e.resolveExecutionOptions()
+	if err == nil {
+		t.Fatal("resolveExecutionOptions() = nil error, want one for a uid matching the worker's own")
+	}
+}
+
+// TestResolveExecutionOptionsAllowsSameUserExplicitly proves the same-uid
+// startup check does not fire when allow_same_user opted in — the
+// deliberate escape hatch stays available, exactly as it does at Run()
+// time in checkLaunch.
+func TestResolveExecutionOptionsAllowsSameUserExplicitly(t *testing.T) {
+	e := New()
+	e.config.Execution.Subprocess.Enabled = true
+	e.config.Execution.Subprocess.User = os.Getuid()
+	e.config.Execution.Subprocess.Group = os.Getgid()
+	e.config.Execution.Subprocess.AllowSameUser = true
+
+	if _, err := e.resolveExecutionOptions(); err != nil {
+		t.Fatalf("resolveExecutionOptions() = %v, want nil", err)
+	}
+}
+
+// TestResolveExecutionOptionsWarnsOnMissingUser proves enabling the rung
+// with no uid configured — the minimal `execution: {subprocess: {enabled:
+// true}}` — logs a WARN. Without one, an operator has no signal that the
+// sandboxed child runs as the worker's own uid, with full read access to
+// its credentials and filesystem, which exec/subprocess's own doc.go
+// calls the thing that "defeats most of this rung's purpose."
+func TestResolveExecutionOptionsWarnsOnMissingUser(t *testing.T) {
+	tl := log.NewTestLogger().(*log.TestLogger)
+
+	e := New()
+	e.SetLogger(tl)
+	e.config.Execution.Subprocess.Enabled = true
+
+	if _, err := e.resolveExecutionOptions(); err != nil {
+		t.Fatalf("resolveExecutionOptions() = %v, want nil", err)
+	}
+
+	if tl.CountLogs("WARN") == 0 {
+		t.Error("no WARN logged for execution.subprocess enabled with no user configured")
+	}
+}
+
+// TestResolveExecutionOptionsNoWarnWhenUserConfigured is the negative
+// case for the above: a properly configured uid must not also trigger
+// the missing-user warning.
+func TestResolveExecutionOptionsNoWarnWhenUserConfigured(t *testing.T) {
+	tl := log.NewTestLogger().(*log.TestLogger)
+
+	e := New()
+	e.SetLogger(tl)
+	e.config.Execution.Subprocess.Enabled = true
+	e.config.Execution.Subprocess.User = 65532
+	e.config.Execution.Subprocess.Group = 65532
+
+	if _, err := e.resolveExecutionOptions(); err != nil {
+		t.Fatalf("resolveExecutionOptions() = %v, want nil", err)
+	}
+
+	if tl.CountLogs("WARN") != 0 {
+		t.Errorf("CountLogs(WARN) = %d, want 0 — a configured user must not warn", tl.CountLogs("WARN"))
 	}
 }
 

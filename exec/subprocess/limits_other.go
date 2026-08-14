@@ -14,6 +14,15 @@ func checkLaunch(options) error {
 	return errors.New("dispatch/exec/subprocess: the subprocess rung requires a Unix platform")
 }
 
+// SameUserRefused always reports false outside Unix. Available, below,
+// already refuses the whole rung on this platform, so configuration code
+// that calls Available first — as it must — never reaches this question
+// in practice; it exists here only so callers that are not platform-
+// specific themselves (extension.resolveExecutionOptions) compile on
+// every platform this package supports. See checkLaunch and its Unix
+// counterpart in limits_unix.go, the one that matters.
+func SameUserRefused(int, bool) bool { return false }
+
 // Available reports that this platform cannot run the subprocess rung at
 // all, for the identical reason checkLaunch refuses above. Configuration
 // code should call this before ever constructing an Executor: checkLaunch
