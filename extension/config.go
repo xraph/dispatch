@@ -21,7 +21,21 @@ type Config struct {
 	// DisableMigrate disables auto-migration on start.
 	DisableMigrate bool `default:"false" json:"disable_migrate" mapstructure:"disable_migrate" yaml:"disable_migrate"`
 
-	// Dispatch holds the core dispatcher configuration.
+	// Dispatch is parsed from YAML (extensions.dispatch.dispatch.* or
+	// dispatch.dispatch.*) but not currently applied anywhere: nothing in
+	// this package reads e.config.Dispatch, and dispatch.Config's own
+	// fields carry no yaml/mapstructure/json struct tags of their own, so
+	// even a populated value here binds by Go field name at best. Setting
+	// concurrency, queues, poll interval, or any other dispatch.Config
+	// field under this key parses without error and has no effect.
+	//
+	// The dispatcher itself IS configurable through this extension —
+	// just not through this field. WithConcurrency, WithQueues,
+	// WithPollInterval, WithMaxPollInterval, WithHeartbeatInterval,
+	// WithStaleJobThreshold, WithWorkerStoreCallTimeout, and the
+	// WithCron* options (options.go) each translate one dispatch.Config
+	// field into the matching dispatch.With* functional option; use
+	// those from Go, not this field from YAML.
 	Dispatch dispatch.Config `json:"dispatch" mapstructure:"dispatch" yaml:"dispatch"`
 
 	// GroveDatabase is the name of a grove.DB registered in the DI container.
@@ -172,11 +186,16 @@ type SubprocessConfig struct {
 	// AllowSameUser is the single opt-out for running this rung unisolated
 	// on the uid boundary (subprocess.WithAllowSameUser): it permits User
 	// to name the worker's own uid, and it permits leaving User unset
-	// entirely. Without it, either shape makes every attempt refuse to
-	// launch — a deliberate security default (see WithAllowSameUser) that
-	// this config surface passes through rather than working around:
-	// nothing here defaults it to true, so a configuration mistake cannot
-	// silently defeat it.
+	// entirely. Without it, either shape refuses at startup —
+	// resolveExecutionOptions rejects it during Register, before this
+	// worker ever starts processing jobs — rather than passing cleanly
+	// and only then failing every attempt's launch, forever, once the
+	// deployment is already running. That is a deliberate security
+	// default (see WithAllowSameUser and checkLaunch, which enforces the
+	// same rule again at Run() for callers that build subprocess.Executor
+	// directly instead of through this config) that this config surface
+	// passes through rather than working around: nothing here defaults it
+	// to true, so a configuration mistake cannot silently defeat it.
 	AllowSameUser bool `default:"false" json:"allow_same_user" mapstructure:"allow_same_user" yaml:"allow_same_user"`
 
 	// ScratchDir is the root directory both the child process's working
@@ -194,12 +213,14 @@ type SubprocessConfig struct {
 	ScratchDir string `json:"scratch_dir" mapstructure:"scratch_dir" yaml:"scratch_dir"`
 
 	// Rlimits configures POSIX resource limits applied to the child
-	// (subprocess.WithRlimits). Fields are in bytes (AddressSpace, FSize)
-	// or counts (NoFile, NProc, Core); zero leaves that limit at whatever
-	// the worker itself runs with. There is no unit-suffixed string
-	// parsing here (no "16GB") — this repo takes no new dependency to
-	// provide one, and every other byte-valued config field
-	// (ArtifactCacheConfig.Budget, resource.Set) is already a plain
+	// (subprocess.WithRlimits). Fields are in bytes (AddressSpace, FSize,
+	// Core) or counts (NoFile, NProc); zero leaves that limit at whatever
+	// the worker itself runs with — except Core, which buildEnv forces
+	// to zero unconditionally regardless of this value, so a configured
+	// Core is always ignored (see RlimitsConfig.Core below). There is no
+	// unit-suffixed string parsing here (no "16GB") — this repo takes no
+	// new dependency to provide one, and every other byte-valued config
+	// field (ArtifactCacheConfig.Budget, resource.Set) is already a plain
 	// integer for the same reason.
 	Rlimits RlimitsConfig `json:"rlimits" mapstructure:"rlimits" yaml:"rlimits"`
 
