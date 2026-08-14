@@ -106,8 +106,8 @@ func TestSysProcAttrCredential(t *testing.T) {
 
 // TestSysProcAttrAlwaysSetsSetpgidWithUser guards against a regression
 // where adding Credential handling accidentally drops Setpgid — the two
-// are independent fields on the same struct, and Task 4's guarantee must
-// survive Task 5's addition regardless of whether a user is configured.
+// are independent fields on the same struct, and Task 4's whole-group-kill
+// guarantee must survive regardless of whether a user is configured.
 func TestSysProcAttrAlwaysSetsSetpgidWithUser(t *testing.T) {
 	attr := sysProcAttr(options{hasUser: true, uid: os.Getuid(), gid: os.Getgid()})
 	if !attr.Setpgid {

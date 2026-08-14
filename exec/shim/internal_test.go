@@ -1,3 +1,5 @@
+//go:build unix
+
 package shim
 
 // This file is package shim (internal), not shim_test, deliberately
@@ -7,6 +9,18 @@ package shim
 // goroutine without forking a real subprocess — which os.Exit inside Main
 // would otherwise force — is to call it directly. File descriptors are
 // process-scoped, so os.Pipe plus t.Setenv reaches it in-process.
+//
+// The build tag is here because callMainExitCode below calls
+// syscall.Dup, which does not exist in Go's syscall package on Windows —
+// this file predates the rest of this package's build-tag split (it's
+// from Task 3) and was missed when that split happened. TestFDFromEnv
+// itself needs nothing platform-specific, but it lives in the same file
+// as callMainExitCode's other callers, so it is unix-only along with
+// them rather than split out on its own; this package has no real
+// non-Unix target (see procattr_other.go / limits_other.go in
+// exec/subprocess, which refuse the whole rung outside Unix), so the
+// coverage this loses there is nothing this rung claims to provide
+// anyway.
 
 import (
 	"context"

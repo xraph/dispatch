@@ -95,10 +95,11 @@ func sysProcAttr(o options) *syscall.SysProcAttr {
 // up here would not fail the attempt — it would hang Run indefinitely
 // instead, waiting on a kill that was never sent to a process that is
 // never going to exit on its own. That is strictly worse than attempting
-// a kill that might itself fail: today, signalling this package's own
-// child, there is no path that produces a non-ErrProcessDone error here,
-// but Task 5 adds a Credential with a dedicated uid, and a uid boundary
-// makes EPERM a real possibility the moment that lands. A failed kill is
+// a kill that might itself fail: signalling this package's own child
+// used to have no path that produces a non-ErrProcessDone error here, but
+// sysProcAttr above now sets Credential with a dedicated uid when one is
+// configured, and that uid boundary makes EPERM a real possibility. A
+// failed kill is
 // recoverable — classify still has the process's actual wait status to
 // report from, whatever it turns out to be; a kill that was never
 // attempted is not.

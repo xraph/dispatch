@@ -137,4 +137,39 @@ func TestMainExitCodeStrictRlimitFailsLaunch(t *testing.T) {
 	})
 }
 
+// TestApplyOneUnverifiedResourceIsAFailure is the regression test for the
+// gap the review round 2 found: resourceOK false used to log and
+// `continue` without ever appending to the failures slice, which meant
+// WithStrictRlimits gave no guarantee at all on a platform this package
+// has not verified a resource number for — the one case an operator
+// opting into strictness needs it most. A synthetic rlimitSpec is used
+// rather than a real unverified platform (this rung's CI and dev machine
+// are both verified for every field WithRlimits exposes today), which is
+// exactly what applyOne being split out of applyRlimits is for.
+func TestApplyOneUnverifiedResourceIsAFailure(t *testing.T) {
+	spec := rlimitSpec{env: "DISPATCH_TEST_UNVERIFIED", resource: 0, resourceOK: false, label: "RLIMIT_TEST"}
+
+	f, hasFailure := applyOne(spec, "12345")
+	if !hasFailure {
+		t.Fatal("applyOne() reported no failure for an unverified resource number, want a failure so WithStrictRlimits actually refuses the launch")
+	}
+	if f.label != "RLIMIT_TEST" {
+		t.Errorf("failure label = %q, want %q", f.label, "RLIMIT_TEST")
+	}
+	if f.err == nil {
+		t.Error("failure err = nil, want a non-nil reason")
+	}
+}
+
+// A resourceOK-true / real-Setrlimit contrast case (proving
+// isKnownUnsupported actually reaches applyOne's result rather than only
+// being unit-tested in isolation) deliberately does not live here: doing
+// that against RLIMIT_AS in-process, in this test binary, would risk
+// exactly the pollution this file's doc comment describes avoiding — on
+// Linux, a generous-enough value would not fail at all, and would then
+// apply for real, for the rest of this test binary's life.
+// TestStrictRlimitsToleratesKnownUnsupported (exec/subprocess,
+// limits_unix_test.go) covers that case instead, through a real forked
+// child, which cannot pollute anything once it exits.
+
 func isDarwin() bool { return runtime.GOOS == "darwin" }

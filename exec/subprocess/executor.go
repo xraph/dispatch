@@ -134,18 +134,26 @@ func WithRlimits(r Rlimits) Option {
 	}
 }
 
-// WithStrictRlimits makes an rlimit that Setrlimit could not apply a
-// launch failure instead of a warning — but only when the failure is
-// unexpected. shim.Main (applyRlimits) still treats a platform's own
+// WithStrictRlimits makes a configured rlimit that did not actually take
+// effect a launch failure instead of a warning — with one exception.
+// shim.Main (applyRlimits) still treats the current kernel's own
 // structural refusal to support a given limit at all as a warning
-// regardless of this option: Darwin rejecting RLIMIT_AS unconditionally
-// is the standing example, and there is nothing a caller-supplied value
-// could have done differently about that, so making it fatal here would
-// only make WithRlimits{AddressSpace: ...} unusable on Darwin rather than
-// catch a real misconfiguration. What this does catch: a value that
-// exceeds the process's own hard limit (EPERM on a platform that does
-// support the resource), or any other Setrlimit failure this rung has
-// not already special-cased as platform-structural.
+// regardless of this option: Darwin rejecting setrlimit(RLIMIT_AS, ...)
+// unconditionally is the standing example, and there is nothing a
+// caller-supplied value could have done differently about that, so
+// making it fatal here would only make WithRlimits{AddressSpace: ...}
+// unusable on Darwin rather than catch a real misconfiguration.
+//
+// Everything else this rung can fail on, it does catch, including two
+// shapes worth naming explicitly: a value that exceeds the process's own
+// hard limit (EPERM on a platform that does support the resource), and —
+// distinct from the kernel refusing the limit — Dispatch itself not
+// having verified the raw resource number for the current platform at
+// all (RLIMIT_NPROC on most non-Linux/Darwin/FreeBSD Unixes, currently;
+// see rlimitNProc in exec/shim/rlimit_unix.go). That second case is a
+// library gap, not a platform fact, and without this option it would
+// otherwise be indistinguishable, from the outside, from the limit
+// simply having applied.
 //
 // Without this, a configured rlimit that fails to apply is logged to the
 // child's stderr and otherwise ignored — see the Rlimits doc comment —
