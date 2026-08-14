@@ -9,6 +9,66 @@ import (
 	"github.com/xraph/dispatch/exec/subprocess"
 )
 
+// mergeExecutionConfig folds programmatic execution settings into what
+// YAML supplied, following the same precedence rule mergeResourceConfig
+// documents: YAML wins where it said something, programmatic options
+// fill the gaps, and every enable-shaped flag is an OR rather than an
+// override. Without this, a binary that called WithConfig to turn on
+// the subprocess rung — the one thing standing between a malicious
+// upload and the worker's own credentials — had that silently discarded
+// the moment ANY YAML "dispatch" key existed, because loadConfiguration
+// replaces e.config wholesale with mergeConfigurations' result and this
+// block was the one Config field that function never touched. The
+// deployment would then run every job in-process, believing it was
+// sandboxed, with no error or warning anywhere.
+func mergeExecutionConfig(yamlCfg, programmatic ExecutionConfig) ExecutionConfig {
+	yamlCfg.Subprocess = mergeSubprocessConfig(yamlCfg.Subprocess, programmatic.Subprocess)
+
+	return yamlCfg
+}
+
+// mergeSubprocessConfig applies mergeExecutionConfig's precedence rule
+// field by field.
+//
+// User and Group are merged as a pair, not independently: buildSubprocessOptions
+// already refuses a config that sets one without the other, so filling
+// them from different sources here could silently manufacture exactly
+// that invalid combination. YAML naming either one counts as YAML having
+// spoken on the pair; only when YAML sets neither does the programmatic
+// pair fill the gap.
+func mergeSubprocessConfig(yamlCfg, programmatic SubprocessConfig) SubprocessConfig {
+	if programmatic.Enabled {
+		yamlCfg.Enabled = true
+	}
+
+	if yamlCfg.Binary == "" && programmatic.Binary != "" {
+		yamlCfg.Binary = programmatic.Binary
+	}
+
+	if yamlCfg.User == 0 && yamlCfg.Group == 0 && (programmatic.User != 0 || programmatic.Group != 0) {
+		yamlCfg.User = programmatic.User
+		yamlCfg.Group = programmatic.Group
+	}
+
+	if programmatic.AllowSameUser {
+		yamlCfg.AllowSameUser = true
+	}
+
+	if yamlCfg.ScratchDir == "" && programmatic.ScratchDir != "" {
+		yamlCfg.ScratchDir = programmatic.ScratchDir
+	}
+
+	if yamlCfg.Rlimits == (RlimitsConfig{}) && programmatic.Rlimits != (RlimitsConfig{}) {
+		yamlCfg.Rlimits = programmatic.Rlimits
+	}
+
+	if programmatic.StrictRlimits {
+		yamlCfg.StrictRlimits = true
+	}
+
+	return yamlCfg
+}
+
 // resolveExecutionOptions turns the execution config block into engine
 // options that register additional isolation rungs beyond the always-
 // present in-process default.

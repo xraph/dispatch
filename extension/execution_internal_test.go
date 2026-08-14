@@ -236,3 +236,132 @@ func TestConfigExecutionYAMLShape(t *testing.T) {
 		t.Errorf("Config.Execution yaml tag = %q, want %q", got, "execution")
 	}
 }
+
+// TestMergeConfigurationsKeepsProgrammaticExecution is the regression
+// test for the bug mergeConfigurations had: it merged Artifacts and
+// Resources but never touched Execution at all, so a binary that called
+// WithConfig(Config{Execution: ...}) to turn on the subprocess rung had
+// that silently dropped the instant loadConfiguration found ANY YAML
+// "dispatch" key — even one that says nothing whatsoever about
+// execution. The deployment would then run every job in-process,
+// believing it was sandboxed, with no error or warning anywhere.
+//
+// Reproduces the exact shape from the report: YAML sets an unrelated
+// field (BasePath) and says nothing about execution at all.
+func TestMergeConfigurationsKeepsProgrammaticExecution(t *testing.T) {
+	e := New()
+
+	yamlConfig := Config{BasePath: "/custom"}
+	programmaticConfig := Config{
+		Execution: ExecutionConfig{
+			Subprocess: SubprocessConfig{
+				Enabled: true,
+				User:    65532,
+				Group:   65532,
+			},
+		},
+	}
+
+	got := e.mergeConfigurations(yamlConfig, programmaticConfig)
+
+	if !got.Execution.Subprocess.Enabled {
+		t.Error("WithConfig's execution.subprocess.enabled was dropped by a config file that said nothing about execution")
+	}
+	if got.Execution.Subprocess.User != 65532 || got.Execution.Subprocess.Group != 65532 {
+		t.Errorf("Execution.Subprocess.User/Group = %d/%d, want 65532/65532",
+			got.Execution.Subprocess.User, got.Execution.Subprocess.Group)
+	}
+}
+
+// TestMergeExecutionConfig covers mergeExecutionConfig's precedence
+// rules directly, mirroring TestMergeResourceConfig in
+// config_internal_test.go.
+func TestMergeExecutionConfig(t *testing.T) {
+	t.Run("programmatic enable survives silent yaml", func(t *testing.T) {
+		got := mergeExecutionConfig(
+			ExecutionConfig{},
+			ExecutionConfig{Subprocess: SubprocessConfig{Enabled: true}},
+		)
+		if !got.Subprocess.Enabled {
+			t.Error("enabled was dropped by a config file that said nothing")
+		}
+	})
+
+	t.Run("yaml enabled survives silent programmatic config", func(t *testing.T) {
+		got := mergeExecutionConfig(
+			ExecutionConfig{Subprocess: SubprocessConfig{Enabled: true}},
+			ExecutionConfig{},
+		)
+		if !got.Subprocess.Enabled {
+			t.Error("yaml's enabled was lost")
+		}
+	})
+
+	t.Run("yaml wins on scalars", func(t *testing.T) {
+		got := mergeExecutionConfig(
+			ExecutionConfig{Subprocess: SubprocessConfig{Binary: "/yaml/bin", ScratchDir: "/yaml/scratch"}},
+			ExecutionConfig{Subprocess: SubprocessConfig{Binary: "/programmatic/bin", ScratchDir: "/programmatic/scratch"}},
+		)
+		if got.Subprocess.Binary != "/yaml/bin" {
+			t.Errorf("Binary = %q, want yaml value", got.Subprocess.Binary)
+		}
+		if got.Subprocess.ScratchDir != "/yaml/scratch" {
+			t.Errorf("ScratchDir = %q, want yaml value", got.Subprocess.ScratchDir)
+		}
+	})
+
+	t.Run("programmatic fills gaps left by yaml", func(t *testing.T) {
+		got := mergeExecutionConfig(
+			ExecutionConfig{},
+			ExecutionConfig{Subprocess: SubprocessConfig{Binary: "/programmatic/bin", ScratchDir: "/programmatic/scratch"}},
+		)
+		if got.Subprocess.Binary != "/programmatic/bin" {
+			t.Errorf("Binary = %q, want programmatic value", got.Subprocess.Binary)
+		}
+		if got.Subprocess.ScratchDir != "/programmatic/scratch" {
+			t.Errorf("ScratchDir = %q, want programmatic value", got.Subprocess.ScratchDir)
+		}
+	})
+
+	t.Run("user and group merge as a pair, never independently", func(t *testing.T) {
+		got := mergeExecutionConfig(
+			ExecutionConfig{Subprocess: SubprocessConfig{User: 100, Group: 100}},
+			ExecutionConfig{Subprocess: SubprocessConfig{User: 200, Group: 200}},
+		)
+		if got.Subprocess.User != 100 || got.Subprocess.Group != 100 {
+			t.Errorf("User/Group = %d/%d, want yaml's 100/100", got.Subprocess.User, got.Subprocess.Group)
+		}
+
+		got = mergeExecutionConfig(
+			ExecutionConfig{},
+			ExecutionConfig{Subprocess: SubprocessConfig{User: 200, Group: 200}},
+		)
+		if got.Subprocess.User != 200 || got.Subprocess.Group != 200 {
+			t.Errorf("User/Group = %d/%d, want programmatic's 200/200 filling an empty yaml pair",
+				got.Subprocess.User, got.Subprocess.Group)
+		}
+	})
+
+	t.Run("allow_same_user and strict_rlimits are an OR", func(t *testing.T) {
+		got := mergeExecutionConfig(
+			ExecutionConfig{},
+			ExecutionConfig{Subprocess: SubprocessConfig{AllowSameUser: true, StrictRlimits: true}},
+		)
+		if !got.Subprocess.AllowSameUser {
+			t.Error("programmatic AllowSameUser was dropped")
+		}
+		if !got.Subprocess.StrictRlimits {
+			t.Error("programmatic StrictRlimits was dropped")
+		}
+	})
+
+	t.Run("rlimits: yaml wins wholesale when it set any field", func(t *testing.T) {
+		got := mergeExecutionConfig(
+			ExecutionConfig{Subprocess: SubprocessConfig{Rlimits: RlimitsConfig{NoFile: 10}}},
+			ExecutionConfig{Subprocess: SubprocessConfig{Rlimits: RlimitsConfig{NoFile: 20, NProc: 5}}},
+		)
+		if got.Subprocess.Rlimits != (RlimitsConfig{NoFile: 10}) {
+			t.Errorf("Rlimits = %+v, want yaml's {NoFile: 10}", got.Subprocess.Rlimits)
+		}
+	})
+}

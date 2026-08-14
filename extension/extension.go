@@ -612,6 +612,7 @@ func (e *Extension) mergeConfigurations(yamlConfig, programmaticConfig Config) C
 	}
 
 	yamlConfig.Resources = mergeResourceConfig(yamlConfig.Resources, programmaticConfig.Resources)
+	yamlConfig.Execution = mergeExecutionConfig(yamlConfig.Execution, programmaticConfig.Execution)
 
 	// String fields: YAML takes precedence.
 	if yamlConfig.BasePath == "" && programmaticConfig.BasePath != "" {
