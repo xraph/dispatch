@@ -162,11 +162,15 @@ can be handed the same `[]job.Registrable` without ever holding an `*Engine`.
 
 `exec/subprocess` is the `exec.LevelProcess` executor: the worker re-execs
 its own binary for every attempt, the child runs the handler under a
-dedicated low-privilege uid with POSIX resource limits applied, and a kill
-ladder enforces the deadline instead of trusting the handler to notice a
-cancelled context. It stops a malicious upload from reading the worker's
-database credentials, because the child never receives the worker's
-environment or its memory.
+dedicated low-privilege uid — enforced at launch, not just advised; `Run`
+refuses to start without one unless the operator explicitly opts out (see
+"The dedicated uid is mandatory" below) — with POSIX resource limits
+applied, and a kill ladder enforces the deadline instead of trusting the
+handler to notice a cancelled context. The child never receives the
+worker's environment or its memory, so it cannot read credentials that live
+there; the dedicated uid is what stops it from reading the ones that live
+on disk instead — the worker's own config file, a mounted secret — since
+the child shares the worker's filesystem view.
 
 <Callout type="warn">
   It does not stop the file from reaching the network or another tenant's
@@ -268,28 +272,28 @@ attempt once it is already in production.
 ### The dedicated uid is mandatory
 
 `user` and `group` are not optional hardening — they are most of what this
-rung is for. Enable the subprocess rung with no `user` configured and the
-child still runs as the worker's own uid, with the worker's own read access
-to `~/.aws`, `/var/run/secrets`, and the Dispatch config file itself. A
-parser exploited in that child can read every credential the worker can.
-Configuring `scratch_dir` and `rlimits` without `user` narrows *where* a
-compromised handler can write and *how much* it can allocate; it does
-nothing to stop it from reading what the worker could already read.
+rung is for, and Dispatch enforces that rather than merely advising it.
+Enabling the subprocess rung with no `user` configured refuses to start at
+all, both from `main()`'s own `subprocess.New` path and from YAML config:
+without it, the child would run as the worker's own uid, with the worker's
+own read access to `~/.aws`, `/var/run/secrets`, and the Dispatch config
+file itself, and a parser exploited in that child could read every
+credential the worker can. Configuring `scratch_dir` and `rlimits` without
+`user` narrows *where* a compromised handler can write and *how much* it
+can allocate; it does nothing to stop it from reading what the worker could
+already read, which is why it is not accepted as a substitute.
 
-Dispatch does not let a configured `user` silently equal the worker's own
-uid — `Run` refuses to launch at all, both from `main()`'s own
-`subprocess.New` path and from YAML config, unless `allow_same_user` (or
-`subprocess.WithAllowSameUser()`) opts in explicitly. That escape hatch
-exists for local development and CI, where dropping to a different uid
-needs privilege the process running the tests does not have — not for
-production. Leaving `user` unset entirely is different: it is a legitimate,
-if weak, choice, so it is not refused — but only the YAML path warns about
-it. `extension/execution.go` logs a startup warning every time
-`execution.subprocess.enabled` is true with no `user` configured; calling
-`subprocess.New` directly with no `WithUser` has no equivalent check
-anywhere in `exec/subprocess` and warns nothing at all. A deployment that
-wires the executor itself, without going through the Forge extension, gets
-pure silence on this exact misconfiguration.
+A configured `user` that silently equals the worker's own uid is refused
+the same way, for the same reason: running the child as the worker gives up
+the uid boundary regardless of whether that happened because `user` was
+never set or because it was set to a value that turned out to match. Both
+shapes share a single opt-out, `allow_same_user` (or
+`subprocess.WithAllowSameUser()`) — not a warning for one and a hard
+refusal for the other. That escape hatch exists for local development and
+CI, where dropping to a different uid needs privilege the process running
+the tests does not have, and for a deployment that has made a deliberate,
+informed decision to accept running this rung unisolated — not for
+production by default.
 
 **Supplementary groups.** A genuine uid drop — `user` naming a uid other
 than the worker's own — clears the child's supplementary groups along with
