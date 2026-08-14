@@ -199,20 +199,27 @@ func (s *Store) UpdateLeasedJob(ctx context.Context, j *job.Job, workerID id.Wor
 		update["$unset"] = unset
 	}
 
-	var matched int64
-	err := withRetry(ctx, defaultRetry, func(ctx context.Context) error {
-		r, updErr := col.UpdateOne(ctx, filter, update)
-		if updErr != nil {
-			return updErr
-		}
-		matched = r.MatchedCount
-
-		return nil
-	})
+	// No withRetry here, deliberately, unlike RenewLease above (and
+	// UpdateJob never uses it either). RenewLease's filter is safe to
+	// retry because its own $set never touches the fields the filter
+	// tests — state, worker_id, lease_epoch — so re-matching after an
+	// already-applied write reapplies the same lease_expires_at and
+	// heartbeat_at values, which is idempotent by construction. This
+	// filter is not: it requires state:"running" while $set moves state
+	// to whatever terminal (or retrying) value the caller asked for, so a
+	// retry after the first attempt actually landed would find zero
+	// matching documents, fall through to the existence check below, and
+	// return ErrLeaseLost for a write that already succeeded — worst case
+	// on sendToDLQ, where the row is genuinely marked failed but the
+	// runner, believing the lease was lost, returns before ever reaching
+	// dlqService.Push. Matching UpdateJob's no-retry choice here is what
+	// keeps this method's error exactly as trustworthy as the write it
+	// reports on.
+	r, err := col.UpdateOne(ctx, filter, update)
 	if err != nil {
 		return fmt.Errorf("dispatch/mongo: update leased job: %w", err)
 	}
-	if matched > 0 {
+	if r.MatchedCount > 0 {
 		return nil
 	}
 
