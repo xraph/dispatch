@@ -23,15 +23,25 @@
 // anything the worker can, which defeats most of this rung's purpose —
 // see WithUser and WithAllowSameUser.
 //
-// That boundary covers the primary uid and gid only. It does not touch
-// supplementary group membership: the child keeps every supplementary
-// group the worker's own OS account belongs to. A worker running as
-// root with, say, "docker" in its supplementary groups (a common shape
-// for a systemd unit that also manages containers) hands that same
-// group membership to every child this package launches, dropped uid
-// notwithstanding — including group-write access to a group-owned
-// socket like /var/run/docker.sock, which is root on the host. Deployments
-// where supplementary groups grant access worth withholding need to
-// account for that outside this package — for example, by not putting
-// the worker's own account in privileged groups in the first place.
+// A genuine uid drop — WithUser naming anything other than the worker's
+// own uid — clears supplementary groups along with it: dropping to a
+// different uid or gid already requires the same privilege setgroups(2)
+// itself needs (CAP_SETUID/CAP_SETGID on Linux, root on Darwin), so
+// os/exec's own "clear supplementary groups whenever Credential is set
+// and NoSetGroups is false" behaviour applies in full (see sysProcAttr,
+// procattr_unix.go). A worker running as root with, say, "docker" in its
+// supplementary groups (a common shape for a systemd unit that also
+// manages containers) does not hand that membership to a genuinely
+// dropped child — the child keeps only the low-privilege uid/gid's own
+// groups.
+//
+// The one case where supplementary groups are NOT cleared is
+// WithAllowSameUser's same-uid, same-gid path, where Credential is
+// otherwise a no-op: NoSetGroups is set there specifically because
+// setgroups needs privilege this process does not have when it is not
+// already root (every dev machine and CI run), and there is nothing to
+// clear anyway, since the child is running as the worker's own account.
+// That path already defeats most of this rung's purpose for the uid/gid
+// boundary itself — see WithUser and WithAllowSameUser — so its
+// supplementary-group behaviour is the smaller of the two problems.
 package subprocess

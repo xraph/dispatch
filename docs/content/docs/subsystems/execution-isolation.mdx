@@ -94,6 +94,10 @@ ladder.
 `engine.WithExecutor` adds an executor to the deployment's registry:
 
 ```go
+subprocessExecutor := subprocess.New(
+    subprocess.WithUser(65534, 65534), // never the worker's own uid — see below
+)
+
 eng := engine.Build(d,
     engine.WithExecutor(subprocessExecutor),
 )
@@ -102,6 +106,9 @@ eng := engine.Build(d,
 The in-process executor is always present as the default, so a deployment
 that adds nothing behaves exactly as before this existed. Adding an executor
 only changes what becomes available to definitions that ask for it.
+
+`exec.LevelProcess` now has a real executor behind it: `exec/subprocess`,
+covered in detail below.
 
 ## Registering a mixed set
 
@@ -126,3 +133,242 @@ if err := engine.RegisterAll(eng, defs...); err != nil {
 them, so a rejected set leaves the registry as it was rather than half
 populated. This is also the seam a future out-of-process entrypoint uses: it
 can be handed the same `[]job.Registrable` without ever holding an `*Engine`.
+
+## The subprocess rung
+
+`exec/subprocess` is the `exec.LevelProcess` executor: the worker re-execs
+its own binary for every attempt, the child runs the handler under a
+dedicated low-privilege uid with POSIX resource limits applied, and a kill
+ladder enforces the deadline instead of trusting the handler to notice a
+cancelled context. It stops a malicious upload from reading the worker's
+database credentials, because the child never receives the worker's
+environment or its memory.
+
+<Callout type="warn">
+  It does not stop the file from reaching the network or another tenant's
+  data — the child shares the worker's network namespace and filesystem
+  view outside its scratch directory. That containment is `exec.LevelSandboxed`'s
+  job, a stronger rung a later phase builds on the same wire protocol. Declare
+  `exec.LevelSandboxed` if that is what a handler actually needs; declaring
+  `exec.LevelProcess` for it and getting this rung instead is a downgrade the
+  registry will not silently hand you (see "No silent downgrades" above), but
+  only if you declare the level you mean.
+</Callout>
+
+### The `main()` branch — read this before enabling anything else
+
+The worker distinguishes a normal run from a re-exec'd child by one thing:
+`argv[1] == "dispatch-exec"`. Nothing in `engine.Build` or `subprocess.New`
+adds that branch for you — it has to be the first thing `main` checks,
+before flags are parsed, before the store connects, before anything else
+that a sandboxed attempt has no business doing:
+
+```go
+func main() {
+    if len(os.Args) > 1 && os.Args[1] == shim.ArgName {
+        shim.Main(Tessellate, SendEmail) // same []job.Registrable as RegisterAll
+        return                          // unreachable: shim.Main calls os.Exit
+    }
+
+    d, err := dispatch.New(dispatch.WithStore(store))
+    if err != nil {
+        log.Fatal(err)
+    }
+
+    eng := engine.Build(d, engine.WithExecutor(subprocessExecutor))
+    if err := engine.RegisterAll(eng, defs...); err != nil {
+        log.Fatal(err)
+    }
+    // ... start the worker
+}
+```
+
+<Callout type="warn">
+  This is the single most likely first-time-setup failure. Without the
+  branch, enabling the subprocess rung makes every attempt re-exec a whole
+  second copy of the worker — it connects to the store, starts polling,
+  does everything a normal worker does except read `exec.Request` off fd 3,
+  because nothing ever routes it to `shim.Main`. That child never writes a
+  result frame, so the parent's kill ladder eventually SIGTERMs and
+  SIGKILLs it at the deadline, and the attempt fails as `StatusTimeout`
+  every single time. Nothing about this looks like a wiring bug from the
+  logs alone — it looks like every job is timing out.
+</Callout>
+
+`shim.Main` takes the exact same `[]job.Registrable` as `RegisterAll` —
+same handler set, same fingerprint. `exec.Fingerprint` is compared between
+parent and child on every attempt, so a child built from a different
+handler set than the worker that launched it fails to launch rather than
+running a stale handler silently.
+
+### Enabling it
+
+Programmatically, `subprocess.New` plus `engine.WithExecutor`, as shown
+above. Through Forge, the extension resolves `execution.subprocess` from
+YAML and does the equivalent `engine.WithExecutor` wiring for you — but not
+the `main()` branch above. That branch cannot live in a package this
+repository ships; it has to be the first thing your own `main()` checks,
+YAML config or not:
+
+```yaml
+extensions:
+  dispatch:
+    execution:
+      subprocess:
+        enabled: true
+        user: 65534              # required to get real isolation — see below
+        group: 65534
+        scratch_dir: /var/lib/dispatch/scratch
+        rlimits:
+          address_space: 2147483648   # 2 GiB, bytes; rejected outright on Darwin, see below
+          nofile: 256
+          nproc: 32
+          fsize: 1073741824           # 1 GiB
+        strict_rlimits: true
+```
+
+`binary` defaults to `os.Executable()` — the worker's own binary — which is
+correct unless the sandboxed handlers are built as a separate binary.
+`allow_same_user` is covered next. A deployment that sets nothing under
+`execution` registers no extra executor; every job keeps running in-process
+exactly as it does today.
+
+This rung refuses to launch on any non-Unix platform. The extension checks
+that once, at startup — `execution.subprocess.enabled: true` on Windows
+fails to boot the worker rather than failing every job's first launch
+attempt once it is already in production.
+
+### The dedicated uid is mandatory
+
+`user` and `group` are not optional hardening — they are most of what this
+rung is for. Enable the subprocess rung with no `user` configured and the
+child still runs as the worker's own uid, with the worker's own read access
+to `~/.aws`, `/var/run/secrets`, and the Dispatch config file itself. A
+parser exploited in that child can read every credential the worker can.
+Configuring `scratch_dir` and `rlimits` without `user` narrows *where* a
+compromised handler can write and *how much* it can allocate; it does
+nothing to stop it from reading what the worker could already read.
+
+Dispatch does not let a configured `user` silently equal the worker's own
+uid — `Run` refuses to launch at all, both from `main()`'s own
+`subprocess.New` path and from YAML config, unless `allow_same_user` (or
+`subprocess.WithAllowSameUser()`) opts in explicitly. That escape hatch
+exists for local development and CI, where dropping to a different uid
+needs privilege the process running the tests does not have — not for
+production. Leaving `user` unset entirely is different: it is a legitimate,
+if weak, choice, so it is not refused, but the worker logs a startup
+warning every time, because silence here is exactly the kind of doc-shaped
+gap this phase exists to close.
+
+**Supplementary groups.** A genuine uid drop — `user` naming a uid other
+than the worker's own — clears the child's supplementary groups along with
+its primary uid and gid: dropping to a different uid already needs the same
+privilege `setgroups(2)` itself requires, so the clear happens for free. The
+one case where it does *not* happen is the `allow_same_user` escape hatch —
+same uid, same gid — where there is nothing to clear anyway, since the
+child is running as the worker's own account. In other words: whenever this
+rung is actually providing the isolation it exists for, supplementary
+groups go with it; the one path where they survive is the same path that
+already gives up the uid boundary too.
+
+### Deadlines are enforced, not just cancelled
+
+`job.WithTimeout` means something stronger here than it does in-process.
+In-process, the timeout middleware wraps the handler's context in
+`context.WithTimeout` and nothing more — a handler that never checks
+`ctx.Done()` runs to completion regardless, because there is no process
+boundary to enforce anything against. Under the subprocess rung, the same
+deadline is also sent to the child as `exec.Request.Deadline`, and this
+package's kill ladder enforces it from the outside: SIGTERM to the child's
+whole process group, a grace period (`exec.GracePeriod`, default 30s) for a
+cooperative exit, then SIGKILL to the group if it has not emptied out by
+then. A handler that ignores cancellation entirely — stuck in a native
+call with no Go code polling `ctx.Done()` — still gets killed at the
+deadline plus grace. That is the actual, measurable difference this rung
+buys over in-process for a job whose native library might hang.
+
+### What `Setpgid` changes
+
+The child is started as its own process group leader, not a member of the
+worker's group. That is what lets the kill ladder reach a native library's
+forked helpers along with the tracked process itself — signalling the
+negative pid addresses the whole group, not just one member of it. It has
+a cost worth knowing about: a signal aimed at the *worker's* process group
+— `kill -TERM -$pgid` from a supervisor, or a shell sending SIGINT to a
+whole job-control group on Ctrl-C — no longer reaches the sandboxed child,
+because the child is not in that group anymore. Only the worker's own
+graceful-shutdown path, which cancels the attempt's context and lets this
+package's kill ladder run, reaches the child cleanly.
+
+That matters most when the worker itself does not get a graceful shutdown
+at all — killed outright, OOM-killed, or crashed. The child is orphaned,
+running with nothing left to signal it. It still enforces its own deadline
+internally (the shim applies `req.Deadline` to the handler's context, the
+same context cancellation in-process relies on), so a cooperative handler
+still stops on its own; an uncooperative one does not, and nothing catches
+it, because `Executor.Reclaim` for this rung is a no-op today — sweeping
+orphaned children across a restart needs a worker identity stable across
+restarts that this rung does not have yet.
+
+What `Reclaim` *does* sweep, at worker startup, is stale scratch
+directories from a previous process of this same worker — matched by the
+PID embedded in the directory name, removed only once that PID is no
+longer a live process. That check is inherently single-host: it asks the
+local kernel whether a PID is alive, which only means something within one
+PID namespace. A deployment where multiple containers share a scratch
+volume across separate PID namespaces can have a live sibling's PID
+collide with a number this worker's own kernel view reports as dead,
+and sweep a directory a running attempt is still using. Don't share a
+subprocess scratch directory across PID-namespace boundaries.
+
+### Resource limits degrade silently by default
+
+`rlimits` are applied child-side, inside the shim, because Go's `os/exec`
+has no way to set a child's rlimits through `SysProcAttr`. Two things about
+that path are worth knowing before relying on it:
+
+- **Darwin rejects `RLIMIT_AS` outright.** The kernel refuses
+  `setrlimit(RLIMIT_AS, ...)` unconditionally, regardless of the value
+  requested. This is a platform fact, not a configuration mistake, and it
+  is treated as one even with `strict_rlimits` on — there is no value that
+  would make it succeed.
+- **Some platforms' `RLIMIT_NPROC` constant is unverified.** Dispatch has
+  confirmed the raw resource number for Linux, Darwin, and FreeBSD only. On
+  every other Unix this rung otherwise supports — NetBSD, OpenBSD,
+  Dragonfly, Solaris/illumos, AIX, Android — a configured `nproc` limit is
+  skipped rather than risk applying a resource number that has not been
+  checked for that platform.
+
+Without `strict_rlimits: true`, both of these — and any other rlimit that
+fails to apply, like a value exceeding the process's own hard limit — are
+warnings, not launch failures, logged to the child's stderr. That stream
+goes nowhere by default: the subprocess executor's own logger defaults to
+a no-op, so a warning nobody configured a logger to receive is a warning
+nobody sees. If a configured limit is meant to be a hard guarantee, set
+`strict_rlimits: true` and configure a logger — either turns a silent
+degradation into a launch failure or, at minimum, a line an operator can
+actually find.
+
+### Inputs are not yet staged out-of-process
+
+`exec.Request` has `Inputs` and `InputDir` fields, and the shim's artifact
+accessor already reads from them (`Accessor.Path`, `Accessor.Open`) — but
+nothing in the worker populates them for an out-of-process attempt today.
+Only *prior outputs* from an earlier attempt of the same job are staged
+into the child (so a retried attempt can skip work it already committed);
+declared inputs from `job.WithArtifactInputs` are not.
+
+This is not a "fetch it yourself" gap — the child cannot fetch anything.
+Its artifact service is deliberately credential-free, a local directory
+standing in for the real backend (see `exec/shim`'s own doc comment), so
+there is no backend to fetch a declared input *from* even if a handler
+tried. A handler that declares both `job.WithArtifactInputs` and an
+isolation level above `LevelNone` registers and runs today, but calling
+`Accessor.Open` for that declared input inside the sandboxed handler
+returns `artifact.ErrUnbound` — the binding exists in the job's policy, it
+is simply never staged where this rung's handler can reach it. Nothing at
+registration time catches this combination yet. Staging declared inputs
+into `InputDir` for out-of-process rungs is Phase 3 work; until it lands,
+keep a handler's declared artifact inputs on definitions that run
+in-process, or fetch outputs of *earlier attempts* only — the one input
+path this rung already wires up.
