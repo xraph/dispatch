@@ -309,29 +309,34 @@ func (r *Runner) terminalFor(j *job.Job) (middleware.Handler, error) {
 		// Commit what the sandbox actually left on disk before reporting
 		// the attempt as done. This runs ahead of the lease-fenced terminal
 		// write Execute makes afterward (see abandonLostLease), not gated
-		// on it — but it is gated on the SAME fence, read rather than
-		// rewritten: commitOutputs' own first act is to check
-		// context.Cause(ctx), which the pool's heartbeat loop sets the
-		// moment it learns this worker no longer holds the job's lease
-		// (see Pool.sendHeartbeats / cancelJob). A fenced-out attempt must
-		// not commit outputs as though it still owned the job merely
-		// because the sandbox itself finished and reported success — so
-		// when the fence is already gone, nothing here writes anything,
-		// to the artifact store or otherwise. commitOutputs rechecks the
-		// same fence before every individual file it commits, and rolls
-		// back whatever this call already committed the moment either
-		// that check or a write itself fails, so a losing attempt commits
-		// everything it is entitled to or nothing at all — never a
-		// partial set a later reader could mistake for complete.
+		// on it.
 		//
-		// Distinct storage keys additionally protect the case the gate
-		// cannot: two holders whose fence checks both still passed,
-		// racing to finish within the same narrow window. commitOutputs
-		// commits under CreateFenced with this worker's lease epoch as
-		// the fence token when one is available, so two holders at the
-		// same nominal attempt can never resolve to the same backend
-		// object — a losing writer's bytes land beside a winner's, never
-		// on top of them.
+		// What actually protects against two workers each believing they
+		// hold the same job at the same RetryCount at once — a lease
+		// reclaim racing a zombie that has not yet noticed its lease
+		// expired — is CreateFenced: commitOutputs commits under this
+		// worker's lease epoch as the fence token when one is available,
+		// so two holders at the same nominal attempt resolve to different
+		// backend objects, never the same one. That protection does not
+		// depend on either holder knowing anything is wrong.
+		//
+		// commitOutputs ALSO checks context.Cause(ctx) for job.ErrLeaseLost
+		// specifically before committing anything, and rechecks it before
+		// every individual file. Be precise about what this catches and
+		// what it does not: the pool's heartbeat loop only sets that cause
+		// once a RenewLease call comes back with a *definitive*
+		// job.ErrLeaseLost (Pool.sendHeartbeats), which can lag the actual
+		// reclaim by up to one heartbeat interval, and — the case that
+		// matters most — never fires at all while this worker cannot reach
+		// the store, since a transient renewal error deliberately does not
+		// cancel a healthy job. A network partition, the canonical way a
+		// lease is actually lost, is exactly what this check cannot see.
+		// It is worth having anyway: it is nearly free, and it turns the
+		// common case (the heartbeat noticed before Run even returned)
+		// into an outright refusal to commit rather than relying solely on
+		// CreateFenced to make the collision harmless. Call it what it is
+		// — an opportunistic check for a signal the pool may already have
+		// — not a fence of its own.
 		//
 		// Only a genuinely failed attempt (res.Status != StatusOK) skips
 		// this outright.
@@ -400,6 +405,39 @@ func (r *Runner) request(j *job.Job, policy exec.Policy) *exec.Request {
 	return req
 }
 
+// scratchDirPattern returns the os.MkdirTemp pattern prepareOutputDir
+// uses for one job's scratch directory. It embeds this process's PID
+// between scratchDirPrefix and jobID so sweepStaleScratchDirs can later
+// decide who might still be using a leftover directory by asking
+// whether that PID is a live process, rather than guessing from age —
+// see parseScratchDirPID and sweepStaleScratchDirs.
+func scratchDirPattern(jobID string) string {
+	return fmt.Sprintf("%s%d-%s-", scratchDirPrefix, os.Getpid(), jobID)
+}
+
+// parseScratchDirPID extracts the PID scratchDirPattern embedded in a
+// scratch directory's name. ok is false for anything that does not
+// match the expected shape — never one of ours, or corrupted — which
+// sweepStaleScratchDirs treats identically to "not ours": left alone.
+func parseScratchDirPID(name string) (pid int, ok bool) {
+	rest, hasPrefix := strings.CutPrefix(name, scratchDirPrefix)
+	if !hasPrefix {
+		return 0, false
+	}
+
+	sep := strings.IndexByte(rest, '-')
+	if sep <= 0 {
+		return 0, false
+	}
+
+	n, err := strconv.Atoi(rest[:sep])
+	if err != nil || n <= 0 {
+		return 0, false
+	}
+
+	return n, true
+}
+
 // prepareOutputDir creates a fresh, empty scratch directory for one
 // out-of-process attempt to write its outputs into, under r.scratchRoot
 // — os.TempDir() when that is unset.
@@ -414,7 +452,7 @@ func (r *Runner) prepareOutputDir(j *job.Job) (dir string, cleanup func(), err e
 		root = os.TempDir()
 	}
 
-	dir, err = os.MkdirTemp(root, "dispatch-out-"+j.ID.String()+"-")
+	dir, err = os.MkdirTemp(root, scratchDirPattern(j.ID.String()))
 	if err != nil {
 		return "", func() {}, fmt.Errorf("dispatch/worker: create output directory: %w", err)
 	}
@@ -438,12 +476,28 @@ func (r *Runner) prepareOutputDir(j *job.Job) (dir string, cleanup func(), err e
 // logged, not returned, since one stuck directory must not stop Reclaim
 // from doing the rest of what it does at startup.
 //
-// Only entries under scratchDirPrefix are touched, and only ones older
-// than staleScratchDirAge — the name filter keeps this from ever
-// looking at anything this package did not create itself, and the age
-// filter keeps it from racing a sibling process's own in-flight
-// attempt that happens to share the same scratch root.
+// It does nothing at all when this Runner has no artifact plane
+// configured: nothing this Runner does creates or commits scratch
+// output without one (see WithArtifacts), so a Runner without one has
+// no basis for deciding anything found here is its own business to
+// remove — and calling Reclaim on such a Runner must not reach into a
+// scratch root a differently-configured sibling process is legitimately
+// using.
+//
+// Ownership, not age, is what decides whether a directory is touched:
+// a directory whose embedded PID (see parseScratchDirPID) belongs to a
+// process that is still alive — this one or a sibling sharing the same
+// scratch root — is left alone regardless of how old it looks, because
+// a live process rewriting the files inside it does not advance the
+// directory's own mtime. Age is only a courtesy tie-break once the
+// owning PID is confirmed gone, against the sliver of a window between
+// MkdirTemp creating the directory and the owning process actually
+// beginning to use it.
 func (r *Runner) sweepStaleScratchDirs() {
+	if r.artifacts == nil || !r.artifacts.Enabled() {
+		return
+	}
+
 	root := r.scratchRoot
 	if root == "" {
 		root = os.TempDir()
@@ -459,7 +513,16 @@ func (r *Runner) sweepStaleScratchDirs() {
 	cutoff := time.Now().Add(-staleScratchDirAge)
 
 	for _, entry := range entries {
-		if !entry.IsDir() || !strings.HasPrefix(entry.Name(), scratchDirPrefix) {
+		if !entry.IsDir() {
+			continue
+		}
+
+		pid, ok := parseScratchDirPID(entry.Name())
+		if !ok {
+			continue // never one of ours
+		}
+
+		if processAlive(pid) {
 			continue
 		}
 
@@ -565,13 +628,19 @@ func (r *Runner) commitOutputs(ctx context.Context, j *job.Job, req *exec.Reques
 		return nil
 	}
 
-	// Checked before anything else: the pool's heartbeat loop cancels
-	// ctx with job.ErrLeaseLost the moment it learns this worker no
-	// longer holds the job's lease (Pool.sendHeartbeats / cancelJob).
-	// Reading that here — not renewing or rewriting anything
-	// lease_fence.go or the pool itself owns — is the commit gate: if
-	// the fence is already gone, nothing below ever runs.
-	if cause := context.Cause(ctx); cause != nil {
+	// Checked before anything else, and specifically for job.ErrLeaseLost
+	// — not any cancellation. ctx is also cancelled for reasons that have
+	// nothing to do with who owns the job (a graceful shutdown mid-commit
+	// being the obvious one), and misreporting THAT as "lease fence lost"
+	// would be actively wrong: it is not what happened, and it changes
+	// how the resulting failure gets classified below. Only the specific,
+	// known signal the pool's heartbeat loop sets — job.ErrLeaseLost, the
+	// moment RenewLease comes back definitive (Pool.sendHeartbeats /
+	// cancelJob) — is treated as a fence loss here. See the longer
+	// comment above this closure for what this check does and does not
+	// cover; it is read-only regardless: nothing here renews or rewrites
+	// anything lease_fence.go or the pool itself owns.
+	if cause := context.Cause(ctx); errors.Is(cause, job.ErrLeaseLost) {
 		return fmt.Errorf("%w: %w", errFenceLost, cause)
 	}
 
@@ -623,6 +692,17 @@ func (r *Runner) commitOutputs(ctx context.Context, j *job.Job, req *exec.Reques
 // by the time it reaches the artifact plane, and two leaves colliding
 // is a structural problem this function must surface, not paper over
 // by committing whichever one the walk happened to visit last.
+//
+// dir not existing at all is a hard error, never an empty result. This
+// function's only caller creates dir itself before the sandbox ever
+// runs (see prepareOutputDir), so the ONLY way it can be missing here
+// is something having removed it after the fact — the sandbox
+// deleting its own OutputDir, or, before sweepStaleScratchDirs was
+// made ownership-based, another process's sweep colliding with a
+// still-running attempt. A vanished output directory is never a
+// legitimate "the handler produced nothing": that is an empty,
+// EXISTING directory, which WalkDir already reports as zero entries
+// with no error, handled below without reaching this branch at all.
 func collectOutputEntries(dir string) ([]outputEntry, error) {
 	var entries []outputEntry
 	seenAt := make(map[string]string)
@@ -661,9 +741,7 @@ func collectOutputEntries(dir string) ([]outputEntry, error) {
 	})
 	if walkErr != nil {
 		if errors.Is(walkErr, fs.ErrNotExist) {
-			// The handler removed its own OutputDir, or wrote nothing to
-			// it. Either way there is nothing to commit.
-			return nil, nil
+			return nil, fmt.Errorf("dispatch/worker: output directory %q no longer exists: %w", dir, walkErr)
 		}
 
 		return nil, fmt.Errorf("dispatch/worker: walk output directory: %w", walkErr)
@@ -693,12 +771,16 @@ func fenceToken(ctx context.Context) string {
 
 // commitOutputEntries commits each entry through the artifact service
 // under token — see artifact.Service.CreateFenced — checking the lease
-// fence again before every individual commit, and rolling back
-// everything this call has already committed the instant any one step
-// fails: a fence loss, a backend error. A losing attempt therefore
-// commits either everything it is entitled to or nothing at all; a
-// retry is never blocked by a stray row a failed earlier pass left
-// behind.
+// fence again before every individual commit.
+//
+// A failure partway through leaves whatever already landed in place:
+// nothing here rolls a prior success back. That is deliberate, not an
+// omission — see commitOutputFile's own doc comment for why undoing a
+// partial commit is worse than leaving it. A losing attempt may
+// therefore end this call with some entries committed and others not;
+// what matters is that every name it DOES leave committed stays valid
+// and reusable, by this same attempt's own retry or by
+// resolvePriorOutputs on a later one.
 func (r *Runner) commitOutputEntries(
 	ctx context.Context,
 	owner artifact.OwnerRef,
@@ -706,46 +788,14 @@ func (r *Runner) commitOutputEntries(
 	token string,
 	entries []outputEntry,
 ) error {
-	committed := make([]artifact.Ref, 0, len(entries))
-
-	rollback := func() {
-		if len(committed) == 0 {
-			return
-		}
-
-		// Detached with its own short timeout rather than derived from
-		// ctx: ctx may itself be why rollback is happening (a cancelled
-		// or fence-lost context), and cleanup must still get a chance to
-		// run in that case, not fail immediately on the same cancellation
-		// it exists to clean up after.
-		cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
-		defer cancel()
-
-		for _, ref := range committed {
-			if delErr := r.artifacts.Backend().Delete(cleanupCtx, ref); delErr != nil {
-				r.logger.Warn("failed to roll back a partially committed output",
-					log.String("artifact_id", ref.ID.String()),
-					log.String("error", delErr.Error()),
-				)
-			}
-		}
-	}
-
 	for _, entry := range entries {
-		if cause := context.Cause(ctx); cause != nil {
-			rollback()
-
+		if cause := context.Cause(ctx); errors.Is(cause, job.ErrLeaseLost) {
 			return fmt.Errorf("%w: %w", errFenceLost, cause)
 		}
 
-		ref, err := r.commitOutputFile(ctx, owner, attempt, token, entry.name, entry.path)
-		if err != nil {
-			rollback()
-
+		if _, err := r.commitOutputFile(ctx, owner, attempt, token, entry.name, entry.path); err != nil {
 			return err
 		}
-
-		committed = append(committed, ref)
 	}
 
 	return nil
@@ -758,6 +808,20 @@ func (r *Runner) commitOutputEntries(
 // actually saw pass through it while committing these exact bytes —
 // nothing here is influenced by anything the sandbox itself claimed
 // about its outputs.
+//
+// It checks FindCommitted first and treats a hit as a no-op success
+// rather than re-writing anything: a commit failure is classified as
+// StatusLaunchFailed (see terminalFor), which — like any other launch
+// failure — requeues without advancing RetryCount, so a retry of it
+// reuses the identical (owner, attempt) and, once a lease epoch is
+// available, the identical fence token. Without this check, a name an
+// earlier, partially-failed pass of the SAME attempt already committed
+// would collide with itself on every subsequent retry — forever, on a
+// store with no lease grants at all, since nothing there ever changes
+// the key a retry computes. Recognising it as already-done instead
+// makes a retry converge once whatever caused the original failure
+// clears, regardless of whether the handler itself is careful enough
+// to consult PriorOutputs and skip regenerating it.
 func (r *Runner) commitOutputFile(
 	ctx context.Context,
 	owner artifact.OwnerRef,
@@ -765,6 +829,12 @@ func (r *Runner) commitOutputFile(
 	token string,
 	name, path string,
 ) (artifact.Ref, error) {
+	if existing, err := r.artifacts.FindCommitted(ctx, owner, attempt, name, token); err == nil {
+		return existing, nil
+	} else if !errors.Is(err, artifact.ErrNotFound) {
+		return artifact.Ref{}, fmt.Errorf("dispatch/worker: check existing output %q: %w", name, err)
+	}
+
 	f, err := openRegularNoFollow(path)
 	if err != nil {
 		return artifact.Ref{}, fmt.Errorf("dispatch/worker: open output %q: %w", name, err)

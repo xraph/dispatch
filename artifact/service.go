@@ -266,6 +266,43 @@ func (s *Service) FindExisting(ctx context.Context, owner OwnerRef, name string)
 	return a.Ref(), nil
 }
 
+// FindCommitted returns the artifact already sitting at the exact
+// storage coordinates Create or CreateFenced would use for
+// (owner, attempt, name, fenceToken), if one exists. It returns
+// ErrNotFound when none does.
+//
+// This is narrower than FindExisting on purpose: FindExisting answers
+// "has ANY attempt committed this name," which is what a handler's own
+// Existing/IfAbsent check wants. FindCommitted answers "did THIS EXACT
+// caller already commit THIS EXACT thing" — which is what lets a caller
+// recognise its own earlier, successful partial work as a no-op to skip
+// rather than a collision to fail on, without also treating a
+// DIFFERENT holder's commit of the same name under a different
+// fenceToken as anything but what it is: a separate object at a
+// separate key. See worker.Runner.commitOutputFile, the motivating
+// caller: a retry of a launch-failure-classified commit failure reuses
+// the identical (owner, attempt) — RetryCount does not advance for a
+// launch failure — so without this, re-committing a name that already
+// landed in an earlier, partially-failed pass would collide with
+// itself on every subsequent attempt.
+func (s *Service) FindCommitted(ctx context.Context, owner OwnerRef, attempt int, name, fenceToken string) (Ref, error) {
+	if !s.Enabled() {
+		return Ref{}, ErrNoBackend
+	}
+
+	key := s.EphemeralKey(owner, attempt, name)
+	if fenceToken != "" {
+		key = path.Join(key, fenceToken)
+	}
+
+	a, err := s.store.FindArtifactByKey(ctx, s.backend.Name(), s.defaultBucket, key)
+	if err != nil {
+		return Ref{}, err
+	}
+
+	return a.Ref(), nil
+}
+
 // Create begins writing an ephemeral artifact owned by owner.
 //
 // The returned writer publishes nothing until Commit; Abort discards it.
