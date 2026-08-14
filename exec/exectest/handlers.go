@@ -36,8 +36,22 @@ type EchoPayload struct {
 
 // SlowPayload controls how long JobSlow sleeps.
 type SlowPayload struct {
-	SleepMillis int  `json:"sleep_millis"`
-	IgnoreCtx   bool `json:"ignore_ctx"`
+	SleepMillis int `json:"sleep_millis"`
+
+	// IgnoreCtx makes the handler deaf to cancellation entirely, standing
+	// in for a native library that has stopped honouring it. Only a rung
+	// that can kill the process will stop this one.
+	IgnoreCtx bool `json:"ignore_ctx"`
+
+	// SwallowCancel only matters when IgnoreCtx is false. A cooperative
+	// handler normally returns ctx.Err() once its context is done; setting
+	// this makes it catch that and return nil instead, the shape of a
+	// handler whose own cleanup swallows context.Canceled. The shim then
+	// reports StatusOK in its Result frame despite the deadline having
+	// fired, which is exactly the case that must not fool the executor
+	// into reporting success — the executor's own timedOut bookkeeping,
+	// not the frame's contents, has to be what decides the Status.
+	SwallowCancel bool `json:"swallow_cancel"`
 }
 
 // Handlers returns the fixture handler set. Registering these is all an
@@ -66,6 +80,10 @@ func Handlers() []job.Registrable {
 			case <-time.After(d):
 				return nil
 			case <-ctx.Done():
+				if p.SwallowCancel {
+					return nil
+				}
+
 				return ctx.Err()
 			}
 		}),

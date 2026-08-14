@@ -58,6 +58,10 @@ func RunSuite(t *testing.T, name string, newExecutor func(*testing.T) exec.Execu
 
 		if caps.Enforces {
 			t.Run("DeadlineEnforced", func(t *testing.T) { testDeadlineEnforced(t, newExecutor) })
+			t.Run("DeadlineEnforcedCooperative", func(t *testing.T) { testDeadlineEnforcedCooperative(t, newExecutor) })
+			t.Run("DeadlineEnforcedSwallowedCancellation", func(t *testing.T) {
+				testDeadlineEnforcedSwallowedCancellation(t, newExecutor)
+			})
 		}
 		if caps.IsolatesPanic {
 			t.Run("PanicIsolated", func(t *testing.T) { testPanicIsolated(t, newExecutor) })
@@ -287,6 +291,65 @@ func testDeadlineEnforced(t *testing.T, newExecutor func(*testing.T) exec.Execut
 	// close to that means the rung did not actually kill it.
 	if elapsed > 10*time.Second {
 		t.Errorf("Run() took %v, want the deadline to be enforced", elapsed)
+	}
+}
+
+// testDeadlineEnforcedCooperative is testDeadlineEnforced's counterpart for
+// the well-behaved path: a handler that actually honours ctx.Done() and
+// returns ctx.Err() once the deadline fires. That is the shape every
+// correctly-written handler has, and it exercises a different part of an
+// Enforces rung than the uncooperative case does — for the subprocess rung,
+// the SIGTERM half of the kill ladder reaches the shim before SIGKILL would,
+// the shim's own context gets cancelled, the handler returns promptly, and
+// the shim writes a Result frame and exits 0. That produces a clean,
+// unsignalled frame arriving at (or after) the same moment the executor's
+// own deadline bookkeeping independently expired — and the executor still
+// has to report StatusTimeout, not trust the frame's StatusOK. A rung that
+// gets this ordering backwards makes StatusTimeout effectively unreachable
+// for every handler that cooperates, which defeats the whole point of
+// enforcement for the common case rather than the pathological one
+// testDeadlineEnforced covers.
+func testDeadlineEnforcedCooperative(t *testing.T, newExecutor func(*testing.T) exec.Executor) {
+	req := request(JobSlow, SlowPayload{SleepMillis: 30000, IgnoreCtx: false})
+	req.Deadline = time.Now().Add(300 * time.Millisecond)
+	// Generous, deliberately: the point of this case is that the handler
+	// wins the race and exits cleanly well before any SIGKILL would fire,
+	// so the grace period needs real headroom for a cold, possibly
+	// race-detector-instrumented child to start up, decode the request,
+	// notice cancellation, and write its Result frame. A tight grace here
+	// would not make the assertion stricter, only flaky.
+	req.Policy = exec.NewPolicy(exec.GracePeriod(3 * time.Second))
+
+	res, err := newExecutor(t).Run(context.Background(), req)
+	if err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	if res.Status != exec.StatusTimeout {
+		t.Errorf("Status = %q, want %q — a handler that returns ctx.Err() after the deadline must still report a blown deadline, not ok",
+			res.Status, exec.StatusTimeout)
+	}
+}
+
+// testDeadlineEnforcedSwallowedCancellation covers the shape that fails
+// silently rather than loudly: a handler whose own cleanup catches
+// context.Canceled and returns nil instead of propagating it. The shim
+// still reports StatusOK in that case — from the handler's point of view it
+// really did return successfully — so an executor that ever lets a clean
+// frame override its own deadline bookkeeping would report a blown deadline
+// as StatusOK, and nothing about that would look like a failure to whoever
+// is reading Result.Status.
+func testDeadlineEnforcedSwallowedCancellation(t *testing.T, newExecutor func(*testing.T) exec.Executor) {
+	req := request(JobSlow, SlowPayload{SleepMillis: 30000, IgnoreCtx: false, SwallowCancel: true})
+	req.Deadline = time.Now().Add(300 * time.Millisecond)
+	req.Policy = exec.NewPolicy(exec.GracePeriod(3 * time.Second))
+
+	res, err := newExecutor(t).Run(context.Background(), req)
+	if err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	if res.Status != exec.StatusTimeout {
+		t.Errorf("Status = %q, want %q — a handler swallowing context.Canceled must not turn a blown deadline into ok",
+			res.Status, exec.StatusTimeout)
 	}
 }
 
