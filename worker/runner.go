@@ -236,6 +236,52 @@ func (r *Runner) request(j *job.Job, policy exec.Policy) *exec.Request {
 	return req
 }
 
+// updateJob persists j's terminal state, fenced on the lease this worker
+// held at claim time whenever ctx carries one — see withLeaseFence.
+//
+// A store that does not implement job.LeaseStore, or a Runner driven
+// without a Pool, never sees a fence attached, so this falls back to the
+// original unfenced UpdateJob: that path must not become a hard
+// requirement of using Runner at all.
+//
+// job.ErrLeaseLost is returned to the caller exactly like any other
+// error here — this method does no special-casing of it. Every call
+// site does, through abandonLostLease, because ErrLeaseLost is not "the
+// write failed, log and propagate," it is "someone else owns this job
+// now, stop."
+func (r *Runner) updateJob(ctx context.Context, j *job.Job) error {
+	if fence, ok := leaseFenceFromContext(ctx); ok {
+		return fence.store.UpdateLeasedJob(ctx, j, fence.workerID, fence.epoch)
+	}
+
+	return r.store.UpdateJob(ctx, j)
+}
+
+// abandonLostLease is what every fenced terminal write does on
+// job.ErrLeaseLost: the lease moved on before this write landed, so the
+// job is running under a different worker's epoch now and this attempt
+// has no coherent claim left to make about it.
+//
+// It does not retry, requeue, or DLQ — both of those write, and the
+// winner's outcome must stand untouched. The handler's own side effects
+// need no cleanup here either: they already commit under attempt-scoped
+// ephemeral artifact keys, so a losing attempt's outputs are orphaned-
+// ephemeral and the existing sweeper collects them.
+//
+// The extension registry emit reuses EmitJobFailed rather than adding a
+// new event: audit_hook and relay_hook both already implement
+// ext.JobFailed, so they observe a lost lease with no new plumbing.
+func (r *Runner) abandonLostLease(ctx context.Context, j *job.Job, cause error) error {
+	r.logger.Warn("lease lost, discarding terminal write",
+		log.String("job_id", j.ID.String()),
+		log.String("job_name", j.Name),
+	)
+
+	r.extensions.EmitJobFailed(ctx, j, cause)
+
+	return cause
+}
+
 // handleSuccess marks the job as completed and emits the lifecycle event.
 func (r *Runner) handleSuccess(ctx context.Context, j *job.Job, now time.Time, elapsed time.Duration) error {
 	r.forgetLaunchFailures(j.ID.String())
@@ -243,7 +289,11 @@ func (r *Runner) handleSuccess(ctx context.Context, j *job.Job, now time.Time, e
 	j.State = job.StateCompleted
 	j.CompletedAt = &now
 
-	if updateErr := r.store.UpdateJob(ctx, j); updateErr != nil {
+	if updateErr := r.updateJob(ctx, j); updateErr != nil {
+		if errors.Is(updateErr, job.ErrLeaseLost) {
+			return r.abandonLostLease(ctx, j, updateErr)
+		}
+
 		r.logger.Error("failed to update job after success",
 			log.String("job_id", j.ID.String()),
 			log.String("job_name", j.Name),
@@ -384,7 +434,11 @@ func (r *Runner) scheduleRetry(ctx context.Context, j *job.Job, now time.Time) e
 	j.RunAt = nextRunAt
 	j.State = job.StateRetrying
 
-	if updateErr := r.store.UpdateJob(ctx, j); updateErr != nil {
+	if updateErr := r.updateJob(ctx, j); updateErr != nil {
+		if errors.Is(updateErr, job.ErrLeaseLost) {
+			return r.abandonLostLease(ctx, j, updateErr)
+		}
+
 		r.logger.Error("failed to update job for retry",
 			log.String("job_id", j.ID.String()),
 			log.String("error", updateErr.Error()),
@@ -411,7 +465,11 @@ func (r *Runner) sendToDLQ(ctx context.Context, j *job.Job, handlerErr error) er
 
 	j.State = job.StateFailed
 
-	if updateErr := r.store.UpdateJob(ctx, j); updateErr != nil {
+	if updateErr := r.updateJob(ctx, j); updateErr != nil {
+		if errors.Is(updateErr, job.ErrLeaseLost) {
+			return r.abandonLostLease(ctx, j, updateErr)
+		}
+
 		r.logger.Error("failed to update job as failed",
 			log.String("job_id", j.ID.String()),
 			log.String("error", updateErr.Error()),

@@ -4,6 +4,7 @@ import (
 	"context"
 	"time"
 
+	"github.com/xraph/dispatch/id"
 	"github.com/xraph/dispatch/job"
 )
 
@@ -46,4 +47,12 @@ func (p *Pool) HeartbeatOnce(ctx context.Context) {
 	p.cancelCtx, p.cancelFunc = context.WithCancel(ctx)
 	defer p.cancelFunc()
 	p.sendHeartbeats()
+}
+
+// WithLeaseFenceForTest attaches a lease fence to ctx exactly as runJob
+// does before calling Execute, so a runner_test case can drive
+// handleSuccess / scheduleRetry / sendToDLQ through the fenced
+// UpdateLeasedJob path without spinning up a full Pool.
+func WithLeaseFenceForTest(ctx context.Context, store job.LeaseStore, workerID id.WorkerID, epoch int) context.Context {
+	return withLeaseFence(ctx, leaseFence{store: store, workerID: workerID, epoch: epoch})
 }

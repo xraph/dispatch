@@ -778,6 +778,23 @@ func (p *Pool) runJob(a admitted) {
 	ctx, cancel := context.WithCancelCause(p.cancelCtx)
 	p.trackJob(j.ID.String(), cancel, a.lease, j.LeaseEpoch, p.leaseTTLFor(j))
 
+	// A fenced terminal write needs the store's lease capability, this
+	// pool's worker ID, and the epoch j.LeaseEpoch carries from the
+	// claim — the same three values trackJob just recorded in inflight.
+	// Attaching them to ctx here, once, is what lets Runner.handleSuccess
+	// / scheduleRetry / sendToDLQ route through UpdateLeasedJob instead
+	// of the unfenced UpdateJob without Runner ever reaching back into
+	// Pool state. Nil leaseStore — a backend that implements only
+	// job.Store — attaches nothing, so Execute keeps calling UpdateJob
+	// exactly as before leases existed.
+	if p.leaseStore != nil {
+		ctx = withLeaseFence(ctx, leaseFence{
+			store:    p.leaseStore,
+			workerID: p.workerID,
+			epoch:    j.LeaseEpoch,
+		})
+	}
+
 	execErr := p.executor.Execute(ctx, j)
 	if execErr != nil {
 		p.logger.Debug("job execution failed",
