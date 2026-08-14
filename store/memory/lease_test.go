@@ -35,6 +35,36 @@ func TestLeaseConformance(t *testing.T) {
 	})
 }
 
+// TestReclaimExpiredLeasesNonPositiveLimitIsUnlimited pins the documented
+// non-positive-limit behaviour of the memory backend (see
+// job.LeaseStore.ReclaimExpiredLeases): the gate is
+// `limit > 0 && len(reclaimed) >= limit`, so limit == 0 and limit < 0
+// never break the loop and every expired running job is reclaimed.
+func TestReclaimExpiredLeasesNonPositiveLimitIsUnlimited(t *testing.T) {
+	ctx := context.Background()
+
+	for _, limit := range []int{0, -1} {
+		s := memory.New()
+
+		a := storetest.RunningJob("a", "reclaim-unlimited", 0)
+		b := storetest.RunningJob("b", "reclaim-unlimited", 0)
+		if err := s.EnqueueJob(ctx, a); err != nil {
+			t.Fatalf("limit=%d: enqueue a: %v", limit, err)
+		}
+		if err := s.EnqueueJob(ctx, b); err != nil {
+			t.Fatalf("limit=%d: enqueue b: %v", limit, err)
+		}
+
+		got, err := s.ReclaimExpiredLeases(ctx, limit)
+		if err != nil {
+			t.Fatalf("limit=%d: ReclaimExpiredLeases: %v", limit, err)
+		}
+		if !storetest.Contains(got, a.ID) || !storetest.Contains(got, b.ID) {
+			t.Fatalf("limit=%d: reclaimed %d jobs, want both a and b reclaimed", limit, len(got))
+		}
+	}
+}
+
 // TestLeaseStoreDoesNotAliasResourceMap covers the same class of bug as
 // TestMemoryStoreDoesNotAliasResourceMap (resource_test.go), but for the
 // lease-granting paths: the leased claim and ReclaimExpiredLeases both

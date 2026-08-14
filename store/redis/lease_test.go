@@ -2,6 +2,7 @@ package redis_test
 
 import (
 	"context"
+	"fmt"
 	"testing"
 	"time"
 
@@ -9,6 +10,36 @@ import (
 	"github.com/xraph/dispatch/job"
 	"github.com/xraph/dispatch/store/storetest"
 )
+
+// TestReclaimExpiredLeasesNonPositiveLimitIsUnlimited pins the documented
+// non-positive-limit behaviour of the redis backend (see
+// job.LeaseStore.ReclaimExpiredLeases): the gate deliberately mirrors the
+// memory backend, so limit == 0 and limit < 0 both reclaim every expired
+// running job instead of stopping early.
+func TestReclaimExpiredLeasesNonPositiveLimitIsUnlimited(t *testing.T) {
+	s := openReapRedis(t)
+	ctx := context.Background()
+
+	for _, limit := range []int{0, -1} {
+		queue := fmt.Sprintf("reclaim-unlimited-%d", limit)
+		a := storetest.RunningJob("a", queue, 0)
+		b := storetest.RunningJob("b", queue, 0)
+		if err := s.EnqueueJob(ctx, a); err != nil {
+			t.Fatalf("limit=%d: enqueue a: %v", limit, err)
+		}
+		if err := s.EnqueueJob(ctx, b); err != nil {
+			t.Fatalf("limit=%d: enqueue b: %v", limit, err)
+		}
+
+		got, err := s.ReclaimExpiredLeases(ctx, limit)
+		if err != nil {
+			t.Fatalf("limit=%d: ReclaimExpiredLeases: %v", limit, err)
+		}
+		if !storetest.Contains(got, a.ID) || !storetest.Contains(got, b.ID) {
+			t.Fatalf("limit=%d: reclaimed set does not contain both a and b", limit)
+		}
+	}
+}
 
 func TestLeaseConformance(t *testing.T) {
 	// One container, shared keyspace — do not use openReapRedis here, which
