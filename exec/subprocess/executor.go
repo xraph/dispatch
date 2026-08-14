@@ -708,13 +708,30 @@ func (e *Executor) classify(
 				ExitCode: exitCode,
 				Signal:   signal,
 				Usage:    res.Usage,
-				// Outputs and Permanent carry through even though the
-				// process was signalled: a handler killed right after
-				// committing its artifacts should not have them become
-				// invisible, and a permanent failure it already flagged
-				// should not silently turn retryable just because the
-				// signal arrived a moment later than the report did.
-				Outputs:   res.Outputs,
+				// Permanent carries through even though the process was
+				// signalled: a permanent failure the handler already
+				// flagged should not silently turn retryable just because
+				// the kill signal arrived a moment after the report did —
+				// Result.Err converts this into exec.Error.Permanent,
+				// which worker/runner.go's retry check reads directly.
+				//
+				// Outputs is deliberately NOT carried through, unlike an
+				// earlier version of this branch claimed ("should not
+				// become invisible"): it does become invisible regardless
+				// of what this field holds, because the only commit call
+				// site (worker/runner.go) gates on Status == StatusOK, and
+				// prepareOutputDir's own deferred cleanup removes the
+				// scratch directory those outputs point into before
+				// anything downstream could read them. That is a
+				// deliberate choice, not an oversight this comment is
+				// papering over: a handler killed moments after writing an
+				// artifact may have left it mid-write, and committing a
+				// truncated file under the job's real output name is worse
+				// than committing nothing. Reviving this would need two
+				// changes made together, not one — populating Outputs here
+				// again AND widening worker/runner.go's commit gate to
+				// include StatusKilled — so a future change to either side
+				// alone does not silently start committing partial output.
 				Permanent: res.Permanent,
 			}
 		}
