@@ -96,10 +96,12 @@ func WithEnv(env map[string]string) Option {
 // matches the worker's own, unless WithAllowSameUser is also given — see
 // its doc comment for why.
 //
-// This only bounds the primary uid and gid. The child still keeps every
-// supplementary group the worker's own OS account belongs to; see the
-// package doc comment's "The uid/gid boundary" section for why that
-// matters and what to do about it.
+// A uid or gid that genuinely differs from the worker's own also clears
+// the child's supplementary groups, along with the primary uid/gid — see
+// the package doc comment's "The uid/gid boundary" section for why that
+// falls out of the same privilege check rather than needing separate
+// handling, and for the one path (WithAllowSameUser) where it does not
+// happen.
 func WithUser(uid, gid int) Option {
 	return func(o *options) {
 		o.uid = uid

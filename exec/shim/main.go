@@ -33,9 +33,12 @@ const (
 	// fd 4.
 	EnvResultFD = "DISPATCH_EXEC_RESULT_FD"
 
-	// ArgName is the argv[0] marker a parent sets when it re-execs its own
+	// ArgName is the argv[1] marker a parent sets when it re-execs its own
 	// binary into the shim, distinguishing that invocation from an
-	// ordinary run of the worker.
+	// ordinary run of the worker. argv[0] is still the binary path itself,
+	// same as any other invocation — subprocess.Executor.Run builds the
+	// child's argv as [binary, ArgName, ...WithArgs], so this is the first
+	// argument after the binary, not the zeroth.
 	ArgName = "dispatch-exec"
 
 	// defaultRequestFD is the descriptor Main reads from absent an

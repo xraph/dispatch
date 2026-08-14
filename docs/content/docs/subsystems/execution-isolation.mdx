@@ -32,11 +32,15 @@ A definition declares the *minimum* it requires, not the executor it runs on
 — which rung actually satisfies that requirement is a deployment decision,
 made by whichever executors the deployment has configured.
 
-Only `LevelNone` ships today, as the in-process executor. `LevelProcess`,
-`LevelSandboxed`, and `LevelVM` describe rungs that later phases add
-(subprocess, OCI container, and Kubernetes pod, respectively). Declaring one
-of them now is legitimate — it documents the requirement — but no deployment
-can satisfy it yet, which matters for the reason below.
+`LevelNone`, the in-process executor, is the only rung present in every
+deployment by default. `LevelProcess` now has a real executor too —
+`exec/subprocess`, covered in detail below — but it has to be configured
+explicitly (see "Adding a stronger rung"); a deployment that never does so
+has only `LevelNone` available, which matters for the reason below.
+`LevelSandboxed` and `LevelVM` describe rungs a later phase adds (OCI
+container and Kubernetes pod, respectively). Declaring either now is
+legitimate — it documents the requirement — but no deployment can satisfy
+them yet.
 
 ## Declaring a policy
 
@@ -82,12 +86,32 @@ deployment cannot provide fails when you start the process, not on the first
 malicious upload that reaches production. `engine.Register` skips the check,
 for definitions you've already verified some other way.
 
-Because only the in-process rung ships in this phase, **any definition that
-declares above `LevelNone` will fail registration unless it also sets
-`exec.AllowDowngrade()`** — there is nothing yet configured that can satisfy
-it. This is expected, not a bug: it's the same enforcement that will matter
-once a stronger rung exists, doing its job now with only one rung on the
-ladder.
+A deployment that has not configured any rung above `LevelNone` — which is
+every deployment until the section below — is in exactly the situation the
+previous two paragraphs describe: **any definition that declares above
+`LevelNone` fails registration unless it also sets
+`exec.AllowDowngrade()`**, because there is nothing configured that can
+satisfy it yet. This is expected, not a bug — it's `Select` doing its job
+with only the in-process rung on the ladder.
+
+<Callout type="warn">
+  `exec.AllowDowngrade()` is not "accept a weaker rung than declared" in the
+  abstract — its fallback is always the in-process executor specifically
+  (`Registry.Select` returns the registry's always-present default when
+  nothing configured satisfies the level). Adding it to a `LevelProcess`
+  definition so registration stops failing, without first configuring the
+  subprocess rung below, means that definition runs in-process — in the
+  worker's own address space, next to its credentials — the moment nothing
+  satisfies the level, silently, with no registration failure to notice.
+  That is true today with no rung configured, and stays true later if the
+  subprocess rung is configured and then becomes unavailable for any
+  reason: disabled, misconfigured, or refused at startup for a reason
+  covered below. For a handler whose isolation requirement exists because
+  it parses untrusted input, only set `AllowDowngrade` on a definition that
+  genuinely tolerates running unisolated — never as a way to silence a
+  registration failure while assuming the stronger rung is actually in
+  place.
+</Callout>
 
 ## Adding a stronger rung
 
@@ -175,7 +199,10 @@ func main() {
         log.Fatal(err)
     }
 
-    eng := engine.Build(d, engine.WithExecutor(subprocessExecutor))
+    eng, err := engine.Build(d, engine.WithExecutor(subprocessExecutor))
+    if err != nil {
+        log.Fatal(err)
+    }
     if err := engine.RegisterAll(eng, defs...); err != nil {
         log.Fatal(err)
     }
@@ -256,9 +283,13 @@ uid — `Run` refuses to launch at all, both from `main()`'s own
 exists for local development and CI, where dropping to a different uid
 needs privilege the process running the tests does not have — not for
 production. Leaving `user` unset entirely is different: it is a legitimate,
-if weak, choice, so it is not refused, but the worker logs a startup
-warning every time, because silence here is exactly the kind of doc-shaped
-gap this phase exists to close.
+if weak, choice, so it is not refused — but only the YAML path warns about
+it. `extension/execution.go` logs a startup warning every time
+`execution.subprocess.enabled` is true with no `user` configured; calling
+`subprocess.New` directly with no `WithUser` has no equivalent check
+anywhere in `exec/subprocess` and warns nothing at all. A deployment that
+wires the executor itself, without going through the Forge extension, gets
+pure silence on this exact misconfiguration.
 
 **Supplementary groups.** A genuine uid drop — `user` naming a uid other
 than the worker's own — clears the child's supplementary groups along with
@@ -287,6 +318,21 @@ call with no Go code polling `ctx.Done()` — still gets killed at the
 deadline plus grace. That is the actual, measurable difference this rung
 buys over in-process for a job whose native library might hang.
 
+That enforcement has a side effect worth knowing before it surprises you in
+a retry log: the attempt's `Status` is decided by whether the deadline
+elapsed at all, not by whether the handler eventually behaved. The parent
+watches its own timer for `req.Deadline` independently of the child; the
+instant it fires, it takes one non-blocking look at whether the process has
+already exited and been reaped, and if not, the attempt is `StatusTimeout`
+— full stop, regardless of what happens next. A handler that traps the
+signal, wraps up, writes a valid result frame, and exits 0 a moment later
+still gets `StatusTimeout`, not `StatusOK` or `StatusHandlerError`: a
+decoded frame is only authoritative once the parent has *not* already
+decided the deadline won that race. In practice, this means any handler
+whose deadline actually elapses is timed out, cooperative or not — the
+distinction that matters isn't "did it eventually exit cleanly," it's "did
+it finish its work before the deadline in the first place."
+
 ### What `Setpgid` changes
 
 The child is started as its own process group leader, not a member of the
@@ -310,15 +356,32 @@ it, because `Executor.Reclaim` for this rung is a no-op today — sweeping
 orphaned children across a restart needs a worker identity stable across
 restarts that this rung does not have yet.
 
-What `Reclaim` *does* sweep, at worker startup, is stale scratch
-directories from a previous process of this same worker — matched by the
-PID embedded in the directory name, removed only once that PID is no
-longer a live process. That check is inherently single-host: it asks the
-local kernel whether a PID is alive, which only means something within one
-PID namespace. A deployment where multiple containers share a scratch
+What `Reclaim` *does* sweep, at worker startup, is narrower than "leftover
+scratch state": only `worker.Runner`'s own per-attempt output directories
+(`dispatch-out-<pid>-<jobid>-…`), and only when this Runner has the
+artifact plane configured — a Runner without one skips the sweep entirely,
+since nothing it does creates that kind of directory without one. A swept
+entry also has to be at least an hour old (`staleScratchDirAge`) on top of
+its owning PID no longer being alive, so the PID-collision hazard below
+needs a leaked directory to sit around that long, not just outlive its
+process by a moment.
+
+`exec/subprocess.Executor`'s *own* scratch working directory — the
+`dispatch-exec-…` directory `Run` creates per attempt as the child's
+`Cmd.Dir`, distinct from the Runner's output directory even when both are
+rooted at the same configured `scratch_dir` — is not covered by this sweep
+at all. It is removed by a deferred `os.RemoveAll` inside `Run` itself, so
+a normal exit (success, failure, or a kill-ladder timeout) always cleans it
+up; a worker that crashes mid-attempt, the same case that orphans the child
+process (above), leaves that directory behind permanently. Nothing sweeps
+it on the next startup.
+
+Ownership matching itself is inherently single-host: `processAlive` asks
+the local kernel whether a PID is alive, which only means something within
+one PID namespace. A deployment where multiple containers share a scratch
 volume across separate PID namespaces can have a live sibling's PID
-collide with a number this worker's own kernel view reports as dead,
-and sweep a directory a running attempt is still using. Don't share a
+collide with a number this worker's own kernel view reports as dead, and
+sweep a directory a running attempt is still using. Don't share a
 subprocess scratch directory across PID-namespace boundaries.
 
 ### Resource limits degrade silently by default
@@ -328,16 +391,23 @@ has no way to set a child's rlimits through `SysProcAttr`. Two things about
 that path are worth knowing before relying on it:
 
 - **Darwin rejects `RLIMIT_AS` outright.** The kernel refuses
-  `setrlimit(RLIMIT_AS, ...)` unconditionally, regardless of the value
-  requested. This is a platform fact, not a configuration mistake, and it
-  is treated as one even with `strict_rlimits` on — there is no value that
-  would make it succeed.
-- **Some platforms' `RLIMIT_NPROC` constant is unverified.** Dispatch has
-  confirmed the raw resource number for Linux, Darwin, and FreeBSD only. On
-  every other Unix this rung otherwise supports — NetBSD, OpenBSD,
-  Dragonfly, Solaris/illumos, AIX, Android — a configured `nproc` limit is
-  skipped rather than risk applying a resource number that has not been
-  checked for that platform.
+  `setrlimit(RLIMIT_AS, ...)` unconditionally (`EINVAL`), regardless of the
+  value requested. This is a platform fact, not a configuration mistake,
+  and it is treated as one even with `strict_rlimits` on — there is no
+  value that would make it succeed.
+- **Some platforms don't get a resource number at all — and this case
+  *is* a strict-mode failure, unlike Darwin's above.** Dispatch has
+  confirmed the raw `RLIMIT_NPROC` number for Linux, Darwin, and FreeBSD
+  only; on every other Unix this rung otherwise supports — NetBSD,
+  OpenBSD, Dragonfly, Solaris/illumos, AIX, Android — a configured `nproc`
+  limit is skipped rather than risk applying a number that has not been
+  checked for that platform. OpenBSD has the same gap for `RLIMIT_AS`
+  specifically, for a different reason: Go's `syscall` package does not
+  export the constant there at all, so a configured `address_space` limit
+  is skipped on OpenBSD too. Both are a library gap Dispatch could close by
+  verifying the number, not a kernel refusing something no value could fix
+  — which is exactly why, unlike Darwin's `RLIMIT_AS` rejection,
+  `strict_rlimits` does treat these as launch failures.
 
 Without `strict_rlimits: true`, both of these — and any other rlimit that
 fails to apply, like a value exceeding the process's own hard limit — are
