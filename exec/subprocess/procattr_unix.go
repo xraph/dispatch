@@ -70,12 +70,24 @@ func sysProcAttr(o options) *syscall.SysProcAttr {
 // package started directly.
 //
 // It takes the signal as a parameter, rather than being a SIGKILL-only
-// function with a parallel SIGTERM sibling, so that the probe below —
-// the part that is actually delicate — exists exactly once. terminate
-// (kill_unix.go) calls this twice per attempt, first with SIGTERM and
-// then, if the grace period elapses, with SIGKILL; killProcess's own
-// direct-SIGKILL path before Task 6 called what was then a
-// SIGKILL-only version of this same function.
+// function, so that the probe below — the part that is actually
+// delicate — has one general-purpose home instead of being copied for
+// each signal that might need it. terminate (kill_unix.go) calls this
+// for the ladder's SIGTERM leg, sent right when a decision to terminate
+// has just been made, which is exactly the situation this probe is
+// suited to: the tracked process is overwhelmingly likely to still be
+// the one this package started, and the only race worth guarding against
+// is the few-Go-statements gap the doc comment below describes.
+//
+// terminate's SIGKILL leg deliberately does *not* come through here —
+// see its own doc comment for why: by the time grace has elapsed, the
+// tracked leader having already exited is the expected shape of the
+// exact bug that escalation exists to catch, not a rare race, so gating
+// that signal on cmd.Process specifically being still alive would silence
+// it in precisely the case it is needed. This function's probe is
+// correct for a signal sent at the *start* of a kill; it is the wrong
+// tool for one decided after a wait, which is what changed between "this
+// function used to be terminate's only signal path" and now.
 //
 // The probe before the kill exists because a raw syscall.Kill(-pid, ...)
 // has no idea whether pid still names the process this package started.
@@ -105,27 +117,31 @@ func sysProcAttr(o options) *syscall.SysProcAttr {
 // used to have no path that produces a non-ErrProcessDone error here, but
 // sysProcAttr above now sets Credential with a dedicated uid when one is
 // configured, and that uid boundary makes EPERM a real possibility. A
-// failed signal is
-// recoverable — classify still has the process's actual wait status to
-// report from, whatever it turns out to be; a signal that was never
-// attempted is not. This applies identically whether sig is SIGTERM or
-// SIGKILL: terminate's SIGKILL half must not silently no-op just because
-// the earlier SIGTERM happened to hit the same EPERM.
+// failed signal is recoverable — classify still has the process's actual
+// wait status to report from, whatever it turns out to be; a signal that
+// was never attempted is not.
 //
 // An ErrProcessDone probe result returns immediately, without ever
-// reaching the group signal below — which means a leader reaped in the
-// gap between waitLoop's own check and this probe leaves any surviving
-// grandchildren unswept, where an unconditional syscall.Kill(-pid, ...)
-// (pid == pgid here) would still have reached them, since a pgid stays
-// valid as long as any member of the group is still alive, leader or
-// not. Signalling anyway in that case was considered and rejected: it
-// would mean signalling a pgid derived from a pid the kernel may already
-// have handed to an unrelated process group, which is the exact hazard
-// this probe exists to avoid — reaching a stray grandchild is not worth
-// reintroducing that. This narrows an already-partial guarantee rather
-// than removing a complete one: a grandchild left behind by a tracked
-// process that exited cleanly on its own, before killProcess was ever
-// called at all, was already unreachable by this function (see the
+// reaching the group signal below. For the SIGTERM call this function is
+// actually used for today, that is a narrow, accepted gap: a leader
+// reaped in the couple of Go statements between waitLoop's own check and
+// this probe landing leaves any surviving grandchildren un-signalled by
+// *this* call, where an unconditional syscall.Kill(-pid, ...) (pid ==
+// pgid here) would still have reached them, since a pgid stays valid as
+// long as any member of the group is still alive, leader or not.
+// Signalling anyway in that case was considered and rejected: it would
+// mean signalling a pgid derived from a pid the kernel may already have
+// handed to an unrelated process group, which is the exact hazard this
+// probe exists to avoid — reaching a stray grandchild on the SIGTERM leg
+// is not worth reintroducing that, because it is not the last word:
+// terminate's SIGKILL escalation (kill_unix.go) does not route through
+// this function at all, specifically so that a leader reaped by the time
+// grace elapses — the expected shape of a cooperative exit, not a rare
+// race — cannot make the *final* signal a no-op the same way. This
+// narrows an already-partial guarantee rather than removing a complete
+// one: a grandchild left behind by a tracked process that exited cleanly
+// on its own, before killProcess was ever called at all, was already
+// unreachable by this function (see the
 // drainGrace comment in Run).
 func killGroup(cmd *osexec.Cmd, sig syscall.Signal) error {
 	if err := cmd.Process.Signal(syscall.Signal(0)); err != nil && errors.Is(err, os.ErrProcessDone) {

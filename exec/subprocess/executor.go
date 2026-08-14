@@ -38,7 +38,8 @@ const (
 // sysProcAttr (procattr_unix.go) sets Credential from uid/gid, and
 // buildEnv below passes rlimits to the child, which shim.Main applies via
 // syscall.Setrlimit. The kill ladder's SIGTERM-then-grace-period-then-
-// SIGKILL sequence is still Task 6's job.
+// SIGKILL sequence runs in terminate (kill_unix.go), called from
+// killProcess below.
 type options struct {
 	binary        string
 	args          []string
@@ -551,8 +552,9 @@ waitLoop:
 
 // killProcess best-effort runs the kill ladder (terminate, kill_unix.go)
 // against the started process's whole group: SIGTERM to the group, up to
-// grace for a cooperative exit, then SIGKILL to the group only if grace
-// elapses first. Setpgid (sysProcAttr, procattr_unix.go) is what makes
+// grace for the whole group — not just the tracked leader — to empty out
+// on its own, then SIGKILL to the group if any of it is still there once
+// grace elapses. Setpgid (sysProcAttr, procattr_unix.go) is what makes
 // "the group" reach anything the tracked process forked, not just the one
 // process this package started directly — without it, even the SIGKILL
 // half would leave a native library's forked helpers running.

@@ -4,23 +4,23 @@ package subprocess
 
 import (
 	"errors"
-	"os"
 	osexec "os/exec"
 	"syscall"
 	"time"
 )
 
-// pollInterval is how often waitExited re-probes the process during the
-// grace period. Short enough that the common case — the child exits
-// promptly once it has been asked to — is detected quickly rather than
-// riding out the whole grace period; long enough not to matter as CPU
-// overhead for the rare case where the child ignores SIGTERM and this
-// polls for the full duration instead.
+// pollInterval is how often waitGroupEmpty re-probes the process group
+// during the grace period. Short enough that the common case — the group
+// empties out promptly once it has been asked to — is detected quickly
+// rather than riding out the whole grace period; long enough not to
+// matter as CPU overhead for the case where something in the group
+// ignores SIGTERM and this polls for the full duration instead.
 const pollInterval = 10 * time.Millisecond
 
 // terminate runs the kill ladder: SIGTERM to the child's whole process
-// group, then up to grace for it to exit on its own, escalating to
-// SIGKILL — also to the whole group — only if grace elapses first.
+// group, then up to grace for the group to empty out on its own,
+// escalating to SIGKILL — again to the whole group — only if it has not
+// by the time grace elapses.
 //
 // Signalling the negative pid (killGroup, procattr_unix.go) is what
 // reaches a native library's forked helper as well as the tracked process
@@ -48,10 +48,37 @@ const pollInterval = 10 * time.Millisecond
 // handler's own behaviour, purely as an artifact of how the ladder
 // happens to be implemented — the opposite of what "give it 30 seconds to
 // shut down after six hours" is asking for.
+//
+// The escalation decision below is made about the *group*, not the
+// leader — this is the fix for a real bug an earlier version of this
+// function had. Setpgid without an explicit Pgid makes the tracked
+// process its own group leader, so its pid also names the group; pgid is
+// captured once here, up front, because — unlike the leader's own pid,
+// which killGroup's probe treats as unsafe to reuse the instant the
+// leader is reaped — a pgid stays valid, and safe to keep addressing,
+// for as long as *any* member of the group remains alive. The production
+// shape this rung exists for is a handler that forks a native helper
+// (an OpenCASCADE-style worker, say) and then itself exits cleanly on
+// SIGTERM: the leader is gone almost immediately, well inside grace,
+// while the helper it left behind is not. A version of this function
+// that asked only "has the leader exited" would read that as "done,
+// nothing left to escalate to SIGKILL" — and it did, silently leaving
+// the helper running for as long as it liked. Asking whether the *group*
+// is empty instead keeps waiting exactly as long as anything is still in
+// it, leader or not, which is what makes the final SIGKILL below
+// actually fire for this case rather than being skipped as though there
+// were nothing left to reach.
 func terminate(cmd *osexec.Cmd, grace time.Duration) {
 	if cmd.Process == nil {
 		return
 	}
+
+	// Setpgid without an explicit Pgid (sysProcAttr, procattr_unix.go)
+	// makes the tracked process its own group leader, so its pid is also
+	// the group's pgid at the moment this call begins — captured once,
+	// before either signal, so the rest of this function keeps addressing
+	// the same group even once the leader itself has been reaped.
+	pgid := cmd.Process.Pid
 
 	// Errors from both signal sends are deliberately discarded, for the
 	// same reason killGroup's own doc comment gives for falling through
@@ -63,36 +90,57 @@ func terminate(cmd *osexec.Cmd, grace time.Duration) {
 	// either way.
 	_ = killGroup(cmd, syscall.SIGTERM) //nolint:errcheck // best-effort; see comment above
 
-	if waitExited(cmd, grace) {
-		// The common case: the child (or its cooperative helpers) honoured
-		// SIGTERM and exited before grace ran out, so there is nothing
-		// left to escalate to SIGKILL.
+	if waitGroupEmpty(pgid, grace) {
+		// The common case: every process in the group — the tracked
+		// leader and anything cooperative it forked — honoured SIGTERM
+		// and exited before grace ran out, so there is nothing left to
+		// escalate to SIGKILL.
 		return
 	}
 
-	_ = killGroup(cmd, syscall.SIGKILL) //nolint:errcheck // best-effort; see comment above
+	// Signalling raw here, rather than through killGroup, is deliberate
+	// and is the other half of this function's fix: killGroup's own probe
+	// is keyed to cmd.Process specifically and skips the send outright
+	// once that process is reaped, which is exactly wrong for this call —
+	// the tracked leader having already exited is the expected shape of
+	// the bug this escalation exists to catch, not a reason to skip it.
+	// waitGroupEmpty having just reported the group as non-empty stands in
+	// for that probe instead: the kernel does not hand a pgid back out
+	// for reuse while any process is still using it as its group, so a
+	// non-ESRCH result from that same kind of check moments ago means
+	// pgid was, at that moment, still this attempt's own group and not a
+	// number the kernel had already recycled. That does not close the
+	// window entirely — a last member could exit in the interval between
+	// that check and this send, freeing the pgid for reuse before the
+	// signal lands — the same kind of gap killGroup's own doc comment
+	// already accepts for the single-process case, narrowed here to the
+	// width of one syscall rather than removed.
+	_ = syscall.Kill(-pgid, syscall.SIGKILL) //nolint:errcheck // best-effort; see comment above
 }
 
-// waitExited reports whether the tracked process has exited by the time
-// grace elapses.
+// waitGroupEmpty reports whether every process in the group named by
+// pgid has exited by the time grace elapses.
 //
-// It cannot use cmd.Wait() to find out: Run's own dedicated goroutine
-// already owns the one call to Wait() this *osexec.Cmd will ever get, and
-// os/exec panics if Wait is invoked a second time. Polling
-// cmd.Process.Signal(syscall.Signal(0)) instead is safe to call
-// concurrently with a Wait() running on another goroutine — it is the
-// same liveness probe killGroup's own guard uses — and once that other
-// goroutine's Wait() actually reaps the process, Go's os.Process marks
-// itself done internally, so this starts reporting os.ErrProcessDone
-// immediately on the next poll, with no syscall involved, rather than
-// only once some fixed interval has passed. That is what lets the common
-// case (the process exits soon after SIGTERM) return in roughly one
-// pollInterval instead of always waiting out the full grace period.
-func waitExited(cmd *osexec.Cmd, grace time.Duration) bool {
+// It probes the group directly — syscall.Kill(-pgid, 0) — rather than
+// asking only whether the tracked leader is still alive. That distinction
+// is the point: syscall.Kill with a negative pid succeeds as long as the
+// caller has permission to signal at least one member of the group, and
+// only fails with ESRCH once none are left, so this notices a helper the
+// leader forked and left running exactly the same way it would notice an
+// uncooperative leader — checking the leader alone would report the
+// group "empty" the moment a *cooperative* leader exits, even while
+// something it forked is still very much alive.
+//
+// This cannot use cmd.Wait() to find out when the leader specifically has
+// gone: Run's own dedicated goroutine already owns the one call to Wait()
+// this *osexec.Cmd will ever get, and os/exec panics if Wait is invoked a
+// second time. Polling the group directly sidesteps that entirely, since
+// it never touches cmd.Process at all.
+func waitGroupEmpty(pgid int, grace time.Duration) bool {
 	deadline := time.Now().Add(grace)
 
 	for {
-		if err := cmd.Process.Signal(syscall.Signal(0)); err != nil && errors.Is(err, os.ErrProcessDone) {
+		if err := syscall.Kill(-pgid, 0); errors.Is(err, syscall.ESRCH) {
 			return true
 		}
 
