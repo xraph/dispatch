@@ -432,6 +432,18 @@ func (e *Executor) Run(ctx context.Context, req *exec.Request) (*exec.Result, er
 		deadlineCh = timer.C
 	}
 
+	// grace is Policy.GracePeriod, falling back to exec.DefaultGracePeriod
+	// when the request carries a zero value — a Request built without
+	// exec.NewPolicy (which applies that same default itself) leaves
+	// Policy as its zero value, and a zero grace period would collapse
+	// the ladder in kill_unix.go's terminate back into an immediate
+	// SIGKILL, silently losing the whole point of Task 6 for any caller
+	// that did not opt in explicitly.
+	grace := req.Policy.GracePeriod
+	if grace <= 0 {
+		grace = exec.DefaultGracePeriod
+	}
+
 	var (
 		timedOut   bool
 		callerDone bool
@@ -450,9 +462,9 @@ waitLoop:
 			// the same instant the timer fired, this case can still win
 			// even though waitCh is already deliverable. A cooperative
 			// handler makes that a live outcome, not a theoretical one:
-			// the shim traps SIGTERM today and cancels its own handler
-			// context, and Task 6 adds the SIGTERM half of the kill
-			// ladder here, so "the tracked process exits right as the
+			// the shim traps SIGTERM and cancels its own handler context,
+			// and killProcess below sends SIGTERM as the first rung of
+			// its kill ladder, so "the tracked process exits right as the
 			// deadline fires" only gets more common, not less. Checking
 			// waitCh non-blockingly resolves the tie deterministically in
 			// favour of what actually happened to the process, instead of
@@ -464,7 +476,7 @@ waitLoop:
 			default:
 			}
 			timedOut = true
-			killProcess(cmd)
+			killProcess(cmd, grace)
 		case <-ctxDoneCh:
 			ctxDoneCh = nil // ditto, so we do not spin once ctx is done
 			select {
@@ -473,7 +485,7 @@ waitLoop:
 			default:
 			}
 			callerDone = true
-			killProcess(cmd)
+			killProcess(cmd, grace)
 		}
 	}
 
@@ -537,24 +549,26 @@ waitLoop:
 	return e.classify(req, fr.frame, fr.err, encodeErr, cmd.ProcessState, timedOut, callerDone), nil
 }
 
-// killProcess best-effort kills the started process's whole group (see
-// killGroup in procattr_unix.go). Task 6 replaces the direct kill here
-// with the graceful SIGTERM-then-grace-period-then-SIGKILL ladder; what
-// this task adds is Setpgid plus signalling the group rather than the one
-// process, so a native library's forked helpers die with the handler
-// instead of surviving it — the direct kill alone only ever reached the
-// process this package started, leaving anything that process forked
-// running.
-func killProcess(cmd *osexec.Cmd) {
+// killProcess best-effort runs the kill ladder (terminate, kill_unix.go)
+// against the started process's whole group: SIGTERM to the group, up to
+// grace for a cooperative exit, then SIGKILL to the group only if grace
+// elapses first. Setpgid (sysProcAttr, procattr_unix.go) is what makes
+// "the group" reach anything the tracked process forked, not just the one
+// process this package started directly — without it, even the SIGKILL
+// half would leave a native library's forked helpers running.
+//
+// This blocks the waitLoop select for up to grace, which is deliberate:
+// the alternative is racing terminate against the very channels that
+// triggered it, and there is nothing useful for waitLoop to do with a
+// second deadline or cancellation signal while a kill is already in
+// flight — see terminate's own doc comment for why grace runs from here,
+// not from whatever triggered this call.
+func killProcess(cmd *osexec.Cmd, grace time.Duration) {
 	if cmd.Process == nil {
 		return
 	}
 
-	// killGroup legitimately errors when the process has already exited —
-	// e.g. it happened to finish in the window between the wait channel
-	// firing and this call landing, which is a benign race, not a failure
-	// this function has anything useful to do about.
-	_ = killGroup(cmd) //nolint:errcheck // benign race with the process exiting on its own; nothing useful to do with the error here
+	terminate(cmd, grace)
 }
 
 // writeRequest encodes and writes the single request frame Run ever

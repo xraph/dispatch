@@ -16,7 +16,13 @@ import (
 func sysProcAttr(options) *syscall.SysProcAttr { return nil }
 
 // killGroup falls back to killing the process directly outside Unix,
-// since there is no process group to address as a whole.
-func killGroup(cmd *osexec.Cmd) error {
+// since there is no process group to address as a whole. sig exists only
+// for signature symmetry with the Unix build's killGroup, which terminate
+// (kill_unix.go) calls with both SIGTERM and SIGKILL: os.Process.Kill is
+// the only process-ending call this build can make through os/exec
+// regardless of which signal the ladder asked for, and this path is never
+// reached in practice anyway — checkLaunch (limits_other.go) refuses to
+// start this rung at all outside Unix.
+func killGroup(cmd *osexec.Cmd, _ syscall.Signal) error {
 	return cmd.Process.Kill()
 }

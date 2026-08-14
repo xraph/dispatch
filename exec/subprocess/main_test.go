@@ -4,7 +4,10 @@ import (
 	"context"
 	"os"
 	osexec "os/exec"
+	"os/signal"
+	"path/filepath"
 	"strconv"
+	"syscall"
 	"testing"
 	"time"
 
@@ -34,6 +37,16 @@ const (
 	// C1's pipes open past the tracked process's own exit.
 	envSleepOnly = "DISPATCH_EXEC_SLEEP_ONLY_TEST"
 
+	// envGroupKill selects a fixture for the kill ladder's own test
+	// (kill_unix_test.go): it reads the request, forks a grandchild that
+	// just sleeps (envSleepOnly), writes that grandchild's pid to a file
+	// in the request's OutputDir, ignores SIGTERM itself, and then
+	// sleeps. Only the ladder's SIGKILL half — sent to the whole process
+	// group, not just this fixture — can end either process, which is
+	// what makes this the fixture that catches a missing Setpgid: without
+	// it, SIGKILL would reach this process but not the grandchild.
+	envGroupKill = "DISPATCH_EXEC_GROUP_KILL_TEST"
+
 	// fixtureSleep is deliberately much longer than any bound the C1/C2
 	// tests assert on, so a regression is caught by the test's own
 	// timeout rather than by this sleep ever completing.
@@ -59,6 +72,9 @@ func TestMain(m *testing.M) {
 		time.Sleep(fixtureSleep)
 		os.Exit(0)
 		return
+	case os.Getenv(envGroupKill) != "":
+		runGroupKillFixture()
+		return // unreachable; runGroupKillFixture exits
 	}
 
 	os.Exit(m.Run())
@@ -98,6 +114,56 @@ func runLeakChild() {
 	res := &exec.Result{Status: exec.StatusOK}
 	_ = wire.Encode(out, &wire.Frame{Kind: wire.KindResult, Result: res})
 
+	os.Exit(0)
+}
+
+// runGroupKillFixture is the envGroupKill fixture body. See its doc
+// comment above for what it reproduces.
+func runGroupKillFixture() {
+	in := os.NewFile(uintptr(fdFromEnv(shim.EnvRequestFD, 3)), "dispatch-exec-request")
+
+	frame, err := wire.Decode(in)
+	if err != nil || frame.Request == nil {
+		os.Exit(1)
+		return
+	}
+
+	// Unlike the shim, which traps SIGTERM to cancel its handler's
+	// context and shut down cleanly, this fixture ignores it outright —
+	// standing in for a handler process that does not cooperate with the
+	// first rung of the ladder at all, so only the SIGKILL half can end
+	// it, and only if that SIGKILL actually reaches this process's whole
+	// group rather than just its leader.
+	signal.Ignore(syscall.SIGTERM)
+
+	// CommandContext with context.Background() rather than Command, purely
+	// to satisfy noctx; this fixture never cancels the grandchild via ctx
+	// — it must outlive this process's own SIGTERM handling, exactly as a
+	// native library's forked helper would.
+	grandchild := osexec.CommandContext(context.Background(), os.Args[0])
+	// Deliberately NOT append(os.Environ(), ...) — see runLeakChild's own
+	// comment on the same line for why: this process's environment still
+	// carries envGroupKill, and inheriting it wholesale would make the
+	// grandchild decide it is another instance of this same fixture.
+	grandchild.Env = []string{envSleepOnly + "=1"}
+	if err := grandchild.Start(); err != nil {
+		os.Exit(1)
+		return
+	}
+
+	// The parent test process reads this file after Run returns to learn
+	// which pid to probe for liveness — it has no other way to learn a
+	// pid this deep in a process tree it does not control directly.
+	pidPath := filepath.Join(frame.Request.OutputDir, "grandchild.pid")
+	if err := os.WriteFile(pidPath, []byte(strconv.Itoa(grandchild.Process.Pid)), 0o600); err != nil {
+		os.Exit(1)
+		return
+	}
+
+	// No result frame is written: this fixture is killed before it gets
+	// the chance to, which is the point — the parent's classify call has
+	// nothing to trust here but the process's own wait status.
+	time.Sleep(fixtureSleep)
 	os.Exit(0)
 }
 
