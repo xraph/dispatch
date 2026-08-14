@@ -38,6 +38,9 @@ const (
 // SIGTERM-then-grace-period-then-SIGKILL sequence is Task 6's. This task
 // carries their configuration through so those tasks only have to wire
 // behaviour onto values that already exist, not invent a new option API.
+// The child's process group is the one piece of SysProcAttr this task does
+// set (see sysProcAttr in procattr_unix.go): Task 5 still owns the
+// Credential half of the same struct, for the dedicated uid.
 type options struct {
 	binary        string
 	args          []string
@@ -272,6 +275,7 @@ func (e *Executor) Run(ctx context.Context, req *exec.Request) (*exec.Result, er
 	cmd.ExtraFiles = []*os.File{reqR, resW} // index 0 -> fd 3, index 1 -> fd 4, matching requestFD/resultFD above
 	cmd.Stdout = outW
 	cmd.Stderr = errW
+	cmd.SysProcAttr = sysProcAttr() // Setpgid, so killProcess below can reach the whole group, not just this one process
 
 	if err := cmd.Start(); err != nil {
 		reqR.Close()
@@ -301,6 +305,23 @@ func (e *Executor) Run(ctx context.Context, req *exec.Request) (*exec.Result, er
 	outW.Close()
 	errW.Close()
 
+	// Each of these closes exactly once no matter which of several racing
+	// paths gets there first: the dedicated writer goroutine below always
+	// closes reqW itself once it is done with it, and the drain-grace
+	// timeout further down can also force any of the four closed to
+	// unblock a reader or writer stuck on a descendant the child left
+	// behind. sync.OnceFunc is what keeps that from ever double-closing a
+	// file — recycled fd numbers make a double-close silently break an
+	// unrelated descriptor rather than just returning a harmless error.
+	closeReqW := sync.OnceFunc(func() { reqW.Close() })
+	closeOutR := sync.OnceFunc(func() { outR.Close() })
+	closeErrR := sync.OnceFunc(func() { errR.Close() })
+	closeResR := sync.OnceFunc(func() { resR.Close() })
+	defer closeReqW()
+	defer closeOutR()
+	defer closeErrR()
+	defer closeResR()
+
 	var stdioWG sync.WaitGroup
 	stdioWG.Add(2)
 	go func() {
@@ -322,13 +343,22 @@ func (e *Executor) Run(ctx context.Context, req *exec.Request) (*exec.Result, er
 		frameCh <- frameRead{f, ferr}
 	}()
 
-	// Writing here, after Start, is what keeps a request larger than the
-	// pipe buffer from deadlocking: the child is already running and
-	// reading concurrently, so the write drains as fast as the child
-	// consumes it rather than requiring the whole frame to fit in the
-	// buffer up front.
-	encodeErr := writeRequest(reqW, req)
-	reqW.Close()
+	// writeRequest runs on its own goroutine instead of blocking Run's own
+	// goroutine here: a synchronous write large enough to fill the pipe
+	// buffer (64KB on Linux, often 16KB on macOS) would block until the
+	// child drains it, and if the child is alive but has not yet reached
+	// wire.Decode — busy, stopped, traced, or simply not a real shim —
+	// that block would sit outside the waitLoop select below, unreachable
+	// by both the deadline and ctx. Once the child is killed (or exits on
+	// its own), the last reader of reqR goes away and the pending Write
+	// unblocks with EPIPE on its own, without this needing to close reqW
+	// itself for that to happen.
+	encodeCh := make(chan error, 1)
+	go func() {
+		err := writeRequest(reqW, req)
+		closeReqW()
+		encodeCh <- err
+	}()
 
 	waitCh := make(chan error, 1)
 	go func() {
@@ -368,32 +398,84 @@ waitLoop:
 		}
 	}
 
-	stdioWG.Wait()
-	outR.Close()
-	errR.Close()
+	// The tracked process is reaped, but that guarantees nothing about
+	// outR/errR/resR/reqW seeing EOF or completing: anything the handler
+	// spawned — a shelled-out ffmpeg, a stray background job — inherits
+	// stdout, stderr, and both wire descriptors, and keeps its own copy of
+	// each open for as long as it runs. killProcess only reaches the
+	// tracked process (Setpgid extends that to its whole group, but only
+	// when killProcess actually runs — nothing kills a grandchild left
+	// behind by a process that exited cleanly on its own, before any
+	// deadline or cancellation ever fired). drainGrace bounds how long the
+	// four operations below wait for their own copies to close on their
+	// own before this forces them closed instead: long enough for a
+	// handler's own trailing writes to flush, short enough that a leaked
+	// descendant cannot wedge Run past this point indefinitely.
+	const drainGrace = 3 * time.Second
 
-	fr := <-frameCh
-	resR.Close()
+	stdioDone := make(chan struct{})
+	go func() {
+		stdioWG.Wait()
+		close(stdioDone)
+	}()
+
+	drainTimer := time.NewTimer(drainGrace)
+	defer drainTimer.Stop()
+
+	var (
+		fr            frameRead
+		encodeErr     error
+		stdioPending  = true
+		framePending  = true
+		encodePending = true
+		timerCh       = drainTimer.C
+	)
+
+	for stdioPending || framePending || encodePending {
+		select {
+		case <-stdioDone:
+			stdioPending = false
+		case fr = <-frameCh:
+			framePending = false
+		case encodeErr = <-encodeCh:
+			encodePending = false
+		case <-timerCh:
+			// Force every reader/writer still blocked to return, so the
+			// goroutines above can finish and this loop can exit rather
+			// than waiting on a descendant process that may never close
+			// these fds on its own. timerCh is a one-shot channel — it
+			// cannot fire twice — so this only ever forces the closes
+			// once, then lets the now-unblocked goroutines deliver
+			// through the cases above on the next iterations.
+			closeOutR()
+			closeErrR()
+			closeResR()
+			closeReqW()
+			timerCh = nil
+		}
+	}
 
 	return e.classify(req, fr.frame, fr.err, encodeErr, cmd.ProcessState, timedOut, callerDone), nil
 }
 
-// killProcess best-effort kills a started process. Task 6 replaces this
-// with the SIGTERM/grace-period/SIGKILL ladder over the process group;
-// until then this is a direct kill of the child itself, which is enough
-// to enforce a deadline against a handler that ignores its context, since
-// nothing before Task 5 gives the child any children of its own to
-// outlive it.
+// killProcess best-effort kills the started process's whole group (see
+// killGroup in procattr_unix.go). Task 6 replaces the direct kill here
+// with the graceful SIGTERM-then-grace-period-then-SIGKILL ladder; what
+// this task adds is Setpgid plus signalling the group rather than the one
+// process, so a native library's forked helpers die with the handler
+// instead of surviving it — the direct kill alone only ever reached the
+// process this package started, leaving anything that process forked
+// running.
 func killProcess(cmd *osexec.Cmd) {
 	if cmd.Process == nil {
 		return
 	}
 
-	// Kill legitimately errors when the process has already exited — e.g.
-	// it happened to finish in the window between the wait channel firing
-	// and this call landing, which is a benign race, not a failure this
-	// function has anything useful to do about.
-	_ = cmd.Process.Kill() //nolint:errcheck // benign race with the process exiting on its own; nothing useful to do with the error here
+	// killGroup legitimately errors when the process has already exited —
+	// e.g. it happened to finish in the window between the wait channel
+	// firing and this call landing, which is a benign race, not a failure
+	// this function has anything useful to do about.
+	_ = killGroup(cmd) //nolint:errcheck // benign race with the process exiting on its own; nothing useful to do with the error here
 }
 
 // writeRequest encodes and writes the single request frame Run ever
@@ -446,14 +528,13 @@ func (e *Executor) buildEnv(req *exec.Request) []string {
 //
 // The rule: the parent trusts the child's frame for what the handler did,
 // and its own wait status for what happened to the process. A decoded
-// frame is authoritative for the status it reports, unless the process
-// still died on a signal — a frame claiming StatusOK from a process that
-// was, in fact, killed is not to be believed, so the process status wins
-// that disagreement. A deadline expiry is reported as StatusTimeout
-// regardless of anything else, since the parent deliberately killed the
-// process itself. Absent a usable frame entirely — the shim never got the
-// chance to report, or its report was cut off mid-write — the process's
-// own exit code or signal is all there is to classify by.
+// frame from a process that was not signalled is authoritative for the
+// status it reports — including when timedOut is set, see below. When the
+// process was signalled, its wait status overrides the frame even if the
+// frame claims StatusOK: a report of success from a process that was, in
+// fact, killed is not to be believed. Absent a usable frame entirely — the
+// shim never got the chance to report, or its report was cut off mid-write
+// — the process's own exit code or signal is all there is to classify by.
 func (e *Executor) classify(
 	req *exec.Request,
 	frame *wire.Frame,
@@ -463,6 +544,25 @@ func (e *Executor) classify(
 	timedOut, callerCanceled bool,
 ) *exec.Result {
 	exitCode, signal, signaled := processOutcome(ps)
+	frameOK := frameErr == nil && frame != nil && frame.Result != nil
+
+	// A decoded frame from a process that was not signalled wins even over
+	// timedOut. The Go spec says select "chooses uniformly at random among
+	// [the ready cases]", so when the tracked process finishes at the same
+	// instant the deadline timer fires, the waitLoop above can pick the
+	// timer case over an already-ready waitCh. A process that was actually
+	// killed always reports Signaled() true — there is no way to kill it
+	// and have it look like a clean exit — so timedOut with signaled false
+	// means only "the timer fired", never "the kill did anything." Trusting
+	// the frame here is what keeps that race from turning a successful
+	// attempt into a StatusTimeout that burns a retry it never needed.
+	if frameOK && !signaled {
+		res := *frame.Result
+		res.ExitCode = exitCode
+		res.Signal = 0
+
+		return &res
+	}
 
 	if timedOut {
 		return &exec.Result{
@@ -473,23 +573,27 @@ func (e *Executor) classify(
 		}
 	}
 
-	if frameErr == nil && frame != nil && frame.Result != nil {
-		res := *frame.Result
-		if signaled {
-			return &exec.Result{
-				Status: exec.StatusKilled,
-				HandlerErr: fmt.Sprintf(
-					"dispatch/exec/subprocess: process killed by signal %d after reporting %s",
-					signal, res.Status,
-				),
-				Signal: signal,
-				Usage:  res.Usage,
-			}
-		}
-		res.ExitCode = exitCode
-		res.Signal = 0
+	if frameOK { // signaled is true here, or the branch above would have returned
+		res := frame.Result
 
-		return &res
+		return &exec.Result{
+			Status: exec.StatusKilled,
+			HandlerErr: fmt.Sprintf(
+				"dispatch/exec/subprocess: process killed by signal %d after reporting %s",
+				signal, res.Status,
+			),
+			ExitCode: exitCode,
+			Signal:   signal,
+			Usage:    res.Usage,
+			// Outputs and Permanent carry through even though the process
+			// was signalled: a handler killed right after committing its
+			// artifacts should not have them become invisible, and a
+			// permanent failure it already flagged should not silently
+			// turn retryable just because the signal arrived a moment
+			// later than the report did.
+			Outputs:   res.Outputs,
+			Permanent: res.Permanent,
+		}
 	}
 
 	reason := "no result frame"
