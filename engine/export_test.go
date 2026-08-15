@@ -13,6 +13,6 @@ func InputSizesForTest(b map[string]artifact.Ref) ([]resource.InputSize, int64, 
 
 // CheckReaperMarginForTest exposes checkReaperMargin to the external test
 // package.
-func CheckReaperMarginForTest(cfg dispatch.Config) error {
-	return checkReaperMargin(cfg)
+func CheckReaperMarginForTest(cfg dispatch.Config, leaseAware bool) error {
+	return checkReaperMargin(cfg, leaseAware)
 }

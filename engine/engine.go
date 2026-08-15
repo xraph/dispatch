@@ -493,7 +493,8 @@ func Build(d *dispatch.Dispatcher, opts ...Option) (*Engine, error) {
 	// stall the fetcher: with no manager, admissionBudget hands back the
 	// pool's own context and admit returns immediately.
 	if eng.resources != nil {
-		if err := checkReaperMargin(config); err != nil {
+		_, leaseAware := js.(job.LeaseStore)
+		if err := checkReaperMargin(config, leaseAware); err != nil {
 			return nil, err
 		}
 

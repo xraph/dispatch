@@ -60,26 +60,64 @@ const reaperSafetyFactor = 2
 // nobody arrives here by accident, and the symptom it prevents — a job
 // executing twice because two subsystems disagreed about who owned it —
 // is not one an operator can be expected to diagnose from a log line.
-func checkReaperMargin(cfg dispatch.Config) error {
+//
+// leaseAware reports whether the store implements job.LeaseStore. It
+// decides which number actually governs reclamation: on a lease-aware
+// backend — every first-party one — worker/pool.go's reapStaleJobs routes
+// to reclaimExpiredLeases, which reclaims purely on lease expiry
+// (leaseTTLFor's chain: DefaultLeaseTTL, then StaleJobThreshold, then
+// job.DefaultLeaseTTL) and never looks at StaleJobThreshold directly.
+// Policing StaleJobThreshold alone on such a backend checks a number
+// nothing reads: a deployment can set DefaultLeaseTTL to a few seconds,
+// clear this check with a generous StaleJobThreshold, and still have the
+// reaper reclaim a job the fetcher is still holding, because the lease
+// granted at claim time expires long before the margin the threshold
+// implied. A backend that is not lease-aware falls back to
+// reapStaleJobsLegacy, which does read StaleJobThreshold directly, so
+// that is what this check polices there instead.
+func checkReaperMargin(cfg dispatch.Config, leaseAware bool) error {
 	if cfg.StaleJobThreshold <= 0 {
 		// The reaper is disabled; nothing can reclaim anything.
 		return nil
 	}
 
 	window := max(cfg.PollInterval, 0) + max(cfg.HeartbeatInterval, 0)
-
 	minimum := reaperSafetyFactor * window
-	if cfg.StaleJobThreshold >= minimum {
+
+	effective := cfg.StaleJobThreshold
+	if leaseAware {
+		effective = effectiveReclaimWindow(cfg)
+	}
+
+	if effective >= minimum {
 		return nil
 	}
 
 	return fmt.Errorf(
-		"dispatch: StaleJobThreshold (%s) is too low for resource-aware admission: "+
-			"the fetcher may hold a claimed job for up to PollInterval (%s) while it reclaims "+
-			"capacity, and that job is not heartbeated for a further HeartbeatInterval (%s), "+
-			"so the reaper could reclaim a job this worker is still holding; "+
-			"set StaleJobThreshold to at least %s, or leave the resource manager unset",
-		cfg.StaleJobThreshold, cfg.PollInterval, cfg.HeartbeatInterval, minimum)
+		"dispatch: the effective reclamation window (%s) is too low for resource-aware "+
+			"admission: the fetcher may hold a claimed job for up to PollInterval (%s) while it "+
+			"reclaims capacity, and that job is not heartbeated for a further HeartbeatInterval "+
+			"(%s), so the reaper could reclaim a job this worker is still holding; set "+
+			"StaleJobThreshold (currently %s) and DefaultLeaseTTL (currently %s) so the window "+
+			"that actually governs reclamation is at least %s, or leave the resource manager unset",
+		effective, cfg.PollInterval, cfg.HeartbeatInterval,
+		cfg.StaleJobThreshold, cfg.DefaultLeaseTTL, minimum)
+}
+
+// effectiveReclaimWindow mirrors worker.Pool.leaseTTLFor(nil): the lease
+// TTL a freshly granted lease gets when no job overrides it with its own
+// job.WithLeaseTTL. That per-job override can only raise a specific job's
+// window above this floor, never lower it below what a config-time check
+// can see, so checking the floor is sound.
+func effectiveReclaimWindow(cfg dispatch.Config) time.Duration {
+	if cfg.DefaultLeaseTTL > 0 {
+		return cfg.DefaultLeaseTTL
+	}
+	if cfg.StaleJobThreshold > 0 {
+		return cfg.StaleJobThreshold
+	}
+
+	return job.DefaultLeaseTTL
 }
 
 // resolveResources computes the job's resource spec and writes it onto
