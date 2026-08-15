@@ -21,13 +21,14 @@ import (
 // Ensure Store implements store.Store at compile time.
 // We can't import store here (import cycle), so we verify each subsystem.
 var (
-	_ job.Store      = (*Store)(nil)
-	_ workflow.Store = (*Store)(nil)
-	_ cron.Store     = (*Store)(nil)
-	_ dlq.Store      = (*Store)(nil)
-	_ event.Store    = (*Store)(nil)
-	_ cluster.Store  = (*Store)(nil)
-	_ artifact.Store = (*Store)(nil)
+	_ job.Store         = (*Store)(nil)
+	_ workflow.Store    = (*Store)(nil)
+	_ cron.Store        = (*Store)(nil)
+	_ dlq.Store         = (*Store)(nil)
+	_ event.Store       = (*Store)(nil)
+	_ cluster.Store     = (*Store)(nil)
+	_ artifact.Store    = (*Store)(nil)
+	_ job.UsageRecorder = (*Store)(nil)
 )
 
 // Store is a fully in-memory implementation of store.Store.
@@ -43,6 +44,7 @@ type Store struct {
 	events      map[string]*event.Event
 	workers     map[string]*cluster.Worker
 
+	jobUsage      []*job.Usage
 	artifacts     map[string]*artifact.Artifact
 	artifactLinks []*artifact.Link
 
