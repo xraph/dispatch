@@ -251,13 +251,17 @@ func TestEngine_JobIsDispatchedToTheAddedExecutor(t *testing.T) {
 
 	// The pool sweeps for leaked sandboxes at startup and the engine closes
 	// every rung when it stops. Both had no caller before.
-	if reclaimed, _ := rung.counts(); reclaimed != 1 {
-		t.Errorf("Reclaim called %d times at pool start, want 1", reclaimed)
-	}
+	//
+	// The startup sweep runs in a background goroutine (see
+	// Pool.runReclaimSweep) that Stop's own p.wg.Wait() joins, so reclaimed
+	// is only guaranteed final once Stop has returned — reading it earlier
+	// races the sweep goroutine against the test goroutine.
 	if stopErr := eng.Stop(context.Background()); stopErr != nil {
 		t.Fatalf("Stop: %v", stopErr)
 	}
-	if _, closed := rung.counts(); closed != 1 {
+	if reclaimed, closed := rung.counts(); reclaimed != 1 {
+		t.Errorf("Reclaim called %d times at pool start, want 1", reclaimed)
+	} else if closed != 1 {
 		t.Errorf("Close called %d times at engine stop, want 1", closed)
 	}
 }
