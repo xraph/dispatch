@@ -129,8 +129,8 @@ func TestMigrateBackfillsRunningJobsWithoutLease(t *testing.T) {
 		}
 	}
 
-	if err := s.Migrate(ctx); err != nil {
-		t.Fatalf("migrate: %v", err)
+	if migrateErr := s.Migrate(ctx); migrateErr != nil {
+		t.Fatalf("migrate: %v", migrateErr)
 	}
 
 	reclaimed, err := s.ReclaimExpiredLeases(ctx, 10)

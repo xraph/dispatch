@@ -211,6 +211,16 @@ func TestReclaimAdoptsPreUpgradeRunningJobs(t *testing.T) {
 		return j
 	}
 
+	// A job with neither timestamp set, so there is nothing to measure age
+	// against. Reclaiming on a null expiry alone would take it; the
+	// staleness gate is what stops it.
+	withoutTimes := func(name string) *job.Job {
+		j := runningJob(name, 0)
+		j.StartedAt = nil
+
+		return j
+	}
+
 	cases := []struct {
 		j    *job.Job
 		want bool
@@ -240,18 +250,12 @@ func TestReclaimAdoptsPreUpgradeRunningJobs(t *testing.T) {
 			want: false,
 			why:  "just claimed; its first heartbeat is not due yet",
 		},
+		{
+			j:    withoutTimes("no-times"),
+			want: false,
+			why:  "no timestamp to establish age from",
+		},
 	}
-
-	// Neither timestamp is set, so there is nothing to measure age against.
-	// Reclaiming on a null expiry alone would take this job; the staleness
-	// gate is what stops it.
-	ageless := runningJob("no-times", 0)
-	ageless.StartedAt = nil
-	cases = append(cases, struct {
-		j    *job.Job
-		want bool
-		why  string
-	}{ageless, false, "no timestamp to establish age from"})
 
 	for _, c := range cases {
 		if err := s.EnqueueJob(ctx, c.j); err != nil {
