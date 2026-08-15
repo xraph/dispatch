@@ -132,9 +132,9 @@ return 1
 // reclaimScript resets one job to pending only if it is still running at
 // the expected epoch.
 //
-// Reclamation does not need to re-derive "is the lease expired" inside
-// Lua: that decision was already made correctly in Go, using real
-// time.Time comparison (job.Lease.IsExpired), before this script was ever
+// Reclamation does not need to re-derive "should this be taken back"
+// inside Lua: that decision was already made correctly in Go, using real
+// time.Time comparison (see reclaimable), before this script was ever
 // called. This script re-verifies only equality — still running, still at
 // the epoch Go observed — which is enough to make the claim exclusive: if
 // another caller (or a fresh grant) already moved the job, the epoch or
@@ -220,13 +220,74 @@ func (s *Store) RenewLease(
 	return nil
 }
 
+// legacyLeaseGrace is how long a running job carrying no lease at all
+// must have been silent before reclamation will adopt it.
+//
+// The value is arbitrary and, unlike every other timing in this system,
+// an operator cannot tune it: ReclaimExpiredLeases(ctx, limit) takes no
+// threshold, and widening that signature to carry one would be a change
+// to all five backends for the sake of a clause that stops mattering once
+// a fleet has finished upgrading. Naming that plainly is better than
+// burying it.
+//
+// Fifteen minutes is chosen to be conservative rather than precise. Before
+// leases, these same rows were reaped by ReapStaleJobs at
+// Config.StaleJobThreshold, which defaults to 30 seconds — so any value
+// well above that is strictly less aggressive than what already shipped,
+// and the cost of overshooting is only that a stranded job takes longer to
+// come back.
+const legacyLeaseGrace = 15 * time.Minute
+
+// reclaimable reports whether a running job should be taken back.
+//
+// The first clause is the actual rule, and job.Lease.IsExpired remains its
+// only authority: a lease was granted and has lapsed.
+//
+// The second is a deliberate, narrow exception to the invariant documented
+// at job/lease.go, which is that a zero expiry means "never leased" rather
+// than "expired" precisely so that reclamation cannot steal a job nobody
+// ever leased. That invariant is right, and it is also what strands every
+// job left running by a pre-lease build: the expiry arrives absent, so
+// reclamation skips the row forever while dequeue — which claims only
+// pending and retrying rows — never looks at it again. Redis cannot fix
+// that with a backfill the way the other backends do, because it has no
+// migration mechanism to hang one on; Migrate is a no-op.
+//
+// So the exception is gated on silence rather than on the null expiry
+// alone, because a null expiry does NOT by itself mean the job is
+// abandoned. DequeueOpts.Grants() is false whenever LeaseUntil is zero,
+// so any caller using job.Store directly without lease options holds a
+// perfectly healthy running job with no lease — and evicting live work
+// would be a worse bug than the one this fixes. A worker that is still
+// heartbeating is therefore never touched, no matter how old its claim.
+//
+// A row with neither timestamp is left alone: there is nothing to measure
+// age against, and guessing would mean guessing against a running job.
+func reclaimable(e *jobEntity, t time.Time) bool {
+	if e.LeaseExpiresAt != nil {
+		return job.Lease{ExpiresAt: *e.LeaseExpiresAt}.IsExpired(t)
+	}
+
+	// Heartbeat first, falling back to the claim time for a worker that
+	// died before its first beat — the same order ReapStaleJobs used.
+	silent := e.HeartbeatAt
+	if silent == nil {
+		silent = e.StartedAt
+	}
+	if silent == nil {
+		return false
+	}
+
+	return silent.Before(t.Add(-legacyLeaseGrace))
+}
+
 // ReclaimExpiredLeases returns expired-lease jobs to pending, fencing
 // their previous holders.
 //
 // Reclamation walks the job-id set rather than a sorted index, matching
 // ReapStaleJobs — there is no secondary index of running-with-expired-
-// lease jobs in this backend. Each candidate is filtered here in Go using
-// real time.Time comparison, the pending-state entity is computed in Go,
+// lease jobs in this backend. Each candidate is filtered here in Go by
+// reclaimable, the pending-state entity is computed in Go,
 // and claimExpired does the compare-and-set: keyed on the epoch this call
 // observed, so two pools scanning concurrently cannot both take the same
 // job — whichever script call runs second sees an epoch (or state) that
@@ -258,11 +319,7 @@ func (s *Store) ReclaimExpiredLeases(ctx context.Context, limit int) ([]*job.Job
 		if job.State(e.State) != job.StateRunning {
 			continue
 		}
-		lease := job.Lease{Epoch: e.LeaseEpoch}
-		if e.LeaseExpiresAt != nil {
-			lease.ExpiresAt = *e.LeaseExpiresAt
-		}
-		if !lease.IsExpired(t) {
+		if !reclaimable(&e, t) {
 			continue
 		}
 

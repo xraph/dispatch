@@ -179,3 +179,100 @@ func TestLeaseLargeDurationRoundTrip(t *testing.T) {
 		t.Fatalf("reclaimed job %s was not requeued", j.ID)
 	}
 }
+
+// TestReclaimAdoptsPreUpgradeRunningJobs covers the fleet upgrade: a job
+// that was already running when the lease feature shipped has no lease
+// expiry at all, so job.Lease.IsExpired reports false for it (a zero
+// expiry means "never leased", not "expired"), the pool no longer calls
+// ReapStaleJobs for a lease-capable store, and dequeue claims only pending
+// and retrying rows. Nothing would ever look at such a job again.
+//
+// Redis gets no backfill because it has no migration mechanism to hang one
+// on — Migrate is a no-op — so reclamation itself carries a narrow
+// compatibility clause instead. The cases below are the boundary of that
+// clause, and the negative ones matter more than the positive ones: a
+// null expiry does NOT by itself mean the job is abandoned. Any caller
+// using job.Store directly without lease options claims a perfectly
+// healthy running job with no lease at all (DequeueOpts.Grants() is false
+// when LeaseUntil is zero), and stealing that job would be a far worse bug
+// than the one being fixed.
+func TestReclaimAdoptsPreUpgradeRunningJobs(t *testing.T) {
+	s := openReapRedis(t)
+	ctx := context.Background()
+	now := time.Now().UTC()
+
+	// withHeartbeat returns a pre-upgrade running job — no lease fields —
+	// whose last heartbeat is beatAgo old.
+	withHeartbeat := func(name string, startedAgo, beatAgo time.Duration) *job.Job {
+		j := runningJob(name, startedAgo)
+		beat := now.Add(-beatAgo)
+		j.HeartbeatAt = &beat
+
+		return j
+	}
+
+	cases := []struct {
+		j    *job.Job
+		want bool
+		why  string
+	}{
+		{
+			j:    withHeartbeat("stale-heartbeat", 30*time.Minute, 20*time.Minute),
+			want: true,
+			why:  "abandoned by a worker that stopped reporting; this is the bug being fixed",
+		},
+		{
+			// The one that protects a live no-lease caller. Note the start
+			// time is old: only the heartbeat says this worker is alive, so
+			// this also pins that heartbeat_at takes precedence over
+			// started_at rather than both having to be fresh.
+			j:    withHeartbeat("fresh-heartbeat", 30*time.Minute, 0),
+			want: false,
+			why:  "still reporting, so it belongs to a healthy worker",
+		},
+		{
+			j:    runningJob("no-heartbeat-old-start", 20*time.Minute),
+			want: true,
+			why:  "claimed long ago and never heartbeated: died before its first beat",
+		},
+		{
+			j:    runningJob("no-heartbeat-fresh-start", 0),
+			want: false,
+			why:  "just claimed; its first heartbeat is not due yet",
+		},
+	}
+
+	// Neither timestamp is set, so there is nothing to measure age against.
+	// Reclaiming on a null expiry alone would take this job; the staleness
+	// gate is what stops it.
+	ageless := runningJob("no-times", 0)
+	ageless.StartedAt = nil
+	cases = append(cases, struct {
+		j    *job.Job
+		want bool
+		why  string
+	}{ageless, false, "no timestamp to establish age from"})
+
+	for _, c := range cases {
+		if err := s.EnqueueJob(ctx, c.j); err != nil {
+			t.Fatalf("enqueue %s: %v", c.j.Name, err)
+		}
+	}
+
+	reclaimed, err := s.ReclaimExpiredLeases(ctx, 100)
+	if err != nil {
+		t.Fatalf("ReclaimExpiredLeases: %v", err)
+	}
+
+	for _, c := range cases {
+		got := storetest.Contains(reclaimed, c.j.ID)
+		if got == c.want {
+			continue
+		}
+		if c.want {
+			t.Errorf("%s was not reclaimed but should have been: %s", c.j.Name, c.why)
+		} else {
+			t.Errorf("%s was reclaimed but must not be: %s", c.j.Name, c.why)
+		}
+	}
+}

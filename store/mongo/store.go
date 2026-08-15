@@ -87,10 +87,15 @@ func (s *Store) DB() *grove.DB {
 	return s.db
 }
 
-// Migrate creates indexes for all dispatch collections.
+// Migrate creates indexes for all dispatch collections and adopts jobs
+// left running by a pre-lease build.
 //
 // CreateMany is itself idempotent — mongo silently no-ops indexes that already
 // exist with matching specs — so this is safe to call on every boot.
+//
+// Note this is the whole of the mongo backend's migration path: the grove
+// migration group in migrations.go is not run from anywhere, so anything
+// that must happen on upgrade belongs here rather than there.
 func (s *Store) Migrate(ctx context.Context) error {
 	indexes := migrationIndexes()
 
@@ -103,6 +108,69 @@ func (s *Store) Migrate(ctx context.Context) error {
 		if err != nil {
 			return fmt.Errorf("dispatch/mongo: migrate %s indexes: %w", col, err)
 		}
+	}
+
+	return s.backfillRunningJobLeases(ctx)
+}
+
+// backfillRunningJobLeases gives a lease expiry to every job that was
+// already running when this fleet upgraded to a lease-aware build.
+//
+// Without it those jobs are stranded permanently. The lease feature added
+// lease_expires_at, ReclaimExpiredLeases requires it to be non-null, and
+// job.Lease.IsExpired deliberately reports false for a zero expiry — a
+// zero value means "never leased" rather than "expired", so the reaper
+// cannot steal jobs that were never leased. The pool no longer calls
+// ReapStaleJobs for a store implementing job.LeaseStore, and dequeue
+// claims only pending and retrying rows. A job running at the instant of
+// the upgrade is therefore invisible to every recovery path and holds its
+// slot forever.
+//
+// The filter tests lease_expires_at against null rather than using
+// $exists, because this collection holds both shapes for the same absent
+// value — see the comment on jobModel.ResourceRequests for why the insert
+// and update paths disagree — and a plain null equality is the one test
+// that matches both. It is also what makes this safe to re-run: after a
+// pass the affected rows have a non-null expiry, so a second call matches
+// nothing.
+//
+// The seeded value is deliberately in the past, which hands these jobs to
+// the normal reclaim path on the very next sweep. The consequence worth
+// naming: a job an old pod is still actively running is evicted and
+// retried elsewhere, because an old binary's heartbeats do not push an
+// expiry it does not know about. That is within the at-least-once
+// contract, and it matches what the postgres and sqlite backfills do.
+func (s *Store) backfillRunningJobLeases(ctx context.Context) error {
+	// A bound time.Time, never a formatted string: the driver writes it as
+	// a BSON date, which is what the reclaim filter's $lte compares
+	// against. The equivalent sqlite backfill was first written with
+	// strftime and silently wrote every row into the future, because there
+	// the comparison is on text.
+	t := now()
+
+	filter := bson.M{
+		"state":            string(job.StateRunning),
+		"lease_expires_at": nil,
+	}
+	// A pipeline update, not a plain $set: the value is copied from
+	// another field of the same document, which $set alone cannot express.
+	update := mongod.Pipeline{
+		{{Key: "$set", Value: bson.M{
+			"lease_expires_at": bson.M{"$ifNull": bson.A{
+				"$heartbeat_at",
+				bson.M{"$ifNull": bson.A{"$started_at", t}},
+			}},
+			"updated_at": t,
+		}}},
+	}
+
+	err := withRetry(ctx, defaultRetry, func(ctx context.Context) error {
+		_, updErr := s.mdb.Collection(colJobs).UpdateMany(ctx, filter, update)
+
+		return updErr
+	})
+	if err != nil {
+		return fmt.Errorf("dispatch/mongo: backfill running job leases: %w", err)
 	}
 
 	return nil
