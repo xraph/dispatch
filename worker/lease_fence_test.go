@@ -10,6 +10,7 @@ import (
 
 	"github.com/xraph/dispatch/backoff"
 	"github.com/xraph/dispatch/dlq"
+	"github.com/xraph/dispatch/exec"
 	"github.com/xraph/dispatch/ext"
 	"github.com/xraph/dispatch/id"
 	"github.com/xraph/dispatch/job"
@@ -116,12 +117,12 @@ func TestRunner_Execute_FallsBackToUnfencedWriteWithNoFenceAttached(t *testing.T
 	}
 }
 
-// TestRunner_TerminalWrites_AbandonOnLeaseLost exercises all three
-// fenced call sites — success, retry, and DLQ — against a store
-// scripted to return job.ErrLeaseLost, and checks the one behaviour the
-// whole fix exists for: the runner does not retry, DLQ, or touch the row
-// again, and the loss is observable through the extension registry with
-// no new plumbing.
+// TestRunner_TerminalWrites_AbandonOnLeaseLost exercises all four
+// fenced call sites — success, retry, DLQ, and the launch-failure
+// requeue — against a store scripted to return job.ErrLeaseLost, and
+// checks the one behaviour the whole fix exists for: the runner does
+// not retry, DLQ, or touch the row again, and the loss is observable
+// through the extension registry with no new plumbing.
 func TestRunner_TerminalWrites_AbandonOnLeaseLost(t *testing.T) {
 	tests := []struct {
 		name       string
@@ -148,6 +149,20 @@ func TestRunner_TerminalWrites_AbandonOnLeaseLost(t *testing.T) {
 			handler:    func(context.Context, struct{}) error { return errors.New("boom") },
 			maxRetries: 1,
 			retryCount: 1, // already at the ceiling, so handleFailure routes straight to sendToDLQ
+		},
+		{
+			// A launch failure never reaches the middleware chain's
+			// ordinary error path — it is *exec.Error carrying a status
+			// that CountsAgainstRetries() reports false for, which
+			// handleFailure routes to requeueAfterLaunchFailure instead of
+			// scheduleRetry. Before this fix that call went through the
+			// plain, unfenced store.UpdateJob no matter what was attached
+			// to ctx; this case only proves anything once it does not.
+			name:    "requeueAfterLaunchFailure",
+			jobName: "launch.job",
+			handler: func(context.Context, struct{}) error {
+				return &exec.Error{Status: exec.StatusLaunchFailed, Msg: "boom"}
+			},
 		},
 	}
 

@@ -393,20 +393,19 @@ func (r *Runner) terminalFor(j *job.Job) (middleware.Handler, error) {
 		if executor.Level() > exec.LevelNone && res.Status == exec.StatusOK {
 			if commitErr := r.commitOutputs(ctx, j, req); commitErr != nil {
 				if errors.Is(commitErr, errFenceLost) {
-					// Must NOT become an *exec.Error with
-					// StatusLaunchFailed: handleFailure routes that
-					// status through requeueAfterLaunchFailure, which
-					// writes via the plain, UNFENCED store.UpdateJob —
-					// exactly the write a fenced-out attempt must never
-					// make, since it could stomp whatever the actual
-					// current holder has already done to the row. An
-					// ordinary wrapped error instead takes the normal
-					// retry path, whose own scheduleRetry already calls
-					// the FENCED updateJob and already routes
-					// ErrLeaseLost to abandonLostLease — the same
-					// protection every other kind of failure racing a
-					// reclaim relies on today; this is not a new
-					// mechanism, just this failure declining to bypass it.
+					// This used to matter for safety: StatusLaunchFailed
+					// routed through requeueAfterLaunchFailure, which wrote
+					// via the plain, unfenced store.UpdateJob and could
+					// stomp whatever the real lease holder had already done
+					// to the row. requeueAfterLaunchFailure now goes
+					// through the same fenced updateJob as every other
+					// terminal write (and routes ErrLeaseLost to
+					// abandonLostLease identically), so either
+					// classification would be safe today. This still
+					// avoids StatusLaunchFailed anyway: the handler ran to
+					// completion here, so the ordinary retry path is the
+					// more honest description of what happened, not a
+					// workaround for the other one being unsafe.
 					return fmt.Errorf("dispatch/worker: job %s: %w", j.ID, commitErr)
 				}
 
@@ -1112,7 +1111,11 @@ func (r *Runner) requeueAfterLaunchFailure(ctx context.Context, j *job.Job, now 
 	j.RunAt = now.Add(delay)
 	j.State = job.StatePending
 
-	if updateErr := r.store.UpdateJob(ctx, j); updateErr != nil {
+	if updateErr := r.updateJob(ctx, j); updateErr != nil {
+		if errors.Is(updateErr, job.ErrLeaseLost) {
+			return r.abandonLostLease(ctx, j, updateErr)
+		}
+
 		r.logger.Error("failed to requeue job after launch failure",
 			log.String("job_id", j.ID.String()),
 			log.String("error", updateErr.Error()),
