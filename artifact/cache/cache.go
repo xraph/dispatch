@@ -224,7 +224,7 @@ func (c *Cache) rebuild() error {
 		}
 
 		// One file per hash on disk, so this never collides.
-		_ = c.entries.put(&entry{
+		c.entries.put(&entry{
 			hash: hashPrefix + d.Name(),
 			path: path,
 			size: info.Size(),
@@ -409,36 +409,38 @@ func (c *Cache) download(ctx context.Context, ref artifact.Ref, coord string) (*
 		return nil, rerr
 	}
 
-	hash := hashPrefix + sum
-
-	final, err := c.promote(tmpPath, sum)
+	final, err := c.shardPath(sum)
 	if err != nil {
 		c.removeQuietly(tmpPath)
 
 		return nil, err
 	}
 
-	// A different artifact may share these bytes and have staged them
-	// first. Content addressing makes that a cache hit, not a conflict:
-	// the existing entry's hold already covers this file, so ours stays
-	// uncommitted and the deferred release hands it straight back.
-	if existing, ok := c.entries.getByHash(hash); ok && existing.path == final {
-		c.entries.alias(coord, hash)
-
-		return existing, nil
-	}
-
 	e := &entry{
-		hash: hash,
-		path: final,
+		hash: hashPrefix + sum,
 		size: written,
 		hold: h,
 	}
 
-	// A racing download of the same bytes under different coordinates
-	// may have registered first. It owns the file and the hold that
-	// covers it; ours goes back with the deferred release.
-	if live := c.entries.put(e, coord); live != e {
+	// The rename and the registration happen together, under the entry
+	// table's lock, because eviction deletes a file under that same lock.
+	// Anything less and this download can adopt a file eviction has
+	// already condemned.
+	live, err := c.entries.publish(e, coord, func() (string, error) {
+		return final, c.promote(tmpPath, final)
+	})
+	if err != nil {
+		c.removeQuietly(tmpPath)
+
+		return nil, err
+	}
+
+	// A racing download of the same bytes may have registered first,
+	// either a different artifact that happens to share them or a retry
+	// of this one. It owns the file and the hold that covers it; ours
+	// goes back with the deferred release. Content addressing makes that
+	// a cache hit rather than a conflict.
+	if live != e {
 		return live, nil
 	}
 
@@ -472,28 +474,42 @@ func (c *Cache) copyAndHash(dst string, src io.Reader) (written int64, digest st
 	return written, hex.EncodeToString(hasher.Sum(nil)), nil
 }
 
-// promote moves a completed temp file into its content-addressed home.
-func (c *Cache) promote(tmpPath, sum string) (string, error) {
+// shardPath returns a digest's home, creating its shard directory.
+//
+// It is separate from promote because only promote has to be ordered
+// against eviction, and creating a directory eviction never removes
+// does not belong inside that lock.
+func (c *Cache) shardPath(sum string) (string, error) {
 	dir := filepath.Join(c.dir, hashDir, sum[:2])
 	if err := os.MkdirAll(dir, dirPerm); err != nil {
 		return "", fmt.Errorf("dispatch/artifact/cache: create shard dir: %w", err)
 	}
 
-	final := filepath.Join(dir, sum)
+	return filepath.Join(dir, sum), nil
+}
 
-	// Another stager may have promoted identical bytes first. Its copy is
-	// as good as ours, so drop ours rather than racing the rename.
+// promote moves a completed temp file into its content-addressed home.
+//
+// It runs under the entry table's lock, so a file it finds already at
+// final belongs to an entry that is in the table right now and cannot
+// be unlinked while this holds the lock. That is the whole reason the
+// caller passes it in rather than calling it first: eviction unlinks
+// under the same lock, so without that ordering a stat here can see a
+// file whose eviction has already been decided.
+func (c *Cache) promote(tmpPath, final string) error {
+	// Another stager promoted identical bytes first. Its copy is as good
+	// as ours, so drop ours rather than racing the rename.
 	if _, err := os.Stat(final); err == nil {
 		c.removeQuietly(tmpPath)
 
-		return final, nil
+		return nil
 	}
 
 	if err := os.Rename(tmpPath, final); err != nil {
-		return "", fmt.Errorf("dispatch/artifact/cache: promote: %w", err)
+		return fmt.Errorf("dispatch/artifact/cache: promote: %w", err)
 	}
 
-	return final, nil
+	return nil
 }
 
 // evictOne removes the least recently used unleased entry, releasing
@@ -502,18 +518,20 @@ func (c *Cache) promote(tmpPath, sum string) (string, error) {
 // zero bytes and is still progress, so the two answers cannot be folded
 // into one number without stalling reclamation on a zero-byte file.
 //
-// The table picks the victim and forgets it under its own lock, and it
-// only ever picks an entry no stager holds. By the time the file is
-// unlinked here nothing can reach it, which is what keeps the cache's
-// lease count and the manager's lease from disagreeing about who owns
-// these bytes.
+// The table picks the victim, forgets it and unlinks its file under its
+// own lock, and it only ever picks an entry no stager holds. Doing the
+// unlink there rather than here is what stops a concurrent download
+// adopting the victim's file in the gap: see entryTable.publish.
+//
+// Releasing the hold stays out here, because that takes the manager's
+// lock and the table's lock is still held inside evictLRU.
 func (c *Cache) evictOne() (int64, bool) {
-	victim := c.entries.evictLRU()
+	victim := c.entries.evictLRU(func(e *entry) {
+		c.removeQuietly(e.path)
+	})
 	if victim == nil {
 		return 0, false
 	}
-
-	c.removeQuietly(victim.path)
 
 	freed := victim.hold.bytes
 	c.releaseHold(victim.hold)

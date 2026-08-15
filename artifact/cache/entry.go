@@ -8,7 +8,9 @@ import (
 type entry struct {
 	// hash is the BLAKE3 content hash, formatted "blake3:<hex>".
 	hash string
-	// path is the absolute location of the file.
+	// path is the absolute location of the file. On the download path
+	// publish fills it in, because the file only has a home once it has
+	// been renamed into one, and that happens under the table's lock.
 	path string
 	// size is the file's byte count, as accounted against the manager.
 	size int64
@@ -98,8 +100,22 @@ func (t *entryTable) getByCoord(coord string) (*entry, bool) {
 }
 
 // put records an entry and, when coord is non-empty, its coordinate
-// alias. It returns whichever entry now owns the hash, which is not e
-// when one was already there.
+// alias.
+//
+// This is the startup path, walking files that are already on disk, so
+// it has no losing entry to hand back: one file per hash means the
+// collision putLocked guards against cannot happen here. Everything
+// that publishes an entry while the cache is live goes through publish
+// instead, because it has a file to put on disk and that has to happen
+// under this same lock.
+func (t *entryTable) put(e *entry, coord string) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	_ = t.putLocked(e, coord)
+}
+
+// putLocked is put's body, for callers already holding the lock.
 //
 // Two downloads of different coordinates can produce identical bytes at
 // the same moment and both miss the content-address check. Only one of
@@ -107,10 +123,7 @@ func (t *entryTable) getByCoord(coord string) (*entry, bool) {
 // entry's hold with no path back to the manager, leaking capacity for
 // the life of the process, and would drop an entry other stagers may
 // already be holding. The loser is told so and hands its hold back.
-func (t *entryTable) put(e *entry, coord string) *entry {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-
+func (t *entryTable) putLocked(e *entry, coord string) *entry {
 	live, ok := t.byHash[e.hash]
 	if !ok {
 		live = e
@@ -121,6 +134,38 @@ func (t *entryTable) put(e *entry, coord string) *entry {
 	t.aliasLocked(coord, live)
 
 	return live
+}
+
+// publish puts a downloaded file into its content-addressed home and
+// registers the entry that owns it, both under this lock. place does
+// the filesystem half and returns the path it settled on.
+//
+// The two halves cannot be separated. Eviction unlinks a victim's file
+// under this same lock, so serialising against it here is what upholds
+// the table's central invariant: a file exists at a hash's path if and
+// only if the table holds an entry for that hash. Promote outside the
+// lock and a download can stat a victim's file in the window after
+// eviction dropped it from the table and before it unlinked it, adopt
+// the doomed file, register an entry for it, and hand a live lease on a
+// path that is deleted a moment later. Worse, the entry stays in the
+// table pointing at nothing, so every later stager of that artifact is
+// handed the same corpse until it is evicted again.
+//
+// Both critical sections are two syscalls rather than scans, so
+// eviction stays O(1) in the size of the cache, which is what the
+// admission path needs from it.
+func (t *entryTable) publish(e *entry, coord string, place func() (string, error)) (*entry, error) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	path, err := place()
+	if err != nil {
+		return nil, err
+	}
+
+	e.path = path
+
+	return t.putLocked(e, coord), nil
 }
 
 // alias points a coordinate at an existing hash.
@@ -211,9 +256,17 @@ func (t *entryTable) release(e *entry) bool {
 	return true
 }
 
-// evictLRU removes the least recently used unleased entry and returns
-// it. It returns nil when every entry is leased.
-func (t *entryTable) evictLRU() *entry {
+// evictLRU removes the least recently used unleased entry, unlinks its
+// file through remove, and returns it. It returns nil, without calling
+// remove, when every entry is leased.
+//
+// remove runs under the lock on purpose: see publish. Dropping the
+// entry and deleting its file have to look like one step to a download
+// promoting the same hash, or that download adopts a file that is
+// already condemned. remove must not touch the resource manager.
+// Crediting the victim's bytes back is the caller's job, once this has
+// returned and the lock is gone.
+func (t *entryTable) evictLRU(remove func(*entry)) *entry {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 
@@ -223,6 +276,7 @@ func (t *entryTable) evictLRU() *entry {
 	}
 
 	t.forget(victim)
+	remove(victim)
 
 	return victim
 }
