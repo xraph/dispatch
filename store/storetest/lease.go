@@ -11,6 +11,7 @@ import (
 
 	"github.com/xraph/dispatch/id"
 	"github.com/xraph/dispatch/job"
+	"github.com/xraph/dispatch/resource"
 )
 
 // RunLeaseSuite runs the lease conformance suite against a backend.
@@ -37,6 +38,9 @@ func RunLeaseSuite(t *testing.T, newStore func(t *testing.T) LeaseStore) {
 	})
 	t.Run("DequeueRejectsLeaseWithoutWorker", func(t *testing.T) {
 		testDequeueRejectsLeaseWithoutWorker(t, newStore(t))
+	})
+	t.Run("DequeueComposesBudgetAndLeaseGrant", func(t *testing.T) {
+		testDequeueComposesBudgetAndLeaseGrant(t, newStore(t))
 	})
 	t.Run("RenewLeaseExtends", func(t *testing.T) {
 		testRenewLeaseExtends(t, newStore(t))
@@ -261,6 +265,63 @@ func testDequeueRejectsLeaseWithoutWorker(t *testing.T, s LeaseStore) {
 		t.Errorf("State = %s, want %s — the refused claim wrote to the job",
 			after.State, job.StatePending)
 	}
+}
+
+// testDequeueComposesBudgetAndLeaseGrant proves the two halves of
+// DequeueOpts a production caller always sends together actually work
+// together. worker/pool.go's fetchLoop sends Budget, CustomKeys,
+// WorkerID, and LeaseUntil in ONE DequeueOpts on every call — there is no
+// path that grants a lease without also carrying whatever budget the
+// worker has — but RunDequeueSuite (job/store.go's resource-aware fit
+// predicate) and the rest of this suite (the lease grant) had exercised
+// those two contracts only apart. A backend could satisfy both suites
+// while still getting the composed shape wrong, for example by granting
+// the lease before the fit predicate ran, or by having the two features
+// implemented against different code paths that silently disagree once
+// both parameters are non-zero.
+func testDequeueComposesBudgetAndLeaseGrant(t *testing.T, s LeaseStore) {
+	const queue = "lease-and-budget"
+
+	fits := newFitJob("fits", queue, resource.Set{resource.Memory: GiB}, withRunAtOffset(0))
+	exceeds := newFitJob("exceeds", queue,
+		resource.Set{resource.Memory: 8 * GiB}, withRunAtOffset(time.Minute))
+
+	mustEnqueue(t, s, fits, exceeds)
+
+	worker := id.NewWorkerID()
+	until := time.Now().UTC().Add(time.Minute)
+
+	got := mustDequeue(t, s, job.DequeueOpts{
+		Queues:     []string{queue},
+		Limit:      10,
+		Budget:     resource.Set{resource.Memory: 4 * GiB},
+		WorkerID:   worker,
+		LeaseUntil: until,
+	})
+
+	// The fit predicate ran: only "fits" was claimed.
+	wantExactly(t, got, "fits")
+
+	d := got[0]
+	if d.State != job.StateRunning {
+		t.Errorf("State = %s, want %s", d.State, job.StateRunning)
+	}
+	if d.WorkerID != worker {
+		t.Errorf("WorkerID = %s, want %s", d.WorkerID, worker)
+	}
+	if d.LeaseEpoch != 1 {
+		t.Errorf("LeaseEpoch = %d, want 1", d.LeaseEpoch)
+	}
+	if d.LeaseExpiresAt == nil {
+		t.Fatal("LeaseExpiresAt = nil, want the granted expiry")
+	}
+	if diff := d.LeaseExpiresAt.Sub(until); diff > time.Second || diff < -time.Second {
+		t.Errorf("LeaseExpiresAt = %v, want within 1s of %v", d.LeaseExpiresAt, until)
+	}
+
+	// The lease grant did not bypass the fit predicate for the oversized
+	// job: it stays fully pending, not merely unleased.
+	wantStillClaimable(t, s, queue, "exceeds")
 }
 
 func testRenewLeaseExtends(t *testing.T, s LeaseStore) {
