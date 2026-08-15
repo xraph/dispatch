@@ -107,6 +107,15 @@ func (s *Store) RenewLease(
 // ReclaimExpiredLeases returns expired-lease jobs to pending, fencing
 // their previous holders.
 func (s *Store) ReclaimExpiredLeases(ctx context.Context, limit int) ([]*job.Job, error) {
+	// A non-positive limit claims nothing. This early return is
+	// load-bearing on SQLite rather than a saved round trip: `LIMIT -1`
+	// means UNLIMITED here, the exact opposite of Postgres, where it is a
+	// runtime error. Without this, a negative limit would reclaim the
+	// entire table.
+	if limit <= 0 {
+		return nil, nil
+	}
+
 	now := time.Now().UTC()
 
 	var models []jobModel

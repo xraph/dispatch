@@ -9,23 +9,18 @@ import (
 	"github.com/xraph/dispatch/store/storetest"
 )
 
-// TestReclaimExpiredLeasesNonPositiveLimitReturnsNothing pins the
-// documented non-positive-limit behaviour of the mongo backend (see
-// job.LeaseStore.ReclaimExpiredLeases): `if limit <= 0 { return nil, nil }`
-// runs before any query, so limit == 0 and limit < 0 both reclaim
-// nothing and leave every running job untouched.
-//
-// This guard is the one that had to be added (commit 6644972) to stop
-// make([]*Job, 0, limit) panicking on a negative capacity — it does not
-// mean mongo chose "returns nothing" as a considered semantics, only that
-// the fix landed there. See the doc comment for the full story.
-func TestReclaimExpiredLeasesNonPositiveLimitReturnsNothing(t *testing.T) {
+// TestReclaimExpiredLeasesNonPositiveLimitReclaimsNothing pins the unified
+// non-positive-limit contract for job.LeaseStore.ReclaimExpiredLeases: a
+// limit <= 0 claims nothing and returns (nil, nil), and — critically —
+// leaves the expired job still reclaimable, so a later call with a
+// positive limit still returns it.
+func TestReclaimExpiredLeasesNonPositiveLimitReclaimsNothing(t *testing.T) {
 	uri := startMongo(t)
 	s := openStore(t, uri)
 	ctx := context.Background()
 
 	for _, limit := range []int{0, -1} {
-		j := storetest.RunningJob("expired", fmt.Sprintf("reclaim-nothing-%d", limit), 0)
+		j := storetest.RunningJob("expired", fmt.Sprintf("reclaim-nonpositive-%d", limit), 0)
 		if err := s.EnqueueJob(ctx, j); err != nil {
 			t.Fatalf("limit=%d: enqueue: %v", limit, err)
 		}
@@ -43,7 +38,17 @@ func TestReclaimExpiredLeasesNonPositiveLimitReturnsNothing(t *testing.T) {
 			t.Fatalf("limit=%d: get: %v", limit, err)
 		}
 		if after.State != job.StateRunning {
-			t.Errorf("limit=%d: State = %s, want still running (nothing reclaimed)", limit, after.State)
+			t.Fatalf("limit=%d: State = %s, want still running (nothing reclaimed)", limit, after.State)
+		}
+
+		// The job must still be reclaimable: a non-positive limit must not
+		// have silently consumed it.
+		reclaimed, err := s.ReclaimExpiredLeases(ctx, 10)
+		if err != nil {
+			t.Fatalf("limit=%d: follow-up ReclaimExpiredLeases: %v", limit, err)
+		}
+		if !storetest.Contains(reclaimed, j.ID) {
+			t.Fatalf("limit=%d: job not reclaimed by a follow-up call with a positive limit", limit)
 		}
 	}
 }

@@ -57,6 +57,13 @@ func (s *Store) RenewLease(
 // The claim and the read are one statement. The old select-then-update
 // reaper let two pools both see the same stale job and both reset it.
 func (s *Store) ReclaimExpiredLeases(ctx context.Context, limit int) ([]*job.Job, error) {
+	// A non-positive limit claims nothing. Postgres would already return
+	// nothing for LIMIT 0, but a negative LIMIT is a runtime error rather
+	// than an empty result, and neither is worth a round trip.
+	if limit <= 0 {
+		return nil, nil
+	}
+
 	var models []jobModel
 	err := s.pgdb.NewRaw(`
 		WITH expired AS (

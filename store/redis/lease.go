@@ -232,6 +232,12 @@ func (s *Store) RenewLease(
 // job — whichever script call runs second sees an epoch (or state) that
 // no longer matches and backs off.
 func (s *Store) ReclaimExpiredLeases(ctx context.Context, limit int) ([]*job.Job, error) {
+	// A non-positive limit claims nothing, matching the SQL backends'
+	// LIMIT 0 and DequeueOpts.Limit's behavior.
+	if limit <= 0 {
+		return nil, nil
+	}
+
 	t := now()
 
 	ids, err := s.rdb.SMembers(ctx, jobIDsKey).Result()
@@ -239,12 +245,9 @@ func (s *Store) ReclaimExpiredLeases(ctx context.Context, limit int) ([]*job.Job
 		return nil, fmt.Errorf("dispatch/redis: reclaim smembers: %w", err)
 	}
 
-	// limit <= 0 means unlimited here (mirrors the memory backend), so the
-	// break below only fires for a positive limit — but the capacity must
-	// still never go negative, hence max(limit, 0).
-	reclaimed := make([]*job.Job, 0, max(limit, 0))
+	reclaimed := make([]*job.Job, 0, limit)
 	for _, jID := range ids {
-		if limit > 0 && len(reclaimed) >= limit {
+		if len(reclaimed) >= limit {
 			break
 		}
 

@@ -498,40 +498,9 @@ type LeaseStore interface {
 	// The claim and the read are one atomic statement, so two pools
 	// reclaiming concurrently cannot both take the same job.
 	//
-	// A non-positive limit is not a portable request; callers should
-	// always pass a positive one. Unlike DequeueOpts.Limit, this was
-	// never unified, and the five backends genuinely disagree about what
-	// limit <= 0 means:
-	//
-	//	memory    limit == 0 and limit < 0 both mean unlimited — the loop
-	//	          only stops at len(reclaimed) >= limit when limit > 0
-	//	redis     limit == 0 and limit < 0 both mean unlimited, by the
-	//	          same guard, deliberately mirroring memory
-	//	mongo     limit == 0 and limit < 0 both return (nil, nil) before
-	//	          a single query runs
-	//	postgres  limit == 0 returns nothing (LIMIT 0 matches no row);
-	//	          limit < 0 is a Postgres runtime error — "LIMIT must not
-	//	          be negative" (SQLSTATE 2201W) — because limit is bound
-	//	          straight into `LIMIT $1` with no guard
-	//	sqlite    limit == 0 returns nothing (LIMIT 0 matches no row);
-	//	          limit < 0 means unlimited, because SQLite itself defines
-	//	          a negative LIMIT as "no limit" and limit is bound
-	//	          straight into `LIMIT ?` with no guard
-	//
-	// Mongo's guard is the one that had to be added, in commit 6644972:
-	// before it, this method built jobs := make([]*Job, 0, limit) ahead
-	// of the loop, which panics on a negative capacity. The limit <= 0
-	// guard fixed that panic — and, as a side effect, created the "mongo
-	// returns nothing" row above rather than resolving the disagreement
-	// the other four backends already had.
-	//
-	// Neither conformance suite exercises a non-positive limit, and no
-	// caller in this repository sends one: worker.Pool always passes
-	// DefaultReclaimBatch, and storetest.RunLeaseSuite always passes a
-	// positive constant. So the split above is latent, not live.
-	// Unifying the five would be a behaviour change to at least three of
-	// them and is deliberately not made here; documenting the split is
-	// what stops a caller assuming it.
+	// A non-positive limit claims nothing and returns (nil, nil), checked
+	// before any query runs. This matches DequeueOpts.Limit, so the two
+	// methods on this interface agree.
 	ReclaimExpiredLeases(ctx context.Context, limit int) ([]*Job, error)
 
 	// UpdateLeasedJob persists j only while the caller still holds the

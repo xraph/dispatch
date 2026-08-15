@@ -48,7 +48,14 @@ func (m *Store) RenewLease(
 
 // ReclaimExpiredLeases returns expired-lease jobs to pending, fencing
 // their previous holders.
+//
+// A non-positive limit claims nothing, matching DequeueOpts.Limit's
+// behavior rather than reading zero or negative as unlimited.
 func (m *Store) ReclaimExpiredLeases(_ context.Context, limit int) ([]*job.Job, error) {
+	if limit <= 0 {
+		return nil, nil
+	}
+
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -56,7 +63,7 @@ func (m *Store) ReclaimExpiredLeases(_ context.Context, limit int) ([]*job.Job, 
 
 	reclaimed := make([]*job.Job, 0, len(m.jobs))
 	for _, j := range m.jobs {
-		if limit > 0 && len(reclaimed) >= limit {
+		if len(reclaimed) >= limit {
 			break
 		}
 		if j.State != job.StateRunning {
