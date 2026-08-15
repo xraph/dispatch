@@ -578,6 +578,8 @@ func TestPoolRequeuesJobThatDoesNotFitLocally(t *testing.T) {
 		}))
 
 	j := newResourceJob("needs-four-fpga", resource.Set{"fpga": 4})
+	beforeRunAt := j.RunAt
+
 	if err := h.store.EnqueueJob(context.Background(), j); err != nil {
 		t.Fatalf("enqueue: %v", err)
 	}
@@ -586,6 +588,13 @@ func TestPoolRequeuesJobThatDoesNotFitLocally(t *testing.T) {
 
 	var got *job.Job
 
+	// requeueRateLimited (which requeueLocalMisfit reuses verbatim) now
+	// clears the assignment fields on its way back to pending, so
+	// StartedAt no longer survives as proof the store handed the job
+	// over. RunAt does: requeueRateLimited unconditionally pushes it to
+	// time.Now().Add(pollInterval), which nothing else in this test ever
+	// touches, so RunAt moving past its enqueue-time value is proof of
+	// exactly one thing — a real claim-then-requeue cycle ran.
 	waitFor(t, "job to be claimed and returned to pending", func() bool {
 		fetched, err := h.store.GetJob(context.Background(), j.ID)
 		if err != nil {
@@ -594,16 +603,28 @@ func TestPoolRequeuesJobThatDoesNotFitLocally(t *testing.T) {
 
 		got = fetched
 
-		return fetched.StartedAt != nil && fetched.State == job.StatePending
+		return fetched.State == job.StatePending && fetched.RunAt.After(beforeRunAt)
 	})
 
 	h.stop()
 
-	// StartedAt proves the store DID hand the job over — the key filter
-	// let it through, exactly as documented — and pending proves the
-	// worker refused it locally on quantity.
-	if got.StartedAt == nil || got.State != job.StatePending {
-		t.Fatalf("job state = %q, StartedAt = %v; want pending after a claim", got.State, got.StartedAt)
+	// RunAt pushed forward proves the store DID hand the job over — the
+	// key filter let it through, exactly as documented — and pending
+	// proves the worker refused it locally on quantity.
+	if !got.RunAt.After(beforeRunAt) || got.State != job.StatePending {
+		t.Fatalf("job state = %q, RunAt = %v (before %v); want pending with RunAt pushed forward after a claim",
+			got.State, got.RunAt, beforeRunAt)
+	}
+
+	// And the fields that record a worker assignment must NOT survive —
+	// this is the property the shared clearJobAssignment helper exists
+	// for: a pending job must never look claimed by a worker that no
+	// longer holds it.
+	if got.StartedAt != nil {
+		t.Errorf("StartedAt = %v, want nil — a job returned to pending must not still look claimed", got.StartedAt)
+	}
+	if !got.WorkerID.IsNil() {
+		t.Errorf("WorkerID = %s, want cleared", got.WorkerID)
 	}
 
 	if ran.Load() {

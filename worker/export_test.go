@@ -56,3 +56,17 @@ func (p *Pool) HeartbeatOnce(ctx context.Context) {
 func WithLeaseFenceForTest(ctx context.Context, store job.LeaseStore, workerID id.WorkerID, epoch int) context.Context {
 	return withLeaseFence(ctx, leaseFence{store: store, workerID: workerID, epoch: epoch})
 }
+
+// RequeueRateLimitedForTest runs requeueRateLimited against ctx, wiring
+// cancelCtx exactly as ReclaimOnce does, so a test can drive it without
+// running the pool's goroutines.
+func (p *Pool) RequeueRateLimitedForTest(ctx context.Context, j *job.Job) {
+	p.cancelCtx, p.cancelFunc = context.WithCancel(ctx)
+	defer p.cancelFunc()
+	p.requeueRateLimited(j)
+}
+
+// RequeueUndispatchedForTest exposes requeueUndispatched to worker_test.
+func (p *Pool) RequeueUndispatchedForTest(j *job.Job) {
+	p.requeueUndispatched(j)
+}

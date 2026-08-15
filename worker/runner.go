@@ -1112,6 +1112,7 @@ func (r *Runner) requeueAfterLaunchFailure(ctx context.Context, j *job.Job, now 
 	delay := r.backoff.Delay(j.RetryCount + 1)
 	j.RunAt = now.Add(delay)
 	j.State = job.StatePending
+	clearJobAssignment(j)
 
 	if updateErr := r.updateJob(ctx, j); updateErr != nil {
 		if errors.Is(updateErr, job.ErrLeaseLost) {

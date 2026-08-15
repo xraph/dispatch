@@ -725,11 +725,31 @@ func (p *Pool) releaseSlots(n int) {
 	}
 }
 
+// clearJobAssignment clears the fields that record which worker holds a
+// job's lease, so a job put back to pending does not keep looking
+// assigned to a worker that no longer holds it — stale WorkerID and
+// LeaseExpiresAt values an operator reads as "this pending job belongs to
+// a worker" when it does not.
+//
+// ReclaimExpiredLeases is the canonical clearer and additionally bumps
+// LeaseEpoch and EvictCount, which this helper deliberately leaves alone:
+// those are lease-eviction bookkeeping for another worker reclaiming a
+// job out from under its holder. Every caller here is the job's own
+// current holder putting it back — a rate limit, a shutdown, a launch
+// failure — not a reclamation, so there is no previous holder to fence.
+func clearJobAssignment(j *job.Job) {
+	j.WorkerID = id.WorkerID{}
+	j.StartedAt = nil
+	j.HeartbeatAt = nil
+	j.LeaseExpiresAt = nil
+}
+
 // requeueRateLimited returns a job the queue manager refused to pending
 // with a small delay.
 func (p *Pool) requeueRateLimited(j *job.Job) {
 	j.State = job.StatePending
 	j.RunAt = time.Now().Add(p.pollInterval)
+	clearJobAssignment(j)
 	updCtx, updCancel := p.callCtx()
 	updateErr := p.store.UpdateJob(updCtx, j)
 	updCancel()
@@ -749,7 +769,7 @@ func (p *Pool) requeueUndispatched(j *job.Job) {
 	defer cancel()
 	j.State = job.StatePending
 	j.RunAt = time.Now().UTC()
-	j.StartedAt = nil
+	clearJobAssignment(j)
 	if err := p.store.UpdateJob(ctx, j); err != nil {
 		p.logger.Warn("failed to return undispatched job to pending",
 			log.String("job_id", j.ID.String()),
@@ -994,9 +1014,7 @@ func (p *Pool) reapStaleJobsLegacy() {
 	for _, j := range stale {
 		j.State = job.StatePending
 		j.RunAt = time.Now().UTC()
-		j.WorkerID = id.WorkerID{} // Clear the worker assignment.
-		j.HeartbeatAt = nil
-		j.StartedAt = nil
+		clearJobAssignment(j)
 
 		updCtx, updCancel := p.callCtx()
 		updateErr := p.store.UpdateJob(updCtx, j)
