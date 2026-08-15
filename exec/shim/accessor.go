@@ -89,9 +89,12 @@ func (a *accessor) Open(_ context.Context, name string) (io.ReadCloser, error) {
 //
 // exec.InputSlot carries only a Name and a Path — inputs are not staged
 // through the artifact plane for out-of-process rungs yet, so there is no
-// Ref to hand back. This is a known Phase 2 limitation, not a bug: a
-// handler that calls Ref for a declared input gets false here even though
-// Path resolves.
+// Ref to hand back. This is a known Phase 2 limitation, not a bug, and
+// Path is no better off: nothing populates req.Inputs or req.InputDir for
+// a declared input today (see execution-isolation.mdx, "Inputs are not
+// yet staged out-of-process" — Phase 3 work), so a handler that calls Ref
+// for a declared input gets false here for the same reason Path returns
+// "" and Open returns artifact.ErrUnbound.
 func (a *accessor) Ref(string) (artifact.Ref, bool) {
 	return artifact.Ref{}, false
 }

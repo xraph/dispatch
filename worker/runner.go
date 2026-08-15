@@ -972,8 +972,10 @@ func (r *Runner) updateJob(ctx context.Context, j *job.Job) error {
 // It does not retry, requeue, or DLQ — both of those write, and the
 // winner's outcome must stand untouched. The handler's own side effects
 // need no cleanup here either: they already commit under attempt-scoped
-// ephemeral artifact keys, so a losing attempt's outputs are orphaned-
-// ephemeral and the existing sweeper collects them.
+// ephemeral artifact keys and carry a link, so SweepOrphans — which only
+// ever considers link-less artifacts — never sees them. What collects a
+// losing attempt's outputs is SweepEphemeral's owner-terminal path, once
+// every owner that links them has gone terminal.
 //
 // The extension registry emit reuses EmitJobFailed rather than adding a
 // new event: audit_hook and relay_hook both already implement
