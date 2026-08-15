@@ -7,6 +7,7 @@ import (
 
 	"github.com/xraph/dispatch/artifact"
 	"github.com/xraph/dispatch/id"
+	"github.com/xraph/dispatch/resource"
 )
 
 // ErrInvalidRequest marks a Request that cannot be executed as given.
@@ -59,6 +60,16 @@ type Request struct {
 	PriorOutputs []PriorOutput
 
 	Policy Policy
+
+	// ResourceLimits is the job's resolved enforcement ceiling
+	// (job.Job.ResourceLimits, see job.WithResourceLimits), carried
+	// across the execution boundary so a rung that can enforce something
+	// has the per-job numbers to enforce it with. A key absent or zero
+	// here means the job declared no ceiling for that dimension; it is
+	// not this type's business to say what a rung does about that —
+	// exec/subprocess.Executor falls back to its own deployment-wide
+	// default in that case, but exec itself has no opinion.
+	ResourceLimits resource.Set
 
 	// ScopeAppID and ScopeOrgID label the attempt for logs and metrics.
 	// They are identifiers, never credentials.

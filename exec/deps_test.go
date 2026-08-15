@@ -18,6 +18,11 @@ func TestExecIsALeafPackage(t *testing.T) {
 		"github.com/xraph/dispatch/id":       true,
 		"github.com/xraph/dispatch/scope":    true,
 		"github.com/xraph/dispatch/artifact": true,
+		// Request.ResourceLimits carries job.Job.ResourceLimits across the
+		// execution boundary so exec/subprocess can enforce it per job.
+		// resource is a leaf like id and artifact: it imports neither job
+		// nor exec, so this adds no cycle.
+		"github.com/xraph/dispatch/resource": true,
 	}
 
 	pkg, err := build.Import(self, "", 0)

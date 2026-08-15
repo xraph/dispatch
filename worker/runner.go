@@ -444,8 +444,15 @@ func (r *Runner) request(j *job.Job, policy exec.Policy) *exec.Request {
 		// check it exists to make.
 		Fingerprint: exec.Fingerprint(r.registry.Names()),
 		Policy:      policy,
-		ScopeAppID:  j.ScopeAppID,
-		ScopeOrgID:  j.ScopeOrgID,
+		// The job's resolved enforcement ceiling (see job.WithResourceLimits
+		// and engine.resolveResources), so a rung that can enforce
+		// something per job — exec/subprocess.Executor maps
+		// resource.Memory to RLIMIT_AS — has the number to enforce.
+		// j.ResourceLimits is nil for the overwhelming majority of jobs
+		// today, which is indistinguishable from "declared nothing".
+		ResourceLimits: j.ResourceLimits,
+		ScopeAppID:     j.ScopeAppID,
+		ScopeOrgID:     j.ScopeOrgID,
 	}
 	if j.Timeout > 0 {
 		req.Deadline = time.Now().Add(j.Timeout)

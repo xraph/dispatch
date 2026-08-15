@@ -17,6 +17,7 @@ import (
 	"github.com/xraph/dispatch/exec/shim"
 	"github.com/xraph/dispatch/exec/wire"
 	"github.com/xraph/dispatch/id"
+	"github.com/xraph/dispatch/resource"
 )
 
 // Name is the identifier this executor registers under.
@@ -38,9 +39,12 @@ const (
 // worker's own, in either case without AllowSameUser, sysProcAttr
 // (procattr_unix.go) sets Credential from uid/gid, and
 // buildEnv below passes rlimits to the child, which shim.Main applies via
-// syscall.Setrlimit. The kill ladder's SIGTERM-then-grace-period-then-
-// SIGKILL sequence runs in terminate (kill_unix.go), called from
-// killProcess below.
+// syscall.Setrlimit — except RLIMIT_AS, which buildEnv lets a job's own
+// resource.Memory ceiling (Request.ResourceLimits) override per attempt,
+// falling back to rlimits.AddressSpace only when the job declares
+// nothing. The kill ladder's SIGTERM-then-grace-period-then-SIGKILL
+// sequence runs in terminate (kill_unix.go), called from killProcess
+// below.
 type options struct {
 	binary        string
 	args          []string
@@ -629,10 +633,34 @@ func (e *Executor) buildEnv(req *exec.Request) []string {
 	// syscall.Setrlimit, since Go cannot set a child's rlimits through
 	// SysProcAttr.
 	merged[shim.EnvRlimitCore] = "0"
+
+	// RLIMIT_AS is the one dimension job.WithResourceLimits can actually
+	// reach today: resource.Memory maps onto it unambiguously. The job's
+	// own ceiling wins when it declares one — a job that asked for a
+	// tight limit must get it even when the deployment's WithRlimits sets
+	// a looser one — and the deployment-wide AddressSpace is the fallback
+	// for the (overwhelming majority of) jobs that declare nothing, so
+	// nobody who never touches the resource model loses the protection
+	// WithRlimits already gave them.
+	//
+	// resource.CPU has no comparably clean rlimit — RLIMIT_CPU caps total
+	// CPU *time*, not the instantaneous share a millicore budget
+	// describes — so it is deliberately left unmapped rather than given
+	// invented semantics. Every other Rlimits field (NoFile, NProc,
+	// FSize) has no per-job resource.Set counterpart at all, so those
+	// stay deployment-wide only, exactly as before.
+	addressSpace := int64(0)
 	if e.opts.hasRlimits {
-		if e.opts.rlimits.AddressSpace != 0 {
-			merged[shim.EnvRlimitAS] = strconv.FormatInt(e.opts.rlimits.AddressSpace, 10)
-		}
+		addressSpace = e.opts.rlimits.AddressSpace
+	}
+	if v := req.ResourceLimits[resource.Memory]; v > 0 {
+		addressSpace = v
+	}
+	if addressSpace != 0 {
+		merged[shim.EnvRlimitAS] = strconv.FormatInt(addressSpace, 10)
+	}
+
+	if e.opts.hasRlimits {
 		if e.opts.rlimits.NoFile != 0 {
 			merged[shim.EnvRlimitNoFile] = strconv.FormatInt(e.opts.rlimits.NoFile, 10)
 		}

@@ -21,6 +21,7 @@ import (
 	"github.com/xraph/dispatch/exec"
 	"github.com/xraph/dispatch/exec/shim"
 	"github.com/xraph/dispatch/exec/wire"
+	"github.com/xraph/dispatch/resource"
 )
 
 func TestClassifyTimedOutOverridesADecodedFrame(t *testing.T) {
@@ -86,11 +87,12 @@ func TestClassifyTimedOutOverridesADecodedFrame(t *testing.T) {
 // entirely rather than sent as "0" when left at its zero value.
 func TestBuildEnvCarriesRlimits(t *testing.T) {
 	tests := []struct {
-		name       string
-		hasRlimits bool
-		rlimits    Rlimits
-		wantHas    []string
-		wantAbsent []string
+		name          string
+		hasRlimits    bool
+		rlimits       Rlimits
+		requestLimits resource.Set
+		wantHas       []string
+		wantAbsent    []string
 	}{
 		{
 			name:       "no WithRlimits call still forces core to zero",
@@ -109,12 +111,49 @@ func TestBuildEnvCarriesRlimits(t *testing.T) {
 			},
 			wantAbsent: []string{shim.EnvRlimitNProc, shim.EnvRlimitFSize}, // left at zero, so omitted
 		},
+		{
+			// job.WithResourceLimits(resource.MemoryBytes(...)) resolved at
+			// enqueue and carried across on Request.ResourceLimits. Per-job
+			// must win over the deployment-wide WithRlimits default.
+			name:          "a job's own memory limit wins over the deployment-wide default",
+			hasRlimits:    true,
+			rlimits:       Rlimits{AddressSpace: 1 << 30},
+			requestLimits: resource.Set{resource.Memory: 2 << 30},
+			wantHas:       []string{shim.EnvRlimitAS + "=2147483648"},
+		},
+		{
+			// The overwhelming majority of jobs declare nothing: the
+			// deployment-wide default must still apply exactly as before.
+			name:          "deployment-wide default still applies when the job declares nothing",
+			hasRlimits:    true,
+			rlimits:       Rlimits{AddressSpace: 1 << 30},
+			requestLimits: nil,
+			wantHas:       []string{shim.EnvRlimitAS + "=1073741824"},
+		},
+		{
+			// A job's own limit must apply even with no deployment-wide
+			// WithRlimits call at all — the per-job ceiling is not merely
+			// an override of a configured default, it is enforced on its
+			// own.
+			name:          "a job's own memory limit applies with no deployment-wide default configured",
+			hasRlimits:    false,
+			requestLimits: resource.Set{resource.Memory: 512 << 20},
+			wantHas:       []string{shim.EnvRlimitAS + "=536870912"},
+		},
+		{
+			// resource.CPU has no clean rlimit mapping (see buildEnv's
+			// comment) and must never leak into RLIMIT_AS.
+			name:          "a CPU limit alone never produces RLIMIT_AS",
+			hasRlimits:    false,
+			requestLimits: resource.Set{resource.CPU: 2000},
+			wantAbsent:    []string{shim.EnvRlimitAS},
+		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			e := &Executor{opts: options{rlimits: tt.rlimits, hasRlimits: tt.hasRlimits}}
-			env := e.buildEnv(&exec.Request{})
+			env := e.buildEnv(&exec.Request{ResourceLimits: tt.requestLimits})
 
 			for _, want := range tt.wantHas {
 				if !slices.Contains(env, want) {

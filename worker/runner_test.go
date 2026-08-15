@@ -17,6 +17,7 @@ import (
 	"github.com/xraph/dispatch/ext"
 	"github.com/xraph/dispatch/id"
 	"github.com/xraph/dispatch/job"
+	"github.com/xraph/dispatch/resource"
 	"github.com/xraph/dispatch/worker"
 )
 
@@ -84,13 +85,14 @@ func TestRunner_ExecuteBuildsRequestFromJob(t *testing.T) {
 	runner, _ := newTestRunner(t, reg, executors)
 
 	j := &job.Job{
-		ID:         id.NewJobID(),
-		Name:       "test.job",
-		Payload:    []byte(`{"a":1}`),
-		RetryCount: 2,
-		MaxRetries: 3,
-		ScopeAppID: "app_1",
-		ScopeOrgID: "org_1",
+		ID:             id.NewJobID(),
+		Name:           "test.job",
+		Payload:        []byte(`{"a":1}`),
+		RetryCount:     2,
+		MaxRetries:     3,
+		ScopeAppID:     "app_1",
+		ScopeOrgID:     "org_1",
+		ResourceLimits: resource.Set{resource.Memory: 256 << 20},
 	}
 
 	if err := runner.Execute(context.Background(), j); err != nil {
@@ -110,6 +112,12 @@ func TestRunner_ExecuteBuildsRequestFromJob(t *testing.T) {
 	}
 	if rec.got.Policy.Level != exec.LevelProcess {
 		t.Errorf("Request.Policy.Level = %v, want %v", rec.got.Policy.Level, exec.LevelProcess)
+	}
+	// job.WithResourceLimits' resolved ceiling must cross the execution
+	// boundary intact — this is the only thing that lets an isolated
+	// rung enforce a per-job limit rather than a deployment-wide one.
+	if got := rec.got.ResourceLimits[resource.Memory]; got != 256<<20 {
+		t.Errorf("Request.ResourceLimits[memory] = %d, want %d", got, 256<<20)
 	}
 }
 
