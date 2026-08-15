@@ -346,7 +346,19 @@ func (s *Store) ListLinks(ctx context.Context, owner artifact.OwnerRef) ([]*arti
 	return out, nil
 }
 
-// FindLinkByName returns the highest-attempt link for an owner and name.
+// FindLinkByName returns the highest-attempt link for an owner and name,
+// breaking ties by CreatedAt descending — see the artifact.Store doc
+// comment for why ties happen and what the tie-break does and does not
+// fix.
+//
+// In practice a tie cannot reach this loop on this backend: LinkArtifact
+// stores each link in a hash keyed by linkField(name, attempt), so a
+// second write to the same (owner, name, attempt) overwrites the first
+// rather than coexisting as a second row the way the SQL and document
+// backends allow. The CreatedAt compare is kept anyway, both so this
+// backend agrees with the other four if that storage shape ever changes,
+// and because ListLinks' own sort does not otherwise guarantee which of
+// two equal-attempt entries — however they arose — comes first.
 func (s *Store) FindLinkByName(
 	ctx context.Context,
 	owner artifact.OwnerRef,
@@ -364,7 +376,8 @@ func (s *Store) FindLinkByName(
 			continue
 		}
 
-		if best == nil || l.Attempt > best.Attempt {
+		if best == nil || l.Attempt > best.Attempt ||
+			(l.Attempt == best.Attempt && l.CreatedAt.After(best.CreatedAt)) {
 			best = l
 		}
 	}

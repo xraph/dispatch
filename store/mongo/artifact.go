@@ -242,7 +242,10 @@ func (s *Store) findLinks(
 	return out, nil
 }
 
-// FindLinkByName returns the highest-attempt link for an owner and name.
+// FindLinkByName returns the highest-attempt link for an owner and name,
+// breaking ties by created_at descending — see the artifact.Store doc
+// comment for why ties happen and what the tie-break does and does not
+// fix.
 func (s *Store) FindLinkByName(
 	ctx context.Context,
 	owner artifact.OwnerRef,
@@ -251,7 +254,7 @@ func (s *Store) FindLinkByName(
 	var m artifactLinkModel
 
 	filter := bson.M{"owner_kind": string(owner.Kind), "owner_id": owner.ID, "name": name}
-	opt := options.FindOne().SetSort(bson.D{{Key: "attempt", Value: -1}})
+	opt := options.FindOne().SetSort(bson.D{{Key: "attempt", Value: -1}, {Key: "created_at", Value: -1}})
 
 	if err := s.mdb.Collection(colArtifactLinks).FindOne(ctx, filter, opt).Decode(&m); err != nil {
 		if isNoDocuments(err) {

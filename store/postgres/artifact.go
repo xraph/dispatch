@@ -234,7 +234,10 @@ func (s *Store) ListLinks(ctx context.Context, owner artifact.OwnerRef) ([]*arti
 	return out, nil
 }
 
-// FindLinkByName returns the highest-attempt link for an owner and name.
+// FindLinkByName returns the highest-attempt link for an owner and name,
+// breaking ties by created_at descending — see the artifact.Store doc
+// comment for why ties happen and what the tie-break does and does not
+// fix.
 func (s *Store) FindLinkByName(
 	ctx context.Context,
 	owner artifact.OwnerRef,
@@ -246,7 +249,7 @@ func (s *Store) FindLinkByName(
 		Where("owner_kind = ?", string(owner.Kind)).
 		Where("owner_id = ?", owner.ID).
 		Where("name = ?", name).
-		OrderExpr("attempt DESC").
+		OrderExpr("attempt DESC, created_at DESC").
 		Limit(1).
 		Scan(ctx)
 	if err != nil {

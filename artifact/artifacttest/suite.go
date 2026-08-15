@@ -35,6 +35,7 @@ func RunStoreSuite(t *testing.T, newStore func(t *testing.T) artifact.Store) {
 		{"LinkAndList", testLinkAndList},
 		{"LinkIdempotent", testLinkIdempotent},
 		{"FindLinkByNameAcrossAttempts", testFindLinkAcrossAttempts},
+		{"FindLinkByNameTieBreaksOnLatestWrite", testFindLinkTieBreaksOnLatestWrite},
 		{"ListArtifacts", testListArtifacts},
 		{"SweepNeverTouchesDurable", testSweepNeverTouchesDurable},
 		{"SweepOrphans", testSweepOrphans},
@@ -264,6 +265,64 @@ func testFindLinkAcrossAttempts(t *testing.T, s artifact.Store) {
 	_, err = s.FindLinkByName(ctx, owner, "never-made.png")
 	if !errors.Is(err, artifact.ErrNotFound) {
 		t.Fatalf("FindLinkByName(missing) = %v, want ErrNotFound", err)
+	}
+}
+
+// testFindLinkTieBreaksOnLatestWrite reproduces the seam a lost lease
+// opens: track D's reclaim increments EvictCount, never RetryCount, so a
+// reclaimed (zombie) holder and the worker it was fenced out for can both
+// commit a link at the identical (OwnerKind, OwnerID, Name, Attempt) —
+// two different ArtifactIDs, since that tuple alone is not the storage
+// key. FindLinkByName must resolve to whichever wrote last, not to
+// whichever a backend's map or query happens to enumerate first.
+func testFindLinkTieBreaksOnLatestWrite(t *testing.T, s artifact.Store) {
+	ctx := context.Background()
+	owner := newOwner()
+
+	zombie := newArtifact("zombie.bin", artifact.Ephemeral)
+	if err := s.CreateArtifact(ctx, zombie, nil); err != nil {
+		t.Fatalf("CreateArtifact zombie: %v", err)
+	}
+
+	winner := newArtifact("winner.bin", artifact.Ephemeral)
+	if err := s.CreateArtifact(ctx, winner, nil); err != nil {
+		t.Fatalf("CreateArtifact winner: %v", err)
+	}
+
+	base := time.Now().UTC()
+
+	if err := s.LinkArtifact(ctx, &artifact.Link{
+		ArtifactID: zombie.ID,
+		OwnerKind:  owner.Kind,
+		OwnerID:    owner.ID,
+		Role:       artifact.RoleOutput,
+		Name:       "output.bin",
+		Attempt:    3,
+		CreatedAt:  base,
+	}); err != nil {
+		t.Fatalf("LinkArtifact zombie: %v", err)
+	}
+
+	if err := s.LinkArtifact(ctx, &artifact.Link{
+		ArtifactID: winner.ID,
+		OwnerKind:  owner.Kind,
+		OwnerID:    owner.ID,
+		Role:       artifact.RoleOutput,
+		Name:       "output.bin",
+		Attempt:    3,
+		CreatedAt:  base.Add(time.Second),
+	}); err != nil {
+		t.Fatalf("LinkArtifact winner: %v", err)
+	}
+
+	got, err := s.FindLinkByName(ctx, owner, "output.bin")
+	if err != nil {
+		t.Fatalf("FindLinkByName: %v", err)
+	}
+
+	if got.ArtifactID != winner.ID {
+		t.Fatalf("FindLinkByName resolved to artifact %v, want the later write %v (winner); "+
+			"got the earlier write %v (zombie)", got.ArtifactID, winner.ID, zombie.ID)
 	}
 }
 

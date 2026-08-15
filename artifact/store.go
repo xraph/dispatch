@@ -84,9 +84,22 @@ type Store interface {
 	ListLinks(ctx context.Context, owner OwnerRef) ([]*Link, error)
 
 	// FindLinkByName returns the link for an owner and name with the
-	// highest attempt number. This is what IfAbsent uses to detect that a
-	// prior attempt already produced an output. Returns ErrNotFound if no
-	// attempt has produced it.
+	// highest attempt number, breaking ties by CreatedAt descending so
+	// resolution is deterministic and favours the later writer. This is
+	// what IfAbsent uses to detect that a prior attempt already produced
+	// an output. Returns ErrNotFound if no attempt has produced it.
+	//
+	// Ties happen: track D's lease reclaim increments EvictCount, never
+	// RetryCount, so a reclaimed (zombie) holder and the worker it was
+	// fenced out for can both commit a link at the same (OwnerKind,
+	// OwnerID, Name, Attempt) — CreateFenced closes the storage-key
+	// collision between them, but nothing stops two Link rows with
+	// different ArtifactIDs at the identical tuple. The CreatedAt
+	// tie-break is the cheap half of the fix: it makes which of the two
+	// wins deterministic instead of backend-dependent map/query order.
+	// The complete fix — carrying the fence token on Link itself, so the
+	// zombie's write is rejected rather than merely outrun — is a schema
+	// change across all five backends and remains open.
 	FindLinkByName(ctx context.Context, owner OwnerRef, name string) (*Link, error)
 
 	// ListArtifactsByOwner returns the artifacts linked to an owner,

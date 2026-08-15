@@ -188,7 +188,9 @@ func (s *Store) linksForOwnerLocked(owner artifact.OwnerRef) []*artifact.Link {
 }
 
 // FindLinkByName returns the link for an owner and name with the highest
-// attempt number.
+// attempt number, breaking ties by CreatedAt descending — see the
+// artifact.Store doc comment for why ties happen and what the tie-break
+// does and does not fix.
 func (s *Store) FindLinkByName(_ context.Context, owner artifact.OwnerRef, name string) (*artifact.Link, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -200,7 +202,8 @@ func (s *Store) FindLinkByName(_ context.Context, owner artifact.OwnerRef, name 
 			continue
 		}
 
-		if best == nil || l.Attempt > best.Attempt {
+		if best == nil || l.Attempt > best.Attempt ||
+			(l.Attempt == best.Attempt && l.CreatedAt.After(best.CreatedAt)) {
 			best = l
 		}
 	}
