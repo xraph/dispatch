@@ -93,6 +93,9 @@ func RunLeaseSuite(t *testing.T, newStore func(t *testing.T) LeaseStore) {
 	t.Run("UpdateLeasedJobRunnableWriteIsDequeueable", func(t *testing.T) {
 		testUpdateLeasedJobRunnableWriteIsDequeueable(t, newStore(t))
 	})
+	t.Run("ReclaimNonPositiveLimitReclaimsNothing", func(t *testing.T) {
+		testReclaimNonPositiveLimitReclaimsNothing(t, newStore(t))
+	})
 }
 
 func testDequeueGrantsLeaseAndBumpsEpoch(t *testing.T, s LeaseStore) {
@@ -1045,5 +1048,72 @@ func testUpdateLeasedJobRunnableWriteIsDequeueable(t *testing.T, s LeaseStore) {
 	}
 	if again[0].ID != claimed.ID {
 		t.Errorf("second DequeueJobs returned job %s, want %s", again[0].ID, claimed.ID)
+	}
+}
+
+// testReclaimNonPositiveLimitReclaimsNothing pins the non-positive-limit
+// contract: a limit <= 0 claims nothing and returns (nil, nil), and,
+// critically, leaves the expired job still reclaimable, so a later call
+// with a positive limit still returns it. That second half is what
+// separates "declined" from "silently consumed", and only it can tell the
+// unified guard apart from a backend that swallowed the job.
+//
+// The guard is a real behaviour change on three of the five backends, and
+// each of them broke differently, which is why this belongs in the shared
+// suite rather than in one backend's tests:
+//
+//	postgres  a negative limit reached `LIMIT $1` and Postgres rejected
+//	          the whole statement with "LIMIT must not be negative"
+//	          (SQLSTATE 2201W), so reclamation ERRORED rather than
+//	          returning empty
+//	sqlite    SQLite defines a negative LIMIT as "no limit", so the same
+//	          call reclaimed the ENTIRE table
+//	mongo     already returned (nil, nil) before any query, as a side
+//	          effect of a fix for a negative-capacity make() panic
+//	memory    read zero and negative as unlimited
+//	redis     read zero and negative as unlimited
+//
+// Two of those are opposites of each other: the same input that errored on
+// Postgres reclaimed everything on SQLite. A backend implementing this
+// interface outside the repository gets the contract checked for free by
+// running this suite, which is the point of moving it here.
+func testReclaimNonPositiveLimitReclaimsNothing(t *testing.T, s LeaseStore) {
+	ctx := context.Background()
+
+	for _, limit := range []int{0, -1} {
+		// A queue per limit, because the suite may be handed a shared
+		// store and reclamation is not queue-scoped.
+		j := RunningJob("expired", fmt.Sprintf("reclaim-nonpositive-%d", limit), 0)
+		if err := s.EnqueueJob(ctx, j); err != nil {
+			t.Fatalf("limit=%d: enqueue: %v", limit, err)
+		}
+
+		got, err := s.ReclaimExpiredLeases(ctx, limit)
+		if err != nil {
+			t.Fatalf("limit=%d: ReclaimExpiredLeases: %v", limit, err)
+		}
+		if len(got) != 0 {
+			t.Fatalf("limit=%d: reclaimed %d jobs, want 0", limit, len(got))
+		}
+
+		after, err := s.GetJob(ctx, j.ID)
+		if err != nil {
+			t.Fatalf("limit=%d: get: %v", limit, err)
+		}
+		if after.State != job.StateRunning {
+			t.Fatalf("limit=%d: State = %s, want still running (nothing reclaimed)",
+				limit, after.State)
+		}
+
+		// The job must still be reclaimable: a non-positive limit must not
+		// have silently consumed it.
+		reclaimed, err := s.ReclaimExpiredLeases(ctx, 10)
+		if err != nil {
+			t.Fatalf("limit=%d: follow-up ReclaimExpiredLeases: %v", limit, err)
+		}
+		if !Contains(reclaimed, j.ID) {
+			t.Fatalf("limit=%d: job not reclaimed by a follow-up call with a positive limit",
+				limit)
+		}
 	}
 }

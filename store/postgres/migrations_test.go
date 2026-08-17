@@ -15,6 +15,7 @@ import (
 	"github.com/xraph/dispatch/id"
 	"github.com/xraph/dispatch/job"
 	"github.com/xraph/dispatch/store/postgres"
+	"github.com/xraph/dispatch/store/storetest"
 )
 
 // leaseMigrationVersion is the version string of the lease migration,
@@ -285,9 +286,15 @@ func TestReclaimAdoptsRunningJobsWithoutLease(t *testing.T) {
 		},
 	}
 
+	// One container for every case, not one each. Each case asserts on the
+	// job it created rather than on the size of the result, so a shared
+	// database is safe, and five containers back to back is both slow and
+	// a needless chance for one of them to fail to come up.
+	dsn := startWakePostgres(t)
+
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			s := setupTestStore(t)
+			s := openWakeStore(t, dsn)
 			ctx := context.Background()
 
 			conn, err := pgdriver.Unwrap(s.DB()).AcquireConn(ctx)
@@ -318,7 +325,9 @@ func TestReclaimAdoptsRunningJobsWithoutLease(t *testing.T) {
 				t.Fatalf("ReclaimExpiredLeases: %v", err)
 			}
 
-			got := len(reclaimed) == 1 && reclaimed[0].ID == j.ID
+			// Membership, not length: the store is shared across cases,
+			// and reclamation is not queue-scoped.
+			got := storetest.Contains(reclaimed, j.ID)
 			if got != tt.want {
 				if tt.want {
 					t.Fatalf("job was not reclaimed but should have been: %s", tt.why)
@@ -326,8 +335,12 @@ func TestReclaimAdoptsRunningJobsWithoutLease(t *testing.T) {
 
 				t.Fatalf("job was reclaimed but must not be: %s", tt.why)
 			}
-			if tt.want && reclaimed[0].State != job.StatePending {
-				t.Errorf("reclaimed job state = %v, want pending", reclaimed[0].State)
+			if tt.want {
+				for _, r := range reclaimed {
+					if r.ID == j.ID && r.State != job.StatePending {
+						t.Errorf("reclaimed job state = %v, want pending", r.State)
+					}
+				}
 			}
 		})
 	}
