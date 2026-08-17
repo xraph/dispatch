@@ -87,11 +87,20 @@ type Engine struct {
 	logger     log.Logger
 
 	// stopOnce guards the executor-close path in Stop against a double
-	// call. Stop's other steps (deregister, scheduler stop, dispatcher
-	// stop) already tolerate being run twice — the dispatcher and pool
-	// both check their own started/running flags — but Close has no such
-	// guard of its own, and closing a rung's clients or child processes
-	// twice is not guaranteed safe the way a no-op Stop is.
+	// call. Stop's other steps tolerate being run twice: the cron
+	// scheduler and the dispatcher each hold their own sync.Once, and the
+	// worker pool checks a running flag. Close has no such guard of its
+	// own, and closing a rung's clients or child processes twice is not
+	// guaranteed safe the way a no-op Stop is.
+	//
+	// The scope is deliberately narrow rather than wrapping all of Stop.
+	// Every other step owns its own idempotence, at the layer that knows
+	// what repeating it costs, and this guard exists only for the one
+	// step that cannot. Widening it here would put that decision in the
+	// wrong place and hide from a reader that the subsystems already
+	// handle it. Note a second Stop returns nil rather than the first
+	// call's error, because the dispatcher's own Once reports nothing on
+	// a repeat call.
 	stopOnce sync.Once
 
 	// Workflow subsystem.

@@ -2,6 +2,7 @@ package dispatch
 
 import (
 	"context"
+	"sync"
 	"time"
 
 	log "github.com/xraph/go-utils/log"
@@ -48,6 +49,15 @@ type Dispatcher struct {
 
 	// started tracks whether Start has been called.
 	started bool
+
+	// stopOnce makes Stop idempotent. Engine.Stop calls it, and a service
+	// shutting down from both a signal handler and a deferred cleanup
+	// reaches it twice; without this, extensions saw two shutdown events
+	// and the store was closed twice. A sync.Once rather than a flag
+	// because those two callers are usually different goroutines, which
+	// an unsynchronised bool would not separate. This mirrors
+	// cron.Scheduler, which guards its own Stop the same way.
+	stopOnce sync.Once
 }
 
 // New creates a new Dispatcher with the given options.
@@ -93,18 +103,26 @@ func (d *Dispatcher) Start(ctx context.Context) error {
 
 // Stop gracefully shuts down the dispatcher.
 func (d *Dispatcher) Stop(ctx context.Context) error {
-	if d.pool != nil && d.started {
-		if err := d.pool.Stop(ctx); err != nil {
-			d.logger.Error("pool stop error", log.String("error", err.Error()))
+	// A second call returns nil rather than repeating the first call's
+	// error, matching Pool.Stop, which also reports nothing once it has
+	// already stopped.
+	var err error
+
+	d.stopOnce.Do(func() {
+		if d.pool != nil && d.started {
+			if poolErr := d.pool.Stop(ctx); poolErr != nil {
+				d.logger.Error("pool stop error", log.String("error", poolErr.Error()))
+			}
 		}
-	}
-	if d.extensions != nil {
-		d.extensions.EmitShutdown(ctx)
-	}
-	if d.store != nil {
-		return d.store.Close()
-	}
-	return nil
+		if d.extensions != nil {
+			d.extensions.EmitShutdown(ctx)
+		}
+		if d.store != nil {
+			err = d.store.Close()
+		}
+	})
+
+	return err
 }
 
 // WithConcurrency sets the maximum number of concurrent job processors.
