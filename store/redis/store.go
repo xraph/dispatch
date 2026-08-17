@@ -5,14 +5,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
-
-	goredis "github.com/redis/go-redis/v9"
 
 	log "github.com/xraph/go-utils/log"
 
 	"github.com/xraph/grove/kv"
-	"github.com/xraph/grove/kv/drivers/redisdriver"
 
 	"github.com/xraph/dispatch/artifact"
 	"github.com/xraph/dispatch/cluster"
@@ -52,11 +50,15 @@ func WithKeyPrefix(prefix string) Option {
 	return func(s *Store) { s.keys = newKeys(prefix) }
 }
 
-// Store implements the composite store.Store interface backed by Redis
-// via Grove KV.
+// Store implements the composite store.Store interface over Grove KV.
+//
+// Every operation goes through kv.Store, including the sorted sets,
+// hashes, scripts, and streams the job queue depends on. Nothing here
+// imports a Redis client, so the backend this runs against is whichever
+// kv driver the caller opened -- provided it supports those capabilities,
+// which Store checks at construction.
 type Store struct {
 	kv     *kv.Store
-	rdb    goredis.UniversalClient
 	keys   keys
 	logger log.Logger
 }
@@ -66,14 +68,53 @@ type Store struct {
 func New(store *kv.Store, opts ...Option) *Store {
 	s := &Store{
 		kv:     store,
-		rdb:    redisdriver.UnwrapClient(store),
 		keys:   newKeys(""),
 		logger: log.NewNoopLogger(),
 	}
 	for _, o := range opts {
 		o(s)
 	}
+
+	if missing := MissingCapabilities(store); len(missing) > 0 {
+		// A driver without these cannot run jobs: the queue is a sorted
+		// set and the lease handoff is a script. Saying so at startup
+		// beats the first dequeue failing with ErrNotSupported, which
+		// reads like a bug rather than a mis-chosen backend.
+		s.logger.Warn("dispatch/redis: kv driver is missing required capabilities",
+			log.String("missing", strings.Join(missing, ", ")),
+		)
+	}
+
 	return s
+}
+
+// MissingCapabilities reports which of the kv capabilities this store
+// needs the given driver does not provide. An empty result means the
+// driver can back Dispatch.
+//
+// Sorted sets order the queue, sets enumerate ids, hashes hold artifact
+// links, scripts make the lease compare-and-set atomic, and streams carry
+// events. Pub/Sub is absent from this list deliberately: it only shortens
+// wake latency, and polling covers its absence.
+func MissingCapabilities(store *kv.Store) []string {
+	var missing []string
+
+	for _, c := range []struct {
+		name string
+		has  bool
+	}{
+		{"sorted sets", store.SupportsSortedSets()},
+		{"sets", store.SupportsSets()},
+		{"hashes", store.SupportsHashes()},
+		{"scripts", store.SupportsScripts()},
+		{"streams", store.SupportsStreams()},
+	} {
+		if !c.has {
+			missing = append(missing, c.name)
+		}
+	}
+
+	return missing
 }
 
 // KV returns the underlying KV store.
@@ -104,11 +145,6 @@ func now() time.Time {
 // isNotFound checks if an error is a KV not-found sentinel.
 func isNotFound(err error) bool {
 	return errors.Is(err, kv.ErrNotFound)
-}
-
-// isRedisNil checks if an error is a Redis nil (key not found).
-func isRedisNil(err error) bool {
-	return errors.Is(err, goredis.Nil)
 }
 
 // getEntity retrieves and decodes a JSON entity from a KV key.
