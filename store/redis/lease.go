@@ -3,11 +3,8 @@ package redis
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"time"
-
-	goredis "github.com/redis/go-redis/v9"
 
 	kvdriver "github.com/xraph/grove/kv/driver"
 
@@ -112,7 +109,7 @@ import (
 // complete updated entity, pre-serialized by Go (see the file comment
 // above for why Lua never re-serializes it itself).
 // Returns 1 on renewal, 0 when the lease is no longer held.
-var renewLeaseScript = goredis.NewScript(`
+const renewLeaseScript = `
 local raw = redis.call('GET', KEYS[1])
 if not raw then
   return 0
@@ -129,7 +126,7 @@ if tostring(j.lease_epoch) ~= ARGV[2] then
 end
 redis.call('SET', KEYS[1], ARGV[3])
 return 1
-`)
+`
 
 // reclaimScript resets one job to pending only if it is still running at
 // the expected epoch.
@@ -148,7 +145,7 @@ return 1
 // above for why Lua never mutates or re-serializes it itself).
 // Returns 1 when this caller took the job, 0 when someone else did (or
 // the job moved out of running between Go's read and this script).
-var reclaimScript = goredis.NewScript(`
+const reclaimScript = `
 local raw = redis.call('GET', KEYS[1])
 if not raw then
   return 0
@@ -162,7 +159,7 @@ if tostring(j.lease_epoch) ~= ARGV[1] then
 end
 redis.call('SET', KEYS[1], ARGV[2])
 return 1
-`)
+`
 
 // The grant is not in this file: it travels on job.DequeueOpts and is
 // applied by claimCandidates, in the same read-modify-write that writes
@@ -206,16 +203,17 @@ func (s *Store) RenewLease(
 		return fmt.Errorf("dispatch/redis: renew lease marshal: %w", marshalErr)
 	}
 
-	res, err := renewLeaseScript.Run(ctx, s.rdb,
+	raw, err := s.kv.Eval(ctx, renewLeaseScript,
 		[]string{key},
 		workerID.String(),
 		epoch,
 		blob,
-	).Int64()
-	if err != nil && !errors.Is(err, goredis.Nil) {
+	)
+	if err != nil {
 		return fmt.Errorf("dispatch/redis: renew lease: %w", err)
 	}
-	if res != 1 {
+
+	if scriptInt(raw) != 1 {
 		return job.ErrLeaseLost
 	}
 
@@ -362,16 +360,36 @@ func (s *Store) ReclaimExpiredLeases(ctx context.Context, limit int) ([]*job.Job
 // found. Go no longer needs to ask Redis what the row says; it already
 // knows, because it wrote it.
 func (s *Store) claimExpired(ctx context.Context, jID string, epoch int, blob []byte) (bool, error) {
-	res, err := reclaimScript.Run(ctx, s.rdb,
+	raw, err := s.kv.Eval(ctx, reclaimScript,
 		[]string{s.keys.job(jID)},
 		epoch,
 		blob,
-	).Int64()
-	if err != nil && !errors.Is(err, goredis.Nil) {
+	)
+	if err != nil {
 		return false, fmt.Errorf("dispatch/redis: reclaim claim: %w", err)
 	}
 
-	return res == 1, nil
+	return scriptInt(raw) == 1, nil
+}
+
+// scriptInt reads the integer a Lua script returned.
+//
+// Both scripts here answer with 1 or 0, and a script that returned
+// nothing at all yields nil, which is not a failure: it means the guard
+// did not match, so the caller did not win. Anything unexpected reads as
+// zero for the same reason -- these are guards, and the safe answer to
+// "did I win?" is no.
+func scriptInt(v any) int64 {
+	switch typed := v.(type) {
+	case int64:
+		return typed
+	case int:
+		return int64(typed)
+	case float64:
+		return int64(typed)
+	default:
+		return 0
+	}
 }
 
 // UpdateLeasedJob persists j only while the caller still holds the
@@ -450,22 +468,22 @@ func (s *Store) UpdateLeasedJob(ctx context.Context, j *job.Job, workerID id.Wor
 	runnable := job.State(next.State) == job.StatePending || job.State(next.State) == job.StateRetrying
 
 	if runnable {
-		z := goredis.Z{Score: jobScore(next.Priority, next.RunAt), Member: jID}
-		if zErr := s.rdb.ZAdd(ctx, qk, z).Err(); zErr != nil {
+		z := kvdriver.ScoredMember{Score: jobScore(next.Priority, next.RunAt), Member: jID}
+		if _, zErr := s.kv.ZAdd(ctx, qk, z); zErr != nil {
 			return fmt.Errorf("dispatch/redis: update leased job index add: %w", zErr)
 		}
 	}
 
-	res, err := renewLeaseScript.Run(ctx, s.rdb,
+	raw, err := s.kv.Eval(ctx, renewLeaseScript,
 		[]string{key},
 		workerID.String(),
 		epoch,
 		blob,
-	).Int64()
-	if err != nil && !errors.Is(err, goredis.Nil) {
+	)
+	if err != nil {
 		return fmt.Errorf("dispatch/redis: update leased job: %w", err)
 	}
-	if res != 1 {
+	if scriptInt(raw) != 1 {
 		// The read above found the row, so a failed compare-and-set here
 		// means the lease moved on between that read and the script
 		// running — not that the row is gone. dispatch.ErrJobNotFound is
@@ -476,7 +494,7 @@ func (s *Store) UpdateLeasedJob(ctx context.Context, j *job.Job, workerID id.Wor
 	}
 
 	if !runnable {
-		if zErr := s.rdb.ZRem(ctx, qk, jID).Err(); zErr != nil {
+		if _, zErr := s.kv.ZRem(ctx, qk, jID); zErr != nil {
 			return fmt.Errorf("dispatch/redis: update leased job index remove: %w", zErr)
 		}
 	}
