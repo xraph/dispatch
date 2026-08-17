@@ -128,3 +128,16 @@ func (k keys) artifactLinks(artifactID string) string {
 func (k keys) ownerLinks(kind, ownerID string) string {
 	return k.full(fmt.Sprintf("artifact_owner_links:%s:%s", kind, ownerID))
 }
+
+// ── Job usage keys ──
+
+// usage returns the key for a usage record.
+func (k keys) usage(id string) string { return k.full("usage:" + id) }
+
+// usageIndex is the Sorted Set of every usage record scored by record
+// time. It drives the newest-first read and the retention sweep.
+func (k keys) usageIndex() string { return k.full("usage_index") }
+
+// usageName is the per-definition Sorted Set, which is the read an
+// estimator actually makes: one job name over a time window.
+func (k keys) usageName(name string) string { return k.full("usage_name:" + name) }

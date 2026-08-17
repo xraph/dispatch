@@ -36,18 +36,20 @@ const (
 	colWorkers       = "dispatch_workers"
 	colArtifacts     = "dispatch_artifacts"
 	colArtifactLinks = "dispatch_artifact_links"
+	colJobUsage      = "dispatch_job_usage"
 )
 
 // Ensure Store implements all subsystem interfaces at compile time.
 var (
-	_ job.Store      = (*Store)(nil)
-	_ workflow.Store = (*Store)(nil)
-	_ cron.Store     = (*Store)(nil)
-	_ dlq.Store      = (*Store)(nil)
-	_ event.Store    = (*Store)(nil)
-	_ cluster.Store  = (*Store)(nil)
-	_ artifact.Store = (*Store)(nil)
-	_ job.LeaseStore = (*Store)(nil)
+	_ job.Store         = (*Store)(nil)
+	_ workflow.Store    = (*Store)(nil)
+	_ cron.Store        = (*Store)(nil)
+	_ dlq.Store         = (*Store)(nil)
+	_ event.Store       = (*Store)(nil)
+	_ cluster.Store     = (*Store)(nil)
+	_ artifact.Store    = (*Store)(nil)
+	_ job.UsageRecorder = (*Store)(nil)
+	_ job.LeaseStore    = (*Store)(nil)
 )
 
 // Store is a grove ORM implementation of store.Store using MongoDB driver.
@@ -152,6 +154,12 @@ func isDuplicateKey(err error) bool {
 // migrationIndexes returns the index definitions for all dispatch collections.
 func migrationIndexes() map[string][]mongod.IndexModel {
 	return map[string][]mongod.IndexModel{
+		colJobUsage: {
+			// The estimator reads one definition over a window; the
+			// retention sweep reads by age alone.
+			{Keys: bson.D{{Key: "name", Value: 1}, {Key: "recorded_at", Value: -1}}},
+			{Keys: bson.D{{Key: "recorded_at", Value: 1}}},
+		},
 		colArtifacts: {
 			// Partial unique index on the storage coordinates: only live
 			// rows collide, so a purged key becomes reusable.

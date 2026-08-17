@@ -614,6 +614,55 @@ func init() {
 				return nil
 			},
 		},
+
+		// Create the job usage table.
+		&migrate.Migration{
+			Name:    "create_job_usage_table",
+			Version: "20261007120000",
+			Up: func(ctx context.Context, exec migrate.Executor) error {
+				if _, err := exec.Exec(ctx, `
+					CREATE TABLE IF NOT EXISTS dispatch_job_usage (
+						id              TEXT PRIMARY KEY,
+						job_id          TEXT NOT NULL,
+						name            TEXT NOT NULL,
+						queue           TEXT NOT NULL DEFAULT 'default',
+						attempt         INTEGER NOT NULL DEFAULT 0,
+						status          TEXT NOT NULL,
+						input_bytes     INTEGER NOT NULL DEFAULT 0,
+						resources       TEXT,
+						wall_time_ns    INTEGER NOT NULL DEFAULT 0,
+						cpu_time_ns     INTEGER NOT NULL DEFAULT 0,
+						peak_rss        INTEGER NOT NULL DEFAULT 0,
+						disk_written    INTEGER NOT NULL DEFAULT 0,
+						executor        TEXT,
+						scope_app_id    TEXT,
+						scope_org_id    TEXT,
+						worker_id       TEXT,
+						recorded_at     TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+					)`); err != nil {
+					return err
+				}
+
+				// The estimator reads by definition over a window; the
+				// retention sweep reads by age alone.
+				if _, err := exec.Exec(ctx, `
+					CREATE INDEX IF NOT EXISTS idx_dispatch_job_usage_name_time
+						ON dispatch_job_usage (name, recorded_at DESC)`); err != nil {
+					return err
+				}
+
+				_, err := exec.Exec(ctx, `
+					CREATE INDEX IF NOT EXISTS idx_dispatch_job_usage_recorded
+						ON dispatch_job_usage (recorded_at)`)
+
+				return err
+			},
+			Down: func(ctx context.Context, exec migrate.Executor) error {
+				_, err := exec.Exec(ctx, `DROP TABLE IF EXISTS dispatch_job_usage`)
+
+				return err
+			},
+		},
 	)
 }
 
