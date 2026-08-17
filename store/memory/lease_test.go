@@ -269,3 +269,117 @@ func TestReclaimAdoptsRunningJobsWithoutLease(t *testing.T) {
 		}
 	}
 }
+
+// TestClearOwnershipStopsTheRequeueLivelock reproduces what a stale lease
+// column does to a job returned to pending from outside the lease
+// machinery, which is the shape api.retryJob wrote before it called
+// job.Job.ClearOwnership.
+//
+// UpdateJob writes the whole row on every backend, lease columns included,
+// so a failed job put back to pending keeps the LeaseExpiresAt of its
+// failed run. Nothing notices while it sits pending. It goes wrong at the
+// next claim that grants no lease, which is a supported call
+// (DequeueOpts.Grants() is false whenever LeaseUntil is zero): that claim
+// writes state and worker but never touches the expiry, so the job enters
+// running already holding a lapsed lease and the next sweep takes it
+// straight back. Claimed, reclaimed, claimed again, forever.
+//
+// The memory store is used because the bug is in the shared job row rather
+// than in any one backend's SQL, and this keeps the reproduction in-process.
+func TestClearOwnershipStopsTheRequeueLivelock(t *testing.T) {
+	ctx := context.Background()
+
+	// requeued builds the row a retry path produces, with or without the
+	// ownership reset, and returns it after one no-lease claim.
+	requeued := func(t *testing.T, clear bool) (*memory.Store, *job.Job) {
+		t.Helper()
+
+		s := memory.New()
+		lapsed := time.Now().UTC().Add(-time.Hour)
+		started := lapsed.Add(-time.Minute)
+		j := &job.Job{
+			ID:             id.NewJobID(),
+			Name:           "retried",
+			Queue:          "default",
+			Payload:        []byte(`{}`),
+			State:          job.StateFailed,
+			MaxRetries:     3,
+			WorkerID:       id.NewWorkerID(),
+			StartedAt:      &started,
+			HeartbeatAt:    &lapsed,
+			LeaseExpiresAt: &lapsed,
+			LeaseEpoch:     4,
+		}
+		if err := s.EnqueueJob(ctx, j); err != nil {
+			t.Fatalf("enqueue: %v", err)
+		}
+
+		// What api.retryJob does to a failed job.
+		j.State = job.StatePending
+		j.RetryCount = 0
+		j.LastError = ""
+		j.RunAt = time.Now().UTC()
+		j.CompletedAt = nil
+		if clear {
+			j.ClearOwnership()
+		} else {
+			j.StartedAt = nil // the old code cleared only this
+		}
+		if err := s.UpdateJob(ctx, j); err != nil {
+			t.Fatalf("update: %v", err)
+		}
+
+		// A claim that grants no lease: legal, and it never writes the
+		// lease columns.
+		claimed, err := s.DequeueJobs(ctx, job.DequeueOpts{
+			Queues: []string{"default"},
+			Limit:  1,
+		})
+		if err != nil {
+			t.Fatalf("dequeue: %v", err)
+		}
+		if len(claimed) != 1 {
+			t.Fatalf("claimed %d jobs, want 1", len(claimed))
+		}
+
+		return s, j
+	}
+
+	t.Run("without the reset the claim is immediately reclaimed", func(t *testing.T) {
+		s, j := requeued(t, false)
+
+		reclaimed, err := s.ReclaimExpiredLeases(ctx, 10)
+		if err != nil {
+			t.Fatalf("ReclaimExpiredLeases: %v", err)
+		}
+		if findJob(reclaimed, j.ID) == nil {
+			t.Skip("the stale expiry no longer reaches running; this reproduction is obsolete")
+		}
+	})
+
+	t.Run("with the reset the claim survives", func(t *testing.T) {
+		s, j := requeued(t, true)
+
+		reclaimed, err := s.ReclaimExpiredLeases(ctx, 10)
+		if err != nil {
+			t.Fatalf("ReclaimExpiredLeases: %v", err)
+		}
+		if findJob(reclaimed, j.ID) != nil {
+			t.Fatal("a freshly claimed job was reclaimed: the retry path left a lapsed " +
+				"lease on the row, so it can never run to completion")
+		}
+
+		got, err := s.GetJob(ctx, j.ID)
+		if err != nil {
+			t.Fatalf("get: %v", err)
+		}
+		if got.State != job.StateRunning {
+			t.Errorf("State = %s, want running", got.State)
+		}
+		// The fencing token must not have been rolled back by the reset.
+		if got.LeaseEpoch < 4 {
+			t.Errorf("LeaseEpoch = %d, want >= 4: a fencing token must never move backwards",
+				got.LeaseEpoch)
+		}
+	})
+}

@@ -105,3 +105,30 @@ type Job struct {
 	// healthy job to the DLQ having never once errored.
 	EvictCount int `json:"evict_count"`
 }
+
+// ClearOwnership drops every field recording who was running the job and
+// under what lease, so the row can safely go back to a runnable state.
+//
+// Any path returning a job to pending from outside the lease machinery
+// has to call this, and forgetting to is not a cosmetic bug. UpdateJob
+// writes the whole row on every backend, lease columns included, so a
+// stale LeaseExpiresAt survives the transition. The row is then pending
+// with an expiry already in the past, which is harmless right up until
+// the job is claimed by a caller that does not grant a lease
+// (DequeueOpts.Grants() is false whenever LeaseUntil is zero). That claim
+// writes state and worker but never touches the expiry, so the job lands
+// in running carrying a lapsed lease and the very next sweep reclaims it.
+// It is claimed and reclaimed forever, never running to completion, with
+// EvictCount climbing on every pass.
+//
+// LeaseEpoch is deliberately left alone. It is a fencing token and must
+// never move backwards, and there is nothing to fence here: a job being
+// returned to pending by this path is not running, so no holder exists to
+// invalidate. ReclaimExpiredLeases increments it because it is taking the
+// job away from a live holder, which is a different situation.
+func (j *Job) ClearOwnership() {
+	j.WorkerID = id.WorkerID{}
+	j.StartedAt = nil
+	j.HeartbeatAt = nil
+	j.LeaseExpiresAt = nil
+}

@@ -108,8 +108,12 @@ func (a *API) retryJob(ctx forge.Context, _ *RetryJobRequest) (*struct{}, error)
 	j.RetryCount = 0
 	j.LastError = ""
 	j.RunAt = now
-	j.StartedAt = nil
 	j.CompletedAt = nil
+	// Clears StartedAt along with the worker and lease fields the failed
+	// run left behind. Without it the retried job carries a lapsed
+	// lease_expires_at into pending, which a claim that grants no lease
+	// never overwrites — see job.Job.ClearOwnership for why that livelocks.
+	j.ClearOwnership()
 	if updateErr := js.UpdateJob(ctx.Context(), j); updateErr != nil {
 		return nil, fmt.Errorf("retry job: %w", updateErr)
 	}
