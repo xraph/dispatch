@@ -361,9 +361,33 @@ type dlqEntryModel struct {
 	FailedAt   time.Time  `grove:"failed_at,notnull,default:current_timestamp"`
 	ReplayedAt *time.Time `grove:"replayed_at"`
 	CreatedAt  time.Time  `grove:"created_at,notnull,default:current_timestamp"`
+
+	// Carried so Replay can rebuild a job that behaves like the failed
+	// one; see the dlq.Entry doc. The two resource sets are stored with
+	// the same jsonb codec jobModel uses rather than as scalar columns:
+	// nothing queries a DLQ row by resource requirement, so the scalar
+	// split that dequeue's fit predicate needs buys nothing here.
+	Priority         int    `grove:"priority,notnull,default:0"`
+	Timeout          int64  `grove:"timeout,notnull,default:0"`
+	LeaseTTL         int64  `grove:"lease_ttl,notnull,default:0"`
+	ArtifactBindings []byte `grove:"artifact_bindings,type:bytea"`
+	Resources        []byte `grove:"resources,type:jsonb"`
+	ResourceLimits   []byte `grove:"resource_limits,type:jsonb"`
+	ResourceClass    string `grove:"resource_class,notnull,default:''"`
+	InputBytes       int64  `grove:"input_bytes,notnull,default:0"`
+	PrimaryInputHash string `grove:"primary_input_hash"`
 }
 
-func toDLQModel(e *dlq.Entry) *dlqEntryModel {
+func toDLQModel(e *dlq.Entry) (*dlqEntryModel, error) {
+	resources, err := resource.EncodeSet(e.Resources)
+	if err != nil {
+		return nil, fmt.Errorf(errPrefix+"encode dlq resources: %w", err)
+	}
+	limits, err := resource.EncodeSet(e.ResourceLimits)
+	if err != nil {
+		return nil, fmt.Errorf(errPrefix+"encode dlq resource limits: %w", err)
+	}
+
 	return &dlqEntryModel{
 		ID:         e.ID.String(),
 		JobID:      e.JobID.String(),
@@ -378,7 +402,17 @@ func toDLQModel(e *dlq.Entry) *dlqEntryModel {
 		FailedAt:   e.FailedAt,
 		ReplayedAt: e.ReplayedAt,
 		CreatedAt:  e.CreatedAt,
-	}
+
+		Priority:         e.Priority,
+		Timeout:          int64(e.Timeout),
+		LeaseTTL:         int64(e.LeaseTTL),
+		ArtifactBindings: e.ArtifactBindings,
+		Resources:        resources,
+		ResourceLimits:   limits,
+		ResourceClass:    e.ResourceClass,
+		InputBytes:       e.InputBytes,
+		PrimaryInputHash: e.PrimaryInputHash,
+	}, nil
 }
 
 func fromDLQModel(m *dlqEntryModel) (*dlq.Entry, error) {
@@ -390,6 +424,15 @@ func fromDLQModel(m *dlqEntryModel) (*dlq.Entry, error) {
 	parsedJobID, err := id.ParseJobID(m.JobID)
 	if err != nil {
 		return nil, fmt.Errorf(errPrefix+"parse job id %q: %w", m.JobID, err)
+	}
+
+	resources, err := resource.DecodeSet(m.Resources)
+	if err != nil {
+		return nil, fmt.Errorf(errPrefix+"decode dlq resources: %w", err)
+	}
+	limits, err := resource.DecodeSet(m.ResourceLimits)
+	if err != nil {
+		return nil, fmt.Errorf(errPrefix+"decode dlq resource limits: %w", err)
 	}
 
 	return &dlq.Entry{
@@ -406,6 +449,16 @@ func fromDLQModel(m *dlqEntryModel) (*dlq.Entry, error) {
 		FailedAt:   m.FailedAt,
 		ReplayedAt: m.ReplayedAt,
 		CreatedAt:  m.CreatedAt,
+
+		Priority:         m.Priority,
+		Timeout:          time.Duration(m.Timeout),
+		LeaseTTL:         time.Duration(m.LeaseTTL),
+		ArtifactBindings: m.ArtifactBindings,
+		Resources:        resources,
+		ResourceLimits:   limits,
+		ResourceClass:    m.ResourceClass,
+		InputBytes:       m.InputBytes,
+		PrimaryInputHash: m.PrimaryInputHash,
 	}, nil
 }
 

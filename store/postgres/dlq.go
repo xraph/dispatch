@@ -12,9 +12,11 @@ import (
 
 // PushDLQ adds a failed job entry to the dead letter queue.
 func (s *Store) PushDLQ(ctx context.Context, entry *dlq.Entry) error {
-	m := toDLQModel(entry)
-	_, err := s.pgdb.NewInsert(m).Exec(ctx)
+	m, err := toDLQModel(entry)
 	if err != nil {
+		return err
+	}
+	if _, err = s.pgdb.NewInsert(m).Exec(ctx); err != nil {
 		return fmt.Errorf(errPrefix+"push dlq: %w", err)
 	}
 	return nil

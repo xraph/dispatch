@@ -67,3 +67,15 @@ func TestLeaseConformance(t *testing.T) {
 		return openWakeStore(t, dsn)
 	})
 }
+
+func TestDLQConformance(t *testing.T) {
+	// One container for the suite, like TestLeaseConformance above; the
+	// cases work only on entries they created, so a shared store is fine.
+	dsn := startWakePostgres(t)
+
+	storetest.RunDLQSuite(t, func(t *testing.T) storetest.DLQStore {
+		t.Helper()
+
+		return openWakeStore(t, dsn)
+	})
+}

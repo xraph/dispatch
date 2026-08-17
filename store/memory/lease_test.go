@@ -383,3 +383,11 @@ func TestClearOwnershipStopsTheRequeueLivelock(t *testing.T) {
 		}
 	})
 }
+
+func TestDLQConformance(t *testing.T) {
+	storetest.RunDLQSuite(t, func(t *testing.T) storetest.DLQStore {
+		t.Helper()
+
+		return memory.New()
+	})
+}

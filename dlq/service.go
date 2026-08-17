@@ -36,6 +36,19 @@ func (s *Service) Push(ctx context.Context, j *job.Job, jobErr error) error {
 		ScopeOrgID: j.ScopeOrgID,
 		FailedAt:   now,
 		CreatedAt:  now,
+
+		// Everything below is carried so Replay can rebuild a job that
+		// behaves like this one. See the Entry doc for why it is copied
+		// from the job rather than looked up from the definition.
+		Priority:         j.Priority,
+		Timeout:          j.Timeout,
+		LeaseTTL:         j.LeaseTTL,
+		ArtifactBindings: j.ArtifactBindings,
+		Resources:        j.Resources,
+		ResourceLimits:   j.ResourceLimits,
+		ResourceClass:    j.ResourceClass,
+		InputBytes:       j.InputBytes,
+		PrimaryInputHash: j.PrimaryInputHash,
 	}
 	return s.store.PushDLQ(ctx, entry)
 }

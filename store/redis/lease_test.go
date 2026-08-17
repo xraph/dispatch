@@ -280,3 +280,13 @@ func TestReclaimAdoptsPreUpgradeRunningJobs(t *testing.T) {
 		}
 	}
 }
+
+func TestDLQConformance(t *testing.T) {
+	connStr := startRedis(t)
+
+	storetest.RunDLQSuite(t, func(t *testing.T) storetest.DLQStore {
+		t.Helper()
+
+		return openRedisStore(t, connStr)
+	})
+}

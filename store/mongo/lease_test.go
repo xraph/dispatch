@@ -187,3 +187,13 @@ func TestLeaseConformance(t *testing.T) {
 		return openStore(t, uri)
 	})
 }
+
+func TestDLQConformance(t *testing.T) {
+	uri := startMongo(t)
+
+	storetest.RunDLQSuite(t, func(t *testing.T) storetest.DLQStore {
+		t.Helper()
+
+		return openStore(t, uri)
+	})
+}

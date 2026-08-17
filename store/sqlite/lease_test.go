@@ -66,3 +66,11 @@ func TestLeaseConformance(t *testing.T) {
 		return openSqliteStore(t)
 	})
 }
+
+func TestDLQConformance(t *testing.T) {
+	storetest.RunDLQSuite(t, func(t *testing.T) storetest.DLQStore {
+		t.Helper()
+
+		return openSqliteStore(t)
+	})
+}

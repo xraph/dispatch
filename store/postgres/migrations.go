@@ -643,6 +643,52 @@ func init() {
 						DROP COLUMN IF EXISTS primary_input_hash`)
 			},
 		},
+		// Replay rebuilds a job from the DLQ row and enqueues it directly,
+		// so anything the row does not carry the replayed job silently takes
+		// a default for. Losing lease_ttl is the worst of them: a six-hour
+		// job replayed on the pool default lease lapses mid-run and is
+		// reclaimed and restarted forever without finishing. See dlq.Entry.
+		&migrate.Migration{
+			Name:    "dlq_job_execution_columns",
+			Version: "20260817120000",
+			Up: func(ctx context.Context, exec migrate.Executor) error {
+				// One batched ALTER under a lock timeout, for the reason
+				// spelled out on job_resource_columns: each statement takes
+				// its own ACCESS EXCLUSIVE lock, and a waiting request for
+				// one blocks every other writer queued behind it. Every
+				// default here is a constant, so this is a catalog update
+				// rather than a table rewrite.
+				//
+				// dispatch_dlq is written once per dead job and read by the
+				// dashboard, so it is far less contended than dispatch_jobs.
+				// The timeout is kept anyway: cheap when uncontended, and the
+				// failure it prevents is a deploy that never finishes.
+				return withLockTimeout(ctx, exec, `
+					ALTER TABLE dispatch_dlq
+						ADD COLUMN IF NOT EXISTS priority           INT NOT NULL DEFAULT 0,
+						ADD COLUMN IF NOT EXISTS timeout            BIGINT NOT NULL DEFAULT 0,
+						ADD COLUMN IF NOT EXISTS lease_ttl          BIGINT NOT NULL DEFAULT 0,
+						ADD COLUMN IF NOT EXISTS artifact_bindings  BYTEA,
+						ADD COLUMN IF NOT EXISTS resources          JSONB,
+						ADD COLUMN IF NOT EXISTS resource_limits    JSONB,
+						ADD COLUMN IF NOT EXISTS resource_class     TEXT NOT NULL DEFAULT '',
+						ADD COLUMN IF NOT EXISTS input_bytes        BIGINT NOT NULL DEFAULT 0,
+						ADD COLUMN IF NOT EXISTS primary_input_hash TEXT`)
+			},
+			Down: func(ctx context.Context, exec migrate.Executor) error {
+				return withLockTimeout(ctx, exec, `
+					ALTER TABLE dispatch_dlq
+						DROP COLUMN IF EXISTS priority,
+						DROP COLUMN IF EXISTS timeout,
+						DROP COLUMN IF EXISTS lease_ttl,
+						DROP COLUMN IF EXISTS artifact_bindings,
+						DROP COLUMN IF EXISTS resources,
+						DROP COLUMN IF EXISTS resource_limits,
+						DROP COLUMN IF EXISTS resource_class,
+						DROP COLUMN IF EXISTS input_bytes,
+						DROP COLUMN IF EXISTS primary_input_hash`)
+			},
+		},
 	)
 }
 

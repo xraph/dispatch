@@ -8,6 +8,7 @@ import (
 	"github.com/xraph/dispatch"
 	"github.com/xraph/dispatch/dlq"
 	"github.com/xraph/dispatch/id"
+	"github.com/xraph/dispatch/resource"
 )
 
 // ── JSON model for KV storage ──
@@ -26,6 +27,19 @@ type dlqEntity struct {
 	FailedAt   time.Time  `json:"failed_at"`
 	ReplayedAt *time.Time `json:"replayed_at,omitempty"`
 	CreatedAt  time.Time  `json:"created_at"`
+
+	// Carried so Replay can rebuild a job that behaves like the failed
+	// one; see the dlq.Entry doc. resource.Set is a map[string]int64 and
+	// marshals natively, like every other field here.
+	Priority         int           `json:"priority,omitempty"`
+	Timeout          time.Duration `json:"timeout,omitempty"`
+	LeaseTTL         time.Duration `json:"lease_ttl,omitempty"`
+	ArtifactBindings []byte        `json:"artifact_bindings,omitempty"`
+	Resources        resource.Set  `json:"resources,omitempty"`
+	ResourceLimits   resource.Set  `json:"resource_limits,omitempty"`
+	ResourceClass    string        `json:"resource_class,omitempty"`
+	InputBytes       int64         `json:"input_bytes,omitempty"`
+	PrimaryInputHash string        `json:"primary_input_hash,omitempty"`
 }
 
 func toDLQEntity(e *dlq.Entry) *dlqEntity {
@@ -43,6 +57,16 @@ func toDLQEntity(e *dlq.Entry) *dlqEntity {
 		FailedAt:   e.FailedAt,
 		ReplayedAt: e.ReplayedAt,
 		CreatedAt:  e.CreatedAt,
+
+		Priority:         e.Priority,
+		Timeout:          e.Timeout,
+		LeaseTTL:         e.LeaseTTL,
+		ArtifactBindings: e.ArtifactBindings,
+		Resources:        e.Resources,
+		ResourceLimits:   e.ResourceLimits,
+		ResourceClass:    e.ResourceClass,
+		InputBytes:       e.InputBytes,
+		PrimaryInputHash: e.PrimaryInputHash,
 	}
 }
 
@@ -68,6 +92,16 @@ func fromDLQEntity(e *dlqEntity) (*dlq.Entry, error) {
 		FailedAt:   e.FailedAt,
 		ReplayedAt: e.ReplayedAt,
 		CreatedAt:  e.CreatedAt,
+
+		Priority:         e.Priority,
+		Timeout:          e.Timeout,
+		LeaseTTL:         e.LeaseTTL,
+		ArtifactBindings: e.ArtifactBindings,
+		Resources:        e.Resources,
+		ResourceLimits:   e.ResourceLimits,
+		ResourceClass:    e.ResourceClass,
+		InputBytes:       e.InputBytes,
+		PrimaryInputHash: e.PrimaryInputHash,
 	}, nil
 }
 

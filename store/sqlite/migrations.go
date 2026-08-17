@@ -559,6 +559,61 @@ func init() {
 				return nil
 			},
 		},
+		// Replay rebuilds a job from the DLQ row and enqueues it directly,
+		// so anything the row does not carry the replayed job silently takes
+		// a default for. Losing lease_ttl is the worst of them: a six-hour
+		// job replayed on the pool default lease lapses mid-run and is
+		// reclaimed and restarted forever without finishing. See dlq.Entry.
+		&migrate.Migration{
+			Name:    "dlq_job_execution_columns",
+			Version: "20260817120000",
+			Up: func(ctx context.Context, exec migrate.Executor) error {
+				// Every ADD COLUMN is guarded, for the reason spelled out on
+				// the lease and resource migrations above: SQLite has no ADD
+				// COLUMN IF NOT EXISTS and grove runs Up outside any
+				// transaction, so a failure partway through would leave some
+				// columns added and no row in grove_migrations, and every
+				// retry from every pod would then die on "duplicate column
+				// name" forever.
+				for _, c := range []struct{ name, ddl string }{
+					{"priority", `INTEGER NOT NULL DEFAULT 0`},
+					{"timeout", `INTEGER NOT NULL DEFAULT 0`},
+					{"lease_ttl", `INTEGER NOT NULL DEFAULT 0`},
+					{"artifact_bindings", `BLOB`},
+					// Nullable TEXT, matching dispatch_jobs: resource.
+					// EncodeSetString writes NULL for a zero Set rather than
+					// an empty object, so a job that declared nothing reads
+					// back as a nil Set rather than an empty one.
+					{"resources", `TEXT`},
+					{"resource_limits", `TEXT`},
+					{"resource_class", `TEXT NOT NULL DEFAULT ''`},
+					{"input_bytes", `INTEGER NOT NULL DEFAULT 0`},
+					{"primary_input_hash", `TEXT`},
+				} {
+					if err := addColumnIfMissing(ctx, exec,
+						"dispatch_dlq", c.name, c.ddl); err != nil {
+						return err
+					}
+				}
+
+				return nil
+			},
+			Down: func(ctx context.Context, exec migrate.Executor) error {
+				// Guarded for the same reason Up is: a Down that fails
+				// halfway must be re-runnable.
+				for _, col := range []string{
+					"priority", "timeout", "lease_ttl", "artifact_bindings",
+					"resources", "resource_limits", "resource_class",
+					"input_bytes", "primary_input_hash",
+				} {
+					if err := dropColumnIfPresent(ctx, exec, "dispatch_dlq", col); err != nil {
+						return err
+					}
+				}
+
+				return nil
+			},
+		},
 	)
 }
 

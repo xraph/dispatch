@@ -382,6 +382,20 @@ type dlqEntryModel struct {
 	FailedAt   time.Time  `grove:"failed_at,notnull" bson:"failed_at"`
 	ReplayedAt *time.Time `grove:"replayed_at"    bson:"replayed_at,omitempty"`
 	CreatedAt  time.Time  `grove:"created_at,notnull" bson:"created_at"`
+
+	// Carried so Replay can rebuild a job that behaves like the failed
+	// one; see the dlq.Entry doc. Mongo is schemaless, so these need no
+	// migration, and resource.Set marshals as a native BSON subdocument
+	// exactly as it does on jobModel.
+	Priority         int          `grove:"priority,notnull,default:0" bson:"priority"`
+	Timeout          int64        `grove:"timeout,notnull,default:0"  bson:"timeout"`
+	LeaseTTL         int64        `grove:"lease_ttl,notnull,default:0" bson:"lease_ttl"`
+	ArtifactBindings []byte       `grove:"artifact_bindings"          bson:"artifact_bindings,omitempty"`
+	Resources        resource.Set `grove:"resources"                  bson:"resources,omitempty"`
+	ResourceLimits   resource.Set `grove:"resource_limits"            bson:"resource_limits,omitempty"`
+	ResourceClass    string       `grove:"resource_class"             bson:"resource_class"`
+	InputBytes       int64        `grove:"input_bytes,notnull,default:0" bson:"input_bytes"`
+	PrimaryInputHash string       `grove:"primary_input_hash"         bson:"primary_input_hash"`
 }
 
 func toDLQModel(e *dlq.Entry) *dlqEntryModel {
@@ -399,6 +413,16 @@ func toDLQModel(e *dlq.Entry) *dlqEntryModel {
 		FailedAt:   e.FailedAt,
 		ReplayedAt: e.ReplayedAt,
 		CreatedAt:  e.CreatedAt,
+
+		Priority:         e.Priority,
+		Timeout:          int64(e.Timeout),
+		LeaseTTL:         int64(e.LeaseTTL),
+		ArtifactBindings: e.ArtifactBindings,
+		Resources:        e.Resources,
+		ResourceLimits:   e.ResourceLimits,
+		ResourceClass:    e.ResourceClass,
+		InputBytes:       e.InputBytes,
+		PrimaryInputHash: e.PrimaryInputHash,
 	}
 }
 
@@ -427,6 +451,16 @@ func fromDLQModel(m *dlqEntryModel) (*dlq.Entry, error) {
 		FailedAt:   m.FailedAt,
 		ReplayedAt: m.ReplayedAt,
 		CreatedAt:  m.CreatedAt,
+
+		Priority:         m.Priority,
+		Timeout:          time.Duration(m.Timeout),
+		LeaseTTL:         time.Duration(m.LeaseTTL),
+		ArtifactBindings: m.ArtifactBindings,
+		Resources:        m.Resources,
+		ResourceLimits:   m.ResourceLimits,
+		ResourceClass:    m.ResourceClass,
+		InputBytes:       m.InputBytes,
+		PrimaryInputHash: m.PrimaryInputHash,
 	}, nil
 }
 

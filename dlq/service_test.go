@@ -10,6 +10,7 @@ import (
 	dispatchDLQ "github.com/xraph/dispatch/dlq"
 	"github.com/xraph/dispatch/id"
 	"github.com/xraph/dispatch/job"
+	"github.com/xraph/dispatch/resource"
 	"github.com/xraph/dispatch/store/memory"
 )
 
@@ -203,5 +204,95 @@ func TestService_Replay_NotFoundReturnsError(t *testing.T) {
 	_, err := svc.Replay(ctx, fakeID)
 	if err == nil {
 		t.Fatal("expected error for non-existent DLQ entry")
+	}
+}
+
+// TestService_Replay_PreservesExecutionFields covers the round trip that
+// makes a replayed job behave like the one that failed.
+//
+// Replay builds a job and calls EnqueueJob directly rather than going back
+// through the engine, so nothing re-derives these values on the way out:
+// whatever Push failed to capture, or Replay failed to restore, the new
+// job silently runs with a default for. LeaseTTL is the one that hurts.
+// A six-hour job replayed on the pool default lease lapses mid-run, gets
+// reclaimed, restarts, and never finishes, which is exactly what a per-job
+// TTL exists to prevent.
+func TestService_Replay_PreservesExecutionFields(t *testing.T) {
+	s := memory.New()
+	svc := dispatchDLQ.NewService(s, s)
+	ctx := context.Background()
+
+	j := newTestJob("long-render", []byte(`{"frame":42}`))
+	j.Priority = 7
+	j.Timeout = 90 * time.Minute
+	j.LeaseTTL = 6 * time.Hour
+	j.ArtifactBindings = []byte(`{"input":"artifact_abc"}`)
+	j.Resources = resource.Set{"cpu_milli": 2000}
+	j.ResourceLimits = resource.Set{"cpu_milli": 4000}
+	j.ResourceClass = "gpu-large"
+	j.InputBytes = 4096
+	j.PrimaryInputHash = "sha256:deadbeef"
+
+	if err := svc.Push(ctx, j, errors.New("handler exploded")); err != nil {
+		t.Fatalf("Push: %v", err)
+	}
+
+	entries, err := s.ListDLQ(ctx, dispatchDLQ.ListOpts{Limit: 10})
+	if err != nil {
+		t.Fatalf("ListDLQ: %v", err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("listed %d entries, want 1", len(entries))
+	}
+
+	replayed, err := svc.Replay(ctx, entries[0].ID)
+	if err != nil {
+		t.Fatalf("Replay: %v", err)
+	}
+
+	if replayed.LeaseTTL != j.LeaseTTL {
+		t.Errorf("LeaseTTL = %v, want %v: the replayed job would fall back to the "+
+			"pool default and be reclaimed mid-run forever", replayed.LeaseTTL, j.LeaseTTL)
+	}
+	if replayed.Timeout != j.Timeout {
+		t.Errorf("Timeout = %v, want %v", replayed.Timeout, j.Timeout)
+	}
+	if replayed.Priority != j.Priority {
+		t.Errorf("Priority = %d, want %d", replayed.Priority, j.Priority)
+	}
+	if string(replayed.ArtifactBindings) != string(j.ArtifactBindings) {
+		t.Errorf("ArtifactBindings = %q, want %q", replayed.ArtifactBindings, j.ArtifactBindings)
+	}
+	if replayed.Resources["cpu_milli"] != 2000 {
+		t.Errorf("Resources = %v, want cpu_milli 2000", replayed.Resources)
+	}
+	if replayed.ResourceLimits["cpu_milli"] != 4000 {
+		t.Errorf("ResourceLimits = %v, want cpu_milli 4000", replayed.ResourceLimits)
+	}
+	if replayed.ResourceClass != j.ResourceClass {
+		t.Errorf("ResourceClass = %q, want %q", replayed.ResourceClass, j.ResourceClass)
+	}
+	if replayed.InputBytes != j.InputBytes {
+		t.Errorf("InputBytes = %d, want %d", replayed.InputBytes, j.InputBytes)
+	}
+	if replayed.PrimaryInputHash != j.PrimaryInputHash {
+		t.Errorf("PrimaryInputHash = %q, want %q", replayed.PrimaryInputHash, j.PrimaryInputHash)
+	}
+
+	// A replay is a fresh job, not a resumption of the failed one: it must
+	// not inherit the identity, the exhausted retry budget, or any of the
+	// ownership the failed run left behind.
+	if replayed.ID == j.ID {
+		t.Error("replayed job reused the failed job's ID")
+	}
+	if replayed.RetryCount != 0 {
+		t.Errorf("RetryCount = %d, want 0", replayed.RetryCount)
+	}
+	if replayed.State != job.StatePending {
+		t.Errorf("State = %s, want pending", replayed.State)
+	}
+	if replayed.LeaseExpiresAt != nil || replayed.StartedAt != nil {
+		t.Errorf("replayed job carries ownership from the failed run: "+
+			"lease_expires_at=%v started_at=%v", replayed.LeaseExpiresAt, replayed.StartedAt)
 	}
 }
