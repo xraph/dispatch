@@ -933,7 +933,12 @@ func (p *Pool) sendHeartbeats() {
 	}
 }
 
-// reaperLoop periodically reaps stale jobs whose heartbeat has expired.
+// reaperLoop periodically returns jobs whose worker has gone away.
+//
+// What "gone away" means depends on the store. For one implementing
+// job.LeaseStore this reclaims lapsed leases, and the heartbeat only
+// matters because renewing the lease writes it; for any other store it
+// falls back to the old heartbeat-age sweep. reapStaleJobs picks.
 func (p *Pool) reaperLoop() {
 	defer p.wg.Done()
 

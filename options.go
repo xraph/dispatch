@@ -171,10 +171,16 @@ func WithHeartbeatInterval(d time.Duration) Option {
 	}
 }
 
-// WithStaleJobThreshold sets how long without a heartbeat before a
-// job is considered stale and reaped. Default 30s. The reaper runs
-// at this interval too, so larger values reduce the reap query rate.
-// Set to 0 to disable stale-job reaping entirely.
+// WithStaleJobThreshold sets how often the reaper runs, and how long
+// without a heartbeat a job may go before it is reaped. Default 30s. Set
+// to 0 to disable reaping entirely.
+//
+// The second half of that no longer applies to a store implementing
+// job.LeaseStore, which is all five built-in backends. There the window
+// before a job is taken back is the lease TTL, per job, from
+// WithLeaseTTL or the pool default, and this value only decides how
+// frequently the reaper looks and whether it runs at all. It still
+// governs the reap window outright for any other store.
 func WithStaleJobThreshold(d time.Duration) Option {
 	return func(disp *Dispatcher) error {
 		disp.config.StaleJobThreshold = d

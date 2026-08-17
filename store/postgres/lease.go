@@ -10,13 +10,14 @@ import (
 	"github.com/xraph/dispatch/job"
 )
 
-// Compile-time check that the postgres store provides the lease capability.
+// The compile-time check that this store provides the lease capability
+// lives in store.go alongside the other interface assertions, matching the
+// mongo and sqlite backends.
 //
-// The grant itself is not here: it travels on job.DequeueOpts and is
+// The grant itself is not here either: it travels on job.DequeueOpts and is
 // compiled into DequeueJobs' claim statement by buildLeaseGrant, so a
 // leased claim carries the fit predicate and the ordering like any other.
 // This file holds only what a lease needs afterwards.
-var _ job.LeaseStore = (*Store)(nil)
 
 // RenewLease extends the lease only if the caller still holds it.
 func (s *Store) RenewLease(
