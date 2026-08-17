@@ -19,6 +19,14 @@ var (
 	// ErrLeaseNotSupported means the configured store does not implement
 	// LeaseStore, so per-definition lease TTLs and epoch fencing are
 	// unavailable.
+	//
+	// Nothing in this module returns it. A pool given a store without the
+	// capability degrades to the heartbeat reaper and logs a warning
+	// rather than failing, because refusing to start over a missing
+	// optional capability would be worse than running without it. The
+	// sentinel is kept for a caller that type-asserts LeaseStore itself
+	// and wants a shared error to report, and because removing an
+	// exported symbol is a breaking change.
 	ErrLeaseNotSupported = errors.New("dispatch/job: store does not implement job.LeaseStore")
 
 	// ErrLeaseWithoutWorker means a dequeue asked for a lease

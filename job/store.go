@@ -413,9 +413,10 @@ type Store interface {
 	// claimed rows get opts.WorkerID, opts.LeaseUntil, and an incremented
 	// lease_epoch, and the returned jobs carry the epoch they were
 	// granted. The grant travels in the claiming write itself, never as a
-	// follow-up: a row left running with no expiry is invisible to
-	// LeaseStore.ReclaimExpiredLeases, so a crash between two writes
-	// would strand it rather than expose it. See DequeueOpts.LeaseUntil.
+	// follow-up: a row left running with no expiry is outside the lease
+	// machinery entirely, so a crash between two writes would leave the
+	// job waiting out the far coarser UnleasedReclaimGrace instead of the
+	// TTL it was given. See DequeueOpts.LeaseUntil.
 	//
 	// Opts that do not grant leave every lease column untouched. A grant
 	// with no WorkerID is refused with ErrLeaseWithoutWorker and claims
@@ -499,12 +500,36 @@ type LeaseStore interface {
 	// evict_count. RetryCount is never touched — a lost lease is
 	// infrastructure, not a handler failure.
 	//
+	// It also adopts a running job carrying no lease at all, but only
+	// once that job has been silent for UnleasedReclaimGrace. See that
+	// constant for why the exception exists and why it is gated on
+	// silence rather than on the missing expiry alone.
+	//
 	// The claim and the read are one atomic statement, so two pools
 	// reclaiming concurrently cannot both take the same job.
 	//
 	// A non-positive limit claims nothing and returns (nil, nil), checked
 	// before any query runs. This matches DequeueOpts.Limit, so the two
 	// methods on this interface agree.
+	//
+	// ORDER IS NOT PART OF THE CONTRACT, and the backends genuinely
+	// differ. Postgres, SQLite and Mongo take the longest-expired jobs
+	// first, because each already reads through an index on the expiry
+	// and ordering it costs nothing. Memory iterates a map and Redis
+	// walks an unordered set member list, so both return an arbitrary
+	// subset.
+	//
+	// This only becomes visible when limit is smaller than the number of
+	// jobs eligible at that instant, where the ordered backends drain
+	// oldest-first and the other two drain arbitrarily. Nothing starves
+	// either way, since each pass moves what it takes out of the eligible
+	// set and the reaper runs on a timer.
+	//
+	// Redis is the reason this is documented rather than unified. It can
+	// stop scanning as soon as it has claimed `limit` jobs; ordering would
+	// force every call to read the entire job-id set first, turning a
+	// bounded scan into a full one on the largest deployments, which is a
+	// steep price for an ordering no caller has asked for.
 	ReclaimExpiredLeases(ctx context.Context, limit int) ([]*Job, error)
 
 	// UpdateLeasedJob persists j only while the caller still holds the

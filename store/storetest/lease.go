@@ -605,6 +605,16 @@ func testReclaimIsExclusiveUnderConcurrency(t *testing.T, s LeaseStore) {
 		queue      = "lease-concurrent"
 		jobCount   = 20
 		reclaimers = 4
+
+		// Deliberately not jobCount. Reclamation is not queue-scoped (see
+		// Contains), and newStore may hand this case a store other cases
+		// have already left expired jobs in. A limit of jobCount would
+		// let four reclaimers fill their quotas with those instead, leave
+		// some of `mine` unclaimed, and fail the n == 0 branch below for
+		// a reason that has nothing to do with exclusivity. The limit
+		// only has to be too large to ever be the binding constraint;
+		// what this case measures is double-claiming, not throughput.
+		reclaimLimit = 10_000
 	)
 
 	mine := make(map[id.JobID]bool, jobCount)
@@ -628,7 +638,7 @@ func testReclaimIsExclusiveUnderConcurrency(t *testing.T, s LeaseStore) {
 		go func() {
 			defer wg.Done()
 
-			got, err := s.ReclaimExpiredLeases(ctx, jobCount)
+			got, err := s.ReclaimExpiredLeases(ctx, reclaimLimit)
 			if err != nil {
 				errCh <- err
 

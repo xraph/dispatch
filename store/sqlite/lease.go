@@ -3,6 +3,7 @@ package sqlite
 import (
 	"context"
 	"fmt"
+	"math/rand/v2"
 	"strings"
 	"time"
 
@@ -23,11 +24,32 @@ import (
 // ReclaimExpiredLeases's atomicity guarantee depends on under concurrency.
 const maxLeaseBusyRetries = 100
 
-// leaseBusyRetryDelay is the pause between retries. It is small because a
-// write against this schema completes in well under a millisecond; the
-// retry exists to ride out a burst of contention, not to wait out
-// something the caller should instead be timed out for.
+// leaseBusyRetryDelay is the mean pause between retries. It is small
+// because a write against this schema completes in well under a
+// millisecond; the retry exists to ride out a burst of contention, not to
+// wait out something the caller should instead be timed out for.
 const leaseBusyRetryDelay = time.Millisecond
+
+// busyRetryDelay returns the next pause, jittered across half to one and a
+// half times leaseBusyRetryDelay.
+//
+// A fixed delay is what makes contention here self-sustaining rather than
+// self-clearing. SQLite takes one write lock, so of N writers that collide
+// exactly one wins and the other N-1 all sleep the identical interval and
+// wake together to collide again. The loser set stays in lockstep for as
+// long as it takes one of them to win each round, which is the worst
+// possible shape for a backoff. Spreading the wake-ups decorrelates them
+// after the first collision.
+//
+// The jitter is centred on the old constant rather than added to it, so
+// the expected time to exhaust maxLeaseBusyRetries is unchanged and this
+// cannot quietly turn a fast failure into a slow one. Non-crypto rand is
+// the right tool, as it is for backoff.Jitter.
+func busyRetryDelay() time.Duration {
+	half := leaseBusyRetryDelay / 2
+
+	return half + time.Duration(rand.Float64()*float64(leaseBusyRetryDelay)) //nolint:gosec // jitter intentionally uses non-crypto rand
+}
 
 // isSQLiteBusy reports whether err is the driver's SQLITE_BUSY, meaning
 // another connection currently holds SQLite's single write lock. Matched
@@ -48,7 +70,7 @@ func withBusyRetry(ctx context.Context, fn func() error) error {
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
-		case <-time.After(leaseBusyRetryDelay):
+		case <-time.After(busyRetryDelay()):
 		}
 	}
 

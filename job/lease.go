@@ -45,6 +45,13 @@ const UnleasedReclaimGrace = 15 * time.Minute
 // held it. Every reason here is infrastructure taking the worker away
 // rather than the handler failing, which is why they increment EvictCount
 // and never RetryCount.
+//
+// The reason is not persisted. Job.EvictCount records that an eviction
+// happened and these constants name the two ways it can, but no column
+// stores which one, so the distinction is currently only available at the
+// point of eviction, in logs. Recording it would mean another job column
+// on five backends, which has not been worth it; the count is what
+// retry-budget decisions actually read.
 type EvictReason string
 
 const (
@@ -73,6 +80,11 @@ const (
 // use UpdateLeasedJob instead. Without the renewal check, a worker
 // resuming from a long GC pause would keep renewing a lease on a job
 // another worker now owns.
+//
+// Only ExpiresAt is populated by the built-in backends, which build a
+// Lease purely to call IsExpired and read the other three off the job row
+// directly. The remaining fields describe the grant for a caller assembling
+// one itself; do not read them off a Lease a backend handed you.
 type Lease struct {
 	// JobID is the leased job.
 	JobID id.JobID
@@ -93,6 +105,13 @@ type Lease struct {
 // A zero ExpiresAt reports false: no lease was ever granted, which is
 // "not held" rather than "expired". Reporting true would let the reclaim
 // loop steal jobs that were never leased.
+//
+// Reclamation does eventually take such a job, but never through this
+// function. It applies a separate and much coarser rule, gated on the row
+// having gone silent for UnleasedReclaimGrace, precisely so that the
+// question this function answers stays "is a lease lapsed" rather than
+// blurring into "is a job abandoned". The two are not the same, and the
+// backends depend on them staying separate.
 func (l Lease) IsExpired(now time.Time) bool {
 	if l.ExpiresAt.IsZero() {
 		return false
