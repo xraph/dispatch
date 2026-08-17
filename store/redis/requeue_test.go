@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	goredis "github.com/redis/go-redis/v9"
+	kvdriver "github.com/xraph/grove/kv/driver"
 
 	"github.com/xraph/dispatch"
 	"github.com/xraph/dispatch/id"
@@ -188,17 +188,10 @@ func TestUpdateJob_MaintainsQueueIndex(t *testing.T) {
 	s := openRedisStore(t, connStr)
 	ctx := context.Background()
 
-	opt, err := goredis.ParseURL(connStr)
-	if err != nil {
-		t.Fatalf("parse redis url: %v", err)
-	}
-	rdb := goredis.NewClient(opt)
-	t.Cleanup(func() { _ = rdb.Close() })
-
 	indexed := func() bool {
 		t.Helper()
 
-		members, mErr := rdb.ZRange(ctx, queueKey, 0, -1).Result()
+		members, mErr := s.KV().ZRange(ctx, queueKey, kvdriver.RangeSpec{})
 		if mErr != nil {
 			t.Fatalf("read queue index: %v", mErr)
 		}
