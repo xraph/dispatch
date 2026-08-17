@@ -9,6 +9,8 @@ import (
 
 	goredis "github.com/redis/go-redis/v9"
 
+	kvdriver "github.com/xraph/grove/kv/driver"
+
 	"github.com/xraph/dispatch"
 	"github.com/xraph/dispatch/id"
 	"github.com/xraph/dispatch/job"
@@ -270,7 +272,7 @@ func (s *Store) ReclaimExpiredLeases(ctx context.Context, limit int) ([]*job.Job
 
 	t := now()
 
-	ids, err := s.rdb.SMembers(ctx, s.keys.jobIDs()).Result()
+	ids, err := s.kv.SMembers(ctx, s.keys.jobIDs())
 	if err != nil {
 		return nil, fmt.Errorf("dispatch/redis: reclaim smembers: %w", err)
 	}
@@ -329,8 +331,8 @@ func (s *Store) ReclaimExpiredLeases(ctx context.Context, limit int) ([]*job.Job
 		// even for a job that was enqueued straight into running (as the
 		// conformance suite's RunningJob helper does) and was therefore
 		// never popped in the first place.
-		zErr := s.rdb.ZAdd(ctx, s.keys.queue(after.Queue),
-			goredis.Z{Score: jobScore(after.Priority, after.RunAt), Member: jID}).Err()
+		_, zErr := s.kv.ZAdd(ctx, s.keys.queue(after.Queue),
+			kvdriver.ScoredMember{Score: jobScore(after.Priority, after.RunAt), Member: jID})
 		if zErr != nil {
 			return nil, fmt.Errorf("dispatch/redis: reclaim requeue: %w", zErr)
 		}

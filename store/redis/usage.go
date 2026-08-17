@@ -3,10 +3,9 @@ package redis
 import (
 	"context"
 	"fmt"
-	"strconv"
 	"time"
 
-	goredis "github.com/redis/go-redis/v9"
+	kvdriver "github.com/xraph/grove/kv/driver"
 
 	"github.com/xraph/dispatch/id"
 	"github.com/xraph/dispatch/job"
@@ -126,15 +125,18 @@ func (s *Store) RecordJobUsage(ctx context.Context, u *job.Usage) error {
 		return fmt.Errorf("dispatch/redis: record job usage: %w", serr)
 	}
 
-	score := float64(u.RecordedAt.UnixNano())
-	member := goredis.Z{Score: score, Member: key}
+	member := kvdriver.ScoredMember{Score: float64(u.RecordedAt.UnixNano()), Member: key}
 
-	pipe := s.rdb.TxPipeline()
-	pipe.ZAdd(ctx, s.keys.usageIndex(), member)
-	pipe.ZAdd(ctx, s.keys.usageName(u.Name), member)
+	// The global index and the per-definition one are two writes. A crash
+	// between them leaves a record reachable through one and not the
+	// other, which costs a row in an estimate and nothing else -- usage is
+	// telemetry, so neither index is authoritative.
+	if _, err := s.kv.ZAdd(ctx, s.keys.usageIndex(), member); err != nil {
+		return fmt.Errorf("dispatch/redis: index job usage: %w", err)
+	}
 
-	if _, perr := pipe.Exec(ctx); perr != nil {
-		return fmt.Errorf("dispatch/redis: index job usage: %w", perr)
+	if _, err := s.kv.ZAdd(ctx, s.keys.usageName(u.Name), member); err != nil {
+		return fmt.Errorf("dispatch/redis: index job usage by name: %w", err)
 	}
 
 	return nil
@@ -147,16 +149,13 @@ func (s *Store) ListJobUsage(ctx context.Context, opts job.UsageListOpts) ([]*jo
 		index = s.keys.usageName(opts.Name)
 	}
 
-	minScore := "-inf"
+	// Newest first, which ZRevRangeByScore gives directly.
+	spec := kvdriver.RangeSpec{Reverse: true}
 	if !opts.Since.IsZero() {
-		minScore = strconv.FormatInt(opts.Since.UnixNano(), 10)
+		spec.Min, spec.HasMin = float64(opts.Since.UnixNano()), true
 	}
 
-	// Newest first, which ZRevRangeByScore gives directly.
-	ids, err := s.rdb.ZRevRangeByScore(ctx, index, &goredis.ZRangeBy{
-		Min: minScore,
-		Max: "+inf",
-	}).Result()
+	ids, err := s.kv.ZRange(ctx, index, spec)
 	if err != nil {
 		return nil, fmt.Errorf("dispatch/redis: list job usage: %w", err)
 	}
@@ -201,10 +200,10 @@ func (s *Store) ListJobUsage(ctx context.Context, opts job.UsageListOpts) ([]*jo
 
 // PurgeJobUsage deletes records older than before, up to limit rows.
 func (s *Store) PurgeJobUsage(ctx context.Context, before time.Time, limit int) (int64, error) {
-	ids, err := s.rdb.ZRangeByScore(ctx, s.keys.usageIndex(), &goredis.ZRangeBy{
-		Min: "-inf",
-		Max: strconv.FormatInt(before.UnixNano(), 10),
-	}).Result()
+	ids, err := s.kv.ZRange(ctx, s.keys.usageIndex(), kvdriver.RangeSpec{
+		Max:    float64(before.UnixNano()),
+		HasMax: true,
+	})
 	if err != nil {
 		return 0, fmt.Errorf("dispatch/redis: purge job usage: %w", err)
 	}
@@ -229,16 +228,18 @@ func (s *Store) PurgeJobUsage(ctx context.Context, before time.Time, limit int) 
 			name = e.Name
 		}
 
-		pipe := s.rdb.TxPipeline()
-		pipe.Del(ctx, s.keys.usage(got))
-		pipe.ZRem(ctx, s.keys.usageIndex(), got)
-
-		if name != "" {
-			pipe.ZRem(ctx, s.keys.usageName(name), got)
+		if derr := s.kv.Delete(ctx, s.keys.usage(got)); derr != nil {
+			return removed, fmt.Errorf("dispatch/redis: purge job usage: %w", derr)
 		}
 
-		if _, perr := pipe.Exec(ctx); perr != nil {
-			return removed, fmt.Errorf("dispatch/redis: purge job usage: %w", perr)
+		if _, zerr := s.kv.ZRem(ctx, s.keys.usageIndex(), got); zerr != nil {
+			return removed, fmt.Errorf("dispatch/redis: purge job usage index: %w", zerr)
+		}
+
+		if name != "" {
+			if _, zerr := s.kv.ZRem(ctx, s.keys.usageName(name), got); zerr != nil {
+				return removed, fmt.Errorf("dispatch/redis: purge job usage name index: %w", zerr)
+			}
 		}
 
 		removed++

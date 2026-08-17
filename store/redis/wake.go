@@ -14,48 +14,24 @@ var _ dispatchstore.WakeNotifier = (*Store)(nil)
 // failed publish only costs poll latency and is not worth failing the
 // enqueue over.
 func (s *Store) notifyWake(ctx context.Context) {
-	_ = s.rdb.Publish(ctx, s.keys.wakeChannel(), "").Err() //nolint:errcheck // best-effort: polling covers missed wakes
+	_ = s.kv.Publish(ctx, s.keys.wakeChannel(), nil) //nolint:errcheck // best-effort: polling covers missed wakes
 }
 
 // StartWakeListener subscribes to the dispatch wake channel and invokes
-// wake for each message. go-redis re-subscribes automatically after
-// connection loss, so no manual rebuild loop is needed; messages published
-// while the connection was down are simply lost, which polling covers. The
-// returned stop function terminates the subscriber and blocks until it has
-// exited.
+// wake for each message.
+//
+// The driver re-subscribes after connection loss, so there is no manual
+// rebuild loop; messages published while the connection was down are
+// simply lost, which polling covers. The returned stop function cancels
+// the subscription.
 func (s *Store) StartWakeListener(ctx context.Context, wake func()) (func(), error) {
 	ctx, cancel := context.WithCancel(ctx)
 
-	sub := s.rdb.Subscribe(ctx, s.keys.wakeChannel())
-	// Confirm the subscription is established so callers know push is
-	// live before relying on it.
-	if _, err := sub.Receive(ctx); err != nil {
+	if err := s.kv.Subscribe(ctx, s.keys.wakeChannel(), func([]byte) { wake() }); err != nil {
 		cancel()
-		_ = sub.Close()
+
 		return nil, fmt.Errorf("dispatch/redis: start wake listener: %w", err)
 	}
 
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		ch := sub.Channel()
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case _, ok := <-ch:
-				if !ok {
-					return
-				}
-				wake()
-			}
-		}
-	}()
-
-	stop := func() {
-		cancel()
-		_ = sub.Close()
-		<-done
-	}
-	return stop, nil
+	return cancel, nil
 }
