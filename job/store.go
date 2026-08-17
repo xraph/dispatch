@@ -179,18 +179,22 @@ type DequeueOpts struct {
 	//
 	// The grant must be part of the claim, not a second write, and the
 	// reason is the opposite of the obvious one. Reclamation cannot
-	// rescue a half-granted job: every backend requires a non-null
-	// expiry to consider a row at all, and Lease.IsExpired reports false
-	// for a zero ExpiresAt precisely so the reclaim loop never steals a
-	// job that was never leased. So a crash between a claim and a
-	// separate grant would leave a row running with no expiry that
-	// nothing in the lease machinery can see — not a job at risk of
-	// being reclaimed, a job that can never be reclaimed. It would sit
-	// there until the coarse global stale-job threshold noticed, which
-	// is the mechanism leases exist to replace.
+	// rescue a half-granted job on the timing that leases exist to
+	// provide: Lease.IsExpired reports false for a zero ExpiresAt
+	// precisely so the reclaim loop never steals a job that was never
+	// leased. A crash between a claim and a separate grant would leave a
+	// row running with no expiry, and the fine-grained lease machinery
+	// cannot see it at all.
+	//
+	// Such a row is recovered eventually, because reclamation adopts an
+	// unleased running job once it has been silent for
+	// UnleasedReclaimGrace, but that clause is a coarse compatibility
+	// fallback measured in minutes, not the per-job TTL a lease buys. A
+	// half-granted job would wait it out, which is precisely the coarse
+	// stale-job behaviour leases exist to replace.
 	//
 	// One write means a claimed job always carries a lease something can
-	// act on.
+	// act on promptly.
 	LeaseUntil time.Time
 }
 

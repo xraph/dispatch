@@ -46,6 +46,37 @@ func (m *Store) RenewLease(
 	return nil
 }
 
+// reclaimable reports whether a running job should be taken back.
+//
+// The first clause is the actual rule, and job.Lease.IsExpired remains its
+// only authority: a lease was granted and has lapsed.
+//
+// The second is the same narrow exception the four persistent backends
+// apply to a running job carrying no lease at all — see
+// job.UnleasedReclaimGrace for why it is gated on silence rather than on
+// the null expiry alone. Only half of that rationale reaches this backend:
+// memory loses every row on restart, so it has no pre-lease build to
+// inherit rows from, but a claim through DequeueJobs without lease options
+// still produces an unleased running job, and abandoning one would
+// otherwise strand it for the life of the process.
+func reclaimable(j *job.Job, now time.Time) bool {
+	if j.LeaseExpiresAt != nil {
+		return job.Lease{ExpiresAt: *j.LeaseExpiresAt}.IsExpired(now)
+	}
+
+	// Heartbeat first, falling back to the claim time for a caller that
+	// stopped before its first beat — the same order ReapStaleJobs used.
+	silent := j.HeartbeatAt
+	if silent == nil {
+		silent = j.StartedAt
+	}
+	if silent == nil {
+		return false
+	}
+
+	return silent.Before(now.Add(-job.UnleasedReclaimGrace))
+}
+
 // ReclaimExpiredLeases returns expired-lease jobs to pending, fencing
 // their previous holders.
 //
@@ -69,11 +100,7 @@ func (m *Store) ReclaimExpiredLeases(_ context.Context, limit int) ([]*job.Job, 
 		if j.State != job.StateRunning {
 			continue
 		}
-		lease := job.Lease{Epoch: j.LeaseEpoch}
-		if j.LeaseExpiresAt != nil {
-			lease.ExpiresAt = *j.LeaseExpiresAt
-		}
-		if !lease.IsExpired(now) {
+		if !reclaimable(j, now) {
 			continue
 		}
 

@@ -140,10 +140,13 @@ func (m *Store) EnqueueJob(_ context.Context, j *job.Job) error {
 // stays the reference the SQL backends are checked against.
 //
 // When opts.Grants() the claim also grants a lease, under the one write
-// lock that already performs the claim. ReclaimExpiredLeases tests
-// job.Lease.IsExpired, which reports false for a zero expiry, so a job
-// left running with no lease would be invisible to it rather than
-// vulnerable to it. See job.DequeueOpts.LeaseUntil.
+// lock that already performs the claim. When it does not, the claim writes
+// a running job with no lease at all, which is a supported shape rather
+// than a broken one. Such a job is not invisible to ReclaimExpiredLeases:
+// job.Lease.IsExpired still reports false for its zero expiry, but reclaim
+// adopts it once it has gone silent for job.UnleasedReclaimGrace, so
+// abandoning one no longer strands it for the life of the process. See
+// job.DequeueOpts.LeaseUntil.
 func (m *Store) DequeueJobs(_ context.Context, opts job.DequeueOpts) ([]*job.Job, error) {
 	if opts.Limit <= 0 {
 		return nil, nil

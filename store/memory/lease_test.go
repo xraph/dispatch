@@ -168,3 +168,104 @@ func TestLeaseStoreDoesNotAliasResourceMap(t *testing.T) {
 		}
 	})
 }
+
+// TestReclaimAdoptsRunningJobsWithoutLease covers a running job carrying
+// no lease at all, matching the rule the four persistent backends apply.
+//
+// Memory has no upgrade to survive, since it loses every row on restart,
+// so the pre-lease-build half of the problem cannot reach it. The other
+// half can: DequeueOpts.Grants() is false whenever LeaseUntil is zero, so
+// a caller claiming through job.Store without lease options holds a
+// running job with no lease, and if that caller stops without completing
+// the job, nothing reclaims it for the life of the process. Reclamation
+// skips a zero expiry and dequeue claims only pending and retrying rows.
+//
+// The negative cases carry the safety argument: a null expiry does not by
+// itself mean the job was abandoned, so silence is what separates a dead
+// claim from a live one.
+func TestReclaimAdoptsRunningJobsWithoutLease(t *testing.T) {
+	s := memory.New()
+	ctx := context.Background()
+	now := time.Now().UTC()
+
+	// unleased builds a running job with no lease fields at all, the shape
+	// a claim through DequeueJobs without lease options leaves behind.
+	unleased := func(name string, started, beat *time.Time) *job.Job {
+		return &job.Job{
+			ID:          id.NewJobID(),
+			Name:        name,
+			Queue:       "default",
+			Payload:     []byte(`{}`),
+			State:       job.StateRunning,
+			MaxRetries:  3,
+			RunAt:       now,
+			StartedAt:   started,
+			HeartbeatAt: beat,
+		}
+	}
+
+	at := func(d time.Duration) *time.Time {
+		t := now.Add(-d)
+
+		return &t
+	}
+
+	silent := job.UnleasedReclaimGrace + time.Minute
+
+	cases := []struct {
+		j    *job.Job
+		want bool
+		why  string
+	}{
+		{
+			j:    unleased("silent-heartbeat", at(2*silent), at(silent)),
+			want: true,
+			why:  "abandoned by a caller that stopped reporting",
+		},
+		{
+			// Old claim, current heartbeat: pins that heartbeat wins over
+			// started_at rather than both needing to be fresh.
+			j:    unleased("fresh-heartbeat", at(2*silent), at(0)),
+			want: false,
+			why:  "still reporting, so it belongs to a live caller",
+		},
+		{
+			j:    unleased("no-heartbeat-old-start", at(silent), nil),
+			want: true,
+			why:  "claimed long ago and never heartbeated",
+		},
+		{
+			j:    unleased("no-heartbeat-fresh-start", at(0), nil),
+			want: false,
+			why:  "just claimed; its first heartbeat is not due yet",
+		},
+		{
+			j:    unleased("no-times", nil, nil),
+			want: false,
+			why:  "no timestamp to establish age from",
+		},
+	}
+
+	for _, c := range cases {
+		if err := s.EnqueueJob(ctx, c.j); err != nil {
+			t.Fatalf("enqueue %s: %v", c.j.Name, err)
+		}
+	}
+
+	reclaimed, err := s.ReclaimExpiredLeases(ctx, 100)
+	if err != nil {
+		t.Fatalf("ReclaimExpiredLeases: %v", err)
+	}
+
+	for _, c := range cases {
+		got := findJob(reclaimed, c.j.ID) != nil
+		if got == c.want {
+			continue
+		}
+		if c.want {
+			t.Errorf("%s was not reclaimed but should have been: %s", c.j.Name, c.why)
+		} else {
+			t.Errorf("%s was reclaimed but must not be: %s", c.j.Name, c.why)
+		}
+	}
+}
