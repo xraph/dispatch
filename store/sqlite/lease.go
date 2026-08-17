@@ -118,6 +118,29 @@ func (s *Store) ReclaimExpiredLeases(ctx context.Context, limit int) ([]*job.Job
 
 	now := time.Now().UTC()
 
+	// The reclaim predicate below adds a branch for a running job carrying
+	// no lease at all, gated on silence rather than on the null expiry
+	// alone — see job.UnleasedReclaimGrace for why a null expiry does not
+	// by itself mean the job was abandoned, and why COALESCE returning NULL
+	// (neither timestamp set) must not be adopted.
+	//
+	// silent is a bound time.Time and must stay one. SQLite has no
+	// timestamp type, so every comparison here is a string comparison
+	// against whatever grove's sqlitedriver wrote, and the driver renders a
+	// time.Time with Go's default layout rather than ISO-8601. Formatting
+	// this value instead would sort it above every driver-written timestamp
+	// ('T' > ' '), which is the bug the migration 008 backfill shipped with
+	// before it was removed.
+	//
+	// Here it is worse than it was there, and in a way that inverts. The
+	// backfill compared in the direction that made a formatted value match
+	// NOTHING, so the failure was jobs staying stranded: bad, but the same
+	// outcome as having no backfill. This predicate compares the other way,
+	// so a formatted value is greater than every stored timestamp and
+	// matches EVERYTHING, reclaiming healthy running jobs out from under
+	// live workers. The same mistake fails open here rather than closed.
+	silent := now.Add(-job.UnleasedReclaimGrace)
+
 	var models []jobModel
 	err := withBusyRetry(ctx, func() error {
 		models = nil
@@ -135,13 +158,15 @@ func (s *Store) ReclaimExpiredLeases(ctx context.Context, limit int) ([]*job.Job
 			WHERE id IN (
 				SELECT id FROM dispatch_jobs
 				WHERE state = 'running'
-				  AND lease_expires_at IS NOT NULL
-				  AND lease_expires_at <= ?
+				  AND ( (lease_expires_at IS NOT NULL AND lease_expires_at <= ?)
+				     OR (lease_expires_at IS NULL
+				         AND COALESCE(heartbeat_at, started_at) IS NOT NULL
+				         AND COALESCE(heartbeat_at, started_at) <= ?) )
 				ORDER BY lease_expires_at ASC
 				LIMIT ?
 			)
 			RETURNING *`,
-			now, now, now, limit,
+			now, now, now, silent, limit,
 		).Scan(ctx, &models)
 	})
 	if err != nil {

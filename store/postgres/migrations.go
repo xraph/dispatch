@@ -450,49 +450,25 @@ func init() {
 					return err
 				}
 
-				// Adopt the jobs that were already running when the fleet
-				// upgraded. Without this they are stranded permanently.
+				// There is deliberately no backfill of lease_expires_at for
+				// rows already running here. An earlier version of this
+				// migration seeded them from COALESCE(heartbeat_at,
+				// started_at, NOW()) so the first sweep would collect them,
+				// and that was too weak in one direction and too strong in
+				// the other. Too weak: it only sees rows that exist the
+				// moment it runs, so during a rolling upgrade every job an
+				// old pod claims afterwards is stranded exactly as before,
+				// and so is every job claimed later through job.Store
+				// without lease options, which is a supported call that
+				// never grants a lease. Too strong: seeding an expiry in the
+				// past evicts jobs old pods are still actively running,
+				// because an old binary's heartbeats do not push an expiry
+				// it does not know about.
 				//
-				// The new column arrives NULL, ReclaimExpiredLeases
-				// requires a non-NULL expiry to consider a row at all
-				// (job.Lease.IsExpired reads a zero expiry as "never
-				// leased", not "expired"), and the pool's reaper no longer
-				// calls ReapStaleJobs for a backend that implements
-				// job.LeaseStore. Dequeue claims only pending and
-				// retrying rows, so nothing else would ever look at these
-				// again: a job running at the instant of the upgrade would
-				// stay running forever, holding its slot, invisible to
-				// every recovery path.
-				//
-				// heartbeat_at first because it is the freshest evidence
-				// the job was alive; started_at when the job was claimed
-				// but has not heartbeated yet; NOW() only for rows
-				// predating both, which gives them a full grace period
-				// rather than reclaiming them out from under a live
-				// worker. Every one of these is in the past or the
-				// present, so the first sweep after the upgrade hands them
-				// to the normal reclaim path — the same path that would
-				// have collected them had they been leased from the
-				// start.
-				//
-				// Idempotent by the IS NULL predicate: a re-run after a
-				// failed migration cannot overwrite an expiry a running
-				// worker has since renewed.
-				//
-				// Under the same lock_timeout, which bounds row locks as
-				// well as table locks. This UPDATE cannot stall the fleet
-				// the way the ALTER can — it takes only ROW EXCLUSIVE on
-				// the table — but it can wait indefinitely on a row a
-				// completing worker is holding, and a migration that waits
-				// indefinitely is a deploy that never finishes. Failing
-				// and being retried is strictly better, and the predicate
-				// above makes the retry free.
-				if err := withLockTimeout(ctx, exec, `
-					UPDATE dispatch_jobs
-					SET lease_expires_at = COALESCE(heartbeat_at, started_at, NOW())
-					WHERE state = 'running' AND lease_expires_at IS NULL`); err != nil {
-					return err
-				}
+				// ReclaimExpiredLeases adopts those rows instead, on every
+				// sweep rather than once, and gated on silence so a worker
+				// that is still heartbeating is never touched. See
+				// job.UnleasedReclaimGrace.
 
 				// CONCURRENTLY: a plain CREATE INDEX holds a SHARE lock
 				// for the whole build, blocking every INSERT, UPDATE and

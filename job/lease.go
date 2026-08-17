@@ -12,6 +12,35 @@ import (
 // change reclamation timing for an existing deployment.
 const DefaultLeaseTTL = 30 * time.Second
 
+// UnleasedReclaimGrace is how long a running job carrying no lease at all
+// must have been silent before reclamation will adopt it.
+//
+// It exists because a null expiry has two very different causes and the
+// reclaim predicate cannot tell them apart from the expiry alone. One is a
+// job left running by a build that predates leases, which nothing will
+// ever look at again: Lease.IsExpired reports false for a zero expiry, the
+// pool stopped calling ReapStaleJobs for a store implementing LeaseStore,
+// and dequeue claims only pending and retrying rows. The other is a live,
+// perfectly healthy job, because DequeueOpts.Grants() is false whenever
+// LeaseUntil is zero, so any caller claiming through Store without lease
+// options holds a running job with no lease by design.
+//
+// Silence is what separates them, which is why every backend gates the
+// exception on heartbeat_at, falling back to started_at for a worker that
+// died before its first beat, rather than on the null expiry alone. A row
+// with neither timestamp is never adopted: there is nothing to measure age
+// against, and guessing would mean guessing against a running job.
+//
+// The value is arbitrary and an operator cannot tune it, which is worth
+// saying plainly rather than burying. ReclaimExpiredLeases(ctx, limit)
+// carries no threshold, and widening that signature would change all five
+// backends. Fifteen minutes is chosen to be conservative rather than
+// precise: before leases these same rows were reaped at
+// Config.StaleJobThreshold, 30 seconds by default, so any value well above
+// that is strictly less aggressive than what already shipped. Overshooting
+// costs only how long an abandoned job waits to come back.
+const UnleasedReclaimGrace = 15 * time.Minute
+
 // EvictReason classifies why a job stopped being run by the worker that
 // held it. Every reason here is infrastructure taking the worker away
 // rather than the handler failing, which is why they increment EvictCount

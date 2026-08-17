@@ -221,48 +221,67 @@ func TestLeaseMigrationSurvivesAPartialApplication(t *testing.T) {
 	}
 }
 
-// TestLeaseMigrationBackfillsRunningJobs is the regression test for jobs
-// that were mid-flight when the fleet upgraded.
-//
-// Without the backfill those jobs are stranded permanently and nothing
-// reports it. lease_expires_at arrives NULL; ReclaimExpiredLeases
-// requires a non-NULL expiry to consider a row at all (job.Lease.IsExpired
-// deliberately reads a zero expiry as "never leased", not "expired"); the
+// TestReclaimAdoptsRunningJobsWithoutLease covers a running job carrying
+// no lease at all, which is the row shape that used to be stranded
+// permanently. lease_expires_at is NULL, ReclaimExpiredLeases required a
+// non-NULL expiry to consider a row at all (job.Lease.IsExpired
+// deliberately reads a zero expiry as "never leased", not "expired"), the
 // pool's reaper no longer calls ReapStaleJobs once the backend implements
-// job.LeaseStore; and dequeue claims only pending and retrying rows. A job
-// running at the instant of the upgrade is therefore never looked at by
-// anything again — it holds its slot forever.
+// job.LeaseStore, and dequeue claims only pending and retrying rows. So
+// nothing looked at these again and they held their slots forever.
 //
-// Each case sets up one branch of the COALESCE and asserts the outcome
-// that matters: not that a column is non-NULL, but that the normal
-// reclaim path actually collects the row.
-func TestLeaseMigrationBackfillsRunningJobs(t *testing.T) {
-	past := time.Now().UTC().Add(-time.Hour).Truncate(time.Microsecond)
-	older := time.Now().UTC().Add(-2 * time.Hour).Truncate(time.Microsecond)
+// Migration 008 used to seed an expiry for them. It no longer does, for
+// the reasons given at that migration: a one-shot backfill misses every
+// row created after it runs, including anything an old pod claims later in
+// a rolling upgrade and anything claimed through job.Store without lease
+// options, which never grants a lease at all. Reclamation adopts them
+// instead, on every sweep and gated on silence.
+//
+// The negative cases are the ones that matter. A NULL expiry does not by
+// itself mean the job was abandoned, so evicting on that alone would take
+// live work away from a healthy caller.
+func TestReclaimAdoptsRunningJobsWithoutLease(t *testing.T) {
+	silent := time.Now().UTC().Add(-job.UnleasedReclaimGrace - time.Minute)
+	older := silent.Add(-time.Hour)
+	fresh := time.Now().UTC()
 
 	tests := []struct {
-		name string
-		// heartbeat and started are written onto the running row before
-		// the migration re-runs; the zero time writes NULL.
+		name      string
 		heartbeat time.Time
 		started   time.Time
-		// want is the expiry the backfill must produce, or the zero time
-		// when the migration has to render NOW() itself.
-		want time.Time
+		want      bool
+		why       string
 	}{
 		{
-			name:      "heartbeat_at is the freshest evidence and wins",
-			heartbeat: past,
+			name:      "silent heartbeat is adopted",
+			heartbeat: silent,
 			started:   older,
-			want:      past,
+			want:      true,
+			why:       "abandoned by a worker that stopped reporting",
 		},
 		{
-			name:    "started_at when the job never heartbeated",
-			started: older,
-			want:    older,
+			name:      "fresh heartbeat is left alone",
+			heartbeat: fresh,
+			started:   older,
+			want:      false,
+			why:       "still reporting, so it belongs to a healthy worker",
 		},
 		{
-			name: "NOW() when the row predates both",
+			name:    "silent started_at is adopted when it never heartbeated",
+			started: silent,
+			want:    true,
+			why:     "died before its first beat",
+		},
+		{
+			name:    "fresh started_at is left alone",
+			started: fresh,
+			want:    false,
+			why:     "just claimed; its first heartbeat is not due yet",
+		},
+		{
+			name: "neither timestamp is left alone",
+			want: false,
+			why:  "no timestamp to establish age from",
 		},
 	}
 
@@ -278,14 +297,13 @@ func TestLeaseMigrationBackfillsRunningJobs(t *testing.T) {
 
 			defer conn.Release()
 
-			j := storetestPendingJob("mid-flight", "backfill", 0)
+			j := storetestPendingJob("mid-flight", "adopt", 0)
 			if err = s.EnqueueJob(ctx, j); err != nil {
 				t.Fatalf("EnqueueJob: %v", err)
 			}
 
-			// Rewind the row to what an upgrading fleet finds: a job the
-			// old code left running, with no lease because leases did not
-			// exist when it was claimed.
+			// The row an upgrading fleet finds, or that a caller without
+			// lease options writes: running, with no lease at all.
 			if _, err = conn.Exec(ctx, `
 				UPDATE dispatch_jobs
 				SET state = 'running', heartbeat_at = $1, started_at = $2,
@@ -295,40 +313,20 @@ func TestLeaseMigrationBackfillsRunningJobs(t *testing.T) {
 				t.Fatalf("rewind the row: %v", err)
 			}
 
-			forgetLeaseMigration(t, conn)
-			remigrate(t, s)
-
-			var expiry *time.Time
-
-			if err = conn.QueryRow(ctx,
-				`SELECT lease_expires_at FROM dispatch_jobs WHERE id = $1`,
-				j.ID.String()).Scan(&expiry); err != nil {
-				t.Fatalf("read lease_expires_at: %v", err)
-			}
-
-			if expiry == nil {
-				t.Fatal("lease_expires_at is still NULL after the migration: this job is " +
-					"unreclaimable forever — reclaim skips NULL expiries and dequeue " +
-					"never looks at running rows")
-			}
-
-			if !tt.want.IsZero() && !expiry.UTC().Equal(tt.want) {
-				t.Errorf("lease_expires_at = %v, want %v", expiry.UTC(), tt.want)
-			}
-
-			// The outcome the backfill exists for.
 			reclaimed, err := s.ReclaimExpiredLeases(ctx, 10)
 			if err != nil {
 				t.Fatalf("ReclaimExpiredLeases: %v", err)
 			}
 
-			if len(reclaimed) != 1 || reclaimed[0].ID != j.ID {
-				t.Fatalf("reclaimed %d jobs, want the backfilled one (%s); "+
-					"lease_expires_at = %v was written but the reclaim predicate "+
-					"did not match it", len(reclaimed), j.ID, expiry)
-			}
+			got := len(reclaimed) == 1 && reclaimed[0].ID == j.ID
+			if got != tt.want {
+				if tt.want {
+					t.Fatalf("job was not reclaimed but should have been: %s", tt.why)
+				}
 
-			if reclaimed[0].State != job.StatePending {
+				t.Fatalf("job was reclaimed but must not be: %s", tt.why)
+			}
+			if tt.want && reclaimed[0].State != job.StatePending {
 				t.Errorf("reclaimed job state = %v, want pending", reclaimed[0].State)
 			}
 		})

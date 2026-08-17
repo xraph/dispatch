@@ -64,14 +64,27 @@ func (s *Store) ReclaimExpiredLeases(ctx context.Context, limit int) ([]*job.Job
 		return nil, nil
 	}
 
+	// The first branch is the actual rule: a lease was granted and has
+	// lapsed. The second is the narrow exception for a running job carrying
+	// no lease at all, gated on silence rather than on the null expiry
+	// alone — see job.UnleasedReclaimGrace for why a null expiry does not
+	// by itself mean the job was abandoned, and why COALESCE returning NULL
+	// (neither timestamp set) must not be adopted.
+	//
+	// The cutoff is bound rather than computed as NOW() - INTERVAL so that
+	// all four backends read the same constant from one place.
+	silent := time.Now().UTC().Add(-job.UnleasedReclaimGrace)
+
 	var models []jobModel
 	err := s.pgdb.NewRaw(`
 		WITH expired AS (
 			SELECT id FROM dispatch_jobs
 			WHERE state = 'running'
-			  AND lease_expires_at IS NOT NULL
-			  AND lease_expires_at <= NOW()
-			ORDER BY lease_expires_at ASC
+			  AND ( (lease_expires_at IS NOT NULL AND lease_expires_at <= NOW())
+			     OR (lease_expires_at IS NULL
+			         AND COALESCE(heartbeat_at, started_at) IS NOT NULL
+			         AND COALESCE(heartbeat_at, started_at) <= $2) )
+			ORDER BY lease_expires_at ASC NULLS FIRST
 			FOR UPDATE SKIP LOCKED
 			LIMIT $1
 		)
@@ -87,7 +100,7 @@ func (s *Store) ReclaimExpiredLeases(ctx context.Context, limit int) ([]*job.Job
 		    updated_at = NOW()
 		WHERE id IN (SELECT id FROM expired)
 		RETURNING *`,
-		limit,
+		limit, silent,
 	).Scan(ctx, &models)
 	if err != nil {
 		return nil, fmt.Errorf(errPrefix+"reclaim expired leases: %w", err)

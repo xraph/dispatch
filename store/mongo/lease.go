@@ -78,9 +78,34 @@ func (s *Store) ReclaimExpiredLeases(ctx context.Context, limit int) ([]*job.Job
 	t := now()
 	col := s.mdb.Collection(colJobs)
 
+	// The first branch is the actual rule: a lease was granted and has
+	// lapsed. The other two are the narrow exception for a running job
+	// carrying no lease at all, gated on silence rather than on the null
+	// expiry alone — see job.UnleasedReclaimGrace for why a null expiry
+	// does not by itself mean the job was abandoned, and why a row with
+	// neither timestamp is deliberately left alone.
+	//
+	// Testing lease_expires_at against null rather than $exists is
+	// load-bearing: this collection holds both shapes for the same absent
+	// value, because grove's insert path writes an explicit null while the
+	// driver's own encoder honors omitempty and drops the key (see the
+	// comment on jobModel.ResourceRequests). Plain null equality is the one
+	// test that matches both.
+	silent := t.Add(-job.UnleasedReclaimGrace)
 	filter := bson.M{
-		"state":            string(job.StateRunning),
-		"lease_expires_at": bson.M{"$ne": nil, "$lte": t},
+		"state": string(job.StateRunning),
+		"$or": bson.A{
+			bson.M{"lease_expires_at": bson.M{"$ne": nil, "$lte": t}},
+			bson.M{
+				"lease_expires_at": nil,
+				"heartbeat_at":     bson.M{"$ne": nil, "$lte": silent},
+			},
+			bson.M{
+				"lease_expires_at": nil,
+				"heartbeat_at":     nil,
+				"started_at":       bson.M{"$ne": nil, "$lte": silent},
+			},
+		},
 	}
 	update := bson.M{
 		"$set": bson.M{
@@ -97,6 +122,11 @@ func (s *Store) ReclaimExpiredLeases(ctx context.Context, limit int) ([]*job.Job
 			"evict_count": 1,
 		},
 	}
+	// Mongo sorts null and missing before every date, so the unleased rows
+	// matched by the exception above are taken first. That is the right
+	// order (they have been stranded longest) and it cannot starve the
+	// leased ones, because each claim moves the row to pending and it stops
+	// matching the filter.
 	opts := options.FindOneAndUpdate().
 		SetReturnDocument(options.After).
 		SetSort(bson.D{{Key: "lease_expires_at", Value: 1}})

@@ -2,7 +2,6 @@ package sqlite
 
 import (
 	"context"
-	"time"
 
 	"github.com/xraph/grove/migrate"
 )
@@ -397,7 +396,7 @@ func init() {
 					// timestamp type, every other time column here is
 					// text, and the reclaim predicate compares
 					// lease_expires_at against the driver's own rendering
-					// of a time.Time. See the backfill below for why that
+					// of a time.Time. See ReclaimExpiredLeases for why that
 					// rendering, not ISO-8601, is what has to be matched.
 					{"lease_expires_at", `TEXT`},
 					{"lease_ttl", `INTEGER NOT NULL DEFAULT 0`},
@@ -409,44 +408,17 @@ func init() {
 					}
 				}
 
-				// Adopt the jobs that were already running when the fleet
-				// upgraded. See the postgres migration for why they would
-				// otherwise be stranded permanently: the new column
-				// arrives NULL, ReclaimExpiredLeases requires a non-NULL
-				// expiry, the reaper no longer sweeps stale jobs on a
-				// lease-capable backend, and dequeue claims only pending
-				// and retrying rows.
-				//
-				// COALESCE copies whatever textual timestamp those columns
-				// already hold, so the backfilled value is comparable with
-				// the reclaim predicate by construction rather than by
-				// this statement guessing at a format.
-				//
-				// The last resort is a bound time.Time and NOT strftime,
-				// which would be the obvious choice and is wrong here.
-				// SQLite has no timestamp type, so lease_expires_at <= ?
-				// in ReclaimExpiredLeases is a string comparison, and
-				// grove's sqlitedriver renders a time.Time with Go's
-				// default layout — "2006-01-02 15:04:05.999999999 -0700
-				// MST" — not ISO-8601. A strftime value would sort as
-				// greater than every driver-written timestamp ('T' > ' ')
-				// and the backfilled rows would silently never be
-				// reclaimed, which is the exact bug this backfill exists
-				// to fix. Binding the value makes the driver render it the
-				// same way it renders every other timestamp in the table.
-				//
-				// Idempotent by the IS NULL predicate: a re-run cannot
-				// overwrite an expiry a running worker has since renewed.
-				if _, err := exec.Exec(ctx, `
-					UPDATE dispatch_jobs
-					SET lease_expires_at = COALESCE(heartbeat_at, started_at, ?)
-					WHERE state = 'running' AND lease_expires_at IS NULL`,
-					time.Now().UTC()); err != nil {
-					return err
-				}
+				// There is deliberately no backfill of lease_expires_at for
+				// rows already running here, matching the postgres migration
+				// of the same name. A one-shot backfill only sees rows that
+				// exist the moment it runs, so it misses every job an old pod
+				// claims later in a rolling upgrade, and every job claimed
+				// through job.Store without lease options, which never grants
+				// a lease at all. It also seeds an expiry in the past, which
+				// evicts jobs old pods are still actively running.
+				// ReclaimExpiredLeases adopts those rows on every sweep
+				// instead, gated on silence. See job.UnleasedReclaimGrace.
 
-				// Created after the backfill so the rows it writes land in
-				// the index as it is built.
 				_, err := exec.Exec(ctx, `
 					CREATE INDEX IF NOT EXISTS idx_dispatch_jobs_lease
 						ON dispatch_jobs (lease_expires_at) WHERE state = 'running'`)

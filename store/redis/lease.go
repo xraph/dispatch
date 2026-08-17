@@ -220,24 +220,6 @@ func (s *Store) RenewLease(
 	return nil
 }
 
-// legacyLeaseGrace is how long a running job carrying no lease at all
-// must have been silent before reclamation will adopt it.
-//
-// The value is arbitrary and, unlike every other timing in this system,
-// an operator cannot tune it: ReclaimExpiredLeases(ctx, limit) takes no
-// threshold, and widening that signature to carry one would be a change
-// to all five backends for the sake of a clause that stops mattering once
-// a fleet has finished upgrading. Naming that plainly is better than
-// burying it.
-//
-// Fifteen minutes is chosen to be conservative rather than precise. Before
-// leases, these same rows were reaped by ReapStaleJobs at
-// Config.StaleJobThreshold, which defaults to 30 seconds — so any value
-// well above that is strictly less aggressive than what already shipped,
-// and the cost of overshooting is only that a stranded job takes longer to
-// come back.
-const legacyLeaseGrace = 15 * time.Minute
-
 // reclaimable reports whether a running job should be taken back.
 //
 // The first clause is the actual rule, and job.Lease.IsExpired remains its
@@ -246,23 +228,10 @@ const legacyLeaseGrace = 15 * time.Minute
 // The second is a deliberate, narrow exception to the invariant documented
 // at job/lease.go, which is that a zero expiry means "never leased" rather
 // than "expired" precisely so that reclamation cannot steal a job nobody
-// ever leased. That invariant is right, and it is also what strands every
-// job left running by a pre-lease build: the expiry arrives absent, so
-// reclamation skips the row forever while dequeue — which claims only
-// pending and retrying rows — never looks at it again. Redis cannot fix
-// that with a backfill the way the other backends do, because it has no
-// migration mechanism to hang one on; Migrate is a no-op.
-//
-// So the exception is gated on silence rather than on the null expiry
-// alone, because a null expiry does NOT by itself mean the job is
-// abandoned. DequeueOpts.Grants() is false whenever LeaseUntil is zero,
-// so any caller using job.Store directly without lease options holds a
-// perfectly healthy running job with no lease — and evicting live work
-// would be a worse bug than the one this fixes. A worker that is still
-// heartbeating is therefore never touched, no matter how old its claim.
-//
-// A row with neither timestamp is left alone: there is nothing to measure
-// age against, and guessing would mean guessing against a running job.
+// ever leased. See job.UnleasedReclaimGrace for why the exception is
+// needed and why it is gated on silence rather than on the null expiry
+// alone; the four persistent backends all apply the same rule, three of
+// them in SQL or a query filter and this one here.
 func reclaimable(e *jobEntity, t time.Time) bool {
 	if e.LeaseExpiresAt != nil {
 		return job.Lease{ExpiresAt: *e.LeaseExpiresAt}.IsExpired(t)
@@ -278,7 +247,7 @@ func reclaimable(e *jobEntity, t time.Time) bool {
 		return false
 	}
 
-	return silent.Before(t.Add(-legacyLeaseGrace))
+	return silent.Before(t.Add(-job.UnleasedReclaimGrace))
 }
 
 // ReclaimExpiredLeases returns expired-lease jobs to pending, fencing
