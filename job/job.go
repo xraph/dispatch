@@ -82,6 +82,9 @@ type Job struct {
 	// write refused outright. UpdateJob does not check it: that is a
 	// whole-row write with no epoch predicate, so a caller that wants the
 	// fence must use UpdateLeasedJob instead.
+	//
+	// Without the renewal check, a worker resuming from a long GC pause
+	// would carry on renewing a lease on a job another worker now owns.
 	LeaseEpoch int `json:"lease_epoch"`
 
 	// LeaseExpiresAt is when the current lease lapses if not renewed.
