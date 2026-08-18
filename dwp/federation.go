@@ -389,7 +389,7 @@ func (f *Federation) connectPeer(ctx context.Context, peer *Peer) error {
 	}
 
 	if writeErr := writeJSONFrame(conn, authFrame); writeErr != nil {
-		conn.Close()
+		_ = conn.Close()
 		peer.mu.Lock()
 		peer.State = PeerStateDisconnected
 		peer.mu.Unlock()
@@ -399,7 +399,7 @@ func (f *Federation) connectPeer(ctx context.Context, peer *Peer) error {
 	// Read auth response.
 	data, err := wsutil.ReadServerText(conn)
 	if err != nil {
-		conn.Close()
+		_ = conn.Close()
 		peer.mu.Lock()
 		peer.State = PeerStateDisconnected
 		peer.mu.Unlock()
@@ -408,7 +408,7 @@ func (f *Federation) connectPeer(ctx context.Context, peer *Peer) error {
 
 	var resp Frame
 	if err := json.Unmarshal(data, &resp); err != nil {
-		conn.Close()
+		_ = conn.Close()
 		peer.mu.Lock()
 		peer.State = PeerStateDisconnected
 		peer.mu.Unlock()
@@ -416,7 +416,7 @@ func (f *Federation) connectPeer(ctx context.Context, peer *Peer) error {
 	}
 
 	if resp.Type == FrameErr {
-		conn.Close()
+		_ = conn.Close()
 		peer.mu.Lock()
 		peer.State = PeerStateDisconnected
 		peer.mu.Unlock()
@@ -452,7 +452,7 @@ func (f *Federation) disconnectPeer(peer *Peer) {
 	defer peer.mu.Unlock()
 
 	if peer.conn != nil {
-		peer.conn.Close()
+		_ = peer.conn.Close()
 		peer.conn = nil
 	}
 	peer.State = PeerStateDisconnected

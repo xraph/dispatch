@@ -587,13 +587,13 @@ func (w *Workflow) WaitForAll(names []string, timeout time.Duration) ([]*event.E
 
 			// Ack and checkpoint (best-effort: event already received).
 			//nolint:errcheck // best-effort ack/checkpoint after successful receive
-			w.eventStore.AckEvent(gctx, evt.ID)
+			_ = w.eventStore.AckEvent(gctx, evt.ID)
 			evtData, marshalErr := json.Marshal(evt)
 			if marshalErr != nil {
 				return fmt.Errorf("marshal event %q: %w", evtName, marshalErr)
 			}
 			//nolint:errcheck // best-effort checkpoint
-			w.store.SaveCheckpoint(gctx, w.run.ID, stepName, evtData)
+			_ = w.store.SaveCheckpoint(gctx, w.run.ID, stepName, evtData)
 
 			events[idx] = evt
 			return nil
@@ -610,7 +610,7 @@ func (w *Workflow) WaitForAll(names []string, timeout time.Duration) ([]*event.E
 		return nil, fmt.Errorf("workflow %s: marshal waitall events: %w", w.run.Name, marshalErr)
 	}
 	//nolint:errcheck // best-effort group checkpoint
-	w.store.SaveCheckpoint(w.ctx, w.run.ID, groupKey, allData)
+	_ = w.store.SaveCheckpoint(w.ctx, w.run.ID, groupKey, allData)
 
 	return events, nil
 }
@@ -672,7 +672,7 @@ func (w *Workflow) WaitForAny(names []string, timeout time.Duration) (*event.Eve
 			}
 		case <-ctx.Done():
 			//nolint:errcheck // best-effort timeout checkpoint
-			w.store.SaveCheckpoint(w.ctx, w.run.ID, stepName, []byte{})
+			_ = w.store.SaveCheckpoint(w.ctx, w.run.ID, stepName, []byte{})
 			return nil, nil
 		}
 	}
@@ -680,7 +680,7 @@ done:
 
 	if firstEvt == nil {
 		//nolint:errcheck // best-effort nil-result checkpoint
-		w.store.SaveCheckpoint(w.ctx, w.run.ID, stepName, []byte{})
+		_ = w.store.SaveCheckpoint(w.ctx, w.run.ID, stepName, []byte{})
 		if lastErr != nil {
 			return nil, fmt.Errorf("workflow %s waitany: %w", w.run.Name, lastErr)
 		}
@@ -689,13 +689,13 @@ done:
 
 	// Ack and checkpoint (best-effort: event already received).
 	//nolint:errcheck // best-effort ack after successful receive
-	w.eventStore.AckEvent(w.ctx, firstEvt.ID)
+	_ = w.eventStore.AckEvent(w.ctx, firstEvt.ID)
 	evtData, marshalErr := json.Marshal(firstEvt)
 	if marshalErr != nil {
 		return nil, fmt.Errorf("workflow %s: marshal waitany event: %w", w.run.Name, marshalErr)
 	}
 	//nolint:errcheck // best-effort checkpoint
-	w.store.SaveCheckpoint(w.ctx, w.run.ID, stepName, evtData)
+	_ = w.store.SaveCheckpoint(w.ctx, w.run.ID, stepName, evtData)
 
 	return firstEvt, nil
 }
@@ -732,7 +732,7 @@ func (w *Workflow) WaitForMatch(
 		remaining := time.Until(deadline)
 		if remaining <= 0 {
 			//nolint:errcheck // best-effort timeout checkpoint
-			w.store.SaveCheckpoint(w.ctx, w.run.ID, stepName, []byte{})
+			_ = w.store.SaveCheckpoint(w.ctx, w.run.ID, stepName, []byte{})
 			return nil, nil
 		}
 
@@ -743,20 +743,20 @@ func (w *Workflow) WaitForMatch(
 		if evt == nil {
 			// Timeout.
 			//nolint:errcheck // best-effort timeout checkpoint
-			w.store.SaveCheckpoint(w.ctx, w.run.ID, stepName, []byte{})
+			_ = w.store.SaveCheckpoint(w.ctx, w.run.ID, stepName, []byte{})
 			return nil, nil
 		}
 
 		if match(evt) {
 			// Match found. Ack and checkpoint.
 			//nolint:errcheck // best-effort ack after successful match
-			w.eventStore.AckEvent(w.ctx, evt.ID)
+			_ = w.eventStore.AckEvent(w.ctx, evt.ID)
 			evtData, marshalErr := json.Marshal(evt)
 			if marshalErr != nil {
 				return nil, fmt.Errorf("workflow %s: marshal waitmatch event: %w", w.run.Name, marshalErr)
 			}
 			//nolint:errcheck // best-effort checkpoint
-			w.store.SaveCheckpoint(w.ctx, w.run.ID, stepName, evtData)
+			_ = w.store.SaveCheckpoint(w.ctx, w.run.ID, stepName, evtData)
 			return evt, nil
 		}
 

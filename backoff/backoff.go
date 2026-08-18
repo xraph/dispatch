@@ -107,7 +107,7 @@ func (e *ExponentialWithJitter) Delay(attempt int) time.Duration {
 	if e.Max > 0 && base > float64(e.Max) {
 		base = float64(e.Max)
 	}
-	return time.Duration(rand.Float64() * base) //nolint:gosec // jitter intentionally uses non-crypto rand
+	return time.Duration(rand.Float64() * base) // #nosec G404 -- retry jitter; spread, not secrecy, is the pointly uses non-crypto rand
 }
 
 // ──────────────────────────────────────────────────

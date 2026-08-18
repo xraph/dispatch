@@ -271,11 +271,20 @@ var shimAllowedModules = []string{
 	"github.com/vmihailenco/tagparser", // msgpack's own struct-tag parser
 	"github.com/zeebo/blake3",          // artifact content hashing
 	"github.com/klauspost/cpuid",       // blake3's SIMD dispatch
-	"go.jetify.com/typeid",             // ID generation
-	"github.com/gofrs/uuid",            // typeid's underlying uuid generator
-	"go.uber.org/zap",                  // logging
-	"go.uber.org/multierr",             // zap's error-joining helper
-	"github.com/xraph/go-utils/log",    // the log.Logger interface dispatch itself uses
+	// cpuid v2.4.0 reads CPU features through syscalls (AT_HWCAP on
+	// linux, sysctl on darwin) where older versions used CPUID
+	// instructions alone, so this arrived with a version bump rather
+	// than with any change here. Raw syscall bindings are the furthest
+	// thing from an infrastructure client, which is what this list
+	// exists to keep out, and the prefix rule above does not cover it
+	// because x/sys is its own module rather than a subpackage of
+	// something already allowed.
+	"golang.org/x/sys",              // cpuid's CPU feature detection
+	"go.jetify.com/typeid",          // ID generation
+	"github.com/gofrs/uuid",         // typeid's underlying uuid generator
+	"go.uber.org/zap",               // logging
+	"go.uber.org/multierr",          // zap's error-joining helper
+	"github.com/xraph/go-utils/log", // the log.Logger interface dispatch itself uses
 }
 
 // shimAllowedDispatchPackages lists the exact dispatch packages exec/shim's
