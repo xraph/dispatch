@@ -36,6 +36,9 @@ import (
 //     returns successfully — anything else is caught and rejected by
 //     the caller's own fstat check.
 func openRegularNoFollow(path string) (*os.File, error) {
+	// #nosec G304 -- this function is the symlink-race hardening: O_NOFOLLOW
+	// and O_NONBLOCK are the mitigation, and the caller fstats for a regular
+	// file before using the handle.
 	return os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
 }
 

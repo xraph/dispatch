@@ -247,7 +247,7 @@ func TestClearOwnershipStopsTheRequeueLivelock(t *testing.T) {
 
 	// requeued builds the row a retry path produces, with or without the
 	// ownership reset, and returns it after one no-lease claim.
-	requeued := func(t *testing.T, clear bool) (*memory.Store, *job.Job) {
+	requeued := func(t *testing.T, resetOwnership bool) (*memory.Store, *job.Job) {
 		t.Helper()
 
 		s := memory.New()
@@ -276,7 +276,7 @@ func TestClearOwnershipStopsTheRequeueLivelock(t *testing.T) {
 		j.LastError = ""
 		j.RunAt = time.Now().UTC()
 		j.CompletedAt = nil
-		if clear {
+		if resetOwnership {
 			j.ClearOwnership()
 		} else {
 			j.StartedAt = nil // the old code cleared only this

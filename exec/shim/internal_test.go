@@ -226,6 +226,15 @@ func TestFDFromEnv(t *testing.T) {
 		t.Errorf("fdFromEnv() = %d, want default %d", got, defaultRequestFD)
 	}
 
+	// A negative value parses fine but is not a descriptor, and callers convert
+	// to uintptr, where it would wrap to an enormous bogus fd rather than fail.
+	for _, v := range []string{"-1", "-99"} {
+		t.Setenv(EnvRequestFD, v)
+		if got := fdFromEnv(EnvRequestFD, defaultRequestFD); got != defaultRequestFD {
+			t.Errorf("fdFromEnv(%q) = %d, want default %d", v, got, defaultRequestFD)
+		}
+	}
+
 	if err := os.Unsetenv("DISPATCH_EXEC_SHIM_TEST_UNSET"); err != nil {
 		t.Fatalf("Unsetenv() = %v", err)
 	}

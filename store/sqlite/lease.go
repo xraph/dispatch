@@ -48,7 +48,9 @@ const leaseBusyRetryDelay = time.Millisecond
 func busyRetryDelay() time.Duration {
 	half := leaseBusyRetryDelay / 2
 
-	return half + time.Duration(rand.Float64()*float64(leaseBusyRetryDelay)) //nolint:gosec // jitter intentionally uses non-crypto rand
+	// #nosec G404 -- retry jitter only needs to spread contention, not resist
+	// prediction, so math/rand is the right tool here.
+	return half + time.Duration(rand.Float64()*float64(leaseBusyRetryDelay))
 }
 
 // isSQLiteBusy reports whether err is the driver's SQLITE_BUSY, meaning

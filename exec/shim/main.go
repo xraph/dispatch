@@ -105,9 +105,9 @@ func Main(defs ...job.Registrable) {
 // Only StatusHandlerError keeps exit 0; every other non-OK status,
 // including one Run reported without an error, is a nonzero exit.
 func mainExitCode(defs []job.Registrable) int {
-	//nolint:gosec // G115: fd numbers come from a small, non-negative process descriptor space, never from attacker input.
+	// fdFromEnv guarantees a non-negative descriptor, so the uintptr
+	// conversion cannot wrap.
 	in := os.NewFile(uintptr(fdFromEnv(EnvRequestFD, defaultRequestFD)), "dispatch-exec-request")
-	//nolint:gosec // G115: fd numbers come from a small, non-negative process descriptor space, never from attacker input.
 	out := os.NewFile(uintptr(fdFromEnv(EnvResultFD, defaultResultFD)), "dispatch-exec-result")
 
 	// Applied before anything else touches the request: RLIMIT_CORE in
@@ -213,6 +213,12 @@ func fdFromEnv(name string, def int) int {
 
 	n, err := strconv.Atoi(v)
 	if err != nil {
+		return def
+	}
+
+	// A descriptor is never negative, and callers convert to uintptr, where a
+	// negative would wrap to an enormous bogus fd instead of failing.
+	if n < 0 {
 		return def
 	}
 
@@ -360,7 +366,8 @@ func collectOutputs(dir string) ([]exec.OutputFile, error) {
 	// dir is req.OutputDir, a path the parent chose and mounted for this
 	// attempt, never a value read out of the untrusted payload the
 	// handler parses.
-	err := filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error { //nolint:gosec // G703: dir is the request's own OutputDir, not attacker-controlled.
+	// dir is the request's own OutputDir, not attacker-controlled.
+	err := filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}

@@ -103,7 +103,8 @@ func TestDispatcherStopIsIdempotentUnderConcurrency(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			_ = d.Stop(context.Background()) //nolint:errcheck // asserted via counts
+			// Errors are asserted via the counts below, not per call.
+			_ = d.Stop(context.Background())
 		}()
 	}
 	wg.Wait()

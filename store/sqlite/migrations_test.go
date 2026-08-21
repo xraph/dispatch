@@ -69,39 +69,6 @@ func mustExec(t *testing.T, drv driver.Driver, stmt string, args ...any) {
 	}
 }
 
-// scanText reads one nullable text column from a single-row query,
-// returning "" for NULL. It exists so a test can look at what a migration
-// actually wrote, rather than at what the model layer renders it back as.
-func scanText(t *testing.T, drv driver.Driver, query string, args ...any) string {
-	t.Helper()
-
-	rows, err := drv.Query(context.Background(), query, args...)
-	if err != nil {
-		t.Fatalf("query %q: %v", query, err)
-	}
-
-	defer func() {
-		if closeErr := rows.Close(); closeErr != nil {
-			t.Errorf("close rows: %v", closeErr)
-		}
-	}()
-
-	if !rows.Next() {
-		t.Fatalf("query %q returned no rows", query)
-	}
-
-	var v *string
-	if err = rows.Scan(&v); err != nil {
-		t.Fatalf("scan %q: %v", query, err)
-	}
-
-	if v == nil {
-		return ""
-	}
-
-	return *v
-}
-
 // hasColumn reports whether dispatch_jobs currently has the named column.
 //
 // The table is fixed rather than a parameter: every migration in this file

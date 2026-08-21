@@ -284,8 +284,8 @@ func (e *Executor) Run(ctx context.Context, req *exec.Request) (*exec.Result, er
 	}
 	resR, resW, err := os.Pipe()
 	if err != nil {
-		reqR.Close()
-		reqW.Close()
+		_ = reqR.Close()
+		_ = reqW.Close()
 
 		return nil, fmt.Errorf("dispatch/exec/subprocess: create result pipe: %w", err)
 	}
@@ -298,35 +298,35 @@ func (e *Executor) Run(ctx context.Context, req *exec.Request) (*exec.Result, er
 	// it alone, so we can read our own end on our own schedule.
 	outR, outW, err := os.Pipe()
 	if err != nil {
-		reqR.Close()
-		reqW.Close()
-		resR.Close()
-		resW.Close()
+		_ = reqR.Close()
+		_ = reqW.Close()
+		_ = resR.Close()
+		_ = resW.Close()
 
 		return nil, fmt.Errorf("dispatch/exec/subprocess: create stdout pipe: %w", err)
 	}
 	errR, errW, err := os.Pipe()
 	if err != nil {
-		reqR.Close()
-		reqW.Close()
-		resR.Close()
-		resW.Close()
-		outR.Close()
-		outW.Close()
+		_ = reqR.Close()
+		_ = reqW.Close()
+		_ = resR.Close()
+		_ = resW.Close()
+		_ = outR.Close()
+		_ = outW.Close()
 
 		return nil, fmt.Errorf("dispatch/exec/subprocess: create stderr pipe: %w", err)
 	}
 
 	scratch, err := os.MkdirTemp(e.opts.scratchDir, "dispatch-exec-")
 	if err != nil {
-		reqR.Close()
-		reqW.Close()
-		resR.Close()
-		resW.Close()
-		outR.Close()
-		outW.Close()
-		errR.Close()
-		errW.Close()
+		_ = reqR.Close()
+		_ = reqW.Close()
+		_ = resR.Close()
+		_ = resW.Close()
+		_ = outR.Close()
+		_ = outW.Close()
+		_ = errR.Close()
+		_ = errW.Close()
 
 		return nil, fmt.Errorf("dispatch/exec/subprocess: create scratch dir: %w", err)
 	}
@@ -339,7 +339,9 @@ func (e *Executor) Run(ctx context.Context, req *exec.Request) (*exec.Result, er
 	// waitLoop select and killProcess. Wiring the caller's ctx in here too
 	// would give os/exec its own independent kill-on-cancel path (with its
 	// own WaitDelay semantics) racing the one this function already owns.
-	cmd := osexec.CommandContext(context.Background(), e.opts.binary, args...) //nolint:gosec // G204: binary and args come from operator configuration (WithBinary/WithArgs), never from the untrusted job payload
+	// #nosec G204 -- binary and args come from operator configuration
+	// (WithBinary/WithArgs), never from the untrusted job payload.
+	cmd := osexec.CommandContext(context.Background(), e.opts.binary, args...)
 	cmd.Env = e.buildEnv(req)
 	cmd.Dir = scratch
 	cmd.ExtraFiles = []*os.File{reqR, resW} // index 0 -> fd 3, index 1 -> fd 4, matching requestFD/resultFD above
@@ -348,14 +350,14 @@ func (e *Executor) Run(ctx context.Context, req *exec.Request) (*exec.Result, er
 	cmd.SysProcAttr = sysProcAttr(e.opts) // Setpgid, so killProcess below can reach the whole group, not just this one process; Credential when a user is configured
 
 	if err := cmd.Start(); err != nil {
-		reqR.Close()
-		reqW.Close()
-		resR.Close()
-		resW.Close()
-		outR.Close()
-		outW.Close()
-		errR.Close()
-		errW.Close()
+		_ = reqR.Close()
+		_ = reqW.Close()
+		_ = resR.Close()
+		_ = resW.Close()
+		_ = outR.Close()
+		_ = outW.Close()
+		_ = errR.Close()
+		_ = errW.Close()
 
 		return &exec.Result{
 			Status:     exec.StatusLaunchFailed,
@@ -370,10 +372,10 @@ func (e *Executor) Run(ctx context.Context, req *exec.Request) (*exec.Result, er
 	// block forever reading a result frame from a process that is already
 	// gone. The same reasoning applies to outW/errW for the stdio pipes.
 	// reqR only matters for symmetry; nothing reads from our copy anyway.
-	reqR.Close()
-	resW.Close()
-	outW.Close()
-	errW.Close()
+	_ = reqR.Close()
+	_ = resW.Close()
+	_ = outW.Close()
+	_ = errW.Close()
 
 	// Each of these closes exactly once no matter which of several racing
 	// paths gets there first: the dedicated writer goroutine below always
@@ -383,10 +385,10 @@ func (e *Executor) Run(ctx context.Context, req *exec.Request) (*exec.Result, er
 	// behind. sync.OnceFunc is what keeps that from ever double-closing a
 	// file — recycled fd numbers make a double-close silently break an
 	// unrelated descriptor rather than just returning a harmless error.
-	closeReqW := sync.OnceFunc(func() { reqW.Close() })
-	closeOutR := sync.OnceFunc(func() { outR.Close() })
-	closeErrR := sync.OnceFunc(func() { errR.Close() })
-	closeResR := sync.OnceFunc(func() { resR.Close() })
+	closeReqW := sync.OnceFunc(func() { _ = reqW.Close() })
+	closeOutR := sync.OnceFunc(func() { _ = outR.Close() })
+	closeErrR := sync.OnceFunc(func() { _ = errR.Close() })
+	closeResR := sync.OnceFunc(func() { _ = resR.Close() })
 	defer closeReqW()
 	defer closeOutR()
 	defer closeErrR()

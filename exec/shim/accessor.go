@@ -77,6 +77,8 @@ func (a *accessor) Open(_ context.Context, name string) (io.ReadCloser, error) {
 		return nil, fmt.Errorf("dispatch/exec/shim: open %q: %w", name, artifact.ErrUnbound)
 	}
 
+	// #nosec G304 -- path comes from the accessor's own binding table via
+	// a.Path, and an unbound name is rejected above.
 	f, err := os.Open(path)
 	if err != nil {
 		return nil, fmt.Errorf("dispatch/exec/shim: open %q: %w", name, err)

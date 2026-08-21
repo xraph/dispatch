@@ -140,7 +140,9 @@ func (fs *LocalFS) Create(_ context.Context, bucket, key string) (artifact.Write
 		_ = tmp.Close()
 		// tmp.Name() is a sibling of path inside the directory resolve
 		// already confined to fs.root; nothing here reads attacker input.
-		_ = os.Remove(tmp.Name()) //nolint:gosec // G703: temp file path is derived from resolve's containment check, not from a raw key.
+		// Safe to remove: the path came from resolve's containment check, not
+		// from a raw key.
+		_ = os.Remove(tmp.Name())
 
 		return nil, fmt.Errorf("shim: create %s/%s: %w", bucket, key, cherr)
 	}
@@ -235,13 +237,13 @@ func (w *localWriter) Commit(_ context.Context) (artifact.ObjectInfo, error) {
 	// resolve already confined to fs.root; it is not attacker input.
 	if err := w.file.Sync(); err != nil {
 		_ = w.file.Close()
-		_ = os.Remove(tmpName) //nolint:gosec // G703: tmpName is our own temp file under the resolved, contained directory.
+		_ = os.Remove(tmpName)
 
 		return artifact.ObjectInfo{}, fmt.Errorf("shim: commit %s/%s: %w", w.bucket, w.key, err)
 	}
 
 	if err := w.file.Close(); err != nil {
-		_ = os.Remove(tmpName) //nolint:gosec // G703: tmpName is our own temp file under the resolved, contained directory.
+		_ = os.Remove(tmpName)
 
 		return artifact.ObjectInfo{}, fmt.Errorf("shim: commit %s/%s: %w", w.bucket, w.key, err)
 	}
@@ -249,8 +251,9 @@ func (w *localWriter) Commit(_ context.Context) (artifact.ObjectInfo, error) {
 	// tmpName and w.final both passed through resolve's containment check
 	// (w.final at Create time; tmpName is a sibling CreateTemp made inside
 	// that same, already-contained directory).
-	if err := os.Rename(tmpName, w.final); err != nil { //nolint:gosec // G703: both paths are confined to fs.root by resolve.
-		_ = os.Remove(tmpName) //nolint:gosec // G703: tmpName is our own temp file under the resolved, contained directory.
+	// Both paths are confined to fs.root by resolve.
+	if err := os.Rename(tmpName, w.final); err != nil {
+		_ = os.Remove(tmpName)
 
 		return artifact.ObjectInfo{}, fmt.Errorf("shim: commit %s/%s: %w", w.bucket, w.key, err)
 	}
@@ -276,7 +279,8 @@ func (w *localWriter) Abort() error {
 
 	// name is this writer's own temp file, created inside the directory
 	// resolve already confined to fs.root at Create time.
-	if err := os.Remove(name); err != nil && !os.IsNotExist(err) { //nolint:gosec // G703: name is our own temp file under the resolved, contained directory.
+	// name is our own temp file under the resolved, contained directory.
+	if err := os.Remove(name); err != nil && !os.IsNotExist(err) {
 		return fmt.Errorf("shim: abort %s/%s: %w", w.bucket, w.key, err)
 	}
 

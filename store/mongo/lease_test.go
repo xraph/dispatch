@@ -45,11 +45,21 @@ func TestReclaimAdoptsRunningJobsWithoutLease(t *testing.T) {
 		return j
 	}
 
-	cases := []struct {
+	// The two cases below need their lease fields set up before they can be
+	// listed alongside the rest.
+	live := runningJob("live-lease", time.Minute)
+	until := time.Now().UTC().Add(10 * time.Minute)
+	live.LeaseExpiresAt = &until
+	live.LeaseEpoch = 1
+	ageless := runningJob("no-times", 0)
+
+	type leaseCase struct {
 		j    *job.Job
 		want bool
 		why  string
-	}{
+	}
+
+	cases := []leaseCase{
 		{
 			j:    withHeartbeat("stale-heartbeat", 30*time.Minute, 20*time.Minute),
 			want: true,
@@ -72,22 +82,8 @@ func TestReclaimAdoptsRunningJobsWithoutLease(t *testing.T) {
 			want: false,
 			why:  "just claimed; its first heartbeat is not due yet",
 		},
-	}
-
-	live := runningJob("live-lease", time.Minute)
-	until := time.Now().UTC().Add(10 * time.Minute)
-	live.LeaseExpiresAt = &until
-	live.LeaseEpoch = 1
-	ageless := runningJob("no-times", 0)
-	for _, extra := range []struct {
-		j    *job.Job
-		want bool
-		why  string
-	}{
-		{live, false, "holds a lease that has not lapsed"},
-		{ageless, false, "no timestamp to establish age from"},
-	} {
-		cases = append(cases, extra)
+		{j: live, want: false, why: "holds a lease that has not lapsed"},
+		{j: ageless, want: false, why: "no timestamp to establish age from"},
 	}
 
 	for _, c := range cases {

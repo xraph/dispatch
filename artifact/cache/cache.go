@@ -452,6 +452,8 @@ func (c *Cache) download(ctx context.Context, ref artifact.Ref, coord string) (*
 // copyAndHash streams src into a new file at dst, returning the byte
 // count and the hex digest.
 func (c *Cache) copyAndHash(dst string, src io.Reader) (written int64, digest string, err error) {
+	// #nosec G304 -- dst is a cache-internal temp path, and O_EXCL means this
+	// creates a new file rather than opening an existing one.
 	f, err := os.OpenFile(dst, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
 	if err != nil {
 		return 0, "", fmt.Errorf("dispatch/artifact/cache: create temp file: %w", err)

@@ -1,6 +1,7 @@
 package storetest
 
 import (
+	"bytes"
 	"context"
 	"testing"
 	"time"
@@ -97,7 +98,7 @@ func testDLQPreservesExecutionFields(t *testing.T, s DLQStore) {
 		t.Errorf("LeaseTTL = %v, want %v: a replayed job would fall back to the "+
 			"pool default and be reclaimed mid-run forever", got.LeaseTTL, want.LeaseTTL)
 	}
-	if string(got.ArtifactBindings) != string(want.ArtifactBindings) {
+	if !bytes.Equal(got.ArtifactBindings, want.ArtifactBindings) {
 		t.Errorf("ArtifactBindings = %q, want %q", got.ArtifactBindings, want.ArtifactBindings)
 	}
 	if !resourceSetEqual(got.Resources, want.Resources) {

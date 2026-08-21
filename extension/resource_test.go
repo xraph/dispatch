@@ -23,15 +23,16 @@ const mib = int64(1) << 20
 func registerWithResources(t *testing.T, opts ...extension.ExtOption) *extension.Extension {
 	t.Helper()
 
-	base := []extension.ExtOption{
+	base := make([]extension.ExtOption, 0, 7+len(opts))
+	base = append(base,
 		extension.WithStore(memory.New()),
 		extension.WithArtifactBackend(artifacttest.NewBackend()),
 		extension.WithArtifactStore(memory.New()),
 		extension.WithArtifactCacheDir(t.TempDir()),
-		extension.WithArtifactCacheBudget(64 * mib),
+		extension.WithArtifactCacheBudget(64*mib),
 		extension.WithResources(),
 		extension.WithDisableRoutes(),
-	}
+	)
 
 	ext := extension.New(append(base, opts...)...)
 
@@ -210,11 +211,12 @@ func runAndCaptureDequeues(t *testing.T, opts ...extension.ExtOption) []job.Dequ
 
 	spy := &dequeueSpy{Store: memory.New()}
 
-	base := []extension.ExtOption{
+	base := make([]extension.ExtOption, 0, 3+len(opts))
+	base = append(base,
 		extension.WithStore(spy),
 		extension.WithDisableRoutes(),
-		extension.WithPollInterval(20 * time.Millisecond),
-	}
+		extension.WithPollInterval(20*time.Millisecond),
+	)
 
 	ext := extension.New(append(base, opts...)...)
 
