@@ -13,6 +13,7 @@ import (
 	"github.com/xraph/dispatch/event"
 	"github.com/xraph/dispatch/id"
 	"github.com/xraph/dispatch/job"
+	"github.com/xraph/dispatch/resource"
 	"github.com/xraph/dispatch/workflow"
 )
 
@@ -21,55 +22,115 @@ import (
 type jobModel struct {
 	grove.BaseModel `grove:"table:dispatch_jobs"`
 
-	ID          string     `grove:"id,pk"`
-	Name        string     `grove:"name,notnull"`
-	Queue       string     `grove:"queue,notnull,default:'default'"`
-	Payload     []byte     `grove:"payload,notnull,type:bytea"`
-	State       string     `grove:"state,notnull,default:'pending'"`
-	Priority    int        `grove:"priority,notnull,default:0"`
-	MaxRetries  int        `grove:"max_retries,notnull,default:3"`
-	RetryCount  int        `grove:"retry_count,notnull,default:0"`
-	LastError   string     `grove:"last_error"`
-	ScopeAppID  string     `grove:"scope_app_id"`
-	ScopeOrgID  string     `grove:"scope_org_id"`
-	WorkerID    string     `grove:"worker_id"`
-	RunAt       time.Time  `grove:"run_at,notnull,default:current_timestamp"`
-	StartedAt   *time.Time `grove:"started_at"`
-	CompletedAt *time.Time `grove:"completed_at"`
-	HeartbeatAt *time.Time `grove:"heartbeat_at"`
-	Timeout     int64      `grove:"timeout,notnull,default:0"`
-	CreatedAt   time.Time  `grove:"created_at,notnull,default:current_timestamp"`
-	UpdatedAt   time.Time  `grove:"updated_at,notnull,default:current_timestamp"`
+	ID             string     `grove:"id,pk"`
+	Name           string     `grove:"name,notnull"`
+	Queue          string     `grove:"queue,notnull,default:'default'"`
+	Payload        []byte     `grove:"payload,notnull,type:bytea"`
+	State          string     `grove:"state,notnull,default:'pending'"`
+	Priority       int        `grove:"priority,notnull,default:0"`
+	MaxRetries     int        `grove:"max_retries,notnull,default:3"`
+	RetryCount     int        `grove:"retry_count,notnull,default:0"`
+	LastError      string     `grove:"last_error"`
+	ScopeAppID     string     `grove:"scope_app_id"`
+	ScopeOrgID     string     `grove:"scope_org_id"`
+	WorkerID       string     `grove:"worker_id"`
+	RunAt          time.Time  `grove:"run_at,notnull,default:current_timestamp"`
+	StartedAt      *time.Time `grove:"started_at"`
+	CompletedAt    *time.Time `grove:"completed_at"`
+	HeartbeatAt    *time.Time `grove:"heartbeat_at"`
+	Timeout        int64      `grove:"timeout,notnull,default:0"`
+	LeaseEpoch     int        `grove:"lease_epoch,notnull,default:0"`
+	LeaseExpiresAt *time.Time `grove:"lease_expires_at"`
+	LeaseTTL       int64      `grove:"lease_ttl,notnull,default:0"`
+	EvictCount     int        `grove:"evict_count,notnull,default:0"`
+	CreatedAt      time.Time  `grove:"created_at,notnull,default:current_timestamp"`
+	UpdatedAt      time.Time  `grove:"updated_at,notnull,default:current_timestamp"`
+
+	// The four canonical dimensions get real scalar columns because the
+	// dequeue predicate compares them and must behave identically across
+	// five backends; JSON comparison semantics are not portable. They are
+	// derived from Resources by toJobModel — the caller never sets them
+	// directly.
+	ReqCPUMilli    int64  `grove:"req_cpu_milli,notnull,default:0"`
+	ReqMemoryBytes int64  `grove:"req_memory_bytes,notnull,default:0"`
+	ReqDiskBytes   int64  `grove:"req_disk_bytes,notnull,default:0"`
+	ReqGPUMilli    int64  `grove:"req_gpu_milli,notnull,default:0"`
+	ReqCustomKeys  string `grove:"req_custom_keys,notnull,default:''"`
+
+	// ResourceRequests and ResourceLimits are the full-fidelity JSON copy
+	// of Resources / ResourceLimits, including custom keys the scalar
+	// columns above do not carry. fromJobModel reads Resources back from
+	// here, not from the scalars.
+	ResourceRequests []byte `grove:"resource_requests,type:jsonb"`
+	ResourceLimits   []byte `grove:"resource_limits,type:jsonb"`
+	ResourceClass    string `grove:"resource_class,notnull,default:''"`
+	InputBytes       int64  `grove:"input_bytes,notnull,default:0"`
+	PrimaryInputHash string `grove:"primary_input_hash"`
 }
 
-func toJobModel(j *job.Job) *jobModel {
-	return &jobModel{
-		ID:          j.ID.String(),
-		Name:        j.Name,
-		Queue:       j.Queue,
-		Payload:     j.Payload,
-		State:       string(j.State),
-		Priority:    j.Priority,
-		MaxRetries:  j.MaxRetries,
-		RetryCount:  j.RetryCount,
-		LastError:   j.LastError,
-		ScopeAppID:  j.ScopeAppID,
-		ScopeOrgID:  j.ScopeOrgID,
-		WorkerID:    j.WorkerID.String(),
-		RunAt:       j.RunAt,
-		StartedAt:   j.StartedAt,
-		CompletedAt: j.CompletedAt,
-		HeartbeatAt: j.HeartbeatAt,
-		Timeout:     j.Timeout.Nanoseconds(),
-		CreatedAt:   j.CreatedAt,
-		UpdatedAt:   j.UpdatedAt,
+func toJobModel(j *job.Job) (*jobModel, error) {
+	reqJSON, err := resource.EncodeSet(j.Resources)
+	if err != nil {
+		return nil, fmt.Errorf(errPrefix+"marshal job resources: %w", err)
 	}
+
+	limitsJSON, err := resource.EncodeSet(j.ResourceLimits)
+	if err != nil {
+		return nil, fmt.Errorf(errPrefix+"marshal job resource limits: %w", err)
+	}
+
+	return &jobModel{
+		ID:             j.ID.String(),
+		Name:           j.Name,
+		Queue:          j.Queue,
+		Payload:        j.Payload,
+		State:          string(j.State),
+		Priority:       j.Priority,
+		MaxRetries:     j.MaxRetries,
+		RetryCount:     j.RetryCount,
+		LastError:      j.LastError,
+		ScopeAppID:     j.ScopeAppID,
+		ScopeOrgID:     j.ScopeOrgID,
+		WorkerID:       j.WorkerID.String(),
+		RunAt:          j.RunAt,
+		StartedAt:      j.StartedAt,
+		CompletedAt:    j.CompletedAt,
+		HeartbeatAt:    j.HeartbeatAt,
+		Timeout:        j.Timeout.Nanoseconds(),
+		LeaseEpoch:     j.LeaseEpoch,
+		LeaseExpiresAt: j.LeaseExpiresAt,
+		LeaseTTL:       j.LeaseTTL.Nanoseconds(),
+		EvictCount:     j.EvictCount,
+		CreatedAt:      j.CreatedAt,
+		UpdatedAt:      j.UpdatedAt,
+
+		ReqCPUMilli:      j.Resources[resource.CPU],
+		ReqMemoryBytes:   j.Resources[resource.Memory],
+		ReqDiskBytes:     j.Resources[resource.Disk],
+		ReqGPUMilli:      j.Resources[resource.GPU],
+		ReqCustomKeys:    resource.EncodeCustomKeys(j.Resources),
+		ResourceRequests: reqJSON,
+		ResourceLimits:   limitsJSON,
+		ResourceClass:    j.ResourceClass,
+		InputBytes:       j.InputBytes,
+		PrimaryInputHash: j.PrimaryInputHash,
+	}, nil
 }
 
 func fromJobModel(m *jobModel) (*job.Job, error) {
 	parsedID, err := id.ParseJobID(m.ID)
 	if err != nil {
-		return nil, fmt.Errorf("dispatch/bun: parse job id %q: %w", m.ID, err)
+		return nil, fmt.Errorf(errPrefix+"parse job id %q: %w", m.ID, err)
+	}
+
+	resources, err := resource.DecodeSet(m.ResourceRequests)
+	if err != nil {
+		return nil, fmt.Errorf(errPrefix+"unmarshal job resources: %w", err)
+	}
+
+	limits, err := resource.DecodeSet(m.ResourceLimits)
+	if err != nil {
+		return nil, fmt.Errorf(errPrefix+"unmarshal job resource limits: %w", err)
 	}
 
 	j := &job.Job{
@@ -77,22 +138,32 @@ func fromJobModel(m *jobModel) (*job.Job, error) {
 			CreatedAt: m.CreatedAt,
 			UpdatedAt: m.UpdatedAt,
 		},
-		ID:          parsedID,
-		Name:        m.Name,
-		Queue:       m.Queue,
-		Payload:     m.Payload,
-		State:       job.State(m.State),
-		Priority:    m.Priority,
-		MaxRetries:  m.MaxRetries,
-		RetryCount:  m.RetryCount,
-		LastError:   m.LastError,
-		ScopeAppID:  m.ScopeAppID,
-		ScopeOrgID:  m.ScopeOrgID,
-		RunAt:       m.RunAt,
-		StartedAt:   m.StartedAt,
-		CompletedAt: m.CompletedAt,
-		HeartbeatAt: m.HeartbeatAt,
-		Timeout:     time.Duration(m.Timeout),
+		ID:             parsedID,
+		Name:           m.Name,
+		Queue:          m.Queue,
+		Payload:        m.Payload,
+		State:          job.State(m.State),
+		Priority:       m.Priority,
+		MaxRetries:     m.MaxRetries,
+		RetryCount:     m.RetryCount,
+		LastError:      m.LastError,
+		ScopeAppID:     m.ScopeAppID,
+		ScopeOrgID:     m.ScopeOrgID,
+		RunAt:          m.RunAt,
+		StartedAt:      m.StartedAt,
+		CompletedAt:    m.CompletedAt,
+		HeartbeatAt:    m.HeartbeatAt,
+		Timeout:        time.Duration(m.Timeout),
+		LeaseEpoch:     m.LeaseEpoch,
+		LeaseExpiresAt: m.LeaseExpiresAt,
+		LeaseTTL:       time.Duration(m.LeaseTTL),
+		EvictCount:     m.EvictCount,
+
+		Resources:        resources,
+		ResourceLimits:   limits,
+		ResourceClass:    m.ResourceClass,
+		InputBytes:       m.InputBytes,
+		PrimaryInputHash: m.PrimaryInputHash,
 	}
 
 	if m.WorkerID != "" {
@@ -144,7 +215,7 @@ func toRunModel(r *workflow.Run) *workflowRunModel {
 func fromRunModel(m *workflowRunModel) (*workflow.Run, error) {
 	parsedID, err := id.ParseRunID(m.ID)
 	if err != nil {
-		return nil, fmt.Errorf("dispatch/bun: parse run id %q: %w", m.ID, err)
+		return nil, fmt.Errorf(errPrefix+"parse run id %q: %w", m.ID, err)
 	}
 
 	return &workflow.Run{
@@ -180,12 +251,12 @@ type checkpointModel struct {
 func fromCheckpointModel(m *checkpointModel) (*workflow.Checkpoint, error) {
 	parsedID, err := id.ParseCheckpointID(m.ID)
 	if err != nil {
-		return nil, fmt.Errorf("dispatch/bun: parse checkpoint id %q: %w", m.ID, err)
+		return nil, fmt.Errorf(errPrefix+"parse checkpoint id %q: %w", m.ID, err)
 	}
 
 	parsedRunID, err := id.ParseRunID(m.RunID)
 	if err != nil {
-		return nil, fmt.Errorf("dispatch/bun: parse run id %q: %w", m.RunID, err)
+		return nil, fmt.Errorf(errPrefix+"parse run id %q: %w", m.RunID, err)
 	}
 
 	return &workflow.Checkpoint{
@@ -245,7 +316,7 @@ func toCronModel(e *cron.Entry) *cronEntryModel {
 func fromCronModel(m *cronEntryModel) (*cron.Entry, error) {
 	parsedID, err := id.ParseCronID(m.ID)
 	if err != nil {
-		return nil, fmt.Errorf("dispatch/bun: parse cron id %q: %w", m.ID, err)
+		return nil, fmt.Errorf(errPrefix+"parse cron id %q: %w", m.ID, err)
 	}
 
 	e := &cron.Entry{
@@ -290,9 +361,33 @@ type dlqEntryModel struct {
 	FailedAt   time.Time  `grove:"failed_at,notnull,default:current_timestamp"`
 	ReplayedAt *time.Time `grove:"replayed_at"`
 	CreatedAt  time.Time  `grove:"created_at,notnull,default:current_timestamp"`
+
+	// Carried so Replay can rebuild a job that behaves like the failed
+	// one; see the dlq.Entry doc. The two resource sets are stored with
+	// the same jsonb codec jobModel uses rather than as scalar columns:
+	// nothing queries a DLQ row by resource requirement, so the scalar
+	// split that dequeue's fit predicate needs buys nothing here.
+	Priority         int    `grove:"priority,notnull,default:0"`
+	Timeout          int64  `grove:"timeout,notnull,default:0"`
+	LeaseTTL         int64  `grove:"lease_ttl,notnull,default:0"`
+	ArtifactBindings []byte `grove:"artifact_bindings,type:bytea"`
+	Resources        []byte `grove:"resources,type:jsonb"`
+	ResourceLimits   []byte `grove:"resource_limits,type:jsonb"`
+	ResourceClass    string `grove:"resource_class,notnull,default:''"`
+	InputBytes       int64  `grove:"input_bytes,notnull,default:0"`
+	PrimaryInputHash string `grove:"primary_input_hash"`
 }
 
-func toDLQModel(e *dlq.Entry) *dlqEntryModel {
+func toDLQModel(e *dlq.Entry) (*dlqEntryModel, error) {
+	resources, err := resource.EncodeSet(e.Resources)
+	if err != nil {
+		return nil, fmt.Errorf(errPrefix+"encode dlq resources: %w", err)
+	}
+	limits, err := resource.EncodeSet(e.ResourceLimits)
+	if err != nil {
+		return nil, fmt.Errorf(errPrefix+"encode dlq resource limits: %w", err)
+	}
+
 	return &dlqEntryModel{
 		ID:         e.ID.String(),
 		JobID:      e.JobID.String(),
@@ -307,18 +402,37 @@ func toDLQModel(e *dlq.Entry) *dlqEntryModel {
 		FailedAt:   e.FailedAt,
 		ReplayedAt: e.ReplayedAt,
 		CreatedAt:  e.CreatedAt,
-	}
+
+		Priority:         e.Priority,
+		Timeout:          int64(e.Timeout),
+		LeaseTTL:         int64(e.LeaseTTL),
+		ArtifactBindings: e.ArtifactBindings,
+		Resources:        resources,
+		ResourceLimits:   limits,
+		ResourceClass:    e.ResourceClass,
+		InputBytes:       e.InputBytes,
+		PrimaryInputHash: e.PrimaryInputHash,
+	}, nil
 }
 
 func fromDLQModel(m *dlqEntryModel) (*dlq.Entry, error) {
 	parsedID, err := id.ParseDLQID(m.ID)
 	if err != nil {
-		return nil, fmt.Errorf("dispatch/bun: parse dlq id %q: %w", m.ID, err)
+		return nil, fmt.Errorf(errPrefix+"parse dlq id %q: %w", m.ID, err)
 	}
 
 	parsedJobID, err := id.ParseJobID(m.JobID)
 	if err != nil {
-		return nil, fmt.Errorf("dispatch/bun: parse job id %q: %w", m.JobID, err)
+		return nil, fmt.Errorf(errPrefix+"parse job id %q: %w", m.JobID, err)
+	}
+
+	resources, err := resource.DecodeSet(m.Resources)
+	if err != nil {
+		return nil, fmt.Errorf(errPrefix+"decode dlq resources: %w", err)
+	}
+	limits, err := resource.DecodeSet(m.ResourceLimits)
+	if err != nil {
+		return nil, fmt.Errorf(errPrefix+"decode dlq resource limits: %w", err)
 	}
 
 	return &dlq.Entry{
@@ -335,6 +449,16 @@ func fromDLQModel(m *dlqEntryModel) (*dlq.Entry, error) {
 		FailedAt:   m.FailedAt,
 		ReplayedAt: m.ReplayedAt,
 		CreatedAt:  m.CreatedAt,
+
+		Priority:         m.Priority,
+		Timeout:          time.Duration(m.Timeout),
+		LeaseTTL:         time.Duration(m.LeaseTTL),
+		ArtifactBindings: m.ArtifactBindings,
+		Resources:        resources,
+		ResourceLimits:   limits,
+		ResourceClass:    m.ResourceClass,
+		InputBytes:       m.InputBytes,
+		PrimaryInputHash: m.PrimaryInputHash,
 	}, nil
 }
 
@@ -367,7 +491,7 @@ func toEventModel(evt *event.Event) *eventModel {
 func fromEventModel(m *eventModel) (*event.Event, error) {
 	parsedID, err := id.ParseEventID(m.ID)
 	if err != nil {
-		return nil, fmt.Errorf("dispatch/bun: parse event id %q: %w", m.ID, err)
+		return nil, fmt.Errorf(errPrefix+"parse event id %q: %w", m.ID, err)
 	}
 
 	return &event.Event{
@@ -416,7 +540,7 @@ func toWorkerModel(w *cluster.Worker) *workerModel {
 func fromWorkerModel(m *workerModel) (*cluster.Worker, error) {
 	parsedID, err := id.ParseWorkerID(m.ID)
 	if err != nil {
-		return nil, fmt.Errorf("dispatch/bun: parse worker id %q: %w", m.ID, err)
+		return nil, fmt.Errorf(errPrefix+"parse worker id %q: %w", m.ID, err)
 	}
 
 	return &cluster.Worker{

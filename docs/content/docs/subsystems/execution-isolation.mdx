@@ -1,0 +1,460 @@
+---
+title: Execution Isolation
+description: Declaring the isolation a handler needs, and how Dispatch enforces it.
+---
+
+A handler that parses an untrusted customer upload with a memory-unsafe native
+library runs, today, in the same process as your database credentials. If the
+parser has a bug and the file is crafted to hit it, whatever the parser can
+reach, the attacker can reach — which in a typical worker is everything.
+
+The execution plane gives a job definition a way to say it needs more than
+that, and gives the engine a way to refuse to run it if the deployment cannot
+provide it.
+
+<Callout type="info">
+  Execution isolation is entirely opt-in. A definition that declares nothing
+  runs in-process exactly as it always has.
+</Callout>
+
+## The ladder
+
+Isolation is a `Level`, and levels are ordered:
+
+```go
+exec.LevelNone      // in-process: no isolation. The default.
+exec.LevelProcess   // a separate address space
+exec.LevelSandboxed // + mount, network, PID, and user namespaces, seccomp, dropped capabilities
+exec.LevelVM        // + an independent kernel (gVisor or Kata)
+```
+
+A definition declares the *minimum* it requires, not the executor it runs on
+— which rung actually satisfies that requirement is a deployment decision,
+made by whichever executors the deployment has configured.
+
+`LevelNone`, the in-process executor, is the only rung present in every
+deployment by default. `LevelProcess` now has a real executor too —
+`exec/subprocess`, covered in detail below — but it has to be configured
+explicitly (see "Adding a stronger rung"); a deployment that never does so
+has only `LevelNone` available, which matters for the reason below.
+`LevelSandboxed` and `LevelVM` describe rungs a later phase adds (OCI
+container and Kubernetes pod, respectively). Declaring either now is
+legitimate — it documents the requirement — but no deployment can satisfy
+them yet.
+
+## Declaring a policy
+
+```go
+var Tessellate = job.NewDefinition("tessellate.model",
+    func(ctx context.Context, in TessellateInput) error {
+        // parses an untrusted customer upload with a native geometry kernel
+        return nil
+    },
+    job.WithExecution(
+        exec.Isolate(exec.LevelProcess),
+        exec.GracePeriod(45*time.Second),
+    ),
+)
+```
+
+`exec.Isolate` sets the minimum level. `exec.GracePeriod` sets how long a
+sandbox gets to exit cleanly after being signalled before it is killed
+outright — `exec/subprocess`'s kill ladder already uses this today (see
+"Deadlines are enforced, not just cancelled" below), and later
+out-of-process rungs will too; the in-process executor ignores it, since
+there's no process to signal. `exec.Image`
+overrides the container image an out-of-process rung launches, for a handler
+that needs something other than the worker's own image. `exec.AllowDowngrade`
+is covered next.
+
+## No silent downgrades
+
+`exec.Registry.Select` picks the weakest configured executor that satisfies
+the declared level — a job asking for `LevelProcess` isolation is not handed
+a Kubernetes pod merely because one happens to be configured, and it is not
+handed the in-process executor merely because that's what's available.
+
+When nothing configured satisfies the level, `Select` **fails** rather than
+running the handler with less isolation than it declared. A parser that
+demanded a separate address space does not quietly fall back to running
+in-process just because no stronger rung was wired up — that would defeat
+the entire point of declaring the requirement. `exec.AllowDowngrade()` opts
+out of this for a definition that would genuinely rather run weakly isolated
+than not run at all.
+
+`engine.RegisterChecked` and `engine.RegisterAll` call `Select` at
+**registration**, not at execution, so a definition demanding isolation the
+deployment cannot provide fails when you start the process, not on the first
+malicious upload that reaches production. `engine.Register` skips the check,
+for definitions you've already verified some other way.
+
+A deployment that has not configured any rung above `LevelNone` — which is
+every deployment until the section below — is in exactly the situation the
+previous two paragraphs describe: **any definition that declares above
+`LevelNone` fails registration unless it also sets
+`exec.AllowDowngrade()`**, because there is nothing configured that can
+satisfy it yet. This is expected, not a bug — it's `Select` doing its job
+with only the in-process rung on the ladder.
+
+<Callout type="warn">
+  `exec.AllowDowngrade()` is not "accept a weaker rung than declared" in the
+  abstract — its fallback is always the in-process executor specifically
+  (`Registry.Select` returns the registry's always-present default when
+  nothing configured satisfies the level). Adding it to a `LevelProcess`
+  definition so registration stops failing, without first configuring the
+  subprocess rung below, means that definition runs in-process — in the
+  worker's own address space, next to its credentials — the moment nothing
+  satisfies the level, silently, with no registration failure to notice.
+  That is true today with no rung configured, and stays true later if the
+  subprocess rung is configured and then becomes unavailable for any
+  reason: disabled, misconfigured, or refused at startup for a reason
+  covered below. For a handler whose isolation requirement exists because
+  it parses untrusted input, only set `AllowDowngrade` on a definition that
+  genuinely tolerates running unisolated — never as a way to silence a
+  registration failure while assuming the stronger rung is actually in
+  place.
+</Callout>
+
+## Adding a stronger rung
+
+`engine.WithExecutor` adds an executor to the deployment's registry:
+
+```go
+subprocessExecutor := subprocess.New(
+    subprocess.WithUser(65534, 65534), // never the worker's own uid — see below
+)
+
+eng, err := engine.Build(d,
+    engine.WithExecutor(subprocessExecutor),
+)
+if err != nil {
+    log.Fatal(err)
+}
+```
+
+The in-process executor is always present as the default, so a deployment
+that adds nothing behaves exactly as before this existed. Adding an executor
+only changes what becomes available to definitions that ask for it.
+
+`exec.LevelProcess` now has a real executor behind it: `exec/subprocess`,
+covered in detail below.
+
+## Registering a mixed set
+
+`job.Registrable` lets definitions with different payload types share one
+slice, since Go forbids a generic method that would otherwise unify them.
+`SendEmail` below declares no isolation, so it stays in the worker process
+alongside the isolated `Tessellate` from above:
+
+```go
+var SendEmail = job.NewDefinition("send.email",
+    func(ctx context.Context, in EmailInput) error { return nil },
+)
+
+var defs []job.Registrable = []job.Registrable{Tessellate, SendEmail}
+
+if err := engine.RegisterAll(eng, defs...); err != nil {
+    log.Fatal(err)
+}
+```
+
+`RegisterAll` validates every definition's policy before registering any of
+them, so a rejected set leaves the registry as it was rather than half
+populated. This is also the seam `shim.Main` already uses, today, as the
+subprocess rung's out-of-process entrypoint (see "The subprocess rung"
+below): it is handed the same `[]job.Registrable` without ever holding an
+`*Engine`.
+
+## The subprocess rung
+
+`exec/subprocess` is the `exec.LevelProcess` executor: the worker re-execs
+its own binary for every attempt, the child runs the handler under a
+dedicated low-privilege uid — enforced at launch, not just advised; `Run`
+refuses to start without one unless the operator explicitly opts out (see
+"The dedicated uid is mandatory" below) — with POSIX resource limits
+applied, and a kill ladder enforces the deadline instead of trusting the
+handler to notice a cancelled context. The child never receives the
+worker's memory, and not its environment wholesale either — only a fixed
+allowlist (`PATH`, `HOME`, `TMPDIR`) is copied across, everything else
+comes from the request's own `Env`, constructed rather than inherited —
+so it cannot read a credential that lived only in some other worker
+environment variable. `HOME` is in that allowlist, though, which is
+exactly what locates `~/.aws` below; the dedicated uid is what actually
+stops the child from reading credentials that live on disk — the
+worker's own config file, a mounted secret, `~/.aws` — since the child
+shares the worker's filesystem view.
+
+<Callout type="warn">
+  It does not stop the file from reaching the network or another tenant's
+  data — the child shares the worker's network namespace and filesystem
+  view outside its scratch directory. That containment is `exec.LevelSandboxed`'s
+  job, a stronger rung a later phase builds on the same wire protocol. Declare
+  `exec.LevelSandboxed` if that is what a handler actually needs; declaring
+  `exec.LevelProcess` for it and getting this rung instead is a downgrade the
+  registry will not silently hand you (see "No silent downgrades" above), but
+  only if you declare the level you mean.
+</Callout>
+
+### The `main()` branch — read this before enabling anything else
+
+The worker distinguishes a normal run from a re-exec'd child by one thing:
+`argv[1] == "dispatch-exec"`. Nothing in `engine.Build` or `subprocess.New`
+adds that branch for you — it has to be the first thing `main` checks,
+before flags are parsed, before the store connects, before anything else
+that a sandboxed attempt has no business doing:
+
+```go
+func main() {
+    if len(os.Args) > 1 && os.Args[1] == shim.ArgName {
+        shim.Main(Tessellate, SendEmail) // same []job.Registrable as RegisterAll
+        return                          // unreachable: shim.Main calls os.Exit
+    }
+
+    d, err := dispatch.New(dispatch.WithStore(store))
+    if err != nil {
+        log.Fatal(err)
+    }
+
+    eng, err := engine.Build(d, engine.WithExecutor(subprocessExecutor))
+    if err != nil {
+        log.Fatal(err)
+    }
+    if err := engine.RegisterAll(eng, defs...); err != nil {
+        log.Fatal(err)
+    }
+    // ... start the worker
+}
+```
+
+<Callout type="warn">
+  This is the single most likely first-time-setup failure. Without the
+  branch, enabling the subprocess rung makes every attempt re-exec a whole
+  second copy of the worker — it connects to the store, starts polling,
+  does everything a normal worker does except read `exec.Request` off fd 3,
+  because nothing ever routes it to `shim.Main`. That child never writes a
+  result frame, so the parent's kill ladder eventually SIGTERMs and
+  SIGKILLs it at the deadline, and the attempt fails as `StatusTimeout`
+  every single time. Nothing about this looks like a wiring bug from the
+  logs alone — it looks like every job is timing out.
+</Callout>
+
+`shim.Main` takes the exact same `[]job.Registrable` as `RegisterAll` —
+same handler set, same fingerprint. `exec.Fingerprint` is compared between
+parent and child on every attempt, so a child built from a different
+handler set than the worker that launched it fails to launch rather than
+running a stale handler silently.
+
+### Enabling it
+
+Programmatically, `subprocess.New` plus `engine.WithExecutor`, as shown
+above. Through Forge, the extension resolves `execution.subprocess` from
+YAML and does the equivalent `engine.WithExecutor` wiring for you — but not
+the `main()` branch above. That branch cannot live in a package this
+repository ships; it has to be the first thing your own `main()` checks,
+YAML config or not:
+
+```yaml
+extensions:
+  dispatch:
+    execution:
+      subprocess:
+        enabled: true
+        user: 65534              # required to get real isolation — see below
+        group: 65534
+        scratch_dir: /var/lib/dispatch/scratch
+        rlimits:
+          address_space: 2147483648   # 2 GiB, bytes; rejected outright on Darwin, see below
+          nofile: 256
+          nproc: 32
+          fsize: 1073741824           # 1 GiB
+        strict_rlimits: true
+```
+
+`binary` defaults to `os.Executable()` — the worker's own binary — which is
+correct unless the sandboxed handlers are built as a separate binary.
+`allow_same_user` is covered next. A deployment that sets nothing under
+`execution` registers no extra executor; every job keeps running in-process
+exactly as it does today.
+
+This rung refuses to launch on any non-Unix platform. The extension checks
+that once, at startup — `execution.subprocess.enabled: true` on Windows
+fails to boot the worker rather than failing every job's first launch
+attempt once it is already in production.
+
+### The dedicated uid is mandatory
+
+`user` and `group` are not optional hardening — they are most of what this
+rung is for, and Dispatch enforces that rather than merely advising it.
+Enabling the subprocess rung with no `user` configured refuses to start at
+all, both from `main()`'s own `subprocess.New` path and from YAML config:
+without it, the child would run as the worker's own uid, with the worker's
+own read access to `~/.aws`, `/var/run/secrets`, and the Dispatch config
+file itself, and a parser exploited in that child could read every
+credential the worker can. Configuring `scratch_dir` and `rlimits` without
+`user` narrows *where* a compromised handler can write and *how much* it
+can allocate; it does nothing to stop it from reading what the worker could
+already read, which is why it is not accepted as a substitute.
+
+A configured `user` that silently equals the worker's own uid is refused
+the same way, for the same reason: running the child as the worker gives up
+the uid boundary regardless of whether that happened because `user` was
+never set or because it was set to a value that turned out to match. Both
+shapes share a single opt-out, `allow_same_user` (or
+`subprocess.WithAllowSameUser()`) — not a warning for one and a hard
+refusal for the other. That escape hatch exists for local development and
+CI, where dropping to a different uid needs privilege the process running
+the tests does not have, and for a deployment that has made a deliberate,
+informed decision to accept running this rung unisolated — not for
+production by default.
+
+**Supplementary groups.** A genuine uid drop — `user` naming a uid other
+than the worker's own — clears the child's supplementary groups along with
+its primary uid and gid: dropping to a different uid already needs the same
+privilege `setgroups(2)` itself requires, so the clear happens for free. The
+one case where it does *not* happen is the `allow_same_user` escape hatch —
+same uid, same gid — where there is nothing to clear anyway, since the
+child is running as the worker's own account. In other words: whenever this
+rung is actually providing the isolation it exists for, supplementary
+groups go with it; the one path where they survive is the same path that
+already gives up the uid boundary too.
+
+### Deadlines are enforced, not just cancelled
+
+`job.WithTimeout` means something stronger here than it does in-process.
+In-process, the timeout middleware wraps the handler's context in
+`context.WithTimeout` and nothing more — a handler that never checks
+`ctx.Done()` runs to completion regardless, because there is no process
+boundary to enforce anything against. Under the subprocess rung, the same
+deadline is also sent to the child as `exec.Request.Deadline`, and this
+package's kill ladder enforces it from the outside: SIGTERM to the child's
+whole process group, a grace period (`exec.GracePeriod`, default 30s) for a
+cooperative exit, then SIGKILL to the group if it has not emptied out by
+then. A handler that ignores cancellation entirely — stuck in a native
+call with no Go code polling `ctx.Done()` — still gets killed at the
+deadline plus grace. That is the actual, measurable difference this rung
+buys over in-process for a job whose native library might hang.
+
+That enforcement has a side effect worth knowing before it surprises you in
+a retry log: the attempt's `Status` is decided by whether the deadline
+elapsed at all, not by whether the handler eventually behaved. The parent
+watches its own timer for `req.Deadline` independently of the child; the
+instant it fires, it takes one non-blocking look at whether the process has
+already exited and been reaped, and if not, the attempt is `StatusTimeout`
+— full stop, regardless of what happens next. A handler that traps the
+signal, wraps up, writes a valid result frame, and exits 0 a moment later
+still gets `StatusTimeout`, not `StatusOK` or `StatusHandlerError`: a
+decoded frame is only authoritative once the parent has *not* already
+decided the deadline won that race. In practice, this means any handler
+whose deadline actually elapses is timed out, cooperative or not — the
+distinction that matters isn't "did it eventually exit cleanly," it's "did
+it finish its work before the deadline in the first place."
+
+### What `Setpgid` changes
+
+The child is started as its own process group leader, not a member of the
+worker's group. That is what lets the kill ladder reach a native library's
+forked helpers along with the tracked process itself — signalling the
+negative pid addresses the whole group, not just one member of it. It has
+a cost worth knowing about: a signal aimed at the *worker's* process group
+— `kill -TERM -$pgid` from a supervisor, or a shell sending SIGINT to a
+whole job-control group on Ctrl-C — no longer reaches the sandboxed child,
+because the child is not in that group anymore. Only the worker's own
+graceful-shutdown path, which cancels the attempt's context and lets this
+package's kill ladder run, reaches the child cleanly.
+
+That matters most when the worker itself does not get a graceful shutdown
+at all — killed outright, OOM-killed, or crashed. The child is orphaned,
+running with nothing left to signal it. It still enforces its own deadline
+internally (the shim applies `req.Deadline` to the handler's context, the
+same context cancellation in-process relies on), so a cooperative handler
+still stops on its own; an uncooperative one does not, and nothing catches
+it, because `Executor.Reclaim` for this rung is a no-op today — sweeping
+orphaned children across a restart needs a worker identity stable across
+restarts that this rung does not have yet.
+
+What `Reclaim` *does* sweep, at worker startup, is narrower than "leftover
+scratch state": only `worker.Runner`'s own per-attempt output directories
+(`dispatch-out-<pid>-<jobid>-…`), and only when this Runner has the
+artifact plane configured — a Runner without one skips the sweep entirely,
+since nothing it does creates that kind of directory without one. A swept
+entry also has to be at least an hour old (`staleScratchDirAge`) on top of
+its owning PID no longer being alive, so the PID-collision hazard below
+needs a leaked directory to sit around that long, not just outlive its
+process by a moment.
+
+`exec/subprocess.Executor`'s *own* scratch working directory — the
+`dispatch-exec-…` directory `Run` creates per attempt as the child's
+`Cmd.Dir`, distinct from the Runner's output directory even when both are
+rooted at the same configured `scratch_dir` — is not covered by this sweep
+at all. It is removed by a deferred `os.RemoveAll` inside `Run` itself, so
+a normal exit (success, failure, or a kill-ladder timeout) always cleans it
+up; a worker that crashes mid-attempt, the same case that orphans the child
+process (above), leaves that directory behind permanently. Nothing sweeps
+it on the next startup.
+
+Ownership matching itself is inherently single-host: `processAlive` asks
+the local kernel whether a PID is alive, which only means something within
+one PID namespace. A deployment where multiple containers share a scratch
+volume across separate PID namespaces can have a live sibling's PID
+collide with a number this worker's own kernel view reports as dead, and
+sweep a directory a running attempt is still using. Don't share a
+subprocess scratch directory across PID-namespace boundaries.
+
+### Resource limits degrade silently by default
+
+`rlimits` are applied child-side, inside the shim, because Go's `os/exec`
+has no way to set a child's rlimits through `SysProcAttr`. Two things about
+that path are worth knowing before relying on it:
+
+- **Darwin rejects `RLIMIT_AS` outright.** The kernel refuses
+  `setrlimit(RLIMIT_AS, ...)` unconditionally (`EINVAL`), regardless of the
+  value requested. This is a platform fact, not a configuration mistake,
+  and it is treated as one even with `strict_rlimits` on — there is no
+  value that would make it succeed.
+- **Some platforms don't get a resource number at all — and this case
+  *is* a strict-mode failure, unlike Darwin's above.** Dispatch has
+  confirmed the raw `RLIMIT_NPROC` number for Linux, Darwin, and FreeBSD
+  only; on every other Unix this rung otherwise supports — NetBSD,
+  OpenBSD, Dragonfly, Solaris/illumos, AIX, Android — a configured `nproc`
+  limit is skipped rather than risk applying a number that has not been
+  checked for that platform. OpenBSD has the same gap for `RLIMIT_AS`
+  specifically, for a different reason: Go's `syscall` package does not
+  export the constant there at all, so a configured `address_space` limit
+  is skipped on OpenBSD too. Both are a library gap Dispatch could close by
+  verifying the number, not a kernel refusing something no value could fix
+  — which is exactly why, unlike Darwin's `RLIMIT_AS` rejection,
+  `strict_rlimits` does treat these as launch failures.
+
+Without `strict_rlimits: true`, both of these — and any other rlimit that
+fails to apply, like a value exceeding the process's own hard limit — are
+warnings, not launch failures, logged to the child's stderr. That stream
+goes nowhere by default: the subprocess executor's own logger defaults to
+a no-op, so a warning nobody configured a logger to receive is a warning
+nobody sees. If a configured limit is meant to be a hard guarantee, set
+`strict_rlimits: true` and configure a logger — either turns a silent
+degradation into a launch failure or, at minimum, a line an operator can
+actually find.
+
+### Inputs are not yet staged out-of-process
+
+`exec.Request` has `Inputs` and `InputDir` fields, and the shim's artifact
+accessor already reads from them (`Accessor.Path`, `Accessor.Open`) — but
+nothing in the worker populates them for an out-of-process attempt today.
+Only *prior outputs* from an earlier attempt of the same job are staged
+into the child (so a retried attempt can skip work it already committed);
+declared inputs from `job.WithArtifactInputs` are not.
+
+This is not a "fetch it yourself" gap — the child cannot fetch anything.
+Its artifact service is deliberately credential-free, a local directory
+standing in for the real backend (see `exec/shim`'s own doc comment), so
+there is no backend to fetch a declared input *from* even if a handler
+tried. A handler that declares both `job.WithArtifactInputs` and an
+isolation level above `LevelNone` registers and runs today, but calling
+`Accessor.Open` for that declared input inside the sandboxed handler
+returns `artifact.ErrUnbound` — the binding exists in the job's policy, it
+is simply never staged where this rung's handler can reach it. Nothing at
+registration time catches this combination yet. Staging declared inputs
+into `InputDir` for out-of-process rungs is Phase 3 work; until it lands,
+keep a handler's declared artifact inputs on definitions that run
+in-process, or fetch outputs of *earlier attempts* only — the one input
+path this rung already wires up.

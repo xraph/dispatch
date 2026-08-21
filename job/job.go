@@ -5,6 +5,7 @@ import (
 
 	"github.com/xraph/dispatch"
 	"github.com/xraph/dispatch/id"
+	"github.com/xraph/dispatch/resource"
 )
 
 // State represents the lifecycle state of a job.
@@ -46,4 +47,91 @@ type Job struct {
 	CompletedAt *time.Time    `json:"completed_at,omitempty"`
 	HeartbeatAt *time.Time    `json:"heartbeat_at,omitempty"`
 	Timeout     time.Duration `json:"timeout,omitempty"`
+
+	// ArtifactBindings carries the encoded map of declared input names to
+	// artifact refs. It travels with the job because Payload is opaque to
+	// the engine: bindings placed inside it would be invisible to the
+	// scheduler and to the staging middleware.
+	ArtifactBindings []byte `json:"artifact_bindings,omitempty"`
+
+	// Resources is the resolved requirement, computed once at enqueue.
+	// Scheduling reads this rather than calling user code.
+	Resources resource.Set `json:"resources,omitempty"`
+
+	// ResourceLimits is the resolved enforcement ceiling.
+	ResourceLimits resource.Set `json:"resource_limits,omitempty"`
+
+	// ResourceClass is forwarded to the isolation backend uninterpreted.
+	ResourceClass string `json:"resource_class,omitempty"`
+
+	// InputBytes is the total size of the declared artifact inputs. It
+	// is the estimator's primary feature and the measurement bucket key.
+	InputBytes int64 `json:"input_bytes,omitempty"`
+
+	// PrimaryInputHash is the content hash of the largest declared
+	// input, used as the locality-scheduling signal. Often empty: the
+	// artifact plane fills content_hash at first staging, not at
+	// registration, so locality helps from an artifact's second use on.
+	PrimaryInputHash string `json:"primary_input_hash,omitempty"`
+
+	// LeaseEpoch is the fencing token for the current lease. It increments
+	// on every grant and every reclamation. RenewLease, the grant inside
+	// DequeueJobs, ReclaimExpiredLeases, and UpdateLeasedJob all check
+	// it, so a worker holding a stale epoch fails to renew — and the pool
+	// cancels the job within one heartbeat interval — or has its terminal
+	// write refused outright. UpdateJob does not check it: that is a
+	// whole-row write with no epoch predicate, so a caller that wants the
+	// fence must use UpdateLeasedJob instead.
+	//
+	// Without the renewal check, a worker resuming from a long GC pause
+	// would carry on renewing a lease on a job another worker now owns.
+	LeaseEpoch int `json:"lease_epoch"`
+
+	// LeaseExpiresAt is when the current lease lapses if not renewed.
+	// Nil means no lease is held.
+	LeaseExpiresAt *time.Time `json:"lease_expires_at,omitempty"`
+
+	// LeaseTTL is how long each renewal extends the lease for this job,
+	// copied at enqueue from the definition's WithLeaseTTL, or from the
+	// enqueue site's when that supplies one. Zero means the pool's
+	// default.
+	//
+	// This is what makes per-definition thresholds work: a 30-second job
+	// and a six-hour job carry different values on their own rows, so one
+	// reclaim query serves both.
+	LeaseTTL time.Duration `json:"lease_ttl,omitempty"`
+
+	// EvictCount is how many times this job has lost a worker to
+	// infrastructure — a reclaimed lease, or later a graceful drain. It is
+	// deliberately separate from RetryCount: a preempted job has not
+	// failed, and charging preemptions to the retry budget would send a
+	// healthy job to the DLQ having never once errored.
+	EvictCount int `json:"evict_count"`
+}
+
+// ClearOwnership drops every field recording who was running the job and
+// under what lease, so the row can safely go back to a runnable state.
+//
+// Any path returning a job to pending from outside the lease machinery
+// has to call this, and forgetting to is not a cosmetic bug. UpdateJob
+// writes the whole row on every backend, lease columns included, so a
+// stale LeaseExpiresAt survives the transition. The row is then pending
+// with an expiry already in the past, which is harmless right up until
+// the job is claimed by a caller that does not grant a lease
+// (DequeueOpts.Grants() is false whenever LeaseUntil is zero). That claim
+// writes state and worker but never touches the expiry, so the job lands
+// in running carrying a lapsed lease and the very next sweep reclaims it.
+// It is claimed and reclaimed forever, never running to completion, with
+// EvictCount climbing on every pass.
+//
+// LeaseEpoch is deliberately left alone. It is a fencing token and must
+// never move backwards, and there is nothing to fence here: a job being
+// returned to pending by this path is not running, so no holder exists to
+// invalidate. ReclaimExpiredLeases increments it because it is taking the
+// job away from a live holder, which is a different situation.
+func (j *Job) ClearOwnership() {
+	j.WorkerID = id.WorkerID{}
+	j.StartedAt = nil
+	j.HeartbeatAt = nil
+	j.LeaseExpiresAt = nil
 }

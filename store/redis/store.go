@@ -14,6 +14,7 @@ import (
 	"github.com/xraph/grove/kv"
 	"github.com/xraph/grove/kv/drivers/redisdriver"
 
+	"github.com/xraph/dispatch/artifact"
 	"github.com/xraph/dispatch/cluster"
 	"github.com/xraph/dispatch/cron"
 	"github.com/xraph/dispatch/dlq"
@@ -25,11 +26,13 @@ import (
 // Compile-time interface checks.
 var (
 	_ job.Store      = (*Store)(nil)
+	_ job.LeaseStore = (*Store)(nil)
 	_ workflow.Store = (*Store)(nil)
 	_ cron.Store     = (*Store)(nil)
 	_ dlq.Store      = (*Store)(nil)
 	_ event.Store    = (*Store)(nil)
 	_ cluster.Store  = (*Store)(nil)
+	_ artifact.Store = (*Store)(nil)
 )
 
 // Option configures the Store.

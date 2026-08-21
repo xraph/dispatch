@@ -26,12 +26,16 @@ import (
 
 	"github.com/xraph/dispatch"
 	"github.com/xraph/dispatch/api"
+	"github.com/xraph/dispatch/artifact"
+	"github.com/xraph/dispatch/artifact/cache"
+	"github.com/xraph/dispatch/artifact/sweeper"
 	"github.com/xraph/dispatch/backoff"
 	dispatchdash "github.com/xraph/dispatch/dashboard"
 	"github.com/xraph/dispatch/dwp"
 	"github.com/xraph/dispatch/engine"
 	"github.com/xraph/dispatch/ext"
 	mw "github.com/xraph/dispatch/middleware"
+	"github.com/xraph/dispatch/resource"
 	mongostore "github.com/xraph/dispatch/store/mongo"
 	pgstore "github.com/xraph/dispatch/store/postgres"
 	redisstore "github.com/xraph/dispatch/store/redis"
@@ -71,6 +75,19 @@ type Extension struct {
 	useGrove     bool
 	useGroveKV   bool
 	enableDWP    bool
+
+	// artifactBackend is an explicitly supplied backend, taking priority
+	// over anything discovered in the container.
+	artifactBackend artifact.Backend
+	// artifactStore is the store the artifact service persists through.
+	artifactStore artifact.Store
+	artifacts     *artifact.Service
+	artifactCache *cache.Cache
+	sweeper       *sweeper.Sweeper
+
+	// resources is the single admission ledger shared by the staging
+	// cache and the worker pool. Nil when the resource model is off.
+	resources resource.Manager
 }
 
 // New creates a Dispatch Forge extension with the given options.
@@ -90,6 +107,17 @@ func (e *Extension) Engine() *engine.Engine { return e.eng }
 
 // API returns the API handler.
 func (e *Extension) API() *api.API { return e.apiHandler }
+
+// Artifacts returns the artifact service, or nil when the plane is off.
+func (e *Extension) Artifacts() *artifact.Service { return e.artifacts }
+
+// ArtifactCache returns the staging cache, or nil when the plane is off.
+func (e *Extension) ArtifactCache() *cache.Cache { return e.artifactCache }
+
+// Resources returns the shared admission ledger, or nil when the
+// resource model is off. It is the same instance the staging cache and
+// the worker pool were built with — which is the point of exposing it.
+func (e *Extension) Resources() resource.Manager { return e.resources }
 
 // DWPServer returns the DWP server, or nil if DWP is not enabled.
 func (e *Extension) DWPServer() *dwp.Server { return e.dwpServer }
@@ -187,6 +215,59 @@ func (e *Extension) init(fapp forge.App) error {
 		engOpts = append(engOpts, engine.WithStreamBroker())
 	}
 
+	// Resolve the artifact store before the ledger, not after. The
+	// ledger's disk capacity is the staging budget, and there is no
+	// staging cache unless this resolves — a store that does not
+	// implement artifact.Store turns `artifacts.enabled: true` into a
+	// plane that is configured and never built.
+	if e.artifactStore == nil {
+		if as, ok := d.Store().(artifact.Store); ok {
+			e.artifactStore = as
+		}
+	}
+
+	// The admission ledger is built next, because both of the things that
+	// follow have to be given the SAME instance: the staging cache holds
+	// a lease per cached entry and registers itself as the ledger's disk
+	// reclaimer, and the worker pool offers disk at dequeue as free PLUS
+	// what that reclaimer could evict. Two managers and the second half
+	// of that budget is permanently zero.
+	e.resources = e.buildResourceManager()
+
+	// The artifact plane is built before the engine, because the staging
+	// middleware has to be in the chain the engine constructs.
+	if e.artifactStore != nil {
+		svc, artCache, aerr := e.buildArtifactPlane(fapp, e.resources)
+		if aerr != nil {
+			return aerr
+		}
+
+		if svc != nil {
+			e.artifacts = svc
+			e.artifactCache = artCache
+			engOpts = append(engOpts, engine.WithArtifacts(svc, artCache))
+		}
+	}
+
+	// Execution rungs beyond the in-process default are resolved after
+	// the artifact plane, not before: resolveExecutionOptions checks
+	// e.artifacts to decide whether a configured scratch directory will
+	// actually be read (see its own comment), and that has to reflect
+	// the artifact plane's FINAL state, not a guess made ahead of it.
+	execOpts, execErr := e.resolveExecutionOptions()
+	if execErr != nil {
+		return execErr
+	}
+	engOpts = append(engOpts, execOpts...)
+
+	if e.resources != nil {
+		engOpts = append(engOpts, engine.WithResourceManager(e.resources))
+
+		if keys := e.config.Resources.CustomKeys; len(keys) > 0 {
+			engOpts = append(engOpts, engine.WithWorkerCustomKeys(keys))
+		}
+	}
+
 	e.eng, err = engine.Build(d, engOpts...)
 	if err != nil {
 		return fmt.Errorf("dispatch: build engine: %w", err)
@@ -275,8 +356,62 @@ func (e *Extension) Start(ctx context.Context) error {
 		return err
 	}
 
+	e.startSweeper(ctx)
+
 	e.MarkStarted()
 	return nil
+}
+
+// startSweeper begins reclaiming Dispatch-owned storage.
+//
+// It runs on the elected leader only, so a fleet does not race to delete
+// the same objects, and it is skipped entirely when the artifact plane is
+// off.
+func (e *Extension) startSweeper(ctx context.Context) {
+	if e.artifacts == nil || !e.artifacts.Enabled() {
+		return
+	}
+
+	logger := e.logger
+	if logger == nil {
+		logger = e.App().Logger()
+	}
+
+	cfg := e.config.Artifacts
+
+	e.sweeper = sweeper.New(e.artifactStore, e.artifacts.Backend(),
+		sweeper.WithRetention(cfg.Retention),
+		sweeper.WithPurgeGrace(cfg.PurgeGrace),
+		sweeper.WithLogger(logger),
+		sweeper.WithLeaderCheck(e.isClusterLeader),
+	)
+
+	if serr := e.sweeper.Start(ctx); serr != nil {
+		logger.Warn("dispatch: could not start the artifact sweeper",
+			log.String("error", serr.Error()))
+	}
+}
+
+// isClusterLeader reports whether this instance holds cluster leadership.
+// A single-instance deployment has no cluster store and is always the
+// leader by default.
+func (e *Extension) isClusterLeader() bool {
+	cls := e.eng.ClusterStore()
+	if cls == nil {
+		return true
+	}
+
+	leader, err := cls.GetLeader(context.Background())
+	if err != nil || leader == nil {
+		return false
+	}
+
+	self := e.eng.WorkerID()
+	if self.IsNil() {
+		return false
+	}
+
+	return leader.ID.String() == self.String()
 }
 
 // Stop gracefully shuts down the dispatch engine.
@@ -285,6 +420,13 @@ func (e *Extension) Stop(ctx context.Context) error {
 		e.MarkStopped()
 		return nil
 	}
+	if e.sweeper != nil {
+		if serr := e.sweeper.Stop(ctx); serr != nil {
+			e.Logger().Warn("dispatch: artifact sweeper did not stop cleanly",
+				forge.F("error", serr.Error()))
+		}
+	}
+
 	err := e.eng.Stop(ctx)
 	e.MarkStopped()
 	return err
@@ -401,6 +543,40 @@ func (e *Extension) mergeWithDefaults(cfg Config) Config {
 	if cfg.BasePath == "" {
 		cfg.BasePath = defaults.BasePath
 	}
+
+	if cfg.Artifacts.Bucket == "" {
+		cfg.Artifacts.Bucket = "dispatch-artifacts"
+	}
+
+	if cfg.Artifacts.EphemeralPrefix == "" {
+		cfg.Artifacts.EphemeralPrefix = artifact.DefaultEphemeralPrefix
+	}
+
+	if cfg.Artifacts.Retention == 0 {
+		cfg.Artifacts.Retention = 168 * time.Hour
+	}
+
+	if cfg.Artifacts.PurgeGrace == 0 {
+		cfg.Artifacts.PurgeGrace = 24 * time.Hour
+	}
+
+	if cfg.Artifacts.Cache.Dir == "" {
+		cfg.Artifacts.Cache.Dir = "/var/lib/dispatch/cache"
+	}
+
+	// Only filled in when the model is on. A zero CPUOvercommit on a
+	// disabled config must stay zero, so a later `enabled: true` in YAML
+	// cannot be silently reinterpreted as "someone chose these numbers".
+	if cfg.Resources.Enabled {
+		if cfg.Resources.CPUOvercommit <= 0 {
+			cfg.Resources.CPUOvercommit = resource.DefaultCPUOvercommit
+		}
+
+		if cfg.Resources.MemoryFraction <= 0 {
+			cfg.Resources.MemoryFraction = resource.DefaultMemoryFraction
+		}
+	}
+
 	return cfg
 }
 
@@ -418,6 +594,25 @@ func (e *Extension) mergeConfigurations(yamlConfig, programmaticConfig Config) C
 	if programmaticConfig.EnableDWP {
 		yamlConfig.EnableDWP = true
 	}
+
+	if programmaticConfig.Artifacts.Enabled {
+		yamlConfig.Artifacts.Enabled = true
+	}
+
+	if yamlConfig.Artifacts.TroveStore == "" && programmaticConfig.Artifacts.TroveStore != "" {
+		yamlConfig.Artifacts.TroveStore = programmaticConfig.Artifacts.TroveStore
+	}
+
+	if yamlConfig.Artifacts.Cache.Dir == "" && programmaticConfig.Artifacts.Cache.Dir != "" {
+		yamlConfig.Artifacts.Cache.Dir = programmaticConfig.Artifacts.Cache.Dir
+	}
+
+	if yamlConfig.Artifacts.Cache.Budget == 0 && programmaticConfig.Artifacts.Cache.Budget != 0 {
+		yamlConfig.Artifacts.Cache.Budget = programmaticConfig.Artifacts.Cache.Budget
+	}
+
+	yamlConfig.Resources = mergeResourceConfig(yamlConfig.Resources, programmaticConfig.Resources)
+	yamlConfig.Execution = mergeExecutionConfig(yamlConfig.Execution, programmaticConfig.Execution)
 
 	// String fields: YAML takes precedence.
 	if yamlConfig.BasePath == "" && programmaticConfig.BasePath != "" {

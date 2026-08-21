@@ -11,6 +11,7 @@ import (
 	_ "github.com/xraph/grove/drivers/pgdriver/pgmigrate" // register pg migration executor
 	"github.com/xraph/grove/migrate"
 
+	"github.com/xraph/dispatch/artifact"
 	"github.com/xraph/dispatch/cluster"
 	"github.com/xraph/dispatch/cron"
 	"github.com/xraph/dispatch/dlq"
@@ -22,11 +23,13 @@ import (
 // Ensure Store implements all subsystem interfaces at compile time.
 var (
 	_ job.Store      = (*Store)(nil)
+	_ job.LeaseStore = (*Store)(nil)
 	_ workflow.Store = (*Store)(nil)
 	_ cron.Store     = (*Store)(nil)
 	_ dlq.Store      = (*Store)(nil)
 	_ event.Store    = (*Store)(nil)
 	_ cluster.Store  = (*Store)(nil)
+	_ artifact.Store = (*Store)(nil)
 )
 
 // Store is a grove ORM implementation of store.Store using PostgreSQL dialect.
@@ -70,11 +73,11 @@ func (s *Store) DB() *grove.DB {
 func (s *Store) Migrate(ctx context.Context) error {
 	executor, err := migrate.NewExecutorFor(s.pgdb)
 	if err != nil {
-		return fmt.Errorf("dispatch/bun: create migration executor: %w", err)
+		return fmt.Errorf(errPrefix+"create migration executor: %w", err)
 	}
 	orch := migrate.NewOrchestrator(executor, Migrations)
 	if _, err := orch.Migrate(ctx); err != nil {
-		return fmt.Errorf("dispatch/bun: migration failed: %w", err)
+		return fmt.Errorf(errPrefix+"migration failed: %w", err)
 	}
 	return nil
 }

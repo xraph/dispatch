@@ -30,6 +30,21 @@ func (s *Service) Replay(ctx context.Context, entryID id.DLQID) (*job.Job, error
 		ScopeAppID: entry.ScopeAppID,
 		ScopeOrgID: entry.ScopeOrgID,
 		RunAt:      now,
+
+		// Restored from the failed job. This path calls EnqueueJob
+		// directly instead of going back through the engine, so nothing
+		// re-derives any of these: whatever is not set here silently
+		// becomes a default, and for LeaseTTL that default is short
+		// enough to make a long job unrunnable. See the Entry doc.
+		Priority:         entry.Priority,
+		Timeout:          entry.Timeout,
+		LeaseTTL:         entry.LeaseTTL,
+		ArtifactBindings: entry.ArtifactBindings,
+		Resources:        entry.Resources,
+		ResourceLimits:   entry.ResourceLimits,
+		ResourceClass:    entry.ResourceClass,
+		InputBytes:       entry.InputBytes,
+		PrimaryInputHash: entry.PrimaryInputHash,
 	}
 
 	if err := s.jobStore.EnqueueJob(ctx, j); err != nil {

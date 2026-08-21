@@ -2,11 +2,13 @@ package memory
 
 import (
 	"context"
+	"fmt"
 	"sort"
 	"sync"
 	"time"
 
 	"github.com/xraph/dispatch"
+	"github.com/xraph/dispatch/artifact"
 	"github.com/xraph/dispatch/cluster"
 	"github.com/xraph/dispatch/cron"
 	"github.com/xraph/dispatch/dlq"
@@ -25,6 +27,7 @@ var (
 	_ dlq.Store      = (*Store)(nil)
 	_ event.Store    = (*Store)(nil)
 	_ cluster.Store  = (*Store)(nil)
+	_ artifact.Store = (*Store)(nil)
 )
 
 // Store is a fully in-memory implementation of store.Store.
@@ -39,6 +42,9 @@ type Store struct {
 	dlqs        map[string]*dlq.Entry
 	events      map[string]*event.Event
 	workers     map[string]*cluster.Worker
+
+	artifacts     map[string]*artifact.Artifact
+	artifactLinks []*artifact.Link
 
 	// leader tracks the current cluster leader worker ID string.
 	leader      string
@@ -55,6 +61,7 @@ func New() *Store {
 		dlqs:        make(map[string]*dlq.Entry),
 		events:      make(map[string]*event.Event),
 		workers:     make(map[string]*cluster.Worker),
+		artifacts:   make(map[string]*artifact.Artifact),
 	}
 }
 
@@ -75,6 +82,39 @@ func (m *Store) Close() error { return nil }
 // Job Store
 // ──────────────────────────────────────────────────
 
+// cloneJob deep-copies the fields that are reference types.
+//
+// Every copy in this store used to be a shallow struct copy, which is
+// correct for scalars and wrong for maps and slices: the copy would
+// alias the caller's underlying data, so a handler mutating its own job
+// (or a caller mutating what it read back) would silently rewrite the
+// stored job.
+//
+// StartedAt, CompletedAt, HeartbeatAt, and LeaseExpiresAt are *time.Time
+// and are deliberately left pointer-shared rather than deep-copied:
+// time.Time has no exported method that mutates the value in place, and
+// nothing in this codebase writes through a *time.Time (it's always
+// reassigned via `j.Field = &newTime`, never `*j.Field = newTime`), so
+// two Job structs sharing the same pointee cannot observe each other's
+// changes.
+func cloneJob(j *job.Job) *job.Job {
+	out := *j
+	out.Resources = j.Resources.Clone()
+	out.ResourceLimits = j.ResourceLimits.Clone()
+
+	if j.Payload != nil {
+		out.Payload = make([]byte, len(j.Payload))
+		copy(out.Payload, j.Payload)
+	}
+
+	if j.ArtifactBindings != nil {
+		out.ArtifactBindings = make([]byte, len(j.ArtifactBindings))
+		copy(out.ArtifactBindings, j.ArtifactBindings)
+	}
+
+	return &out
+}
+
 // EnqueueJob persists a new job in pending state.
 func (m *Store) EnqueueJob(_ context.Context, j *job.Job) error {
 	m.mu.Lock()
@@ -84,19 +124,43 @@ func (m *Store) EnqueueJob(_ context.Context, j *job.Job) error {
 	if _, exists := m.jobs[key]; exists {
 		return dispatch.ErrJobAlreadyExists
 	}
-	cp := *j
-	m.jobs[key] = &cp
+	m.jobs[key] = cloneJob(j)
 	return nil
 }
 
-// DequeueJobs atomically claims up to limit pending jobs from the given
-// queues, sets them to running, and returns them.
-func (m *Store) DequeueJobs(_ context.Context, queues []string, limit int) ([]*job.Job, error) {
+// DequeueJobs atomically claims up to opts.Limit ready jobs from
+// opts.Queues that fit opts, sets them to running, and returns them
+// ordered by priority descending, then locality-preferred first, then
+// RunAt ascending.
+//
+// A non-positive Limit claims nothing: a worker computing zero free slots
+// must claim zero jobs, matching the SQL backends' `LIMIT 0` behavior
+// rather than reading zero as "unlimited". The fit predicate itself is
+// job.DequeueOpts.Allows / Less, not reimplemented here, so this store
+// stays the reference the SQL backends are checked against.
+//
+// When opts.Grants() the claim also grants a lease, under the one write
+// lock that already performs the claim. When it does not, the claim writes
+// a running job with no lease at all, which is a supported shape rather
+// than a broken one. Such a job is not invisible to ReclaimExpiredLeases:
+// job.Lease.IsExpired still reports false for its zero expiry, but reclaim
+// adopts it once it has gone silent for job.UnleasedReclaimGrace, so
+// abandoning one no longer strands it for the life of the process. See
+// job.DequeueOpts.LeaseUntil.
+func (m *Store) DequeueJobs(_ context.Context, opts job.DequeueOpts) ([]*job.Job, error) {
+	if opts.Limit <= 0 {
+		return nil, nil
+	}
+
+	if err := opts.Validate(); err != nil {
+		return nil, fmt.Errorf("dispatch/memory: dequeue jobs: %w", err)
+	}
+
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	queueSet := make(map[string]struct{}, len(queues))
-	for _, q := range queues {
+	queueSet := make(map[string]struct{}, len(opts.Queues))
+	for _, q := range opts.Queues {
 		queueSet[q] = struct{}{}
 	}
 
@@ -116,19 +180,26 @@ func (m *Store) DequeueJobs(_ context.Context, queues []string, limit int) ([]*j
 				continue
 			}
 		}
+		// IsUnbounded skips the fit predicate entirely: a caller not
+		// using the resource model claims everything, including jobs
+		// declaring custom resources. This must be evaluated as part of
+		// the claim below, never applied after — a job that does not fit
+		// stays pending and untouched.
+		if !opts.IsUnbounded() && !opts.Allows(j) {
+			continue
+		}
 		candidates = append(candidates, j)
 	}
 
-	// Sort: priority DESC, RunAt ASC.
+	// Order, then truncate: priority DESC, then locality-preferred before
+	// not (a tiebreak strictly within a priority band, never above it),
+	// then RunAt ASC.
 	sort.Slice(candidates, func(i, k int) bool {
-		if candidates[i].Priority != candidates[k].Priority {
-			return candidates[i].Priority > candidates[k].Priority
-		}
-		return candidates[i].RunAt.Before(candidates[k].RunAt)
+		return opts.Less(candidates[i], candidates[k])
 	})
 
-	if limit > 0 && len(candidates) > limit {
-		candidates = candidates[:limit]
+	if len(candidates) > opts.Limit {
+		candidates = candidates[:opts.Limit]
 	}
 
 	result := make([]*job.Job, len(candidates))
@@ -136,9 +207,21 @@ func (m *Store) DequeueJobs(_ context.Context, queues []string, limit int) ([]*j
 		j.State = job.StateRunning
 		n := now
 		j.StartedAt = &n
-		// Return a copy so callers can mutate without racing with the store.
-		cp := *j
-		result[i] = &cp
+		j.UpdatedAt = now
+
+		if opts.Grants() {
+			until := opts.LeaseUntil
+			j.WorkerID = opts.WorkerID
+			j.LeaseEpoch++
+			j.LeaseExpiresAt = &until
+		}
+
+		// Return a copy so callers can mutate without racing with the
+		// store. cloneJob deep-copies Resources, ResourceLimits, Payload
+		// and ArtifactBindings; a shallow struct copy here would let a
+		// worker mutating its claimed job rewrite the stored requirement
+		// (TestLeaseStoreDoesNotAliasResourceMap).
+		result[i] = cloneJob(j)
 	}
 
 	return result, nil
@@ -153,8 +236,7 @@ func (m *Store) GetJob(_ context.Context, jobID id.JobID) (*job.Job, error) {
 	if !ok {
 		return nil, dispatch.ErrJobNotFound
 	}
-	cp := *j
-	return &cp, nil
+	return cloneJob(j), nil
 }
 
 // UpdateJob persists changes to an existing job.
@@ -166,9 +248,9 @@ func (m *Store) UpdateJob(_ context.Context, j *job.Job) error {
 	if _, ok := m.jobs[key]; !ok {
 		return dispatch.ErrJobNotFound
 	}
-	cp := *j
+	cp := cloneJob(j)
 	cp.UpdatedAt = time.Now().UTC()
-	m.jobs[key] = &cp
+	m.jobs[key] = cp
 	return nil
 }
 
@@ -198,8 +280,7 @@ func (m *Store) ListJobsByState(_ context.Context, state job.State, opts job.Lis
 		if opts.Queue != "" && j.Queue != opts.Queue {
 			continue
 		}
-		cp := *j
-		result = append(result, &cp)
+		result = append(result, cloneJob(j))
 	}
 
 	// Sort by CreatedAt for deterministic output.
@@ -251,8 +332,7 @@ func (m *Store) ReapStaleJobs(_ context.Context, threshold time.Duration) ([]*jo
 		expired := (j.HeartbeatAt != nil && j.HeartbeatAt.Before(cutoff)) ||
 			(j.HeartbeatAt == nil && j.StartedAt != nil && j.StartedAt.Before(cutoff))
 		if expired {
-			cp := *j
-			stale = append(stale, &cp)
+			stale = append(stale, cloneJob(j))
 		}
 	}
 	return stale, nil

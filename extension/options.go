@@ -1,15 +1,18 @@
 package extension
 
 import (
+	"slices"
 	"time"
 
 	log "github.com/xraph/go-utils/log"
 
 	"github.com/xraph/dispatch"
+	"github.com/xraph/dispatch/artifact"
 	"github.com/xraph/dispatch/backoff"
 	"github.com/xraph/dispatch/dwp"
 	"github.com/xraph/dispatch/ext"
 	mw "github.com/xraph/dispatch/middleware"
+	"github.com/xraph/dispatch/resource"
 )
 
 // ExtOption configures the Dispatch Forge extension.
@@ -209,5 +212,115 @@ func WithDWP(opts ...dwp.Option) ExtOption {
 	return func(e *Extension) {
 		e.enableDWP = true
 		e.dwpOpts = append(e.dwpOpts, opts...)
+	}
+}
+
+// WithArtifactBackend supplies the object store backing the artifact
+// plane explicitly, bypassing container discovery.
+//
+// Use it outside Forge, or when the backend is not Trove.
+func WithArtifactBackend(b artifact.Backend) ExtOption {
+	return func(e *Extension) {
+		e.artifactBackend = b
+		e.config.Artifacts.Enabled = true
+	}
+}
+
+// WithArtifactStore sets the store the artifact plane persists through.
+// It defaults to the dispatcher's store when that store implements
+// artifact.Store, which every bundled backend does.
+func WithArtifactStore(s artifact.Store) ExtOption {
+	return func(e *Extension) { e.artifactStore = s }
+}
+
+// WithArtifacts enables the artifact plane, resolving a Trove instance
+// from the DI container. Pass a store name for multi-store Trove setups,
+// or the empty string for the default instance.
+func WithArtifacts(troveStore string) ExtOption {
+	return func(e *Extension) {
+		e.config.Artifacts.Enabled = true
+		e.config.Artifacts.TroveStore = troveStore
+	}
+}
+
+// WithArtifactCacheDir sets where staged artifacts are held on disk.
+func WithArtifactCacheDir(dir string) ExtOption {
+	return func(e *Extension) { e.config.Artifacts.Cache.Dir = dir }
+}
+
+// WithArtifactCacheBudget caps the bytes the staging cache may hold.
+//
+// With the resource model enabled this becomes the shared ledger's disk
+// capacity, so it is the figure a job's declared disk requirement is
+// admitted against rather than a private ceiling inside the cache.
+func WithArtifactCacheBudget(bytes int64) ExtOption {
+	return func(e *Extension) { e.config.Artifacts.Cache.Budget = bytes }
+}
+
+// WithResources turns on capacity detection and resource-aware
+// admission.
+//
+// The extension then builds one resource.Manager over the detected
+// capacity and hands the same instance to the staging cache and the
+// worker pool: the cache holds a lease per cached entry and reclaims disk
+// on demand, the pool admits every claimed job against what is actually
+// free. Without this the pool dequeues unbounded and nothing changes.
+//
+// Detection is cgroup-first, so a container with a two-core quota
+// advertises two cores rather than the host's sixty-four.
+func WithResources() ExtOption {
+	return func(e *Extension) { e.config.Resources.Enabled = true }
+}
+
+// WithCPUOvercommit multiplies the detected core count (default 1.0).
+//
+// CPU is compressible: exceeding it makes jobs slow, not dead. There is
+// no memory equivalent, deliberately — overcommitting memory is how a box
+// enters the OOM cascade this model prevents.
+func WithCPUOvercommit(factor float64) ExtOption {
+	return func(e *Extension) { e.config.Resources.CPUOvercommit = factor }
+}
+
+// WithMemoryFraction sets the share of detected memory to advertise
+// (default 0.8), leaving the remainder for the Go runtime, the page
+// cache, and everything else sharing the box.
+func WithMemoryFraction(fraction float64) ExtOption {
+	return func(e *Extension) { e.config.Resources.MemoryFraction = fraction }
+}
+
+// WithExplicitCapacity overrides detection per key and is the only way to
+// declare a custom resource — nothing detects "fpga".
+//
+// Quantities are canonical units: cpu in millicores, memory and disk in
+// bytes, gpu in milli-devices. Sets merge per key across calls.
+func WithExplicitCapacity(sets ...resource.Set) ExtOption {
+	return func(e *Extension) {
+		for _, s := range sets {
+			if e.config.Resources.Explicit == nil {
+				e.config.Resources.Explicit = make(resource.Set, len(s))
+			}
+
+			for k, v := range s {
+				e.config.Resources.Explicit[k] = v
+			}
+		}
+	}
+}
+
+// WithWorkerCustomKeys narrows the custom resource keys this worker
+// advertises at dequeue. Empty advertises every custom key it has
+// capacity for, which is usually what you want; this exists so a worker
+// draining a device can stop attracting work for it.
+//
+// Keys accumulate across calls and duplicates collapse, matching
+// WithExplicitCapacity above. The slice is copied, so the caller keeps no
+// handle on extension state.
+func WithWorkerCustomKeys(keys ...string) ExtOption {
+	return func(e *Extension) {
+		for _, k := range keys {
+			if !slices.Contains(e.config.Resources.CustomKeys, k) {
+				e.config.Resources.CustomKeys = append(e.config.Resources.CustomKeys, k)
+			}
+		}
 	}
 }

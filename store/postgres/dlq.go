@@ -12,10 +12,12 @@ import (
 
 // PushDLQ adds a failed job entry to the dead letter queue.
 func (s *Store) PushDLQ(ctx context.Context, entry *dlq.Entry) error {
-	m := toDLQModel(entry)
-	_, err := s.pgdb.NewInsert(m).Exec(ctx)
+	m, err := toDLQModel(entry)
 	if err != nil {
-		return fmt.Errorf("dispatch/bun: push dlq: %w", err)
+		return err
+	}
+	if _, err = s.pgdb.NewInsert(m).Exec(ctx); err != nil {
+		return fmt.Errorf(errPrefix+"push dlq: %w", err)
 	}
 	return nil
 }
@@ -40,14 +42,14 @@ func (s *Store) ListDLQ(ctx context.Context, opts dlq.ListOpts) ([]*dlq.Entry, e
 
 	err := q.Scan(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("dispatch/bun: list dlq: %w", err)
+		return nil, fmt.Errorf(errPrefix+"list dlq: %w", err)
 	}
 
 	entries := make([]*dlq.Entry, 0, len(models))
 	for i := range models {
 		e, convErr := fromDLQModel(&models[i])
 		if convErr != nil {
-			return nil, fmt.Errorf("dispatch/bun: list dlq convert: %w", convErr)
+			return nil, fmt.Errorf(errPrefix+"list dlq convert: %w", convErr)
 		}
 		entries = append(entries, e)
 	}
@@ -65,7 +67,7 @@ func (s *Store) GetDLQ(ctx context.Context, entryID id.DLQID) (*dlq.Entry, error
 		if isNoRows(err) {
 			return nil, dispatch.ErrDLQNotFound
 		}
-		return nil, fmt.Errorf("dispatch/bun: get dlq: %w", err)
+		return nil, fmt.Errorf(errPrefix+"get dlq: %w", err)
 	}
 	return fromDLQModel(m)
 }
@@ -77,7 +79,7 @@ func (s *Store) ReplayDLQ(ctx context.Context, entryID id.DLQID) error {
 		Where("id = ?", entryID.String()).
 		Exec(ctx)
 	if err != nil {
-		return fmt.Errorf("dispatch/bun: replay dlq: %w", err)
+		return fmt.Errorf(errPrefix+"replay dlq: %w", err)
 	}
 	rows, _ := res.RowsAffected() //nolint:errcheck // driver always returns nil
 	if rows == 0 {
@@ -93,7 +95,7 @@ func (s *Store) PurgeDLQ(ctx context.Context, before time.Time) (int64, error) {
 		Where("failed_at < ?", before).
 		Exec(ctx)
 	if err != nil {
-		return 0, fmt.Errorf("dispatch/bun: purge dlq: %w", err)
+		return 0, fmt.Errorf(errPrefix+"purge dlq: %w", err)
 	}
 	rows, _ := res.RowsAffected() //nolint:errcheck // driver always returns nil
 	return rows, nil
@@ -104,7 +106,7 @@ func (s *Store) CountDLQ(ctx context.Context) (int64, error) {
 	count, err := s.pgdb.NewSelect((*dlqEntryModel)(nil)).
 		Count(ctx)
 	if err != nil {
-		return 0, fmt.Errorf("dispatch/bun: count dlq: %w", err)
+		return 0, fmt.Errorf(errPrefix+"count dlq: %w", err)
 	}
 	return count, nil
 }

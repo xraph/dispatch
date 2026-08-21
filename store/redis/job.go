@@ -12,6 +12,7 @@ import (
 	"github.com/xraph/dispatch"
 	"github.com/xraph/dispatch/id"
 	"github.com/xraph/dispatch/job"
+	"github.com/xraph/dispatch/resource"
 )
 
 // ── JSON model for KV storage ──
@@ -36,9 +37,48 @@ type jobEntity struct {
 	Timeout     int64      `json:"timeout"`
 	CreatedAt   time.Time  `json:"created_at"`
 	UpdatedAt   time.Time  `json:"updated_at"`
+
+	LeaseEpoch     int        `json:"lease_epoch"`
+	LeaseExpiresAt *time.Time `json:"lease_expires_at,omitempty"`
+	LeaseTTL       int64      `json:"lease_ttl"`
+	EvictCount     int        `json:"evict_count"`
+
+	// The four canonical dimensions get their own fields because a
+	// later dequeue predicate compares them numerically and must
+	// behave identically across all five backends. They are derived
+	// from Resources by toJobEntity -- never independently settable.
+	ReqCPUMilli    int64  `json:"req_cpu_milli"`
+	ReqMemoryBytes int64  `json:"req_memory_bytes"`
+	ReqDiskBytes   int64  `json:"req_disk_bytes"`
+	ReqGPUMilli    int64  `json:"req_gpu_milli"`
+	ReqCustomKeys  string `json:"req_custom_keys"`
+
+	// ResourceRequests and ResourceLimits are the full-fidelity encoded
+	// copy of Resources / ResourceLimits produced by resource.EncodeSet,
+	// including custom keys the scalar fields above do not carry.
+	// fromJobEntity reconstructs Resources from here, not from the
+	// scalars. "omitempty" on this []byte -- nil for a zero Set, per
+	// EncodeSet's contract -- is what keeps an undeclared job's JSON
+	// blob free of the key entirely, mirroring the SQL backends' NULL
+	// column: an absent value, not "{}" or "".
+	ResourceRequests []byte `json:"resource_requests,omitempty"`
+	ResourceLimits   []byte `json:"resource_limits,omitempty"`
+	ResourceClass    string `json:"resource_class"`
+	InputBytes       int64  `json:"input_bytes"`
+	PrimaryInputHash string `json:"primary_input_hash"`
 }
 
-func toJobEntity(j *job.Job) *jobEntity {
+func toJobEntity(j *job.Job) (*jobEntity, error) {
+	reqJSON, err := resource.EncodeSet(j.Resources)
+	if err != nil {
+		return nil, fmt.Errorf("dispatch/redis: marshal job resources: %w", err)
+	}
+
+	limitsJSON, err := resource.EncodeSet(j.ResourceLimits)
+	if err != nil {
+		return nil, fmt.Errorf("dispatch/redis: marshal job resource limits: %w", err)
+	}
+
 	return &jobEntity{
 		ID:          j.ID.String(),
 		Name:        j.Name,
@@ -59,13 +99,39 @@ func toJobEntity(j *job.Job) *jobEntity {
 		Timeout:     j.Timeout.Nanoseconds(),
 		CreatedAt:   j.CreatedAt,
 		UpdatedAt:   j.UpdatedAt,
-	}
+
+		LeaseEpoch:     j.LeaseEpoch,
+		LeaseExpiresAt: j.LeaseExpiresAt,
+		LeaseTTL:       j.LeaseTTL.Nanoseconds(),
+		EvictCount:     j.EvictCount,
+
+		ReqCPUMilli:      j.Resources[resource.CPU],
+		ReqMemoryBytes:   j.Resources[resource.Memory],
+		ReqDiskBytes:     j.Resources[resource.Disk],
+		ReqGPUMilli:      j.Resources[resource.GPU],
+		ReqCustomKeys:    resource.EncodeCustomKeys(j.Resources),
+		ResourceRequests: reqJSON,
+		ResourceLimits:   limitsJSON,
+		ResourceClass:    j.ResourceClass,
+		InputBytes:       j.InputBytes,
+		PrimaryInputHash: j.PrimaryInputHash,
+	}, nil
 }
 
 func fromJobEntity(e *jobEntity) (*job.Job, error) {
 	parsedID, err := id.ParseJobID(e.ID)
 	if err != nil {
 		return nil, fmt.Errorf("dispatch/redis: parse job id: %w", err)
+	}
+
+	resources, err := resource.DecodeSet(e.ResourceRequests)
+	if err != nil {
+		return nil, fmt.Errorf("dispatch/redis: unmarshal job resources: %w", err)
+	}
+
+	limits, err := resource.DecodeSet(e.ResourceLimits)
+	if err != nil {
+		return nil, fmt.Errorf("dispatch/redis: unmarshal job resource limits: %w", err)
 	}
 
 	j := &job.Job{
@@ -89,6 +155,17 @@ func fromJobEntity(e *jobEntity) (*job.Job, error) {
 		CompletedAt: e.CompletedAt,
 		HeartbeatAt: e.HeartbeatAt,
 		Timeout:     time.Duration(e.Timeout),
+
+		LeaseEpoch:     e.LeaseEpoch,
+		LeaseExpiresAt: e.LeaseExpiresAt,
+		LeaseTTL:       time.Duration(e.LeaseTTL),
+		EvictCount:     e.EvictCount,
+
+		Resources:        resources,
+		ResourceLimits:   limits,
+		ResourceClass:    e.ResourceClass,
+		InputBytes:       e.InputBytes,
+		PrimaryInputHash: e.PrimaryInputHash,
 	}
 
 	if e.WorkerID != "" {
@@ -115,7 +192,10 @@ func (s *Store) EnqueueJob(ctx context.Context, j *job.Job) error {
 		return dispatch.ErrJobAlreadyExists
 	}
 
-	e := toJobEntity(j)
+	e, err := toJobEntity(j)
+	if err != nil {
+		return err
+	}
 	if setErr := s.setEntity(ctx, key, e); setErr != nil {
 		return fmt.Errorf("dispatch/redis: enqueue set entity: %w", setErr)
 	}
@@ -135,53 +215,8 @@ func (s *Store) EnqueueJob(ctx context.Context, j *job.Job) error {
 	return nil
 }
 
-// DequeueJobs atomically pops up to limit jobs from the given queues.
-func (s *Store) DequeueJobs(ctx context.Context, queues []string, limit int) ([]*job.Job, error) {
-	t := now()
-	var jobs []*job.Job
-
-	for _, q := range queues {
-		if len(jobs) >= limit {
-			break
-		}
-		remaining := limit - len(jobs)
-		qk := queueKey(q)
-
-		// Pop from sorted set (lowest score = highest priority + earliest RunAt).
-		members, err := s.rdb.ZPopMin(ctx, qk, int64(remaining)).Result()
-		if err != nil {
-			return nil, fmt.Errorf("dispatch/redis: dequeue zpopmin: %w", err)
-		}
-
-		for _, z := range members {
-			jID, ok := z.Member.(string)
-			if !ok {
-				continue
-			}
-
-			key := jobKey(jID)
-			var e jobEntity
-			if getErr := s.getEntity(ctx, key, &e); getErr != nil {
-				continue // skip missing
-			}
-
-			// Update state to running.
-			e.State = string(job.StateRunning)
-			e.StartedAt = &t
-			e.UpdatedAt = t
-			if setErr := s.setEntity(ctx, key, &e); setErr != nil {
-				return nil, fmt.Errorf("dispatch/redis: dequeue update: %w", setErr)
-			}
-
-			j, convErr := fromJobEntity(&e)
-			if convErr != nil {
-				return nil, convErr
-			}
-			jobs = append(jobs, j)
-		}
-	}
-	return jobs, nil
-}
+// DequeueJobs lives in dequeue.go, where the fit predicate and the claim
+// are documented together.
 
 // GetJob retrieves a job by ID.
 func (s *Store) GetJob(ctx context.Context, jobID id.JobID) (*job.Job, error) {
@@ -195,7 +230,34 @@ func (s *Store) GetJob(ctx context.Context, jobID id.JobID) (*job.Job, error) {
 	return fromJobEntity(&e)
 }
 
-// UpdateJob persists changes to an existing job.
+// UpdateJob persists changes to an existing job and keeps the queue index
+// in step with the state it just wrote.
+//
+// The index is what makes a job visible to DequeueJobs at all: EnqueueJob
+// adds a member, the claim removes it, and every state transition after
+// that arrives HERE. A retry from Runner.scheduleRetry, a job handed back
+// by Pool.requeueRateLimited or Pool.requeueUndispatched, a stale job reset
+// by Pool.reapStaleJobs — all of them just set a runnable state and call
+// this. Writing that state without restoring the member leaves a job that
+// GetJob reports as pending and no dequeue can ever see again: it looks
+// healthy in the dashboard and runs nowhere. The other four backends have
+// no equivalent hazard because they have no index — they re-derive
+// candidacy from the row on every query.
+//
+// The two index writes sit on OPPOSITE sides of the entity write, which is
+// deliberate. The stored entity is authoritative — dequeue.go re-checks
+// state and RunAt against it — so a member that should not be there is
+// inert, while a member that is missing is a job that never runs again.
+// Ordering each write so the index errs towards the harmless side means a
+// lost second write cannot strand anything:
+//
+//	becoming runnable — ZADD first, so a failed entity write leaves a
+//	                    spare member the state gate ignores.
+//	becoming final    — ZREM last, so a failed entity write leaves the job
+//	                    both runnable and still indexed.
+//
+// ZADD on a member already present only updates its score, so this is also
+// safe for a job that was never claimed.
 func (s *Store) UpdateJob(ctx context.Context, j *job.Job) error {
 	jID := j.ID.String()
 	key := jobKey(jID)
@@ -208,9 +270,37 @@ func (s *Store) UpdateJob(ctx context.Context, j *job.Job) error {
 		return dispatch.ErrJobNotFound
 	}
 
-	e := toJobEntity(j)
+	e, err := toJobEntity(j)
+	if err != nil {
+		return err
+	}
 	e.UpdatedAt = now()
-	return s.setEntity(ctx, key, e)
+
+	// Nothing in this repository moves a job between queues after enqueue,
+	// so j.Queue is the queue it was indexed under. If that ever changes,
+	// the old queue keeps a member pointing at this job, and this function
+	// has to read the stored entity to learn which queue to clear.
+	qk := queueKey(j.Queue)
+	runnable := j.State == job.StatePending || j.State == job.StateRetrying
+
+	if runnable {
+		z := goredis.Z{Score: jobScore(j.Priority, j.RunAt), Member: jID}
+		if zErr := s.rdb.ZAdd(ctx, qk, z).Err(); zErr != nil {
+			return fmt.Errorf("dispatch/redis: update job index add: %w", zErr)
+		}
+	}
+
+	if setErr := s.setEntity(ctx, key, e); setErr != nil {
+		return fmt.Errorf("dispatch/redis: update job set entity: %w", setErr)
+	}
+
+	if !runnable {
+		if zErr := s.rdb.ZRem(ctx, qk, jID).Err(); zErr != nil {
+			return fmt.Errorf("dispatch/redis: update job index remove: %w", zErr)
+		}
+	}
+
+	return nil
 }
 
 // DeleteJob removes a job by ID.

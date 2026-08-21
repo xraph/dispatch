@@ -152,7 +152,7 @@ func TestJobDequeue(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			jobs, err := s.DequeueJobs(ctx, tt.queues, tt.limit)
+			jobs, err := s.DequeueJobs(ctx, job.DequeueOpts{Queues: tt.queues, Limit: tt.limit})
 			if err != nil {
 				t.Fatalf("DequeueJobs: %v", err)
 			}
@@ -188,7 +188,7 @@ func TestJobDequeueLimitAndRunAt(t *testing.T) {
 		}
 	}
 
-	jobs, err := s.DequeueJobs(ctx, []string{"default"}, 10)
+	jobs, err := s.DequeueJobs(ctx, job.DequeueOpts{Queues: []string{"default"}, Limit: 10})
 	if err != nil {
 		t.Fatalf("DequeueJobs: %v", err)
 	}

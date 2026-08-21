@@ -4,8 +4,38 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"slices"
 	"sync"
+	"time"
+
+	"github.com/xraph/dispatch/artifact"
+	"github.com/xraph/dispatch/exec"
+	"github.com/xraph/dispatch/resource"
 )
+
+// ResourceDecl is what a definition declares about its resource needs,
+// captured at registration.
+//
+// The declaration has to be reachable by job name because the typed
+// definition is gone by the time a job is enqueued through EnqueueRaw,
+// exactly as with Inputs.
+type ResourceDecl struct {
+	// Requests is the declared requirement. It is a floor: the engine may
+	// raise it, and a per-enqueue override replaces it per key.
+	Requests resource.Set
+	// Limits is the declared enforcement ceiling, if any.
+	Limits resource.Set
+	// Func computes the requirement from the enqueue-time request.
+	Func resource.ResourceFunc
+	// Class is the opaque scheduling class for the isolation backend.
+	Class string
+}
+
+// IsZero reports whether the definition declares nothing about
+// resources, which is how every job behaves before this feature is used.
+func (d ResourceDecl) IsZero() bool {
+	return d.Requests.IsZero() && d.Limits.IsZero() && d.Func == nil && d.Class == ""
+}
 
 // HandlerFunc is a type-erased job handler that accepts raw JSON payload.
 // The typed Definition[T] is converted to a HandlerFunc at registration
@@ -17,12 +47,36 @@ type HandlerFunc func(ctx context.Context, payload []byte) error
 type Registry struct {
 	mu       sync.RWMutex
 	handlers map[string]HandlerFunc
+
+	// inputs holds each job's artifact declarations. The staging
+	// middleware needs them keyed by job name, because by the time a job
+	// is executing the typed definition is long gone.
+	inputs map[string][]artifact.InputSpec
+
+	// resources holds each job's resource declaration, for the same
+	// reason: enqueue works from a job name and a payload.
+	resources map[string]ResourceDecl
+
+	// leaseTTLs holds each job's declared lease TTL, for the same reason
+	// again: EnqueueRaw has a name and a payload, not the typed
+	// definition, so a per-definition TTL is unreachable unless it is
+	// keyed by name here. Absent means the definition declared none.
+	leaseTTLs map[string]time.Duration
+
+	// policies holds each job's execution declaration. The worker needs
+	// it keyed by name for the same reason inputs are: at execution time
+	// the typed definition is long gone.
+	policies map[string]exec.Policy
 }
 
 // NewRegistry creates an empty job registry.
 func NewRegistry() *Registry {
 	return &Registry{
-		handlers: make(map[string]HandlerFunc),
+		handlers:  make(map[string]HandlerFunc),
+		inputs:    make(map[string][]artifact.InputSpec),
+		resources: make(map[string]ResourceDecl),
+		leaseTTLs: make(map[string]time.Duration),
+		policies:  make(map[string]exec.Policy),
 	}
 }
 
@@ -46,6 +100,101 @@ func RegisterDefinition[T any](r *Registry, def *Definition[T]) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.handlers[def.Name] = handler
+
+	if len(def.Opts.Inputs) > 0 {
+		specs := make([]artifact.InputSpec, len(def.Opts.Inputs))
+		copy(specs, def.Opts.Inputs)
+		r.inputs[def.Name] = specs
+	}
+
+	// The sets are cloned, not aliased: a definition's Options stay
+	// reachable by the caller, and a resolved requirement must not change
+	// under a job that was already enqueued.
+	decl := ResourceDecl{
+		Requests: def.Opts.Resources.Clone(),
+		Limits:   def.Opts.ResourceLimits.Clone(),
+		Func:     def.Opts.ResourceFunc,
+		Class:    def.Opts.ResourceClass,
+	}
+
+	if !decl.IsZero() {
+		r.resources[def.Name] = decl
+	}
+
+	// Stored under the same non-zero guard as the resource declaration,
+	// and for the same reason: zero already means "the pool's default"
+	// everywhere downstream, so recording it would only make an absent
+	// declaration indistinguishable from a deliberate one without
+	// changing what any caller does with it.
+	if def.Opts.LeaseTTL > 0 {
+		r.leaseTTLs[def.Name] = def.Opts.LeaseTTL
+	}
+
+	// Unlike inputs and resources, the policy is stored unconditionally:
+	// DefaultOptions gives every definition a non-zero grace period, so a
+	// zero-guard here would never skip anything and would only obscure
+	// intent.
+	r.policies[def.Name] = def.Opts.Execution
+}
+
+// Resources returns the resource declaration for a job, or the zero
+// ResourceDecl when it declares none.
+//
+// The sets are cloned on the way out as well as in: returning the stored
+// maps by reference would let one caller's mutation rewrite the
+// requirement every future job of that name resolves from.
+func (r *Registry) Resources(name string) ResourceDecl {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	decl := r.resources[name]
+	decl.Requests = decl.Requests.Clone()
+	decl.Limits = decl.Limits.Clone()
+
+	return decl
+}
+
+// LeaseTTL returns the lease TTL a definition declared, or zero when it
+// declared none.
+//
+// Zero is not a sentinel this has to distinguish: it is what Job.LeaseTTL
+// already means everywhere downstream — Pool.leaseTTLFor falls through to
+// the pool default, then the stale-job threshold, then
+// job.DefaultLeaseTTL — so an unregistered name and a definition that
+// declared nothing correctly resolve the same way.
+func (r *Registry) LeaseTTL(name string) time.Duration {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	return r.leaseTTLs[name]
+}
+
+// Policy returns the execution declaration for a job. An unregistered name
+// yields a default policy rather than a zero one, so callers always get a
+// usable grace period.
+func (r *Registry) Policy(name string) exec.Policy {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	if p, ok := r.policies[name]; ok {
+		return p
+	}
+
+	return exec.NewPolicy()
+}
+
+// Inputs returns the artifact declarations for a job, or nil when it
+// declares none.
+//
+// The slice is copied, matching the copy RegisterDefinition makes on the
+// way in: a caller that mutated the stored declaration would change what
+// every future job of that name validates against. InputSpec is all
+// value fields, so a shallow copy is a complete one.
+func (r *Registry) Inputs(name string) []artifact.InputSpec {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	return slices.Clone(r.inputs[name])
 }
 
 // Get returns the handler for the given job name.

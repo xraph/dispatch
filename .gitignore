@@ -1,0 +1,7 @@
+# Superpowers working artifacts — design specs and implementation plans.
+# These are scratch for the development process, not part of the library.
+docs/superpowers/
+.superpowers/
+
+# ─── Local agent config ─────────────────────────────────────
+.claude/

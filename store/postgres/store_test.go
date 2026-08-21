@@ -4,7 +4,6 @@ package postgres_test
 
 import (
 	"context"
-	"database/sql"
 	"errors"
 	"fmt"
 	"testing"
@@ -13,9 +12,10 @@ import (
 	"github.com/testcontainers/testcontainers-go"
 	pgmodule "github.com/testcontainers/testcontainers-go/modules/postgres"
 	"github.com/testcontainers/testcontainers-go/wait"
-	"github.com/uptrace/bun"
-	"github.com/uptrace/bun/dialect/pgdialect"
-	"github.com/uptrace/bun/driver/pgdriver"
+
+	"github.com/xraph/grove"
+	"github.com/xraph/grove/drivers/pgdriver"
+	_ "github.com/xraph/grove/drivers/pgdriver/pgmigrate" // registers the pg migrate executor
 
 	"github.com/xraph/dispatch"
 	"github.com/xraph/dispatch/cluster"
@@ -30,7 +30,7 @@ import (
 	log "github.com/xraph/go-utils/log"
 )
 
-// setupTestStore creates a Postgres container and returns a connected Bun Store.
+// setupTestStore creates a Postgres container and returns a connected store.
 func setupTestStore(t *testing.T) *postgres.Store {
 	t.Helper()
 
@@ -61,9 +61,15 @@ func setupTestStore(t *testing.T) *postgres.Store {
 		t.Fatalf("get connection string: %v", err)
 	}
 
-	// Create Bun DB from pgdriver.
-	sqldb := sql.OpenDB(pgdriver.NewConnector(pgdriver.WithDSN(connStr)))
-	db := bun.NewDB(sqldb, pgdialect.New())
+	drv := pgdriver.New()
+	if openErr := drv.Open(ctx, connStr); openErr != nil {
+		t.Fatalf("open pgdriver: %v", openErr)
+	}
+
+	db, err := grove.Open(drv)
+	if err != nil {
+		t.Fatalf("grove open: %v", err)
+	}
 
 	t.Cleanup(func() {
 		_ = db.Close()
@@ -144,6 +150,14 @@ func TestJobStore_DequeueSkipLocked(t *testing.T) {
 	ctx := context.Background()
 
 	// Enqueue 3 jobs with different priorities.
+	//
+	// run_at is backdated rather than set to now. Dequeue eligibility is
+	// `run_at <= NOW()`, where run_at comes from this process's clock and
+	// NOW() from the database's. When the two disagree by even a fraction
+	// of a millisecond -- routine when Postgres runs in a container -- a
+	// job stamped "now" is briefly in the future and is skipped, which
+	// made this test flake between 3, 2, and 0 eligible jobs. Backdating
+	// keeps the test about priority ordering and SKIP LOCKED.
 	for i := 0; i < 3; i++ {
 		j := &job.Job{
 			Entity:     dispatch.NewEntity(),
@@ -154,7 +168,7 @@ func TestJobStore_DequeueSkipLocked(t *testing.T) {
 			State:      job.StatePending,
 			Priority:   i, // 0, 1, 2
 			MaxRetries: 3,
-			RunAt:      time.Now().UTC(),
+			RunAt:      time.Now().UTC().Add(-time.Minute),
 		}
 		if err := s.EnqueueJob(ctx, j); err != nil {
 			t.Fatalf("enqueue job-%d: %v", i, err)
@@ -162,7 +176,7 @@ func TestJobStore_DequeueSkipLocked(t *testing.T) {
 	}
 
 	// Dequeue 2 — should get highest priority first.
-	dequeued, err := s.DequeueJobs(ctx, []string{"default"}, 2)
+	dequeued, err := s.DequeueJobs(ctx, job.DequeueOpts{Queues: []string{"default"}, Limit: 2})
 	if err != nil {
 		t.Fatalf("dequeue: %v", err)
 	}
@@ -177,7 +191,7 @@ func TestJobStore_DequeueSkipLocked(t *testing.T) {
 	}
 
 	// Dequeue remaining — should get 1 job.
-	remaining, err := s.DequeueJobs(ctx, []string{"default"}, 10)
+	remaining, err := s.DequeueJobs(ctx, job.DequeueOpts{Queues: []string{"default"}, Limit: 10})
 	if err != nil {
 		t.Fatalf("dequeue remaining: %v", err)
 	}

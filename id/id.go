@@ -32,6 +32,7 @@ const (
 	PrefixDLQ        Prefix = "dlq"
 	PrefixEvent      Prefix = "evt"
 	PrefixWorker     Prefix = "wkr"
+	PrefixArtifact   Prefix = "art"
 )
 
 // ID is the primary identifier type for all Dispatch entities.
@@ -136,6 +137,9 @@ type EventID = ID
 // WorkerID is a type-safe identifier for workers (prefix: "wkr").
 type WorkerID = ID
 
+// ArtifactID is a type-safe identifier for artifacts (prefix: "art").
+type ArtifactID = ID
+
 // AnyID is a type alias that accepts any valid prefix.
 type AnyID = ID
 
@@ -167,6 +171,9 @@ func NewEventID() ID { return New(PrefixEvent) }
 // NewWorkerID generates a new unique worker ID.
 func NewWorkerID() ID { return New(PrefixWorker) }
 
+// NewArtifactID generates a new unique artifact ID.
+func NewArtifactID() ID { return New(PrefixArtifact) }
+
 // ──────────────────────────────────────────────────
 // Convenience parsers
 // ──────────────────────────────────────────────────
@@ -194,6 +201,9 @@ func ParseEventID(s string) (ID, error) { return ParseWithPrefix(s, PrefixEvent)
 
 // ParseWorkerID parses a string and validates the "wkr" prefix.
 func ParseWorkerID(s string) (ID, error) { return ParseWithPrefix(s, PrefixWorker) }
+
+// ParseArtifactID parses a string and validates the "art" prefix.
+func ParseArtifactID(s string) (ID, error) { return ParseWithPrefix(s, PrefixArtifact) }
 
 // ParseAny parses a string into an ID without type checking the prefix.
 func ParseAny(s string) (ID, error) { return Parse(s) }

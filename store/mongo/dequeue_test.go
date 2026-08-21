@@ -113,7 +113,7 @@ func TestDequeueJobsIdleIssuesNoWriteCommands(t *testing.T) {
 	}
 
 	for range 5 {
-		jobs, err := s.DequeueJobs(ctx, []string{"default"}, 4)
+		jobs, err := s.DequeueJobs(ctx, job.DequeueOpts{Queues: []string{"default"}, Limit: 4})
 		if err != nil {
 			t.Fatalf("dequeue: %v", err)
 		}
@@ -149,7 +149,7 @@ func TestDequeueJobsClaimsPendingJob(t *testing.T) {
 		t.Fatalf("enqueue: %v", err)
 	}
 
-	jobs, err := s.DequeueJobs(ctx, []string{"default"}, 4)
+	jobs, err := s.DequeueJobs(ctx, job.DequeueOpts{Queues: []string{"default"}, Limit: 4})
 	if err != nil {
 		t.Fatalf("dequeue: %v", err)
 	}
@@ -161,5 +161,53 @@ func TestDequeueJobsClaimsPendingJob(t *testing.T) {
 	}
 	if jobs[0].State != job.StateRunning {
 		t.Fatalf("expected state running, got %s", jobs[0].State)
+	}
+}
+
+// TestDequeueWithNoQueuesClaimsNothing pins the guard that replaced a
+// server error.
+//
+// The driver marshals a nil []string to BSON null, so an empty
+// DequeueOpts.Queues used to produce {queue: {$in: null}} and Mongo
+// rejected the whole query with "$in needs an array". That is not
+// "claims everything" or "claims nothing" — it is a dequeue that ERRORS
+// on every poll, which backs the worker pool off exponentially on a
+// configuration that merely named no queues, and logs a message about
+// BSON to an operator who changed a queue list.
+//
+// Postgres, SQLite and Redis all return nothing for the same input. This
+// matches them. See job.DequeueOpts.Queues for the full per-backend
+// split, which is deliberately documented rather than unified: doing
+// otherwise would change store/memory's behaviour.
+func TestDequeueWithNoQueuesClaimsNothing(t *testing.T) {
+	uri := startMongo(t)
+	s := openStore(t, uri)
+	ctx := context.Background()
+
+	now := time.Now().UTC()
+	j := &job.Job{
+		Entity:     dispatch.NewEntity(),
+		ID:         id.NewJobID(),
+		Name:       "no-queue-filter",
+		Queue:      "default",
+		Payload:    []byte(`{}`),
+		State:      job.StatePending,
+		MaxRetries: 3,
+		RunAt:      now.Add(-time.Second),
+	}
+	if err := s.EnqueueJob(ctx, j); err != nil {
+		t.Fatalf("enqueue: %v", err)
+	}
+
+	for _, queues := range [][]string{nil, {}} {
+		got, err := s.DequeueJobs(ctx, job.DequeueOpts{Queues: queues, Limit: 4})
+		if err != nil {
+			t.Fatalf("DequeueJobs with %#v queues returned an error rather than an empty "+
+				"result: %v", queues, err)
+		}
+
+		if len(got) != 0 {
+			t.Errorf("DequeueJobs with %#v queues claimed %d jobs, want none", queues, len(got))
+		}
 	}
 }

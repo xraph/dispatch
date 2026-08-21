@@ -13,6 +13,7 @@ import (
 	"github.com/xraph/dispatch/event"
 	"github.com/xraph/dispatch/id"
 	"github.com/xraph/dispatch/job"
+	"github.com/xraph/dispatch/resource"
 	"github.com/xraph/dispatch/workflow"
 )
 
@@ -40,10 +41,63 @@ type jobModel struct {
 	Timeout     int64      `grove:"timeout,notnull" bson:"timeout"`
 	CreatedAt   time.Time  `grove:"created_at,notnull" bson:"created_at"`
 	UpdatedAt   time.Time  `grove:"updated_at,notnull" bson:"updated_at"`
+
+	LeaseEpoch     int        `grove:"lease_epoch,notnull" bson:"lease_epoch"`
+	LeaseExpiresAt *time.Time `grove:"lease_expires_at"    bson:"lease_expires_at,omitempty"`
+	LeaseTTL       int64      `grove:"lease_ttl,notnull"   bson:"lease_ttl"`
+	EvictCount     int        `grove:"evict_count,notnull" bson:"evict_count"`
+
+	// The four canonical dimensions get their own fields because a
+	// later dequeue predicate compares them numerically and must
+	// behave identically across all five backends; JSON/BSON comparison
+	// semantics are not portable. They are derived from Resources by
+	// toJobModel -- the caller never sets them directly.
+	ReqCPUMilli    int64  `grove:"req_cpu_milli,notnull,default:0"    bson:"req_cpu_milli"`
+	ReqMemoryBytes int64  `grove:"req_memory_bytes,notnull,default:0" bson:"req_memory_bytes"`
+	ReqDiskBytes   int64  `grove:"req_disk_bytes,notnull,default:0"   bson:"req_disk_bytes"`
+	ReqGPUMilli    int64  `grove:"req_gpu_milli,notnull,default:0"    bson:"req_gpu_milli"`
+	ReqCustomKeys  string `grove:"req_custom_keys,notnull,default:''" bson:"req_custom_keys"`
+
+	// ResourceRequests and ResourceLimits are the full-fidelity copy of
+	// Resources / ResourceLimits, including custom keys the scalar
+	// fields above do not carry; fromJobModel reads Resources back from
+	// here, not from the scalars. Unlike the SQL backends this needs no
+	// resource.EncodeSet/DecodeSet codec wrapper: the BSON driver
+	// marshals resource.Set (a map[string]int64) as a native subdocument,
+	// so toJobModel leaves the field at its Go zero value (nil map) for
+	// a zero Set rather than assigning it -- never an empty subdocument.
+	//
+	// The "omitempty" bson tag below does NOT behave the same on both
+	// write paths, and a future reader relying on only one of them will
+	// be wrong for the other:
+	//   - EnqueueJob (NewInsert) goes through grove's structToMapInsert,
+	//     which builds the document by reflecting over the grove tags
+	//     and unconditionally sets doc[column] = value -- it never looks
+	//     at the bson tag, so "omitempty" has no effect here. A zero Set
+	//     is written as an explicit BSON null; the key IS present.
+	//   - UpdateJob (ReplaceOne) hands the struct straight to the raw
+	//     driver, whose native bson encoder DOES honor "omitempty": a
+	//     zero Set drops the key entirely; the key is ABSENT.
+	// Both are "never {}" and both decode back to a nil Set, so reads
+	// are unaffected. A query written directly against Mongo, though,
+	// must not test for only one shape: a plain equality test against
+	// null covers both, $exists:false covers only the ReplaceOne one,
+	// and a type-bracketed range operator covers neither. All three are
+	// asserted against real documents by
+	// TestUndeclaredJobMatchesNullEqualityOnBothWritePaths.
+	//
+	// The dequeue fit predicate sidesteps the asymmetry entirely by
+	// comparing the scalar fields above, which both write paths always
+	// emit -- see dequeueFilter in dequeue.go.
+	ResourceRequests resource.Set `grove:"resource_requests" bson:"resource_requests,omitempty"`
+	ResourceLimits   resource.Set `grove:"resource_limits"   bson:"resource_limits,omitempty"`
+	ResourceClass    string       `grove:"resource_class,notnull,default:''" bson:"resource_class"`
+	InputBytes       int64        `grove:"input_bytes,notnull,default:0"     bson:"input_bytes"`
+	PrimaryInputHash string       `grove:"primary_input_hash" bson:"primary_input_hash"`
 }
 
 func toJobModel(j *job.Job) *jobModel {
-	return &jobModel{
+	m := &jobModel{
 		ID:          j.ID.String(),
 		Name:        j.Name,
 		Queue:       j.Queue,
@@ -63,7 +117,34 @@ func toJobModel(j *job.Job) *jobModel {
 		Timeout:     j.Timeout.Nanoseconds(),
 		CreatedAt:   j.CreatedAt,
 		UpdatedAt:   j.UpdatedAt,
+
+		LeaseEpoch:     j.LeaseEpoch,
+		LeaseExpiresAt: j.LeaseExpiresAt,
+		LeaseTTL:       j.LeaseTTL.Nanoseconds(),
+		EvictCount:     j.EvictCount,
+
+		ReqCPUMilli:      j.Resources[resource.CPU],
+		ReqMemoryBytes:   j.Resources[resource.Memory],
+		ReqDiskBytes:     j.Resources[resource.Disk],
+		ReqGPUMilli:      j.Resources[resource.GPU],
+		ReqCustomKeys:    resource.EncodeCustomKeys(j.Resources),
+		ResourceClass:    j.ResourceClass,
+		InputBytes:       j.InputBytes,
+		PrimaryInputHash: j.PrimaryInputHash,
 	}
+
+	// A zero Set (nil, or every quantity zero) is left as the field's
+	// Go zero value -- nil -- rather than assigned j.Resources/
+	// j.ResourceLimits verbatim, so "omitempty" drops the key instead
+	// of writing an empty subdocument.
+	if !j.Resources.IsZero() {
+		m.ResourceRequests = j.Resources
+	}
+	if !j.ResourceLimits.IsZero() {
+		m.ResourceLimits = j.ResourceLimits
+	}
+
+	return m
 }
 
 func fromJobModel(m *jobModel) (*job.Job, error) {
@@ -93,6 +174,17 @@ func fromJobModel(m *jobModel) (*job.Job, error) {
 		CompletedAt: m.CompletedAt,
 		HeartbeatAt: m.HeartbeatAt,
 		Timeout:     time.Duration(m.Timeout),
+
+		LeaseEpoch:     m.LeaseEpoch,
+		LeaseExpiresAt: m.LeaseExpiresAt,
+		LeaseTTL:       time.Duration(m.LeaseTTL),
+		EvictCount:     m.EvictCount,
+
+		Resources:        m.ResourceRequests,
+		ResourceLimits:   m.ResourceLimits,
+		ResourceClass:    m.ResourceClass,
+		InputBytes:       m.InputBytes,
+		PrimaryInputHash: m.PrimaryInputHash,
 	}
 
 	if m.WorkerID != "" {
@@ -290,6 +382,20 @@ type dlqEntryModel struct {
 	FailedAt   time.Time  `grove:"failed_at,notnull" bson:"failed_at"`
 	ReplayedAt *time.Time `grove:"replayed_at"    bson:"replayed_at,omitempty"`
 	CreatedAt  time.Time  `grove:"created_at,notnull" bson:"created_at"`
+
+	// Carried so Replay can rebuild a job that behaves like the failed
+	// one; see the dlq.Entry doc. Mongo is schemaless, so these need no
+	// migration, and resource.Set marshals as a native BSON subdocument
+	// exactly as it does on jobModel.
+	Priority         int          `grove:"priority,notnull,default:0" bson:"priority"`
+	Timeout          int64        `grove:"timeout,notnull,default:0"  bson:"timeout"`
+	LeaseTTL         int64        `grove:"lease_ttl,notnull,default:0" bson:"lease_ttl"`
+	ArtifactBindings []byte       `grove:"artifact_bindings"          bson:"artifact_bindings,omitempty"`
+	Resources        resource.Set `grove:"resources"                  bson:"resources,omitempty"`
+	ResourceLimits   resource.Set `grove:"resource_limits"            bson:"resource_limits,omitempty"`
+	ResourceClass    string       `grove:"resource_class"             bson:"resource_class"`
+	InputBytes       int64        `grove:"input_bytes,notnull,default:0" bson:"input_bytes"`
+	PrimaryInputHash string       `grove:"primary_input_hash"         bson:"primary_input_hash"`
 }
 
 func toDLQModel(e *dlq.Entry) *dlqEntryModel {
@@ -307,6 +413,16 @@ func toDLQModel(e *dlq.Entry) *dlqEntryModel {
 		FailedAt:   e.FailedAt,
 		ReplayedAt: e.ReplayedAt,
 		CreatedAt:  e.CreatedAt,
+
+		Priority:         e.Priority,
+		Timeout:          int64(e.Timeout),
+		LeaseTTL:         int64(e.LeaseTTL),
+		ArtifactBindings: e.ArtifactBindings,
+		Resources:        e.Resources,
+		ResourceLimits:   e.ResourceLimits,
+		ResourceClass:    e.ResourceClass,
+		InputBytes:       e.InputBytes,
+		PrimaryInputHash: e.PrimaryInputHash,
 	}
 }
 
@@ -335,6 +451,16 @@ func fromDLQModel(m *dlqEntryModel) (*dlq.Entry, error) {
 		FailedAt:   m.FailedAt,
 		ReplayedAt: m.ReplayedAt,
 		CreatedAt:  m.CreatedAt,
+
+		Priority:         m.Priority,
+		Timeout:          time.Duration(m.Timeout),
+		LeaseTTL:         time.Duration(m.LeaseTTL),
+		ArtifactBindings: m.ArtifactBindings,
+		Resources:        m.Resources,
+		ResourceLimits:   m.ResourceLimits,
+		ResourceClass:    m.ResourceClass,
+		InputBytes:       m.InputBytes,
+		PrimaryInputHash: m.PrimaryInputHash,
 	}, nil
 }
 

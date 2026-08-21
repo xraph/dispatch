@@ -18,7 +18,7 @@ func (s *Store) CreateRun(ctx context.Context, run *workflow.Run) error {
 		if isDuplicateKey(err) {
 			return dispatch.ErrJobAlreadyExists
 		}
-		return fmt.Errorf("dispatch/bun: create run: %w", err)
+		return fmt.Errorf(errPrefix+"create run: %w", err)
 	}
 	return nil
 }
@@ -34,7 +34,7 @@ func (s *Store) GetRun(ctx context.Context, runID id.RunID) (*workflow.Run, erro
 		if isNoRows(err) {
 			return nil, dispatch.ErrRunNotFound
 		}
-		return nil, fmt.Errorf("dispatch/bun: get run: %w", err)
+		return nil, fmt.Errorf(errPrefix+"get run: %w", err)
 	}
 	return fromRunModel(m)
 }
@@ -45,7 +45,7 @@ func (s *Store) UpdateRun(ctx context.Context, run *workflow.Run) error {
 	m.UpdatedAt = time.Now().UTC()
 	res, err := s.pgdb.NewUpdate(m).WherePK().Exec(ctx)
 	if err != nil {
-		return fmt.Errorf("dispatch/bun: update run: %w", err)
+		return fmt.Errorf(errPrefix+"update run: %w", err)
 	}
 	rows, _ := res.RowsAffected() //nolint:errcheck // driver always returns nil
 	if rows == 0 {
@@ -74,14 +74,14 @@ func (s *Store) ListRuns(ctx context.Context, opts workflow.ListOpts) ([]*workfl
 
 	err := q.Scan(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("dispatch/bun: list runs: %w", err)
+		return nil, fmt.Errorf(errPrefix+"list runs: %w", err)
 	}
 
 	runs := make([]*workflow.Run, 0, len(models))
 	for i := range models {
 		r, convErr := fromRunModel(&models[i])
 		if convErr != nil {
-			return nil, fmt.Errorf("dispatch/bun: list runs convert: %w", convErr)
+			return nil, fmt.Errorf(errPrefix+"list runs convert: %w", convErr)
 		}
 		runs = append(runs, r)
 	}
@@ -104,7 +104,7 @@ func (s *Store) SaveCheckpoint(ctx context.Context, runID id.RunID, stepName str
 		Set("created_at = EXCLUDED.created_at").
 		Exec(ctx)
 	if err != nil {
-		return fmt.Errorf("dispatch/bun: save checkpoint: %w", err)
+		return fmt.Errorf(errPrefix+"save checkpoint: %w", err)
 	}
 	return nil
 }
@@ -122,7 +122,7 @@ func (s *Store) GetCheckpoint(ctx context.Context, runID id.RunID, stepName stri
 		if isNoRows(err) {
 			return nil, nil // no checkpoint is not an error
 		}
-		return nil, fmt.Errorf("dispatch/bun: get checkpoint: %w", err)
+		return nil, fmt.Errorf(errPrefix+"get checkpoint: %w", err)
 	}
 	return m.Data, nil
 }
@@ -135,14 +135,14 @@ func (s *Store) ListCheckpoints(ctx context.Context, runID id.RunID) ([]*workflo
 		OrderExpr("created_at ASC").
 		Scan(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("dispatch/bun: list checkpoints: %w", err)
+		return nil, fmt.Errorf(errPrefix+"list checkpoints: %w", err)
 	}
 
 	checkpoints := make([]*workflow.Checkpoint, 0, len(models))
 	for i := range models {
 		cp, convErr := fromCheckpointModel(&models[i])
 		if convErr != nil {
-			return nil, fmt.Errorf("dispatch/bun: list checkpoints convert: %w", convErr)
+			return nil, fmt.Errorf(errPrefix+"list checkpoints convert: %w", convErr)
 		}
 		checkpoints = append(checkpoints, cp)
 	}
@@ -157,14 +157,14 @@ func (s *Store) ListChildRuns(ctx context.Context, parentRunID id.RunID) ([]*wor
 		OrderExpr("created_at ASC").
 		Scan(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("dispatch/bun: list child runs: %w", err)
+		return nil, fmt.Errorf(errPrefix+"list child runs: %w", err)
 	}
 
 	runs := make([]*workflow.Run, 0, len(models))
 	for i := range models {
 		r, convErr := fromRunModel(&models[i])
 		if convErr != nil {
-			return nil, fmt.Errorf("dispatch/bun: list child runs convert: %w", convErr)
+			return nil, fmt.Errorf(errPrefix+"list child runs convert: %w", convErr)
 		}
 		runs = append(runs, r)
 	}
@@ -179,7 +179,7 @@ func (s *Store) DeleteCheckpointsAfter(ctx context.Context, runID id.RunID, afte
 		Where("created_at > (SELECT created_at FROM dispatch_checkpoints WHERE run_id = ? AND step_name = ?)", runID.String(), afterStep).
 		Exec(ctx)
 	if err != nil {
-		return fmt.Errorf("dispatch/bun: delete checkpoints after: %w", err)
+		return fmt.Errorf(errPrefix+"delete checkpoints after: %w", err)
 	}
 	return nil
 }

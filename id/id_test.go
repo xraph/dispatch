@@ -276,3 +276,25 @@ func TestBSONUnmarshalInvalidType(t *testing.T) {
 		t.Error("expected error for invalid BSON type, got nil")
 	}
 }
+
+func TestArtifactID(t *testing.T) {
+	got := id.NewArtifactID()
+	if got.Prefix() != id.PrefixArtifact {
+		t.Fatalf("prefix = %q, want %q", got.Prefix(), id.PrefixArtifact)
+	}
+	if got.IsNil() {
+		t.Fatal("NewArtifactID returned nil ID")
+	}
+
+	parsed, err := id.ParseArtifactID(got.String())
+	if err != nil {
+		t.Fatalf("ParseArtifactID(%q) error = %v", got.String(), err)
+	}
+	if parsed.String() != got.String() {
+		t.Fatalf("round trip = %q, want %q", parsed.String(), got.String())
+	}
+
+	if _, err := id.ParseArtifactID("job_01h2xcejqtf2nbrexx3vqjhp41"); err == nil {
+		t.Fatal("ParseArtifactID accepted a job ID, want error")
+	}
+}

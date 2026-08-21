@@ -16,6 +16,7 @@ import (
 	"github.com/xraph/grove"
 	"github.com/xraph/grove/drivers/mongodriver"
 
+	"github.com/xraph/dispatch/artifact"
 	"github.com/xraph/dispatch/cluster"
 	"github.com/xraph/dispatch/cron"
 	"github.com/xraph/dispatch/dlq"
@@ -26,13 +27,15 @@ import (
 
 // Collection name constants.
 const (
-	colJobs         = "dispatch_jobs"
-	colWorkflowRuns = "dispatch_workflow_runs"
-	colCheckpoints  = "dispatch_checkpoints"
-	colCronEntries  = "dispatch_cron_entries"
-	colDLQ          = "dispatch_dlq"
-	colEvents       = "dispatch_events"
-	colWorkers      = "dispatch_workers"
+	colJobs          = "dispatch_jobs"
+	colWorkflowRuns  = "dispatch_workflow_runs"
+	colCheckpoints   = "dispatch_checkpoints"
+	colCronEntries   = "dispatch_cron_entries"
+	colDLQ           = "dispatch_dlq"
+	colEvents        = "dispatch_events"
+	colWorkers       = "dispatch_workers"
+	colArtifacts     = "dispatch_artifacts"
+	colArtifactLinks = "dispatch_artifact_links"
 )
 
 // Ensure Store implements all subsystem interfaces at compile time.
@@ -43,6 +46,8 @@ var (
 	_ dlq.Store      = (*Store)(nil)
 	_ event.Store    = (*Store)(nil)
 	_ cluster.Store  = (*Store)(nil)
+	_ artifact.Store = (*Store)(nil)
+	_ job.LeaseStore = (*Store)(nil)
 )
 
 // Store is a grove ORM implementation of store.Store using MongoDB driver.
@@ -86,6 +91,16 @@ func (s *Store) DB() *grove.DB {
 //
 // CreateMany is itself idempotent — mongo silently no-ops indexes that already
 // exist with matching specs — so this is safe to call on every boot.
+//
+// Note this is the whole of the mongo backend's migration path: the grove
+// migration group in migrations.go is not run from anywhere, so anything
+// that must happen on upgrade belongs here rather than there. Jobs left
+// running by a pre-lease build are deliberately NOT handled here. A
+// one-shot backfill cannot see a job an old pod claims after the migration
+// has already run, and it would evict jobs those pods are still running,
+// because it seeds an expiry in the past that their heartbeats do not know
+// to push. ReclaimExpiredLeases adopts them instead, continuously and
+// gated on silence — see job.UnleasedReclaimGrace.
 func (s *Store) Migrate(ctx context.Context) error {
 	indexes := migrationIndexes()
 
@@ -137,6 +152,44 @@ func isDuplicateKey(err error) bool {
 // migrationIndexes returns the index definitions for all dispatch collections.
 func migrationIndexes() map[string][]mongod.IndexModel {
 	return map[string][]mongod.IndexModel{
+		colArtifacts: {
+			// Partial unique index on the storage coordinates: only live
+			// rows collide, so a purged key becomes reusable.
+			{
+				Keys: bson.D{
+					{Key: "backend", Value: 1},
+					{Key: "bucket", Value: 1},
+					{Key: "key", Value: 1},
+				},
+				Options: options.Index().
+					SetName("dispatch_artifacts_unique_live_key").
+					SetUnique(true).
+					SetPartialFilterExpression(bson.M{"deleted_at": bson.M{"$eq": nil}}),
+			},
+			{Keys: bson.D{{Key: "lifecycle", Value: 1}, {Key: "created_at", Value: 1}}},
+			{Keys: bson.D{{Key: "deleted_at", Value: 1}}},
+			{Keys: bson.D{{Key: "content_hash", Value: 1}}},
+			{Keys: bson.D{
+				{Key: "scope_app_id", Value: 1},
+				{Key: "scope_org_id", Value: 1},
+			}},
+		},
+		colArtifactLinks: {
+			{
+				Keys: bson.D{
+					{Key: "artifact_id", Value: 1},
+					{Key: "owner_kind", Value: 1},
+					{Key: "owner_id", Value: 1},
+					{Key: "name", Value: 1},
+					{Key: "attempt", Value: 1},
+				},
+				Options: options.Index().
+					SetName("dispatch_artifact_links_unique").
+					SetUnique(true),
+			},
+			{Keys: bson.D{{Key: "owner_kind", Value: 1}, {Key: "owner_id", Value: 1}}},
+			{Keys: bson.D{{Key: "artifact_id", Value: 1}}},
+		},
 		colJobs: {
 			// Dequeue index: queue + state + priority + run_at.
 			{Keys: bson.D{
@@ -157,6 +210,8 @@ func migrationIndexes() map[string][]mongod.IndexModel {
 				{Key: "state", Value: 1},
 				{Key: "heartbeat_at", Value: 1},
 			}},
+			// Lease index for the expired-lease reclaim scan.
+			{Keys: bson.D{{Key: "state", Value: 1}, {Key: "lease_expires_at", Value: 1}}},
 		},
 		colWorkflowRuns: {
 			{Keys: bson.D{{Key: "state", Value: 1}}},

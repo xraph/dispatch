@@ -19,7 +19,7 @@ func (s *Store) RegisterCron(ctx context.Context, entry *cron.Entry) error {
 		if isDuplicateKey(err) {
 			return dispatch.ErrDuplicateCron
 		}
-		return fmt.Errorf("dispatch/bun: register cron: %w", err)
+		return fmt.Errorf(errPrefix+"register cron: %w", err)
 	}
 	return nil
 }
@@ -35,7 +35,7 @@ func (s *Store) GetCron(ctx context.Context, entryID id.CronID) (*cron.Entry, er
 		if isNoRows(err) {
 			return nil, dispatch.ErrCronNotFound
 		}
-		return nil, fmt.Errorf("dispatch/bun: get cron: %w", err)
+		return nil, fmt.Errorf(errPrefix+"get cron: %w", err)
 	}
 	return fromCronModel(m)
 }
@@ -47,14 +47,14 @@ func (s *Store) ListCrons(ctx context.Context) ([]*cron.Entry, error) {
 		OrderExpr("created_at ASC").
 		Scan(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("dispatch/bun: list crons: %w", err)
+		return nil, fmt.Errorf(errPrefix+"list crons: %w", err)
 	}
 
 	entries := make([]*cron.Entry, 0, len(models))
 	for i := range models {
 		e, convErr := fromCronModel(&models[i])
 		if convErr != nil {
-			return nil, fmt.Errorf("dispatch/bun: list crons convert: %w", convErr)
+			return nil, fmt.Errorf(errPrefix+"list crons convert: %w", convErr)
 		}
 		entries = append(entries, e)
 	}
@@ -77,7 +77,7 @@ func (s *Store) AcquireCronLock(ctx context.Context, entryID id.CronID, workerID
 		Where("(locked_by IS NULL OR locked_until < ? OR locked_by = ?)", now, wID).
 		Exec(ctx)
 	if err != nil {
-		return false, fmt.Errorf("dispatch/bun: acquire cron lock: %w", err)
+		return false, fmt.Errorf(errPrefix+"acquire cron lock: %w", err)
 	}
 
 	rows, _ := res.RowsAffected() //nolint:errcheck // driver always returns nil
@@ -87,7 +87,7 @@ func (s *Store) AcquireCronLock(ctx context.Context, entryID id.CronID, workerID
 			Where("id = ?", entryID.String()).
 			Count(ctx)
 		if existErr != nil {
-			return false, fmt.Errorf("dispatch/bun: check cron exists: %w", existErr)
+			return false, fmt.Errorf(errPrefix+"check cron exists: %w", existErr)
 		}
 		if count == 0 {
 			return false, dispatch.ErrCronNotFound
@@ -109,7 +109,7 @@ func (s *Store) ReleaseCronLock(ctx context.Context, entryID id.CronID, workerID
 		Where("locked_by = ?", workerID.String()).
 		Exec(ctx)
 	if err != nil {
-		return fmt.Errorf("dispatch/bun: release cron lock: %w", err)
+		return fmt.Errorf(errPrefix+"release cron lock: %w", err)
 	}
 	return nil
 }
@@ -122,7 +122,7 @@ func (s *Store) UpdateCronLastRun(ctx context.Context, entryID id.CronID, at tim
 		Where("id = ?", entryID.String()).
 		Exec(ctx)
 	if err != nil {
-		return fmt.Errorf("dispatch/bun: update cron last run: %w", err)
+		return fmt.Errorf(errPrefix+"update cron last run: %w", err)
 	}
 	rows, _ := res.RowsAffected() //nolint:errcheck // driver always returns nil
 	if rows == 0 {
@@ -137,7 +137,7 @@ func (s *Store) UpdateCronEntry(ctx context.Context, entry *cron.Entry) error {
 	m.UpdatedAt = time.Now().UTC()
 	res, err := s.pgdb.NewUpdate(m).WherePK().Exec(ctx)
 	if err != nil {
-		return fmt.Errorf("dispatch/bun: update cron entry: %w", err)
+		return fmt.Errorf(errPrefix+"update cron entry: %w", err)
 	}
 	rows, _ := res.RowsAffected() //nolint:errcheck // driver always returns nil
 	if rows == 0 {
@@ -152,7 +152,7 @@ func (s *Store) DeleteCron(ctx context.Context, entryID id.CronID) error {
 		Where("id = ?", entryID.String()).
 		Exec(ctx)
 	if err != nil {
-		return fmt.Errorf("dispatch/bun: delete cron: %w", err)
+		return fmt.Errorf(errPrefix+"delete cron: %w", err)
 	}
 	rows, _ := res.RowsAffected() //nolint:errcheck // driver always returns nil
 	if rows == 0 {

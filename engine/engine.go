@@ -14,6 +14,8 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"slices"
+	"sync"
 	"time"
 
 	log "github.com/xraph/go-utils/log"
@@ -21,17 +23,21 @@ import (
 	"go.opentelemetry.io/otel/trace"
 
 	"github.com/xraph/dispatch"
+	"github.com/xraph/dispatch/artifact"
+	"github.com/xraph/dispatch/artifact/cache"
 	"github.com/xraph/dispatch/backoff"
 	"github.com/xraph/dispatch/cluster"
 	"github.com/xraph/dispatch/cron"
 	"github.com/xraph/dispatch/dlq"
 	"github.com/xraph/dispatch/event"
+	"github.com/xraph/dispatch/exec"
 	"github.com/xraph/dispatch/ext"
 	"github.com/xraph/dispatch/id"
 	"github.com/xraph/dispatch/job"
 	mw "github.com/xraph/dispatch/middleware"
 	"github.com/xraph/dispatch/observability"
 	"github.com/xraph/dispatch/queue"
+	"github.com/xraph/dispatch/resource"
 	"github.com/xraph/dispatch/scope"
 	"github.com/xraph/dispatch/store"
 	"github.com/xraph/dispatch/stream"
@@ -80,6 +86,23 @@ type Engine struct {
 	mws        []mw.Middleware
 	logger     log.Logger
 
+	// stopOnce guards the executor-close path in Stop against a double
+	// call. Stop's other steps tolerate being run twice: the cron
+	// scheduler and the dispatcher each hold their own sync.Once, and the
+	// worker pool checks a running flag. Close has no such guard of its
+	// own, and closing a rung's clients or child processes twice is not
+	// guaranteed safe the way a no-op Stop is.
+	//
+	// The scope is deliberately narrow rather than wrapping all of Stop.
+	// Every other step owns its own idempotence, at the layer that knows
+	// what repeating it costs, and this guard exists only for the one
+	// step that cannot. Widening it here would put that decision in the
+	// wrong place and hide from a reader that the subsystems already
+	// handle it. Note a second Stop returns nil rather than the first
+	// call's error, because the dispatcher's own Once reports nothing on
+	// a repeat call.
+	stopOnce sync.Once
+
 	// Workflow subsystem.
 	wfRegistry *workflow.Registry
 	wfRunner   *workflow.Runner
@@ -99,6 +122,26 @@ type Engine struct {
 	brokerOpts   []stream.BrokerOption
 	enableBroker bool
 
+	// Artifact plane (optional; nil means disabled).
+	artifacts     *artifact.Service
+	artifactCache *cache.Cache
+
+	// Resource model (optional; zero values mean no requirements and no
+	// capacity check, which is exactly today's behaviour).
+	estimator       resource.Estimator
+	resourceDefault resource.Set
+	queueResources  map[string]resource.Set
+	workerCapacity  resource.Set
+
+	// resources is the shared admission ledger. It must be the SAME
+	// instance the staging cache was built with, or the cache's staged
+	// bytes are invisible to the pool's disk budget. Nil disables the
+	// model outright.
+	resources resource.Manager
+	// workerCustomKeys narrows the custom keys this worker advertises at
+	// dequeue. Empty derives them from the manager's capacity.
+	workerCustomKeys []string
+
 	// Queue subsystem.
 	queueConfigs []queue.Config
 	queueManager *queue.Manager
@@ -108,6 +151,19 @@ type Engine struct {
 	// metricFactory is the go-utils MetricFactory for engine-level metrics.
 	// nil means use gu.NewMetricsCollector default.
 	metricFactory gu.MetricFactory
+
+	// executors is the registry job attempts are dispatched through. It
+	// always has the in-process executor as its default.
+	executors *exec.Registry
+	// extraExecutors accumulates executors added via WithExecutor until
+	// buildExecutors assembles them into executors.
+	extraExecutors []exec.Executor
+	// scratchRoot is the root directory an out-of-process attempt's
+	// scratch OutputDir is created under (worker.Runner.WithArtifacts).
+	// Empty means worker.Runner's own default, os.TempDir(). See
+	// WithScratchRoot for why it only takes effect alongside the artifact
+	// plane.
+	scratchRoot string
 }
 
 // Option configures an Engine.
@@ -141,6 +197,104 @@ func WithQueueConfig(configs ...queue.Config) Option {
 	return func(eng *Engine) {
 		eng.queueConfigs = append(eng.queueConfigs, configs...)
 	}
+}
+
+// WithEstimator installs the resource estimator consulted at enqueue.
+//
+// The estimator sits above a definition's static declaration and below
+// a per-enqueue override. It receives the declaration in the request and
+// may return it unchanged, so installing one is an explicit opt-in to
+// letting inference override declaration. An estimator that errors is
+// ignored: it must never fail an enqueue.
+func WithEstimator(e resource.Estimator) Option {
+	return func(eng *Engine) { eng.estimator = e }
+}
+
+// WithResourceDefaults sets the fleet-wide default requirement and any
+// per-queue overrides. Both are the lowest-precedence sources, below a
+// definition's own declaration.
+func WithResourceDefaults(global resource.Set, perQueue map[string]resource.Set) Option {
+	return func(eng *Engine) {
+		eng.resourceDefault = global
+		eng.queueResources = perQueue
+	}
+}
+
+// WithWorkerCapacity declares the largest single-worker capacity in the
+// fleet, and is the ONLY thing that turns the enqueue-time unschedulable
+// check on. Leave it unset — the default — and Enqueue never rejects a
+// job for being too big for any worker.
+//
+// It is a fleet-wide statement, not a description of this process, and
+// the distinction is the whole reason the check is opt-in. Declare it
+// and a job requiring more than this on any dimension fails Enqueue with
+// ErrUnschedulable, wherever it was enqueued from: a light API pod that
+// declared its own 2 GiB would hard-reject the tessellation job the
+// heavy tier runs perfectly well.
+//
+// The check cannot derive the fleet maximum for itself, because
+// cluster.Worker.Capacity does not round-trip. Only store/memory carries
+// it; postgres, sqlite, mongo, redis and the k8s provider all enumerate
+// worker fields by hand and drop it, so a worker registered with
+// {memory: 64GiB} reads back an empty map. MaxWorkerCapacity therefore
+// sees this value and — on memory alone — whatever live workers
+// published, never the real fleet maximum. Persisting Capacity in those
+// four models would make the derivation honest and is tracked as
+// follow-up work; until then, declaring the ceiling is the operator's
+// job or the check stays off.
+//
+// It is deliberately NOT defaulted from WithResourceManager's capacity.
+// That default read as a convenience and behaved as a silent rescope of
+// a fleet-wide question to one process.
+func WithWorkerCapacity(c resource.Set) Option {
+	return func(eng *Engine) { eng.workerCapacity = c }
+}
+
+// WithResourceManager installs the admission ledger the worker pool
+// admits jobs against.
+//
+// The manager passed here MUST be the same instance the staging cache
+// was built with (cache.WithManager). One ledger is the whole design:
+// the cache holds a lease per cached entry and registers itself as the
+// manager's disk reclaimer, and the pool's dequeue budget offers disk as
+// free PLUS what that reclaimer could evict. Give the cache a private
+// manager — which it constructs for itself when none is supplied — and
+// the pool's Reclaimable() is permanently zero, staged bytes are never
+// offered back to the budget, and the disk path quietly does nothing.
+// It presents as a worker that went quiet, not as an error.
+//
+// Leaving this unset is the supported default: the pool passes an
+// unbounded DequeueOpts, every backend skips its fit predicate, and no
+// leases are taken. That is exactly how Dispatch behaved before the
+// resource model existed.
+//
+// Installing a manager does NOT declare a fleet capacity, and does not
+// turn the enqueue-time unschedulable check on. See WithWorkerCapacity
+// for why that is opt-in and separate.
+//
+// Leases compose with this. The grant travels on job.DequeueOpts
+// (WorkerID and LeaseUntil), so a claim that takes a lease is an
+// ordinary claim that also writes the lease columns — it carries the
+// budget, the custom-key containment and the locality preference like
+// any other. There is one dequeue path per backend and it is the one
+// this manager constrains. Turning leases and resources on together is
+// the natural upgrade, and it is a supported one.
+func WithResourceManager(m resource.Manager) Option {
+	return func(eng *Engine) { eng.resources = m }
+}
+
+// WithWorkerCustomKeys narrows the custom resource keys this worker
+// advertises at dequeue.
+//
+// The default — every custom key the manager has capacity for — is
+// usually right. This exists to shrink it, so a worker draining a device
+// can stop attracting work for it without being reconfigured. Keep the
+// list a subset of the manager's custom capacity: dequeue matches custom
+// keys by containment and never by quantity, so a key advertised here
+// with no capacity behind it passes the store's filter and is then
+// refused locally, on every attempt.
+func WithWorkerCustomKeys(keys []string) Option {
+	return func(eng *Engine) { eng.workerCustomKeys = slices.Clone(keys) }
 }
 
 // WithTracerProvider sets a custom OTel TracerProvider for the engine.
@@ -230,6 +384,11 @@ func Build(d *dispatch.Dispatcher, opts ...Option) (*Engine, error) {
 		opt(eng)
 	}
 
+	// Assemble the executor registry now that WithExecutor options have
+	// populated extraExecutors, and before any definition is registered
+	// or the runner is built, since both consult it.
+	eng.buildExecutors()
+
 	// Create stream broker if enabled (must be before pool so events flow).
 	if eng.enableBroker {
 		eng.broker = stream.NewBroker(logger, eng.brokerOpts...)
@@ -281,9 +440,34 @@ func Build(d *dispatch.Dispatcher, opts ...Option) (*Engine, error) {
 	allMws = append(allMws, defaultMws...)
 	allMws = append(allMws, eng.mws...)
 
-	// Create executor and pool.
+	// Create runner and pool.
 	config := d.Config()
-	executor := worker.NewExecutor(eng.registry, eng.extensions, eng.jobStore, eng.dlqService, eng.bo, logger, allMws...)
+	runner := worker.NewRunner(
+		eng.registry, eng.extensions, eng.jobStore, eng.dlqService,
+		eng.bo, eng.executors, logger, allMws...,
+	)
+
+	// An out-of-process rung gets a scratch directory regardless of
+	// whether this runs — worker.Runner creates one for any attempt whose
+	// executor is above exec.LevelNone, artifact plane or not — and
+	// worker.Runner.Reclaim's startup sweep of directories a previous
+	// process left behind now runs unconditionally too, for the same
+	// reason. What this call actually turns on is PriorOutputs and output
+	// committing (worker.Runner.commitOutputs), which is the one thing
+	// genuinely gated on having somewhere to commit to. Gated on
+	// eng.artifacts specifically — not on whether an extra executor is
+	// configured — because that is the same condition commitOutputs
+	// itself gates on; calling this with a nil svc would be a no-op by
+	// its own contract, so there is nothing to lose by keeping the
+	// condition here identical rather than trying to also know about
+	// every executor WithExecutor might have added. One side effect worth
+	// knowing: eng.scratchRoot only ever reaches the Runner through this
+	// call's second argument, so with no artifact plane configured a
+	// Runner's scratch directories fall back to os.TempDir() even if
+	// WithScratchRoot named something else.
+	if eng.artifacts != nil {
+		runner.WithArtifacts(eng.artifacts, eng.scratchRoot)
+	}
 
 	poolOpts := []worker.PoolOption{
 		worker.WithPoolConcurrency(config.Concurrency),
@@ -300,6 +484,12 @@ func Build(d *dispatch.Dispatcher, opts ...Option) (*Engine, error) {
 	if config.WorkerStoreCallTimeout != 0 {
 		poolOpts = append(poolOpts, worker.WithStoreCallTimeout(config.WorkerStoreCallTimeout))
 	}
+	if config.ReapInterval != 0 {
+		poolOpts = append(poolOpts, worker.WithReapInterval(config.ReapInterval))
+	}
+	if config.DefaultLeaseTTL != 0 {
+		poolOpts = append(poolOpts, worker.WithDefaultLeaseTTL(config.DefaultLeaseTTL))
+	}
 
 	// Create queue manager if queue configs were provided.
 	if len(eng.queueConfigs) > 0 {
@@ -307,9 +497,44 @@ func Build(d *dispatch.Dispatcher, opts ...Option) (*Engine, error) {
 		poolOpts = append(poolOpts, worker.WithQueueManager(eng.queueManager))
 	}
 
+	// Hand the pool the shared ledger. The timing check runs only when a
+	// manager is present, because admission is the only thing that can
+	// stall the fetcher: with no manager, admissionBudget hands back the
+	// pool's own context and admit returns immediately.
+	if eng.resources != nil {
+		_, leaseAware := js.(job.LeaseStore)
+		if err := checkReaperMargin(config, leaseAware); err != nil {
+			return nil, err
+		}
+
+		poolOpts = append(poolOpts, worker.WithResourceManager(eng.resources))
+
+		// Deliberately NOT seeding eng.workerCapacity from the ledger.
+		// The manager describes THIS process; workerCapacity is the floor
+		// of a fleet-wide check. Defaulting one from the other rescoped
+		// the question to one process, and because cluster.Worker.Capacity
+		// does not round-trip on four of the five backends, nothing could
+		// raise it back to the fleet maximum afterwards — so a light API
+		// worker rejected at enqueue every job bigger than itself. See
+		// WithWorkerCapacity.
+		//
+		// No construction-time warning about leases is emitted here, and
+		// there is no longer anything to warn about. The lease grant
+		// travels on job.DequeueOpts, so worker.Pool's single dequeue
+		// path — DequeueJobs — is also the path that takes a lease, and
+		// it carries the budget, the custom keys and the locality
+		// preference whether or not a lease is being granted. There is no
+		// second entry point that could claim a job this worker cannot
+		// run. See WithResourceManager and job.LeaseStore.
+	}
+
+	if len(eng.workerCustomKeys) > 0 {
+		poolOpts = append(poolOpts, worker.WithWorkerCustomKeys(eng.workerCustomKeys))
+	}
+
 	eng.pool = worker.NewPool(
 		eng.jobStore,
-		executor,
+		runner,
 		eng.extensions,
 		logger,
 		poolOpts...,
@@ -360,6 +585,7 @@ func Build(d *dispatch.Dispatcher, opts ...Option) (*Engine, error) {
 		Hostname:    hostname,
 		Queues:      config.Queues,
 		Concurrency: config.Concurrency,
+		Capacity:    eng.workerCapacity.Clone(),
 		State:       cluster.WorkerActive,
 		LastSeen:    time.Now().UTC(),
 		CreatedAt:   time.Now().UTC(),
@@ -372,8 +598,36 @@ func Build(d *dispatch.Dispatcher, opts ...Option) (*Engine, error) {
 }
 
 // Register registers a typed job definition with the engine.
+//
+// Use RegisterChecked when the definition declares artifact inputs, or an
+// execution policy (job.WithExecution), and you want either validated —
+// the staging budget for the former, and for the latter, that some
+// configured executor can actually satisfy it. Register itself performs
+// neither check: a definition declaring exec.Isolate(exec.LevelProcess)
+// with no rung configured to provide it registers cleanly here and only
+// fails the first time a worker actually tries to run it, which is
+// exactly the startup-error-versus-silently-hung-job choice
+// RegisterChecked exists to take out of a caller's hands.
 func Register[T any](eng *Engine, def *job.Definition[T]) {
 	job.RegisterDefinition(eng.registry, def)
+}
+
+// RegisterChecked registers a definition and validates its artifact
+// declarations and execution policy, so a job that could never be staged
+// or could never be isolated as it requires fails here — at registration,
+// on a developer's machine — rather than on every worker that picks it
+// up.
+func RegisterChecked[T any](eng *Engine, def *job.Definition[T]) error {
+	if err := eng.ValidateArtifactInputs(def.Name, def.Opts.Inputs); err != nil {
+		return err
+	}
+	if err := eng.checkExecutionPolicy(def.Name, def.Opts.Execution); err != nil {
+		return err
+	}
+
+	job.RegisterDefinition(eng.registry, def)
+
+	return nil
 }
 
 // Enqueue creates and enqueues a job.
@@ -415,8 +669,34 @@ func (eng *Engine) EnqueueRaw(ctx context.Context, name string, payload []byte, 
 	j.Priority = jobOpts.Priority
 	j.MaxRetries = jobOpts.MaxRetries
 	j.Timeout = jobOpts.Timeout
+
+	// A definition declares; an enqueue overrides — the same precedence
+	// resolveResources applies to ResourceFunc and ResourceClass. The
+	// definition's TTL has to come from the registry because EnqueueRaw
+	// has only a name and a payload; without this lookup a definition
+	// declaring job.WithLeaseTTL would silently get the pool default,
+	// which is the whole point of a per-job lease TTL.
+	//
+	// Only a positive enqueue-site value overrides, because zero is not
+	// an override: it is the absence of one, and means "use the pool
+	// default" rather than "cancel what the definition declared".
+	j.LeaseTTL = eng.registry.LeaseTTL(name)
+	if jobOpts.LeaseTTL > 0 {
+		j.LeaseTTL = jobOpts.LeaseTTL
+	}
 	if !jobOpts.RunAt.IsZero() {
 		j.RunAt = jobOpts.RunAt
+	}
+
+	if err := eng.applyBindings(ctx, j, jobOpts.Bindings); err != nil {
+		return nil, err
+	}
+
+	// After applyBindings, so the bindings this reads are already
+	// validated; before EnqueueJob, so an unschedulable job never
+	// reaches the store.
+	if err := eng.resolveResources(ctx, j, jobOpts); err != nil {
+		return nil, err
 	}
 
 	if err := eng.jobStore.EnqueueJob(ctx, j); err != nil {
@@ -493,7 +773,36 @@ func (eng *Engine) Stop(ctx context.Context) error {
 		eng.logger.Error("cron scheduler stop error", log.String("error", err.Error()))
 	}
 
-	return eng.d.Stop(ctx)
+	stopErr := eng.d.Stop(ctx)
+
+	// Close the executors last. The dispatcher stop above drains the worker
+	// pool, so no attempt is still running through a rung when its resources
+	// go away. In-process Close is a no-op; an out-of-process rung releases
+	// its clients and child processes here or leaks them.
+	//
+	// Guarded by stopOnce: a second Stop call must not close every executor
+	// again, since Close is newly reachable here and, unlike the rest of
+	// this method, is not itself idempotent.
+	eng.stopOnce.Do(eng.closeExecutors)
+
+	return stopErr
+}
+
+// closeExecutors releases every configured executor's resources, logging
+// failures rather than propagating them: shutdown continues regardless.
+func (eng *Engine) closeExecutors() {
+	if eng.executors == nil {
+		return
+	}
+
+	for _, e := range eng.executors.Executors() {
+		if err := e.Close(); err != nil {
+			eng.logger.Warn("executor close failed",
+				log.String("executor", e.Name()),
+				log.String("error", err.Error()),
+			)
+		}
+	}
 }
 
 // Extensions returns the extension registry.

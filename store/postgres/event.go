@@ -15,7 +15,7 @@ func (s *Store) PublishEvent(ctx context.Context, evt *event.Event) error {
 	m := toEventModel(evt)
 	_, err := s.pgdb.NewInsert(m).Exec(ctx)
 	if err != nil {
-		return fmt.Errorf("dispatch/bun: publish event: %w", err)
+		return fmt.Errorf(errPrefix+"publish event: %w", err)
 	}
 	return nil
 }
@@ -52,12 +52,12 @@ func (s *Store) SubscribeEvent(ctx context.Context, name string, timeout time.Du
 				sleepCtx(ctx, 50*time.Millisecond)
 				continue
 			}
-			return nil, fmt.Errorf("dispatch/bun: subscribe event: %w", err)
+			return nil, fmt.Errorf(errPrefix+"subscribe event: %w", err)
 		}
 
 		evt, convErr := fromEventModel(m)
 		if convErr != nil {
-			return nil, fmt.Errorf("dispatch/bun: subscribe event convert: %w", convErr)
+			return nil, fmt.Errorf(errPrefix+"subscribe event convert: %w", convErr)
 		}
 		return evt, nil
 	}
@@ -70,7 +70,7 @@ func (s *Store) AckEvent(ctx context.Context, eventID id.EventID) error {
 		Where("id = ?", eventID.String()).
 		Exec(ctx)
 	if err != nil {
-		return fmt.Errorf("dispatch/bun: ack event: %w", err)
+		return fmt.Errorf(errPrefix+"ack event: %w", err)
 	}
 	rows, _ := res.RowsAffected() //nolint:errcheck // driver always returns nil
 	if rows == 0 {

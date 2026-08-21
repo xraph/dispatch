@@ -3,6 +3,7 @@ package worker
 import (
 	"context"
 	"errors"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -12,6 +13,7 @@ import (
 	"github.com/xraph/dispatch/ext"
 	"github.com/xraph/dispatch/id"
 	"github.com/xraph/dispatch/job"
+	"github.com/xraph/dispatch/resource"
 )
 
 // isTransientStoreErr reports whether err is a transient store failure —
@@ -51,13 +53,30 @@ type QueueManager interface {
 // defaultStoreCallTimeout caps how long a single store roundtrip
 // (DequeueJobs, HeartbeatJob, ReapStaleJobs, UpdateJob) is allowed
 // to run before the worker abandons it. Without this, a slow Mongo /
-// Postgres session selection would let dequeue calls stack on the
-// shared driver pool until every connection is checked out — which
-// is exactly the cascade that produces "context deadline exceeded"
-// floods at boot. 5 seconds is generous enough for a healthy
-// roundtrip and tight enough that 10 workers polling every second
-// can't pile up more than 50 in-flight calls at once.
+// Postgres session selection would let calls stack on the shared driver
+// pool until every connection is checked out — which is exactly the
+// cascade that produces "context deadline exceeded" floods at boot.
+// DequeueJobs comes from the single fetchLoop poller (see its own doc
+// comment below), not one call per worker goroutine, but
+// HeartbeatJob/UpdateJob can still arrive from up to `concurrency`
+// worker goroutines at once, each tending its own active job. 5 seconds
+// is generous enough for a healthy roundtrip and tight enough that a
+// pool of 10 concurrent workers can't pile up more than a few dozen
+// in-flight calls at once.
 const defaultStoreCallTimeout = 5 * time.Second
+
+// DefaultReapInterval is how often the pool scans for expired leases.
+//
+// It is deliberately independent of any lease TTL. The reaper used to
+// tick at the stale-job threshold, so a five-minute threshold meant a
+// dead job could sit for ten minutes before anyone looked; and with
+// per-definition TTLs there is no single threshold left to tick at.
+const DefaultReapInterval = 15 * time.Second
+
+// DefaultReclaimBatch caps how many expired leases one pass reclaims, so
+// a backlog after an outage drains over several ticks instead of one
+// statement that locks a large slice of the table.
+const DefaultReclaimBatch = 100
 
 // Pool manages a set of concurrent worker goroutines fed by a single
 // fetcher that polls the store for jobs and executes them through the
@@ -83,6 +102,21 @@ type Pool struct {
 	heartbeatInterval time.Duration
 	staleJobThreshold time.Duration
 
+	// reapInterval is the reaper's scan cadence. Zero uses
+	// DefaultReapInterval; this is deliberately independent of
+	// staleJobThreshold and any lease TTL. See WithReapInterval.
+	reapInterval time.Duration
+
+	// leaseStore is the store's optional lease capability. Nil means the
+	// backend implements only job.Store, and the pool keeps its previous
+	// behaviour: unleased claims, bare heartbeats, threshold reaping.
+	leaseStore job.LeaseStore
+
+	// defaultLeaseTTL is how far a renewal pushes the expiry for jobs
+	// that declare no LeaseTTL of their own. Zero falls back to
+	// staleJobThreshold, then to job.DefaultLeaseTTL.
+	defaultLeaseTTL time.Duration
+
 	// storeCallTimeout caps how long a single store call (dequeue,
 	// heartbeat, reap, update) may hold a driver-pool connection
 	// before being abandoned. Zero means use defaultStoreCallTimeout;
@@ -93,16 +127,26 @@ type Pool struct {
 	// Queue manager (optional).
 	queueManager QueueManager
 
+	// resources admits jobs against this worker's real capacity. Nil
+	// disables the resource model entirely: the pool offers no budget at
+	// dequeue and takes no lease, which is exactly how it behaved before
+	// the model existed.
+	resources resource.Manager
+
+	// customKeys are the custom resource keys this worker advertises,
+	// overriding the keys derived from the manager's capacity.
+	customKeys []string
+
 	stopCh     chan struct{}
 	wakeCh     chan struct{}      // nudges the fetcher out of its idle backoff
-	jobCh      chan *job.Job      // hand-off from the fetcher to the workers
+	jobCh      chan admitted      // hand-off from the fetcher to the workers
 	slots      chan struct{}      // free-worker tokens; capacity == concurrency
 	cancelCtx  context.Context    // Cancelled on Stop to interrupt in-flight store operations
 	cancelFunc context.CancelFunc // Cancels cancelCtx
 	wg         sync.WaitGroup
 	mu         sync.Mutex
 	running    bool
-	activeJobs map[string]context.CancelFunc
+	activeJobs map[string]*inflight
 	activeMu   sync.Mutex
 }
 
@@ -119,7 +163,8 @@ func WithPoolQueues(queues []string) PoolOption {
 	return func(p *Pool) { p.queues = queues }
 }
 
-// WithPollInterval sets how often workers poll for new jobs.
+// WithPollInterval sets how often the pool's single fetcher (fetchLoop)
+// polls the store for new jobs.
 func WithPollInterval(d time.Duration) PoolOption {
 	return func(p *Pool) { p.pollInterval = d }
 }
@@ -137,10 +182,39 @@ func WithHeartbeatInterval(d time.Duration) PoolOption {
 }
 
 // WithStaleJobThreshold sets the threshold after which running jobs
-// without a heartbeat are considered stale and reaped. A zero value
-// disables stale job reaping.
+// without a heartbeat are considered stale and reaped, on the legacy
+// SELECT-then-UPDATE path a backend implementing only job.Store falls
+// back to (reapStaleJobsLegacy). It has no effect on any first-party
+// backend: every one of them (memory, mongo, postgres, redis, sqlite)
+// implements job.LeaseStore, so reapStaleJobs routes to
+// reclaimExpiredLeases instead, which reclaims purely by lease expiry
+// (job.LeaseTTL / WithDefaultLeaseTTL) and never reads this value. A
+// zero value disables reaping outright, on either path — see
+// reapStaleJobs and reclaimExpiredLeases.
 func WithStaleJobThreshold(d time.Duration) PoolOption {
 	return func(p *Pool) { p.staleJobThreshold = d }
+}
+
+// WithReapInterval sets how often the reaper scans for expired leases /
+// stale jobs.
+//
+// This is the scan cadence, not the lease duration — it does not control
+// how long a lease survives without renewal. For that, see
+// WithDefaultLeaseTTL and job.WithLeaseTTL. A zero value leaves
+// DefaultReapInterval in place; it has no effect when WithStaleJobThreshold
+// is zero, since that still disables reaping entirely.
+func WithReapInterval(d time.Duration) PoolOption {
+	return func(p *Pool) { p.reapInterval = d }
+}
+
+// resolvedReapInterval returns the configured reap interval, or
+// DefaultReapInterval when unset.
+func (p *Pool) resolvedReapInterval() time.Duration {
+	if p.reapInterval > 0 {
+		return p.reapInterval
+	}
+
+	return DefaultReapInterval
 }
 
 // WithQueueManager sets the queue manager for rate limiting and
@@ -149,12 +223,90 @@ func WithQueueManager(m QueueManager) PoolOption {
 	return func(p *Pool) { p.queueManager = m }
 }
 
+// WithResourceManager makes the pool resource-aware.
+//
+// With a manager installed the fetcher offers its free capacity as the
+// dequeue budget, so the store never hands this worker a job it cannot
+// run, and every claimed job holds a lease for as long as it executes.
+// Without one the pool passes an unbounded DequeueOpts and takes no
+// leases — every backend skips its fit predicate and behaviour is
+// identical to a pool that predates the resource model.
+//
+// Prefer engine.WithResourceManager to calling this directly. A manager
+// makes admit able to stall the fetcher for up to one pollInterval per
+// batch while it holds claimed, running-state, not-yet-heartbeating jobs,
+// which puts pollInterval and staleJobThreshold into a relationship the
+// pool cannot police: it is handed both as already-decided values and
+// does not own the policy. engine.Build validates them together
+// (checkReaperMargin) before it constructs a pool. Construct one here
+// instead and that check does not run — a staleJobThreshold inside the
+// stall lets the reaper reclaim a job this fetcher still holds, and the
+// job runs twice.
+func WithResourceManager(m resource.Manager) PoolOption {
+	return func(p *Pool) { p.resources = m }
+}
+
+// WithWorkerCustomKeys sets the custom resource keys this worker offers
+// at dequeue, overriding the keys derived from the resource manager's
+// capacity.
+//
+// The derived default is usually what you want; this exists to narrow
+// it, so a worker draining a device can stop attracting work for it
+// without being reconfigured. Keep the list a subset of the manager's
+// custom capacity: dequeue matches custom resources by key and never by
+// quantity, so a key advertised here that the manager has no capacity
+// for will pass the store's filter and then be refused locally, and the
+// job will bounce back to pending on every attempt.
+//
+// Setting this without a resource manager makes the dequeue bounded on
+// its own, which is a deliberate opt-in: the worker then claims only
+// jobs whose custom keys it offers, with no quantity accounting at all.
+//
+// The slice is copied, so the caller keeps no handle on pool state.
+func WithWorkerCustomKeys(keys []string) PoolOption {
+	return func(p *Pool) { p.customKeys = slices.Clone(keys) }
+}
+
 // WithStoreCallTimeout caps a single store roundtrip. Pass a positive
 // duration to override defaultStoreCallTimeout, zero to leave the
 // default in place, or a negative value to disable the timeout
 // entirely. Disabling is only intended for unit tests.
 func WithStoreCallTimeout(d time.Duration) PoolOption {
 	return func(p *Pool) { p.storeCallTimeout = d }
+}
+
+// WithDefaultLeaseTTL sets how far each renewal pushes a job's lease
+// expiry when the job declares no LeaseTTL of its own.
+//
+// This is a liveness window, not a time limit: it should be a small
+// multiple of the heartbeat interval regardless of how long the work
+// takes. When unset the pool uses the configured stale-job threshold, so
+// an existing deployment sees the same reclamation timing it had before
+// leases existed.
+func WithDefaultLeaseTTL(d time.Duration) PoolOption {
+	return func(p *Pool) { p.defaultLeaseTTL = d }
+}
+
+// leaseTTLFor resolves how far a renewal should push this job's lease:
+// the job's own declaration, else the pool default, else the legacy
+// stale-job threshold, else job.DefaultLeaseTTL. The threshold sits in
+// the chain so a deployment that configured only StaleJobThreshold —
+// which is every deployment predating leases — keeps its current timing.
+//
+// j may be nil: the initial grant at claim time has no job to consult
+// yet, so it resolves straight to the pool-level fallbacks.
+func (p *Pool) leaseTTLFor(j *job.Job) time.Duration {
+	if j != nil && j.LeaseTTL > 0 {
+		return j.LeaseTTL
+	}
+	if p.defaultLeaseTTL > 0 {
+		return p.defaultLeaseTTL
+	}
+	if p.staleJobThreshold > 0 {
+		return p.staleJobThreshold
+	}
+
+	return job.DefaultLeaseTTL
 }
 
 // NewPool creates a worker pool.
@@ -177,13 +329,19 @@ func NewPool(
 		logger:          logger,
 		stopCh:          make(chan struct{}),
 		wakeCh:          make(chan struct{}, 1),
-		activeJobs:      make(map[string]context.CancelFunc),
+		activeJobs:      make(map[string]*inflight),
 	}
 	for _, opt := range opts {
 		opt(p)
 	}
 	if p.maxPollInterval < p.pollInterval {
 		p.maxPollInterval = p.pollInterval
+	}
+	if ls, ok := store.(job.LeaseStore); ok {
+		p.leaseStore = ls
+	} else {
+		logger.Warn("store does not implement job.LeaseStore; " +
+			"per-definition lease TTLs and epoch fencing are disabled")
 	}
 	return p
 }
@@ -203,11 +361,11 @@ func (p *Pool) Wake() {
 func (p *Pool) WorkerID() id.WorkerID { return p.workerID }
 
 // Start launches the worker goroutines. It returns immediately.
-func (p *Pool) Start(_ context.Context) error {
+func (p *Pool) Start(ctx context.Context) error {
 	p.mu.Lock()
-	defer p.mu.Unlock()
 
 	if p.running {
+		p.mu.Unlock()
 		return nil
 	}
 	p.running = true
@@ -224,7 +382,7 @@ func (p *Pool) Start(_ context.Context) error {
 	// one DequeueJobs call per cycle instead of `concurrency` concurrent
 	// calls, which kept idle pools writing to the store every second and
 	// could exhaust the shared driver pool on its own.
-	p.jobCh = make(chan *job.Job)
+	p.jobCh = make(chan admitted)
 	p.slots = make(chan struct{}, p.concurrency)
 	for range p.concurrency {
 		p.slots <- struct{}{}
@@ -249,7 +407,73 @@ func (p *Pool) Start(_ context.Context) error {
 		go p.reaperLoop()
 	}
 
+	p.mu.Unlock()
+
+	// Sweep sandboxes this worker left behind across a restart before it
+	// takes new work. In-process reclaim is a no-op; an out-of-process rung
+	// would otherwise keep orphaned children or pods alive indefinitely.
+	// Best effort by design: a rung that cannot sweep must not stop the
+	// pool from running the jobs it can still execute.
+	//
+	// Run in the background, tracked by p.wg like every other pool
+	// goroutine, so Start returns immediately as documented even when a
+	// rung's Reclaim does real (and potentially slow) process or
+	// filesystem I/O. Outside p.mu: nothing else needs the lock held for
+	// this, and holding it here would block Stop and every other pool
+	// method on a sweep that has no bound of its own.
+	if p.executor != nil {
+		p.wg.Add(1)
+		go p.runReclaimSweep(ctx)
+	}
+
 	return nil
+}
+
+// runReclaimSweep runs the executor reclaim sweep to completion or
+// cancellation, whichever comes first, and reports it to p.wg.
+//
+// The sweep's context is cancelled by either the ctx Start was called with
+// or Pool.Stop (via p.cancelCtx) — whichever fires first — so a blocked
+// rung can always be interrupted: by the caller giving up on Start's ctx,
+// or by the pool being stopped before the sweep finishes.
+func (p *Pool) runReclaimSweep(ctx context.Context) {
+	defer p.wg.Done()
+
+	sweepCtx, cancel := mergeDone(ctx, p.cancelCtx)
+	defer cancel()
+
+	// Reclamation is best-effort cleanup, not a startup precondition: a
+	// rung that cannot sweep must not stop the pool from running the jobs
+	// it can still execute, so an error here is logged, never fatal.
+	if err := p.executor.Reclaim(sweepCtx, p.workerID); err != nil {
+		p.logger.Warn("executor reclaim failed",
+			log.String("worker_id", p.workerID.String()),
+			log.String("error", err.Error()),
+		)
+	}
+}
+
+// mergeDone returns a context cancelled as soon as either a or b is done,
+// and a cancel func the caller must call once it no longer needs the
+// merged context — otherwise the watcher goroutine backing it leaks until
+// whichever of a or b is cancelled last.
+func mergeDone(a, b context.Context) (context.Context, context.CancelFunc) {
+	merged, cancel := context.WithCancel(context.Background())
+
+	stopWatch := make(chan struct{})
+	go func() {
+		select {
+		case <-a.Done():
+		case <-b.Done():
+		case <-stopWatch:
+		}
+		cancel()
+	}()
+
+	return merged, func() {
+		cancel()
+		close(stopWatch)
+	}
 }
 
 // Stop signals all workers to stop and waits for them to finish.
@@ -337,7 +561,26 @@ func (p *Pool) fetchLoop() {
 		}
 
 		dqCtx, dqCancel := p.callCtx()
-		jobs, err := p.store.DequeueJobs(dqCtx, p.queues, held)
+		// The budget is recomputed every cycle rather than cached: jobs
+		// finish and reclaimers evict between polls, and a stale ceiling
+		// would either strand work or admit work this worker cannot run.
+		// With no resource manager configured both fields are empty, the
+		// opts are IsUnbounded, and every backend skips its fit predicate.
+		dqOpts := job.DequeueOpts{
+			Queues:     p.queues,
+			Limit:      held,
+			Budget:     p.dequeueBudget(),
+			CustomKeys: p.offeredCustomKeys(),
+		}
+		// The grant uses the POOL default TTL, not any per-job value: the
+		// store cannot apply per-job TTL arithmetic at claim time, and the
+		// grant only has to survive until the first renewal one heartbeat
+		// later — which then applies the job's real TTL.
+		if p.leaseStore != nil {
+			dqOpts.WorkerID = p.workerID
+			dqOpts.LeaseUntil = time.Now().UTC().Add(p.leaseTTLFor(nil))
+		}
+		jobs, err := p.store.DequeueJobs(dqCtx, dqOpts)
 		dqCancel()
 		if err != nil {
 			p.releaseSlots(held)
@@ -358,6 +601,17 @@ func (p *Pool) fetchLoop() {
 			continue
 		}
 
+		// dispatched counts jobs actually handed to a worker, which is what
+		// paces the loop below — len(jobs) is not, because a refused job
+		// never reaches the blocking hand-off that used to do the pacing.
+		dispatched := 0
+
+		// One reclaim budget for the whole batch. Per job it would be
+		// batch size × the deadline, and the fetcher spends that stall
+		// holding claimed jobs that are already in running state and not
+		// yet heartbeating.
+		admitCtx, admitCancel := p.admissionBudget(len(jobs))
+
 		for _, j := range jobs {
 			// Check queue/tenant rate limit and concurrency.
 			if p.queueManager != nil && !p.queueManager.Acquire(j.Queue, j.ScopeOrgID) {
@@ -365,28 +619,75 @@ func (p *Pool) fetchLoop() {
 				continue
 			}
 
+			// Reserve local capacity between the claim and the hand-off,
+			// so no job reaches a worker without the resources it declared
+			// already accounted for.
+			lease, admitErr := p.admit(admitCtx, j)
+			if admitErr != nil {
+				p.releaseQueueSlot(j)
+				p.requeueLocalMisfit(j, admitErr)
+
+				continue
+			}
+
+			a := admitted{job: j, lease: lease}
+
 			select {
-			case p.jobCh <- j:
+			case p.jobCh <- a:
 				held-- // The worker now owns this slot.
+				dispatched++
 			case <-p.stopCh:
-				p.requeueUndispatched(j)
+				p.abandon(a)
 				p.releaseSlots(held)
+				admitCancel()
+
 				return
 			case <-p.cancelCtx.Done():
-				p.requeueUndispatched(j)
+				p.abandon(a)
 				p.releaseSlots(held)
+				admitCancel()
+
 				return
 			}
 		}
+
+		admitCancel()
 		p.releaseSlots(held)
 
-		if len(jobs) > 0 {
-			// There may be more ready work; poll again immediately.
+		// Three cadences, because a poll has three outcomes and only one
+		// of them paces itself.
+		switch {
+		case dispatched > 0:
+			// Something went through the blocking hand-off, which throttles
+			// this loop to the rate work completes. There may be more ready
+			// work behind it, so poll again immediately.
 			interval = p.pollInterval
+
 			continue
+
+		case len(jobs) > 0:
+			// Rows came back and none could be dispatched: rate limited, or
+			// too big for what is free. Those return instantly, so the fast
+			// path above would spin the claim/requeue cycle as fast as the
+			// store can serve it — 713 dequeues in 500ms on the regression
+			// test, an UpdateJob on each, against a backlog nothing can run.
+			//
+			// The idle backoff below is the wrong pace too, and worse: the
+			// store returns the queue head, so a batch of unrunnable jobs is
+			// re-claimed a Limit at a time, and backing off exponentially
+			// leaves a runnable job sitting behind them for the whole ramp
+			// (8.5s in that same test, against 94ms at this cadence). The
+			// refused rows only clear by being claimed and pushed forward,
+			// so the loop has to keep claiming — just not faster than it was
+			// configured to poll.
+			interval = p.pollInterval
+
+		default:
+			// Nothing ready at all. Back off; only a Wake or real work
+			// resets the cadence.
+			interval = min(interval*2, p.maxPollInterval)
 		}
 
-		interval = min(interval*2, p.maxPollInterval)
 		woken, ok := p.wait(interval)
 		if !ok {
 			return
@@ -424,11 +725,31 @@ func (p *Pool) releaseSlots(n int) {
 	}
 }
 
+// clearJobAssignment clears the fields that record which worker holds a
+// job's lease, so a job put back to pending does not keep looking
+// assigned to a worker that no longer holds it — stale WorkerID and
+// LeaseExpiresAt values an operator reads as "this pending job belongs to
+// a worker" when it does not.
+//
+// ReclaimExpiredLeases is the canonical clearer and additionally bumps
+// LeaseEpoch and EvictCount, which this helper deliberately leaves alone:
+// those are lease-eviction bookkeeping for another worker reclaiming a
+// job out from under its holder. Every caller here is the job's own
+// current holder putting it back — a rate limit, a shutdown, a launch
+// failure — not a reclamation, so there is no previous holder to fence.
+func clearJobAssignment(j *job.Job) {
+	j.WorkerID = id.WorkerID{}
+	j.StartedAt = nil
+	j.HeartbeatAt = nil
+	j.LeaseExpiresAt = nil
+}
+
 // requeueRateLimited returns a job the queue manager refused to pending
 // with a small delay.
 func (p *Pool) requeueRateLimited(j *job.Job) {
 	j.State = job.StatePending
 	j.RunAt = time.Now().Add(p.pollInterval)
+	clearJobAssignment(j)
 	updCtx, updCancel := p.callCtx()
 	updateErr := p.store.UpdateJob(updCtx, j)
 	updCancel()
@@ -448,7 +769,7 @@ func (p *Pool) requeueUndispatched(j *job.Job) {
 	defer cancel()
 	j.State = job.StatePending
 	j.RunAt = time.Now().UTC()
-	j.StartedAt = nil
+	clearJobAssignment(j)
 	if err := p.store.UpdateJob(ctx, j); err != nil {
 		p.logger.Warn("failed to return undispatched job to pending",
 			log.String("job_id", j.ID.String()),
@@ -457,8 +778,9 @@ func (p *Pool) requeueUndispatched(j *job.Job) {
 	}
 }
 
-// workerLoop executes jobs handed off by the fetcher, returning its slot
-// token after each job.
+// workerLoop executes jobs handed off by the fetcher. The slot token is
+// returned by runJob's own defer, not here, so it comes back on every
+// exit path the attempt can take.
 func (p *Pool) workerLoop() {
 	defer p.wg.Done()
 
@@ -468,18 +790,42 @@ func (p *Pool) workerLoop() {
 			return
 		case <-p.cancelCtx.Done():
 			return
-		case j := <-p.jobCh:
-			p.runJob(j)
-			p.slots <- struct{}{}
+		case a := <-p.jobCh:
+			p.runJob(a)
 		}
 	}
 }
 
-func (p *Pool) runJob(j *job.Job) {
+func (p *Pool) runJob(a admitted) {
+	// Everything this attempt holds — the worker slot, the queue/tenant
+	// token, and the resource lease — comes back through this one defer,
+	// so a handler that panics past a pool with no Recover middleware
+	// cannot leave capacity spoken for by a job that is no longer running.
+	defer p.finishJob(a)
+
+	j := a.job
+
 	p.extensions.EmitJobStarted(p.cancelCtx, j)
 
-	ctx, cancel := context.WithCancel(p.cancelCtx)
-	p.trackJob(j.ID.String(), cancel)
+	ctx, cancel := context.WithCancelCause(p.cancelCtx)
+	p.trackJob(j.ID.String(), cancel, a.lease, j.LeaseEpoch, p.leaseTTLFor(j))
+
+	// A fenced terminal write needs the store's lease capability, this
+	// pool's worker ID, and the epoch j.LeaseEpoch carries from the
+	// claim — the same three values trackJob just recorded in inflight.
+	// Attaching them to ctx here, once, is what lets Runner.handleSuccess
+	// / scheduleRetry / sendToDLQ route through UpdateLeasedJob instead
+	// of the unfenced UpdateJob without Runner ever reaching back into
+	// Pool state. Nil leaseStore — a backend that implements only
+	// job.Store — attaches nothing, so Execute keeps calling UpdateJob
+	// exactly as before leases existed.
+	if p.leaseStore != nil {
+		ctx = withLeaseFence(ctx, leaseFence{
+			store:    p.leaseStore,
+			workerID: p.workerID,
+			epoch:    j.LeaseEpoch,
+		})
+	}
 
 	execErr := p.executor.Execute(ctx, j)
 	if execErr != nil {
@@ -488,14 +834,6 @@ func (p *Pool) runJob(j *job.Job) {
 			log.String("job_name", j.Name),
 			log.String("error", execErr.Error()),
 		)
-	}
-
-	p.untrackJob(j.ID.String())
-	cancel()
-
-	// Release the queue/tenant slot.
-	if p.queueManager != nil {
-		p.queueManager.Release(j.Queue, j.ScopeOrgID)
 	}
 }
 
@@ -516,37 +854,95 @@ func (p *Pool) heartbeatLoop() {
 	}
 }
 
+// activeSnapshot is one job's liveness bookkeeping as of the moment
+// sendHeartbeats took its snapshot of activeJobs: the epoch and TTL are
+// copied out under the lock so the renewal loop below can run without
+// holding it.
+type activeSnapshot struct {
+	jobID      string
+	leaseEpoch int
+	leaseTTL   time.Duration
+}
+
+// sendHeartbeats keeps every active job's ownership fresh in the store.
+//
+// When the store implements job.LeaseStore, this renews the job's lease
+// with the epoch it was granted at claim time instead of sending a bare
+// liveness heartbeat. A renewal that comes back job.ErrLeaseLost means
+// another worker now holds the job — this one was paused past its lease
+// and reclaimed — so the job is cancelled here, within one heartbeat
+// interval, rather than left to run to completion racing its replacement.
+//
+// Without a lease-capable store this keeps calling HeartbeatJob exactly
+// as before leases existed.
 func (p *Pool) sendHeartbeats() {
 	p.activeMu.Lock()
-	jobIDs := make([]string, 0, len(p.activeJobs))
-	for jobID := range p.activeJobs {
-		jobIDs = append(jobIDs, jobID)
+	snapshots := make([]activeSnapshot, 0, len(p.activeJobs))
+	for jobID, rec := range p.activeJobs {
+		snapshots = append(snapshots, activeSnapshot{
+			jobID:      jobID,
+			leaseEpoch: rec.leaseEpoch,
+			leaseTTL:   rec.leaseTTL,
+		})
 	}
 	p.activeMu.Unlock()
 
-	for _, jobIDStr := range jobIDs {
-		parsedID, parseErr := id.ParseJobID(jobIDStr)
+	for _, snap := range snapshots {
+		parsedID, parseErr := id.ParseJobID(snap.jobID)
 		if parseErr != nil {
-			p.logger.Warn("heartbeat: invalid job id", log.String("job_id", jobIDStr))
+			p.logger.Warn("heartbeat: invalid job id", log.String("job_id", snap.jobID))
 			continue
 		}
-		hbCtx, hbCancel := p.callCtx()
-		err := p.store.HeartbeatJob(hbCtx, parsedID, p.workerID)
-		hbCancel()
-		if err != nil {
-			p.logger.Warn("heartbeat failed",
-				log.String("job_id", jobIDStr),
-				log.String("error", err.Error()),
-			)
+
+		if p.leaseStore == nil {
+			hbCtx, hbCancel := p.callCtx()
+			err := p.store.HeartbeatJob(hbCtx, parsedID, p.workerID)
+			hbCancel()
+			if err != nil {
+				p.logger.Warn("heartbeat failed",
+					log.String("job_id", snap.jobID),
+					log.String("error", err.Error()),
+				)
+			}
+			continue
 		}
+
+		hbCtx, hbCancel := p.callCtx()
+		renewErr := p.leaseStore.RenewLease(
+			hbCtx, parsedID, p.workerID, snap.leaseEpoch, time.Now().UTC().Add(snap.leaseTTL),
+		)
+		hbCancel()
+		if renewErr == nil {
+			continue
+		}
+
+		if errors.Is(renewErr, job.ErrLeaseLost) {
+			p.logger.Warn("lease lost, cancelling job",
+				log.String("job_id", snap.jobID),
+			)
+			p.cancelJob(snap.jobID, job.ErrLeaseLost)
+			continue
+		}
+
+		// A transient store blip must not cancel a healthy job; only a
+		// definitive ErrLeaseLost above does that.
+		p.logger.Warn("lease renewal failed",
+			log.String("job_id", snap.jobID),
+			log.String("error", renewErr.Error()),
+		)
 	}
 }
 
-// reaperLoop periodically reaps stale jobs whose heartbeat has expired.
+// reaperLoop periodically returns jobs whose worker has gone away.
+//
+// What "gone away" means depends on the store. For one implementing
+// job.LeaseStore this reclaims lapsed leases, and the heartbeat only
+// matters because renewing the lease writes it; for any other store it
+// falls back to the old heartbeat-age sweep. reapStaleJobs picks.
 func (p *Pool) reaperLoop() {
 	defer p.wg.Done()
 
-	ticker := time.NewTicker(p.staleJobThreshold)
+	ticker := time.NewTicker(p.resolvedReapInterval())
 	defer ticker.Stop()
 
 	for {
@@ -559,7 +955,51 @@ func (p *Pool) reaperLoop() {
 	}
 }
 
+// reapStaleJobs reclaims jobs that have gone dark, through the store's
+// atomic path when it has one, falling back to the legacy SELECT-then-
+// UPDATE path for a backend that implements only job.Store.
 func (p *Pool) reapStaleJobs() {
+	if p.leaseStore != nil {
+		p.reclaimExpiredLeases()
+
+		return
+	}
+
+	p.reapStaleJobsLegacy()
+}
+
+// reclaimExpiredLeases takes back jobs whose lease has lapsed. The store
+// does the claim and the read in one statement, so unlike the legacy
+// path two pools cannot both reset the same job.
+func (p *Pool) reclaimExpiredLeases() {
+	reapCtx, reapCancel := p.callCtx()
+	reclaimed, err := p.leaseStore.ReclaimExpiredLeases(reapCtx, DefaultReclaimBatch)
+	reapCancel()
+	if err != nil {
+		if isTransientStoreErr(err) {
+			p.logger.Warn("reclaim expired leases transient error", log.String("error", err.Error()))
+		} else {
+			p.logger.Error("reclaim expired leases error", log.String("error", err.Error()))
+		}
+
+		return
+	}
+
+	for _, j := range reclaimed {
+		p.logger.Info("reclaimed expired lease",
+			log.String("job_id", j.ID.String()),
+			log.String("job_name", j.Name),
+			log.Int("evict_count", j.EvictCount),
+			log.Int("lease_epoch", j.LeaseEpoch),
+		)
+	}
+
+	if len(reclaimed) > 0 {
+		p.Wake()
+	}
+}
+
+func (p *Pool) reapStaleJobsLegacy() {
 	reapCtx, reapCancel := p.callCtx()
 	stale, err := p.store.ReapStaleJobs(reapCtx, p.staleJobThreshold)
 	reapCancel()
@@ -579,9 +1019,7 @@ func (p *Pool) reapStaleJobs() {
 	for _, j := range stale {
 		j.State = job.StatePending
 		j.RunAt = time.Now().UTC()
-		j.WorkerID = id.WorkerID{} // Clear the worker assignment.
-		j.HeartbeatAt = nil
-		j.StartedAt = nil
+		clearJobAssignment(j)
 
 		updCtx, updCancel := p.callCtx()
 		updateErr := p.store.UpdateJob(updCtx, j)
@@ -608,23 +1046,65 @@ func (p *Pool) reapStaleJobs() {
 	}
 }
 
-func (p *Pool) trackJob(jobID string, cancel context.CancelFunc) {
+// trackJob records one job's cancel func, resource lease, and job-lease
+// bookkeeping so the heartbeat loop and shutdown path can act on it.
+//
+// leaseEpoch and leaseTTL are the job lease's epoch and renewal window,
+// resolved once here at claim time rather than re-read from the store on
+// every heartbeat.
+func (p *Pool) trackJob(
+	jobID string,
+	cancel context.CancelCauseFunc,
+	lease resource.Lease,
+	leaseEpoch int,
+	leaseTTL time.Duration,
+) {
 	p.activeMu.Lock()
-	p.activeJobs[jobID] = cancel
+	p.activeJobs[jobID] = &inflight{
+		cancel:     cancel,
+		lease:      lease,
+		leaseEpoch: leaseEpoch,
+		leaseTTL:   leaseTTL,
+	}
 	p.activeMu.Unlock()
 }
 
-func (p *Pool) untrackJob(jobID string) {
+// untrackJob removes and returns the in-flight record, or nil if the job
+// was never tracked. The caller owns the record's cancel func from here.
+func (p *Pool) untrackJob(jobID string) *inflight {
 	p.activeMu.Lock()
+	defer p.activeMu.Unlock()
+
+	rec, ok := p.activeJobs[jobID]
+	if !ok {
+		return nil
+	}
+
 	delete(p.activeJobs, jobID)
-	p.activeMu.Unlock()
+
+	return rec
 }
 
 func (p *Pool) cancelActiveJobs() {
 	p.activeMu.Lock()
 	defer p.activeMu.Unlock()
-	for jobID, cancel := range p.activeJobs {
+
+	for jobID, rec := range p.activeJobs {
 		p.logger.Warn("cancelling active job", log.String("job_id", jobID))
-		cancel()
+		rec.cancel(context.Canceled)
 	}
+}
+
+// cancelJob cancels one in-flight job with a cause the executor and the
+// handler can tell apart from a timeout or a shutdown.
+func (p *Pool) cancelJob(jobID string, cause error) {
+	p.activeMu.Lock()
+	rec, ok := p.activeJobs[jobID]
+	p.activeMu.Unlock()
+
+	if !ok {
+		return
+	}
+
+	rec.cancel(cause)
 }

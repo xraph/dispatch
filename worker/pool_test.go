@@ -330,7 +330,8 @@ func newRecordingStore() *recordingStore {
 	return rs
 }
 
-func (r *recordingStore) DequeueJobs(ctx context.Context, queues []string, limit int) ([]*job.Job, error) {
+func (r *recordingStore) DequeueJobs(ctx context.Context, opts job.DequeueOpts) ([]*job.Job, error) {
+	limit := opts.Limit
 	r.dequeueCalls.Add(1)
 	cur := r.inFlight.Add(1)
 	defer r.inFlight.Add(-1)
@@ -352,7 +353,7 @@ func (r *recordingStore) DequeueJobs(ctx context.Context, queues []string, limit
 			break
 		}
 	}
-	return r.Store.DequeueJobs(ctx, queues, limit)
+	return r.Store.DequeueJobs(ctx, opts)
 }
 
 func setupRecordingPool(t *testing.T, rs *recordingStore, opts ...worker.PoolOption) (*worker.Pool, *job.Registry) {
@@ -486,6 +487,12 @@ func TestPool_WakeResetsBackoff(t *testing.T) {
 // TestPool_ReaperWakesFetcher verifies that when the reaper resets a stale
 // job to pending, it wakes the fetcher so the job is retried immediately
 // instead of waiting out the inflated idle poll interval.
+//
+// WithReapInterval is set explicitly because the reaper's scan cadence is
+// deliberately independent of WithStaleJobThreshold (see
+// worker.DefaultReapInterval) — the two used to be the same value, but a
+// test that relied on that coupling would time out against today's 15s
+// default cadence.
 func TestPool_ReaperWakesFetcher(t *testing.T) {
 	rs := newRecordingStore()
 	pool, reg := setupRecordingPool(t, rs,
@@ -493,6 +500,7 @@ func TestPool_ReaperWakesFetcher(t *testing.T) {
 		worker.WithPollInterval(10*time.Millisecond),
 		worker.WithMaxPollInterval(5*time.Second),
 		worker.WithStaleJobThreshold(100*time.Millisecond),
+		worker.WithReapInterval(100*time.Millisecond),
 		worker.WithPoolQueues([]string{"default"}),
 	)
 
@@ -515,18 +523,24 @@ func TestPool_ReaperWakesFetcher(t *testing.T) {
 	time.Sleep(1200 * time.Millisecond)
 
 	// Inject a stale running job — a worker elsewhere died mid-execution.
+	// recordingStore embeds *memory.Store, which implements job.LeaseStore,
+	// so the pool reaps through reclaimExpiredLeases rather than the
+	// legacy heartbeat-threshold path; LeaseExpiresAt must be set (and in
+	// the past) for the injected job to be visible to that path — a zero
+	// LeaseExpiresAt reads as "never leased", not "expired".
 	now := time.Now().UTC()
 	old := now.Add(-time.Hour)
 	j := &job.Job{
-		ID:          newTestJobID(),
-		Name:        "reaped",
-		Queue:       "default",
-		Payload:     []byte(`{}`),
-		State:       job.StateRunning,
-		MaxRetries:  3,
-		RunAt:       old,
-		StartedAt:   &old,
-		HeartbeatAt: &old,
+		ID:             newTestJobID(),
+		Name:           "reaped",
+		Queue:          "default",
+		Payload:        []byte(`{}`),
+		State:          job.StateRunning,
+		MaxRetries:     3,
+		RunAt:          old,
+		StartedAt:      &old,
+		HeartbeatAt:    &old,
+		LeaseExpiresAt: &old,
 	}
 	j.CreatedAt = old
 	j.UpdatedAt = old
