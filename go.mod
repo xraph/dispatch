@@ -200,9 +200,3 @@ require (
 	modernc.org/sqlite v1.46.1 // indirect
 	nhooyr.io/websocket v1.8.17 // indirect
 )
-
-// TEMPORARY: the artifact backend needs trove's error classification
-// (trove.ErrPermissionDenied, the ErrNotFound hierarchy), which is committed
-// in trove but not yet released. Remove this and bump the require above to
-// the release carrying it.
-replace github.com/xraph/trove => ../trove
