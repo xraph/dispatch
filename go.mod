@@ -21,7 +21,7 @@ require (
 	github.com/xraph/grove/kv v1.6.1
 	github.com/xraph/grove/kv/drivers/redisdriver v1.6.1
 	github.com/xraph/relay v1.6.2
-	github.com/xraph/trove v1.6.3
+	github.com/xraph/trove v1.6.4
 	github.com/xraph/vessel v1.0.4
 	github.com/zeebo/blake3 v0.2.4
 	go.jetify.com/typeid/v2 v2.0.0-alpha.3

@@ -411,6 +411,8 @@ github.com/xraph/grove/kv/drivers/redisdriver v1.6.1 h1:Mlv8c8Xlu2xTKE65lWmZuyC6
 github.com/xraph/grove/kv/drivers/redisdriver v1.6.1/go.mod h1:aZxHux8IHL1+LMR+aZC6yU4iHhb6JXg0vSPyfdq5vz4=
 github.com/xraph/relay v1.6.2 h1:V4xYS5fTxo0ihvi+XLUc9AhxfiJ0auvys97ioFd+DhU=
 github.com/xraph/relay v1.6.2/go.mod h1:dUMwMP2i8Sc8zJlQlrg4xm3fps4l4A5LSpzbP8LdLok=
+github.com/xraph/trove v1.6.4 h1:OeIeAO+58BK8YLqIUIMEMAyZpSNJEKOOc1b1+LMXX24=
+github.com/xraph/trove v1.6.4/go.mod h1:bLs3RZEd6OlBY4xjmLaaacNKR7M5RdM75GQvEIAPVCo=
 github.com/xraph/vessel v1.0.4 h1:YVG80hm7bAKTwogwLXZMlp46tMHHJThUcvCUOWao9Yk=
 github.com/xraph/vessel v1.0.4/go.mod h1:5hgrMbuczxu2kRIM3iVJ3wPSb6HOvbMhV4nkRFaPNqs=
 github.com/youmark/pkcs8 v0.0.0-20240726163527-a2c0da244d78 h1:ilQV1hzziu+LLM3zUTJ0trRztfwgjqKnBWNtSRkbmwM=
