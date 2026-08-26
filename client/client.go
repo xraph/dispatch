@@ -262,6 +262,21 @@ func (c *Client) tryReconnect() {
 
 // request sends a request frame and waits for the correlated response.
 func (c *Client) request(ctx context.Context, method string, data any) (*dwp.Frame, error) {
+	// Checked before anything is marshalled or sent, for two reasons.
+	// A caller whose deadline has already blown should not still cause a
+	// side effect on the server, and writeFrame below does not consult
+	// ctx at all, so without this an expired context still enqueues the
+	// job. The select at the end of this function cannot stand in for the
+	// check either: once the response has landed in respCh, both of its
+	// cases are ready, and Go picks between ready cases uniformly at
+	// random, so an expired context loses roughly half the time. That is
+	// what made TestClient_ContextTimeout flake on Linux CI, where the
+	// read goroutine can deliver the response before this goroutine
+	// reaches the select.
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+
 	frame := &dwp.Frame{
 		ID:        dwp.GenerateFrameID(),
 		Type:      dwp.FrameRequest,
