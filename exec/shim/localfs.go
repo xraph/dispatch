@@ -142,6 +142,7 @@ func (fs *LocalFS) Create(_ context.Context, bucket, key string) (artifact.Write
 		// already confined to fs.root; nothing here reads attacker input.
 		// Safe to remove: the path came from resolve's containment check, not
 		// from a raw key.
+		// #nosec G703 -- os.CreateTemp generated this name inside a directory resolve already confined to fs.root.
 		_ = os.Remove(tmp.Name())
 
 		return nil, fmt.Errorf("shim: create %s/%s: %w", bucket, key, cherr)
@@ -237,12 +238,14 @@ func (w *localWriter) Commit(_ context.Context) (artifact.ObjectInfo, error) {
 	// resolve already confined to fs.root; it is not attacker input.
 	if err := w.file.Sync(); err != nil {
 		_ = w.file.Close()
+		// #nosec G703 -- tmpName is this writer's own CreateTemp file, confined to fs.root by resolve.
 		_ = os.Remove(tmpName)
 
 		return artifact.ObjectInfo{}, fmt.Errorf("shim: commit %s/%s: %w", w.bucket, w.key, err)
 	}
 
 	if err := w.file.Close(); err != nil {
+		// #nosec G703 -- tmpName is this writer's own CreateTemp file, confined to fs.root by resolve.
 		_ = os.Remove(tmpName)
 
 		return artifact.ObjectInfo{}, fmt.Errorf("shim: commit %s/%s: %w", w.bucket, w.key, err)
@@ -252,7 +255,9 @@ func (w *localWriter) Commit(_ context.Context) (artifact.ObjectInfo, error) {
 	// (w.final at Create time; tmpName is a sibling CreateTemp made inside
 	// that same, already-contained directory).
 	// Both paths are confined to fs.root by resolve.
+	// #nosec G703 -- both operands passed resolve's containment check; see the comment above.
 	if err := os.Rename(tmpName, w.final); err != nil {
+		// #nosec G703 -- tmpName is this writer's own CreateTemp file, confined to fs.root by resolve.
 		_ = os.Remove(tmpName)
 
 		return artifact.ObjectInfo{}, fmt.Errorf("shim: commit %s/%s: %w", w.bucket, w.key, err)
@@ -280,6 +285,7 @@ func (w *localWriter) Abort() error {
 	// name is this writer's own temp file, created inside the directory
 	// resolve already confined to fs.root at Create time.
 	// name is our own temp file under the resolved, contained directory.
+	// #nosec G703 -- name is this writer's own CreateTemp file, confined to fs.root by resolve.
 	if err := os.Remove(name); err != nil && !os.IsNotExist(err) {
 		return fmt.Errorf("shim: abort %s/%s: %w", w.bucket, w.key, err)
 	}
