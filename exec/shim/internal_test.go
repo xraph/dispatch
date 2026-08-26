@@ -112,7 +112,7 @@ func callMainExitCode(t *testing.T, defs []job.Registrable, req *exec.Request) i
 	t.Setenv(EnvRequestFD, strconv.Itoa(reqDup))
 	t.Setenv(EnvResultFD, strconv.Itoa(resDup))
 
-	return mainExitCode(defs)
+	return mainExitCode(defs, false)
 }
 
 // TestMainExitCode pins the exit-code contract mainExitCode must satisfy:

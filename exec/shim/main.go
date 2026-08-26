@@ -88,7 +88,11 @@ const (
 // clean run without having to inspect the frame first: the exit code
 // corroborates what the Result already says.
 func Main(defs ...job.Registrable) {
-	os.Exit(mainExitCode(defs))
+	// true: this is the real child, so mainExitCode's signal teardown
+	// must leave SIGTERM ignored rather than restore the default. See the
+	// exiting parameter's own comment for why that matters here and not
+	// for the in-process callers that pass false.
+	os.Exit(mainExitCode(defs, true))
 }
 
 // mainExitCode does the real work of Main and returns the process exit
@@ -104,7 +108,7 @@ func Main(defs ...job.Registrable) {
 // err == nil alone cannot tell mainExitCode apart from a clean success.
 // Only StatusHandlerError keeps exit 0; every other non-OK status,
 // including one Run reported without an error, is a nonzero exit.
-func mainExitCode(defs []job.Registrable) int {
+func mainExitCode(defs []job.Registrable, exiting bool) int {
 	// fdFromEnv guarantees a non-negative descriptor, so the uintptr
 	// conversion cannot wrap.
 	in := os.NewFile(uintptr(fdFromEnv(EnvRequestFD, defaultRequestFD)), "dispatch-exec-request")
@@ -140,6 +144,29 @@ func mainExitCode(defs []job.Registrable) int {
 
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGTERM)
+
+	// Registered before the Stop below so that it runs after it: defers
+	// unwind last-in-first-out, and the order is what this is for.
+	// signal.Stop puts SIGTERM back on its default disposition, which is
+	// fatal, while this process is still alive and still a target. The
+	// parent's kill ladder (subprocess.terminate) signals the whole
+	// process group the moment a deadline fires, and a handler that
+	// cooperated has returned ctx.Err() at that same instant off the
+	// child's own copy of the deadline, so the two events collide by
+	// design. Without this, a SIGTERM landing in the gap between Stop and
+	// the process actually exiting kills a child that had already written
+	// its Result frame and settled on exit 0, and the parent reports
+	// Signal 15 for a handler that shut down cleanly. Measured at roughly
+	// 7% of runs under load before this was added.
+	//
+	// Only the real child does this. An in-process caller (the tests,
+	// which pass exiting false) is not about to exit, and leaving SIGTERM
+	// ignored for the rest of the test binary's life would outlive the
+	// call that set it.
+	if exiting {
+		defer signal.Ignore(syscall.SIGTERM)
+	}
+
 	defer signal.Stop(sigCh)
 
 	// done unblocks the goroutine below once mainExitCode is about to
