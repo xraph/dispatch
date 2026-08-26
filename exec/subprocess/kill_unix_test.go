@@ -103,7 +103,34 @@ func TestKillLadderKillsTheWholeProcessGroup(t *testing.T) {
 	// that surviving would show up as "still alive," not as "happened to
 	// exit on its own around the same time," see envLongSleep's doc
 	// comment (main_test.go).
-	if kerr := syscall.Kill(pid, 0); kerr != syscall.ESRCH {
+	//
+	// Polled rather than probed once, for the same reason
+	// TestKillLadderReapsAHelperAfterACooperativeLeaderExits polls its own
+	// helper: the grandchild is forked by the fixture, not by this test,
+	// so once the fixture is killed the grandchild is reparented and
+	// reaped by whatever subreaper the OS hands it to, on no schedule
+	// this test is synchronised with. terminate sends the group its
+	// SIGKILL and returns without waiting, so Run can return while the
+	// grandchild is a zombie that has died but not yet been reaped, and
+	// syscall.Kill reports success rather than ESRCH for exactly that
+	// state. A single check right after Run raced the reap on Linux CI
+	// under parallel-package load. Two seconds is nowhere near longSleep,
+	// so a grandchild that genuinely survived the group kill still fails
+	// this the same way it always did.
+	deadline := time.Now().Add(2 * time.Second)
+
+	var kerr error
+
+	for {
+		kerr = syscall.Kill(pid, 0)
+		if errors.Is(kerr, syscall.ESRCH) || time.Now().After(deadline) {
+			break
+		}
+
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	if !errors.Is(kerr, syscall.ESRCH) {
 		t.Errorf("syscall.Kill(%d, 0) = %v, want ESRCH — grandchild pid %d is still alive", pid, kerr, pid)
 	}
 }
