@@ -111,7 +111,9 @@ func Main(defs ...job.Registrable) {
 func mainExitCode(defs []job.Registrable, exiting bool) int {
 	// fdFromEnv guarantees a non-negative descriptor, so the uintptr
 	// conversion cannot wrap.
+	// #nosec G115 -- fdFromEnv rejects negatives and both defaults are positive, so neither conversion can wrap.
 	in := os.NewFile(uintptr(fdFromEnv(EnvRequestFD, defaultRequestFD)), "dispatch-exec-request")
+	// #nosec G115 -- fdFromEnv rejects negatives and both defaults are positive, so neither conversion can wrap.
 	out := os.NewFile(uintptr(fdFromEnv(EnvResultFD, defaultResultFD)), "dispatch-exec-result")
 
 	// Applied before anything else touches the request: RLIMIT_CORE in
@@ -394,6 +396,7 @@ func collectOutputs(dir string) ([]exec.OutputFile, error) {
 	// attempt, never a value read out of the untrusted payload the
 	// handler parses.
 	// dir is the request's own OutputDir, not attacker-controlled.
+	// #nosec G703 -- dir is req.OutputDir, chosen by the parent and delivered over the request fd, never handler input.
 	err := filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
