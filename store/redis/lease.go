@@ -183,7 +183,7 @@ func (s *Store) RenewLease(
 	epoch int,
 	leaseUntil time.Time,
 ) error {
-	key := jobKey(jobID.String())
+	key := s.keys.job(jobID.String())
 
 	var e jobEntity
 	if getErr := s.getEntity(ctx, key, &e); getErr != nil {
@@ -270,7 +270,7 @@ func (s *Store) ReclaimExpiredLeases(ctx context.Context, limit int) ([]*job.Job
 
 	t := now()
 
-	ids, err := s.rdb.SMembers(ctx, jobIDsKey).Result()
+	ids, err := s.rdb.SMembers(ctx, s.keys.jobIDs()).Result()
 	if err != nil {
 		return nil, fmt.Errorf("dispatch/redis: reclaim smembers: %w", err)
 	}
@@ -282,7 +282,7 @@ func (s *Store) ReclaimExpiredLeases(ctx context.Context, limit int) ([]*job.Job
 		}
 
 		var e jobEntity
-		if getErr := s.getEntity(ctx, jobKey(jID), &e); getErr != nil {
+		if getErr := s.getEntity(ctx, s.keys.job(jID), &e); getErr != nil {
 			continue // gone by the time we looked
 		}
 		if job.State(e.State) != job.StateRunning {
@@ -329,7 +329,7 @@ func (s *Store) ReclaimExpiredLeases(ctx context.Context, limit int) ([]*job.Job
 		// even for a job that was enqueued straight into running (as the
 		// conformance suite's RunningJob helper does) and was therefore
 		// never popped in the first place.
-		zErr := s.rdb.ZAdd(ctx, queueKey(after.Queue),
+		zErr := s.rdb.ZAdd(ctx, s.keys.queue(after.Queue),
 			goredis.Z{Score: jobScore(after.Priority, after.RunAt), Member: jID}).Err()
 		if zErr != nil {
 			return nil, fmt.Errorf("dispatch/redis: reclaim requeue: %w", zErr)
@@ -361,7 +361,7 @@ func (s *Store) ReclaimExpiredLeases(ctx context.Context, limit int) ([]*job.Job
 // knows, because it wrote it.
 func (s *Store) claimExpired(ctx context.Context, jID string, epoch int, blob []byte) (bool, error) {
 	res, err := reclaimScript.Run(ctx, s.rdb,
-		[]string{jobKey(jID)},
+		[]string{s.keys.job(jID)},
 		epoch,
 		blob,
 	).Int64()
@@ -404,7 +404,7 @@ func (s *Store) claimExpired(ctx context.Context, jID string, epoch int, blob []
 // which never need the index touched at all, but that is a property of
 // today's callers, not a license for this method to assume it.
 func (s *Store) UpdateLeasedJob(ctx context.Context, j *job.Job, workerID id.WorkerID, epoch int) error {
-	key := jobKey(j.ID.String())
+	key := s.keys.job(j.ID.String())
 
 	var cur jobEntity
 	if getErr := s.getEntity(ctx, key, &cur); getErr != nil {
@@ -444,7 +444,7 @@ func (s *Store) UpdateLeasedJob(ctx context.Context, j *job.Job, workerID id.Wor
 	// pointing at a running entity is inert until dequeue's own state
 	// check discards it.
 	jID := j.ID.String()
-	qk := queueKey(next.Queue)
+	qk := s.keys.queue(next.Queue)
 	runnable := job.State(next.State) == job.StatePending || job.State(next.State) == job.StateRetrying
 
 	if runnable {

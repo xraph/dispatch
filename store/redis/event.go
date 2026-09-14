@@ -56,7 +56,7 @@ func fromEventEntity(e *eventEntity) (*event.Event, error) {
 // PublishEvent persists a new event and adds it to the name's stream.
 func (s *Store) PublishEvent(ctx context.Context, evt *event.Event) error {
 	eID := evt.ID.String()
-	key := eventKey(eID)
+	key := s.keys.event(eID)
 
 	e := toEventEntity(evt)
 	if err := s.setEntity(ctx, key, e); err != nil {
@@ -65,7 +65,7 @@ func (s *Store) PublishEvent(ctx context.Context, evt *event.Event) error {
 
 	// Add to the named stream so subscribers get notified.
 	if err := s.rdb.XAdd(ctx, &goredis.XAddArgs{
-		Stream: eventStreamKey(evt.Name),
+		Stream: s.keys.eventStream(evt.Name),
 		Values: map[string]interface{}{
 			"event_id": eID,
 		},
@@ -78,7 +78,7 @@ func (s *Store) PublishEvent(ctx context.Context, evt *event.Event) error {
 // SubscribeEvent waits for an unacked event matching the given name.
 // Uses stream polling for efficient waiting.
 func (s *Store) SubscribeEvent(ctx context.Context, name string, timeout time.Duration) (*event.Event, error) {
-	stream := eventStreamKey(name)
+	stream := s.keys.eventStream(name)
 	deadline := time.Now().Add(timeout)
 
 	for {
@@ -104,7 +104,7 @@ func (s *Store) SubscribeEvent(ctx context.Context, name string, timeout time.Du
 				continue
 			}
 
-			key := eventKey(eID)
+			key := s.keys.event(eID)
 			var e eventEntity
 			if getErr := s.getEntity(ctx, key, &e); getErr != nil {
 				continue
@@ -132,7 +132,7 @@ func (s *Store) SubscribeEvent(ctx context.Context, name string, timeout time.Du
 
 // AckEvent acknowledges an event, marking it as consumed.
 func (s *Store) AckEvent(ctx context.Context, eventID id.EventID) error {
-	key := eventKey(eventID.String())
+	key := s.keys.event(eventID.String())
 
 	var e eventEntity
 	if err := s.getEntity(ctx, key, &e); err != nil {

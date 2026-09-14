@@ -181,7 +181,7 @@ func fromJobEntity(e *jobEntity) (*job.Job, error) {
 // EnqueueJob stores the job as a JSON entity and adds it to the queue's Sorted Set.
 func (s *Store) EnqueueJob(ctx context.Context, j *job.Job) error {
 	jID := j.ID.String()
-	key := jobKey(jID)
+	key := s.keys.job(jID)
 
 	// Check for duplicate.
 	exists, err := s.entityExists(ctx, key)
@@ -201,11 +201,11 @@ func (s *Store) EnqueueJob(ctx context.Context, j *job.Job) error {
 	}
 
 	pipe := s.rdb.TxPipeline()
-	pipe.SAdd(ctx, jobIDsKey, jID)
+	pipe.SAdd(ctx, s.keys.jobIDs(), jID)
 
 	// Add to queue sorted set: score = priority (negated for DESC) + time component.
 	score := jobScore(j.Priority, j.RunAt)
-	pipe.ZAdd(ctx, queueKey(j.Queue), goredis.Z{Score: score, Member: jID})
+	pipe.ZAdd(ctx, s.keys.queue(j.Queue), goredis.Z{Score: score, Member: jID})
 
 	_, err = pipe.Exec(ctx)
 	if err != nil {
@@ -221,7 +221,7 @@ func (s *Store) EnqueueJob(ctx context.Context, j *job.Job) error {
 // GetJob retrieves a job by ID.
 func (s *Store) GetJob(ctx context.Context, jobID id.JobID) (*job.Job, error) {
 	var e jobEntity
-	if err := s.getEntity(ctx, jobKey(jobID.String()), &e); err != nil {
+	if err := s.getEntity(ctx, s.keys.job(jobID.String()), &e); err != nil {
 		if isNotFound(err) {
 			return nil, dispatch.ErrJobNotFound
 		}
@@ -260,7 +260,7 @@ func (s *Store) GetJob(ctx context.Context, jobID id.JobID) (*job.Job, error) {
 // safe for a job that was never claimed.
 func (s *Store) UpdateJob(ctx context.Context, j *job.Job) error {
 	jID := j.ID.String()
-	key := jobKey(jID)
+	key := s.keys.job(jID)
 
 	exists, err := s.entityExists(ctx, key)
 	if err != nil {
@@ -280,7 +280,7 @@ func (s *Store) UpdateJob(ctx context.Context, j *job.Job) error {
 	// so j.Queue is the queue it was indexed under. If that ever changes,
 	// the old queue keeps a member pointing at this job, and this function
 	// has to read the stored entity to learn which queue to clear.
-	qk := queueKey(j.Queue)
+	qk := s.keys.queue(j.Queue)
 	runnable := j.State == job.StatePending || j.State == job.StateRetrying
 
 	if runnable {
@@ -306,7 +306,7 @@ func (s *Store) UpdateJob(ctx context.Context, j *job.Job) error {
 // DeleteJob removes a job by ID.
 func (s *Store) DeleteJob(ctx context.Context, jobID id.JobID) error {
 	jID := jobID.String()
-	key := jobKey(jID)
+	key := s.keys.job(jID)
 
 	// Get queue name before deleting to remove from sorted set.
 	var e jobEntity
@@ -320,8 +320,8 @@ func (s *Store) DeleteJob(ctx context.Context, jobID id.JobID) error {
 	// Delete entity via raw Redis DEL (KV store may not have Delete).
 	pipe := s.rdb.TxPipeline()
 	pipe.Del(ctx, key)
-	pipe.SRem(ctx, jobIDsKey, jID)
-	pipe.ZRem(ctx, queueKey(e.Queue), jID)
+	pipe.SRem(ctx, s.keys.jobIDs(), jID)
+	pipe.ZRem(ctx, s.keys.queue(e.Queue), jID)
 	_, err := pipe.Exec(ctx)
 	if err != nil {
 		return fmt.Errorf("dispatch/redis: delete job: %w", err)
@@ -331,7 +331,7 @@ func (s *Store) DeleteJob(ctx context.Context, jobID id.JobID) error {
 
 // ListJobsByState returns jobs matching the given state.
 func (s *Store) ListJobsByState(ctx context.Context, state job.State, opts job.ListOpts) ([]*job.Job, error) {
-	ids, err := s.rdb.SMembers(ctx, jobIDsKey).Result()
+	ids, err := s.rdb.SMembers(ctx, s.keys.jobIDs()).Result()
 	if err != nil {
 		return nil, fmt.Errorf("dispatch/redis: list jobs smembers: %w", err)
 	}
@@ -339,7 +339,7 @@ func (s *Store) ListJobsByState(ctx context.Context, state job.State, opts job.L
 	jobs := make([]*job.Job, 0, len(ids))
 	for _, jID := range ids {
 		var e jobEntity
-		if getErr := s.getEntity(ctx, jobKey(jID), &e); getErr != nil {
+		if getErr := s.getEntity(ctx, s.keys.job(jID), &e); getErr != nil {
 			continue // skip missing
 		}
 		if job.State(e.State) != state {
@@ -360,7 +360,7 @@ func (s *Store) ListJobsByState(ctx context.Context, state job.State, opts job.L
 
 // HeartbeatJob updates the heartbeat timestamp for a running job.
 func (s *Store) HeartbeatJob(ctx context.Context, jobID id.JobID, _ id.WorkerID) error {
-	key := jobKey(jobID.String())
+	key := s.keys.job(jobID.String())
 	var e jobEntity
 	if err := s.getEntity(ctx, key, &e); err != nil {
 		if isNotFound(err) {
@@ -379,7 +379,7 @@ func (s *Store) HeartbeatJob(ctx context.Context, jobID id.JobID, _ id.WorkerID)
 func (s *Store) ReapStaleJobs(ctx context.Context, threshold time.Duration) ([]*job.Job, error) {
 	cutoff := now().Add(-threshold)
 
-	ids, err := s.rdb.SMembers(ctx, jobIDsKey).Result()
+	ids, err := s.rdb.SMembers(ctx, s.keys.jobIDs()).Result()
 	if err != nil {
 		return nil, fmt.Errorf("dispatch/redis: reap smembers: %w", err)
 	}
@@ -387,7 +387,7 @@ func (s *Store) ReapStaleJobs(ctx context.Context, threshold time.Duration) ([]*
 	var stale []*job.Job
 	for _, jID := range ids {
 		var e jobEntity
-		if getErr := s.getEntity(ctx, jobKey(jID), &e); getErr != nil {
+		if getErr := s.getEntity(ctx, s.keys.job(jID), &e); getErr != nil {
 			continue
 		}
 		if job.State(e.State) != job.StateRunning {
@@ -411,14 +411,14 @@ func (s *Store) ReapStaleJobs(ctx context.Context, threshold time.Duration) ([]*
 
 // CountJobs returns the number of jobs matching the given options.
 func (s *Store) CountJobs(ctx context.Context, opts job.CountOpts) (int64, error) {
-	ids, err := s.rdb.SMembers(ctx, jobIDsKey).Result()
+	ids, err := s.rdb.SMembers(ctx, s.keys.jobIDs()).Result()
 	if err != nil {
 		return 0, fmt.Errorf("dispatch/redis: count smembers: %w", err)
 	}
 
 	var count int64
 	for _, jID := range ids {
-		raw, getErr := s.kv.GetRaw(ctx, jobKey(jID))
+		raw, getErr := s.kv.GetRaw(ctx, s.keys.job(jID))
 		if getErr != nil {
 			continue
 		}

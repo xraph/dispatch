@@ -63,14 +63,14 @@ func fromWorkerEntity(e *workerEntity) (*cluster.Worker, error) {
 // RegisterWorker adds a new worker to the cluster registry.
 func (s *Store) RegisterWorker(ctx context.Context, w *cluster.Worker) error {
 	wID := w.ID.String()
-	key := workerKey(wID)
+	key := s.keys.worker(wID)
 
 	e := toWorkerEntity(w)
 	if err := s.setEntity(ctx, key, e); err != nil {
 		return fmt.Errorf("dispatch/redis: register worker set: %w", err)
 	}
 
-	if err := s.rdb.SAdd(ctx, workerIDsKey, wID).Err(); err != nil {
+	if err := s.rdb.SAdd(ctx, s.keys.workerIDs(), wID).Err(); err != nil {
 		return fmt.Errorf("dispatch/redis: register worker index: %w", err)
 	}
 	return nil
@@ -79,7 +79,7 @@ func (s *Store) RegisterWorker(ctx context.Context, w *cluster.Worker) error {
 // DeregisterWorker removes a worker from the cluster registry.
 func (s *Store) DeregisterWorker(ctx context.Context, workerID id.WorkerID) error {
 	wID := workerID.String()
-	key := workerKey(wID)
+	key := s.keys.worker(wID)
 
 	exists, err := s.entityExists(ctx, key)
 	if err != nil {
@@ -91,7 +91,7 @@ func (s *Store) DeregisterWorker(ctx context.Context, workerID id.WorkerID) erro
 
 	pipe := s.rdb.TxPipeline()
 	pipe.Del(ctx, key)
-	pipe.SRem(ctx, workerIDsKey, wID)
+	pipe.SRem(ctx, s.keys.workerIDs(), wID)
 	_, err = pipe.Exec(ctx)
 	if err != nil {
 		return fmt.Errorf("dispatch/redis: deregister worker: %w", err)
@@ -101,7 +101,7 @@ func (s *Store) DeregisterWorker(ctx context.Context, workerID id.WorkerID) erro
 
 // HeartbeatWorker updates the last-seen timestamp for a worker.
 func (s *Store) HeartbeatWorker(ctx context.Context, workerID id.WorkerID) error {
-	key := workerKey(workerID.String())
+	key := s.keys.worker(workerID.String())
 
 	var e workerEntity
 	if err := s.getEntity(ctx, key, &e); err != nil {
@@ -117,7 +117,7 @@ func (s *Store) HeartbeatWorker(ctx context.Context, workerID id.WorkerID) error
 
 // ListWorkers returns all registered workers.
 func (s *Store) ListWorkers(ctx context.Context) ([]*cluster.Worker, error) {
-	ids, err := s.rdb.SMembers(ctx, workerIDsKey).Result()
+	ids, err := s.rdb.SMembers(ctx, s.keys.workerIDs()).Result()
 	if err != nil {
 		return nil, fmt.Errorf("dispatch/redis: list workers: %w", err)
 	}
@@ -125,7 +125,7 @@ func (s *Store) ListWorkers(ctx context.Context) ([]*cluster.Worker, error) {
 	workers := make([]*cluster.Worker, 0, len(ids))
 	for _, wID := range ids {
 		var e workerEntity
-		if getErr := s.getEntity(ctx, workerKey(wID), &e); getErr != nil {
+		if getErr := s.getEntity(ctx, s.keys.worker(wID), &e); getErr != nil {
 			continue
 		}
 		w, convErr := fromWorkerEntity(&e)
@@ -142,7 +142,7 @@ func (s *Store) ListWorkers(ctx context.Context) ([]*cluster.Worker, error) {
 func (s *Store) DeleteStaleWorkers(ctx context.Context, threshold time.Duration) (int64, error) {
 	cutoff := now().Add(-threshold)
 
-	ids, err := s.rdb.SMembers(ctx, workerIDsKey).Result()
+	ids, err := s.rdb.SMembers(ctx, s.keys.workerIDs()).Result()
 	if err != nil {
 		return 0, fmt.Errorf("dispatch/redis: delete stale smembers: %w", err)
 	}
@@ -150,11 +150,11 @@ func (s *Store) DeleteStaleWorkers(ctx context.Context, threshold time.Duration)
 	var deleted int64
 	for _, wID := range ids {
 		var e workerEntity
-		if getErr := s.getEntity(ctx, workerKey(wID), &e); getErr != nil {
+		if getErr := s.getEntity(ctx, s.keys.worker(wID), &e); getErr != nil {
 			// Orphaned set member without a backing entity — treat as
 			// stale and remove from the index.
 			if isNotFound(getErr) {
-				if remErr := s.rdb.SRem(ctx, workerIDsKey, wID).Err(); remErr == nil {
+				if remErr := s.rdb.SRem(ctx, s.keys.workerIDs(), wID).Err(); remErr == nil {
 					deleted++
 				}
 			}
@@ -162,8 +162,8 @@ func (s *Store) DeleteStaleWorkers(ctx context.Context, threshold time.Duration)
 		}
 		if e.LastSeen.Before(cutoff) {
 			pipe := s.rdb.TxPipeline()
-			pipe.Del(ctx, workerKey(wID))
-			pipe.SRem(ctx, workerIDsKey, wID)
+			pipe.Del(ctx, s.keys.worker(wID))
+			pipe.SRem(ctx, s.keys.workerIDs(), wID)
 			if _, execErr := pipe.Exec(ctx); execErr == nil {
 				deleted++
 			}
@@ -176,7 +176,7 @@ func (s *Store) DeleteStaleWorkers(ctx context.Context, threshold time.Duration)
 func (s *Store) ReapDeadWorkers(ctx context.Context, threshold time.Duration) ([]*cluster.Worker, error) {
 	cutoff := now().Add(-threshold)
 
-	ids, err := s.rdb.SMembers(ctx, workerIDsKey).Result()
+	ids, err := s.rdb.SMembers(ctx, s.keys.workerIDs()).Result()
 	if err != nil {
 		return nil, fmt.Errorf("dispatch/redis: reap smembers: %w", err)
 	}
@@ -184,7 +184,7 @@ func (s *Store) ReapDeadWorkers(ctx context.Context, threshold time.Duration) ([
 	var dead []*cluster.Worker
 	for _, wID := range ids {
 		var e workerEntity
-		if getErr := s.getEntity(ctx, workerKey(wID), &e); getErr != nil {
+		if getErr := s.getEntity(ctx, s.keys.worker(wID), &e); getErr != nil {
 			continue
 		}
 		if e.LastSeen.Before(cutoff) {
@@ -201,7 +201,7 @@ func (s *Store) ReapDeadWorkers(ctx context.Context, threshold time.Duration) ([
 // AcquireLeadership attempts to become the cluster leader.
 func (s *Store) AcquireLeadership(ctx context.Context, workerID id.WorkerID, ttl time.Duration) (bool, error) {
 	wID := workerID.String()
-	wKey := workerKey(wID)
+	wKey := s.keys.worker(wID)
 
 	// Check worker exists.
 	exists, err := s.entityExists(ctx, wKey)
@@ -213,7 +213,7 @@ func (s *Store) AcquireLeadership(ctx context.Context, workerID id.WorkerID, ttl
 	}
 
 	// Try SET NX with TTL (atomic acquire).
-	ok, err := s.rdb.SetNX(ctx, leaderKey, wID, ttl).Result()
+	ok, err := s.rdb.SetNX(ctx, s.keys.leader(), wID, ttl).Result()
 	if err != nil {
 		return false, fmt.Errorf("dispatch/redis: acquire leadership setnx: %w", err)
 	}
@@ -230,13 +230,13 @@ func (s *Store) AcquireLeadership(ctx context.Context, workerID id.WorkerID, ttl
 	}
 
 	// Check if we already hold it.
-	current, err := s.rdb.Get(ctx, leaderKey).Result()
+	current, err := s.rdb.Get(ctx, s.keys.leader()).Result()
 	if err != nil && !isRedisNil(err) {
 		return false, fmt.Errorf("dispatch/redis: acquire leadership get: %w", err)
 	}
 	if current == wID {
 		// Re-acquire: extend TTL.
-		_ = s.rdb.Expire(ctx, leaderKey, ttl).Err() //nolint:errcheck // best-effort
+		_ = s.rdb.Expire(ctx, s.keys.leader(), ttl).Err() //nolint:errcheck // best-effort
 		until := now().Add(ttl)
 		var e workerEntity
 		if getErr := s.getEntity(ctx, wKey, &e); getErr == nil {
@@ -254,7 +254,7 @@ func (s *Store) AcquireLeadership(ctx context.Context, workerID id.WorkerID, ttl
 func (s *Store) RenewLeadership(ctx context.Context, workerID id.WorkerID, ttl time.Duration) (bool, error) {
 	wID := workerID.String()
 
-	current, err := s.rdb.Get(ctx, leaderKey).Result()
+	current, err := s.rdb.Get(ctx, s.keys.leader()).Result()
 	if err != nil {
 		if isRedisNil(err) {
 			return false, nil // no leader
@@ -265,19 +265,19 @@ func (s *Store) RenewLeadership(ctx context.Context, workerID id.WorkerID, ttl t
 		return false, nil // not the leader
 	}
 
-	_ = s.rdb.Expire(ctx, leaderKey, ttl).Err() //nolint:errcheck // best-effort
+	_ = s.rdb.Expire(ctx, s.keys.leader(), ttl).Err() //nolint:errcheck // best-effort
 	until := now().Add(ttl)
 	var e workerEntity
-	if getErr := s.getEntity(ctx, workerKey(wID), &e); getErr == nil {
+	if getErr := s.getEntity(ctx, s.keys.worker(wID), &e); getErr == nil {
 		e.LeaderUntil = &until
-		_ = s.setEntity(ctx, workerKey(wID), &e) //nolint:errcheck // best-effort update
+		_ = s.setEntity(ctx, s.keys.worker(wID), &e) //nolint:errcheck // best-effort update
 	}
 	return true, nil
 }
 
 // GetLeader returns the current cluster leader, or nil if there is no leader.
 func (s *Store) GetLeader(ctx context.Context) (*cluster.Worker, error) {
-	wID, err := s.rdb.Get(ctx, leaderKey).Result()
+	wID, err := s.rdb.Get(ctx, s.keys.leader()).Result()
 	if err != nil {
 		if isRedisNil(err) {
 			return nil, nil // no leader
@@ -286,7 +286,7 @@ func (s *Store) GetLeader(ctx context.Context) (*cluster.Worker, error) {
 	}
 
 	var e workerEntity
-	if getErr := s.getEntity(ctx, workerKey(wID), &e); getErr != nil {
+	if getErr := s.getEntity(ctx, s.keys.worker(wID), &e); getErr != nil {
 		return nil, nil // leader key exists but worker gone
 	}
 	return fromWorkerEntity(&e)

@@ -80,10 +80,10 @@ func fromCronEntity(e *cronEntity) (*cron.Entry, error) {
 // RegisterCron persists a new cron entry.
 func (s *Store) RegisterCron(ctx context.Context, entry *cron.Entry) error {
 	eID := entry.ID.String()
-	key := cronKey(eID)
+	key := s.keys.cron(eID)
 
 	// Check for duplicate name.
-	existing, err := s.rdb.HGet(ctx, cronNamesKey, entry.Name).Result()
+	existing, err := s.rdb.HGet(ctx, s.keys.cronNames(), entry.Name).Result()
 	if err != nil && !isRedisNil(err) {
 		return fmt.Errorf("dispatch/redis: register cron check name: %w", err)
 	}
@@ -97,8 +97,8 @@ func (s *Store) RegisterCron(ctx context.Context, entry *cron.Entry) error {
 	}
 
 	pipe := s.rdb.TxPipeline()
-	pipe.SAdd(ctx, cronIDsKey, eID)
-	pipe.HSet(ctx, cronNamesKey, entry.Name, eID)
+	pipe.SAdd(ctx, s.keys.cronIDs(), eID)
+	pipe.HSet(ctx, s.keys.cronNames(), entry.Name, eID)
 	_, err = pipe.Exec(ctx)
 	if err != nil {
 		return fmt.Errorf("dispatch/redis: register cron indexes: %w", err)
@@ -109,7 +109,7 @@ func (s *Store) RegisterCron(ctx context.Context, entry *cron.Entry) error {
 // GetCron retrieves a cron entry by ID.
 func (s *Store) GetCron(ctx context.Context, entryID id.CronID) (*cron.Entry, error) {
 	var e cronEntity
-	if err := s.getEntity(ctx, cronKey(entryID.String()), &e); err != nil {
+	if err := s.getEntity(ctx, s.keys.cron(entryID.String()), &e); err != nil {
 		if isNotFound(err) {
 			return nil, dispatch.ErrCronNotFound
 		}
@@ -120,7 +120,7 @@ func (s *Store) GetCron(ctx context.Context, entryID id.CronID) (*cron.Entry, er
 
 // ListCrons returns all cron entries.
 func (s *Store) ListCrons(ctx context.Context) ([]*cron.Entry, error) {
-	ids, err := s.rdb.SMembers(ctx, cronIDsKey).Result()
+	ids, err := s.rdb.SMembers(ctx, s.keys.cronIDs()).Result()
 	if err != nil {
 		return nil, fmt.Errorf("dispatch/redis: list crons: %w", err)
 	}
@@ -128,7 +128,7 @@ func (s *Store) ListCrons(ctx context.Context) ([]*cron.Entry, error) {
 	entries := make([]*cron.Entry, 0, len(ids))
 	for _, eID := range ids {
 		var e cronEntity
-		if getErr := s.getEntity(ctx, cronKey(eID), &e); getErr != nil {
+		if getErr := s.getEntity(ctx, s.keys.cron(eID), &e); getErr != nil {
 			continue
 		}
 		entry, convErr := fromCronEntity(&e)
@@ -143,7 +143,7 @@ func (s *Store) ListCrons(ctx context.Context) ([]*cron.Entry, error) {
 // AcquireCronLock attempts to acquire a distributed lock for a cron entry.
 func (s *Store) AcquireCronLock(ctx context.Context, entryID id.CronID, workerID id.WorkerID, ttl time.Duration) (bool, error) {
 	eID := entryID.String()
-	key := cronKey(eID)
+	key := s.keys.cron(eID)
 	wID := workerID.String()
 	t := now()
 	until := t.Add(ttl)
@@ -177,7 +177,7 @@ func (s *Store) AcquireCronLock(ctx context.Context, entryID id.CronID, workerID
 
 // ReleaseCronLock releases the distributed lock for a cron entry.
 func (s *Store) ReleaseCronLock(ctx context.Context, entryID id.CronID, workerID id.WorkerID) error {
-	key := cronKey(entryID.String())
+	key := s.keys.cron(entryID.String())
 	wID := workerID.String()
 
 	var e cronEntity
@@ -200,7 +200,7 @@ func (s *Store) ReleaseCronLock(ctx context.Context, entryID id.CronID, workerID
 
 // UpdateCronLastRun records when a cron entry last fired.
 func (s *Store) UpdateCronLastRun(ctx context.Context, entryID id.CronID, at time.Time) error {
-	key := cronKey(entryID.String())
+	key := s.keys.cron(entryID.String())
 	var e cronEntity
 	if err := s.getEntity(ctx, key, &e); err != nil {
 		if isNotFound(err) {
@@ -216,7 +216,7 @@ func (s *Store) UpdateCronLastRun(ctx context.Context, entryID id.CronID, at tim
 
 // UpdateCronEntry updates a cron entry.
 func (s *Store) UpdateCronEntry(ctx context.Context, entry *cron.Entry) error {
-	key := cronKey(entry.ID.String())
+	key := s.keys.cron(entry.ID.String())
 	exists, err := s.entityExists(ctx, key)
 	if err != nil {
 		return fmt.Errorf("dispatch/redis: update cron exists: %w", err)
@@ -233,7 +233,7 @@ func (s *Store) UpdateCronEntry(ctx context.Context, entry *cron.Entry) error {
 // DeleteCron removes a cron entry by ID.
 func (s *Store) DeleteCron(ctx context.Context, entryID id.CronID) error {
 	eID := entryID.String()
-	key := cronKey(eID)
+	key := s.keys.cron(eID)
 
 	// Get name for name index cleanup.
 	var e cronEntity
@@ -246,9 +246,9 @@ func (s *Store) DeleteCron(ctx context.Context, entryID id.CronID) error {
 
 	pipe := s.rdb.TxPipeline()
 	pipe.Del(ctx, key)
-	pipe.SRem(ctx, cronIDsKey, eID)
+	pipe.SRem(ctx, s.keys.cronIDs(), eID)
 	if e.Name != "" {
-		pipe.HDel(ctx, cronNamesKey, e.Name)
+		pipe.HDel(ctx, s.keys.cronNames(), e.Name)
 	}
 	_, err := pipe.Exec(ctx)
 	if err != nil {

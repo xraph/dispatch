@@ -25,8 +25,10 @@ import (
 	"github.com/xraph/dispatch/workflow"
 )
 
-// setupTestStore creates a Redis container and returns a connected Redis Store.
-func setupTestStore(t *testing.T) *redisstore.Store {
+// setupTestKV starts a Redis container and returns a flushed KV store on
+// it. Tests that need more than one dispatch store on the same Redis (the
+// key-prefix isolation cases) build their stores from this directly.
+func setupTestKV(t *testing.T) *kv.Store {
 	t.Helper()
 
 	ctx := context.Background()
@@ -61,15 +63,19 @@ func setupTestStore(t *testing.T) *redisstore.Store {
 		_ = kvStore.Close()
 	})
 
-	store := redisstore.New(kvStore)
-
 	// FlushDB to start clean.
 	client := redisdriver.UnwrapClient(kvStore)
 	if flushErr := client.FlushDB(ctx).Err(); flushErr != nil {
 		t.Fatalf("flush: %v", flushErr)
 	}
 
-	return store
+	return kvStore
+}
+
+// setupTestStore creates a Redis container and returns a connected Redis Store.
+func setupTestStore(t *testing.T) *redisstore.Store {
+	t.Helper()
+	return redisstore.New(setupTestKV(t))
 }
 
 // ──────────────────────────────────────────────────

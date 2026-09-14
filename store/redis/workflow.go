@@ -79,7 +79,7 @@ type checkpointEntity struct {
 // CreateRun persists a new workflow run.
 func (s *Store) CreateRun(ctx context.Context, run *workflow.Run) error {
 	rID := run.ID.String()
-	key := runKey(rID)
+	key := s.keys.run(rID)
 
 	exists, err := s.entityExists(ctx, key)
 	if err != nil {
@@ -94,7 +94,7 @@ func (s *Store) CreateRun(ctx context.Context, run *workflow.Run) error {
 		return fmt.Errorf("dispatch/redis: create run set: %w", err)
 	}
 
-	if err := s.rdb.SAdd(ctx, runIDsKey, rID).Err(); err != nil {
+	if err := s.rdb.SAdd(ctx, s.keys.runIDs(), rID).Err(); err != nil {
 		return fmt.Errorf("dispatch/redis: create run index: %w", err)
 	}
 	return nil
@@ -103,7 +103,7 @@ func (s *Store) CreateRun(ctx context.Context, run *workflow.Run) error {
 // GetRun retrieves a workflow run by ID.
 func (s *Store) GetRun(ctx context.Context, runID id.RunID) (*workflow.Run, error) {
 	var e runEntity
-	if err := s.getEntity(ctx, runKey(runID.String()), &e); err != nil {
+	if err := s.getEntity(ctx, s.keys.run(runID.String()), &e); err != nil {
 		if isNotFound(err) {
 			return nil, dispatch.ErrRunNotFound
 		}
@@ -114,7 +114,7 @@ func (s *Store) GetRun(ctx context.Context, runID id.RunID) (*workflow.Run, erro
 
 // UpdateRun persists changes to an existing workflow run.
 func (s *Store) UpdateRun(ctx context.Context, run *workflow.Run) error {
-	key := runKey(run.ID.String())
+	key := s.keys.run(run.ID.String())
 	exists, err := s.entityExists(ctx, key)
 	if err != nil {
 		return fmt.Errorf("dispatch/redis: update run exists: %w", err)
@@ -130,7 +130,7 @@ func (s *Store) UpdateRun(ctx context.Context, run *workflow.Run) error {
 
 // ListRuns returns workflow runs matching the given options.
 func (s *Store) ListRuns(ctx context.Context, opts workflow.ListOpts) ([]*workflow.Run, error) {
-	ids, err := s.rdb.SMembers(ctx, runIDsKey).Result()
+	ids, err := s.rdb.SMembers(ctx, s.keys.runIDs()).Result()
 	if err != nil {
 		return nil, fmt.Errorf("dispatch/redis: list runs smembers: %w", err)
 	}
@@ -138,7 +138,7 @@ func (s *Store) ListRuns(ctx context.Context, opts workflow.ListOpts) ([]*workfl
 	runs := make([]*workflow.Run, 0, len(ids))
 	for _, rID := range ids {
 		var e runEntity
-		if getErr := s.getEntity(ctx, runKey(rID), &e); getErr != nil {
+		if getErr := s.getEntity(ctx, s.keys.run(rID), &e); getErr != nil {
 			continue
 		}
 		if opts.State != "" && workflow.RunState(e.State) != opts.State {
@@ -157,7 +157,7 @@ func (s *Store) ListRuns(ctx context.Context, opts workflow.ListOpts) ([]*workfl
 // SaveCheckpoint persists checkpoint data for a workflow step.
 func (s *Store) SaveCheckpoint(ctx context.Context, runID id.RunID, stepName string, data []byte) error {
 	rID := runID.String()
-	key := checkpointKey(rID, stepName)
+	key := s.keys.checkpoint(rID, stepName)
 
 	e := &checkpointEntity{
 		ID:        id.NewCheckpointID().String(),
@@ -171,7 +171,7 @@ func (s *Store) SaveCheckpoint(ctx context.Context, runID id.RunID, stepName str
 		return fmt.Errorf("dispatch/redis: save checkpoint: %w", err)
 	}
 
-	if err := s.rdb.SAdd(ctx, checkpointIndexKey(rID), stepName).Err(); err != nil {
+	if err := s.rdb.SAdd(ctx, s.keys.checkpointIndex(rID), stepName).Err(); err != nil {
 		return fmt.Errorf("dispatch/redis: save checkpoint index: %w", err)
 	}
 	return nil
@@ -179,7 +179,7 @@ func (s *Store) SaveCheckpoint(ctx context.Context, runID id.RunID, stepName str
 
 // GetCheckpoint retrieves checkpoint data for a specific workflow step.
 func (s *Store) GetCheckpoint(ctx context.Context, runID id.RunID, stepName string) ([]byte, error) {
-	key := checkpointKey(runID.String(), stepName)
+	key := s.keys.checkpoint(runID.String(), stepName)
 	var e checkpointEntity
 	if err := s.getEntity(ctx, key, &e); err != nil {
 		if isNotFound(err) {
@@ -193,14 +193,14 @@ func (s *Store) GetCheckpoint(ctx context.Context, runID id.RunID, stepName stri
 // ListCheckpoints returns all checkpoints for a workflow run.
 func (s *Store) ListCheckpoints(ctx context.Context, runID id.RunID) ([]*workflow.Checkpoint, error) {
 	rID := runID.String()
-	steps, err := s.rdb.SMembers(ctx, checkpointIndexKey(rID)).Result()
+	steps, err := s.rdb.SMembers(ctx, s.keys.checkpointIndex(rID)).Result()
 	if err != nil {
 		return nil, fmt.Errorf("dispatch/redis: list checkpoints: %w", err)
 	}
 
 	checkpoints := make([]*workflow.Checkpoint, 0, len(steps))
 	for _, step := range steps {
-		key := checkpointKey(rID, step)
+		key := s.keys.checkpoint(rID, step)
 		var e checkpointEntity
 		if getErr := s.getEntity(ctx, key, &e); getErr != nil {
 			continue
@@ -244,7 +244,7 @@ func (s *Store) DeleteCheckpointsAfter(ctx context.Context, runID id.RunID, afte
 
 	// Get the target checkpoint's time.
 	var target checkpointEntity
-	if err := s.getEntity(ctx, checkpointKey(rID, afterStep), &target); err != nil {
+	if err := s.getEntity(ctx, s.keys.checkpoint(rID, afterStep), &target); err != nil {
 		if isNotFound(err) {
 			return nil // step not found; nothing to delete
 		}
@@ -252,13 +252,13 @@ func (s *Store) DeleteCheckpointsAfter(ctx context.Context, runID id.RunID, afte
 	}
 
 	// List all step names for this run.
-	steps, err := s.rdb.SMembers(ctx, checkpointIndexKey(rID)).Result()
+	steps, err := s.rdb.SMembers(ctx, s.keys.checkpointIndex(rID)).Result()
 	if err != nil {
 		return fmt.Errorf("dispatch/redis: list checkpoint steps: %w", err)
 	}
 
 	for _, step := range steps {
-		key := checkpointKey(rID, step)
+		key := s.keys.checkpoint(rID, step)
 		var e checkpointEntity
 		if getErr := s.getEntity(ctx, key, &e); getErr != nil {
 			continue
@@ -267,7 +267,7 @@ func (s *Store) DeleteCheckpointsAfter(ctx context.Context, runID id.RunID, afte
 			if delErr := s.rdb.Del(ctx, key).Err(); delErr != nil {
 				return fmt.Errorf("delete checkpoint %s: %w", key, delErr)
 			}
-			if remErr := s.rdb.SRem(ctx, checkpointIndexKey(rID), step).Err(); remErr != nil {
+			if remErr := s.rdb.SRem(ctx, s.keys.checkpointIndex(rID), step).Err(); remErr != nil {
 				return fmt.Errorf("remove checkpoint index %s: %w", step, remErr)
 			}
 		}

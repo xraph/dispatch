@@ -43,11 +43,20 @@ func WithLogger(l log.Logger) Option {
 	return func(s *Store) { s.logger = l }
 }
 
+// WithKeyPrefix namespaces every key and channel this store touches so
+// several dispatch instances can share one Redis without seeing each
+// other's jobs, cron locks or leadership. Pass the tenant's own prefix
+// (for example "ws_acme:"); the empty string keeps the historical keys.
+func WithKeyPrefix(prefix string) Option {
+	return func(s *Store) { s.keys = newKeys(prefix) }
+}
+
 // Store implements the composite store.Store interface backed by Redis
 // via Grove KV.
 type Store struct {
 	kv     *kv.Store
 	rdb    goredis.UniversalClient
+	keys   keys
 	logger log.Logger
 }
 
@@ -57,6 +66,7 @@ func New(store *kv.Store, opts ...Option) *Store {
 	s := &Store{
 		kv:     store,
 		rdb:    redisdriver.UnwrapClient(store),
+		keys:   newKeys(""),
 		logger: log.NewNoopLogger(),
 	}
 	for _, o := range opts {
@@ -67,6 +77,10 @@ func New(store *kv.Store, opts ...Option) *Store {
 
 // KV returns the underlying KV store.
 func (s *Store) KV() *kv.Store { return s.kv }
+
+// KeyPrefix returns the tenant prefix every key is written under; empty
+// when the store uses the historical unprefixed keys.
+func (s *Store) KeyPrefix() string { return s.keys.prefix }
 
 // Migrate is a no-op for Redis (schemaless).
 func (s *Store) Migrate(_ context.Context) error { return nil }

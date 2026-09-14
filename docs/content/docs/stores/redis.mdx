@@ -27,6 +27,22 @@ if err := s.Ping(ctx); err != nil {
 d, err := dispatch.New(dispatch.WithStore(s))
 ```
 
+## Sharing one Redis between instances
+
+All keys sit under `dispatch:`. To run more than one dispatch instance
+against the same Redis, give each a key prefix and the store puts every
+key, event stream and wake channel under it:
+
+```go
+s := redis.New(kvStore, redis.WithKeyPrefix("ws_acme:"))
+// jobs land at ws_acme:dispatch:job:<id>, the queue at ws_acme:dispatch:queue:<name>
+```
+
+An instance with a prefix never dequeues another instance's jobs, never
+sees its cron names as duplicates, and takes leadership independently. An
+empty prefix keeps the historical unprefixed keys, so existing deployments
+carry on unchanged.
+
 ## Internals
 
 | Aspect | Detail |

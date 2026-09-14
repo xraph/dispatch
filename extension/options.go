@@ -205,6 +205,15 @@ func WithGroveKV(name string) ExtOption {
 	}
 }
 
+// WithKVKeyPrefix namespaces the Redis-backed store's keys (see
+// Config.KeyPrefix). Pair it with WithGroveKV; the grove database path
+// ignores it.
+func WithKVKeyPrefix(prefix string) ExtOption {
+	return func(e *Extension) {
+		e.config.KeyPrefix = prefix
+	}
+}
+
 // WithDWP enables the Dispatch Wire Protocol (DWP) for real-time
 // client communication over WebSocket, SSE, and HTTP RPC.
 // Options configure authentication, codec, and server behaviour.

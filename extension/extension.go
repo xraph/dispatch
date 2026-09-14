@@ -165,7 +165,7 @@ func (e *Extension) init(fapp forge.App) error {
 		if err != nil {
 			return fmt.Errorf("dispatch: %w", err)
 		}
-		e.dispatchOpts = append(e.dispatchOpts, dispatch.WithStore(redisstore.New(kvStore)))
+		e.dispatchOpts = append(e.dispatchOpts, dispatch.WithStore(e.buildStoreFromGroveKV(kvStore)))
 	} else if db, err := vessel.Inject[*grove.DB](fapp.Container()); err == nil {
 		// Auto-discover default grove.DB from container (matches authsome/cortex pattern).
 		s, err := e.buildStoreFromGroveDB(db)
@@ -498,6 +498,7 @@ func (e *Extension) loadConfiguration() error {
 		forge.F("base_path", e.config.BasePath),
 		forge.F("grove_database", e.config.GroveDatabase),
 		forge.F("grove_kv", e.config.GroveKV),
+		forge.F("key_prefix", e.config.KeyPrefix),
 	)
 
 	return nil
@@ -624,6 +625,9 @@ func (e *Extension) mergeConfigurations(yamlConfig, programmaticConfig Config) C
 	if yamlConfig.GroveKV == "" && programmaticConfig.GroveKV != "" {
 		yamlConfig.GroveKV = programmaticConfig.GroveKV
 	}
+	if yamlConfig.KeyPrefix == "" && programmaticConfig.KeyPrefix != "" {
+		yamlConfig.KeyPrefix = programmaticConfig.KeyPrefix
+	}
 	if yamlConfig.DWPBasePath == "" && programmaticConfig.DWPBasePath != "" {
 		yamlConfig.DWPBasePath = programmaticConfig.DWPBasePath
 	}
@@ -663,6 +667,12 @@ func (e *Extension) buildStoreFromGroveDB(db *grove.DB) (dispatch.Storer, error)
 	default:
 		return nil, fmt.Errorf("dispatch: unsupported grove driver %q", driverName)
 	}
+}
+
+// buildStoreFromGroveKV wraps a grove KV store in the Redis backend,
+// namespaced by the configured key prefix.
+func (e *Extension) buildStoreFromGroveKV(kvStore *kv.Store) dispatch.Storer {
+	return redisstore.New(kvStore, redisstore.WithKeyPrefix(e.config.KeyPrefix))
 }
 
 // resolveGroveKV resolves a *kv.Store from the DI container.
