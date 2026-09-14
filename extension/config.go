@@ -50,6 +50,12 @@ type Config struct {
 	// (unnamed) kv.Store is used.
 	GroveKV string `json:"grove_kv" mapstructure:"grove_kv" yaml:"grove_kv"`
 
+	// KeyPrefix namespaces every key the Redis-backed store writes, so
+	// several dispatch instances can share one Redis without seeing each
+	// other's jobs, cron locks or leadership. Only the grove KV path reads
+	// it. Empty keeps the historical "dispatch:" keys.
+	KeyPrefix string `json:"key_prefix" mapstructure:"key_prefix" yaml:"key_prefix"`
+
 	// Artifacts configures the artifact plane.
 	Artifacts ArtifactConfig `json:"artifacts" mapstructure:"artifacts" yaml:"artifacts"`
 

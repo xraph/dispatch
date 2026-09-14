@@ -233,7 +233,7 @@ func (s *Store) scanQueue(
 	q string,
 	t time.Time,
 ) ([]dequeueCandidate, error) {
-	key := queueKey(q)
+	key := s.keys.queue(q)
 	full := !opts.IsUnbounded() || len(opts.PreferredHashes()) > 0
 
 	var (
@@ -353,7 +353,7 @@ func (s *Store) readJobEntities(ctx context.Context, ids []string) ([]*jobEntity
 
 	cmds := make([]*goredis.StringCmd, len(ids))
 	for i, jID := range ids {
-		cmds[i] = pipe.Get(ctx, jobKey(jID))
+		cmds[i] = pipe.Get(ctx, s.keys.job(jID))
 	}
 
 	// A missing key makes Exec report goredis.Nil for the batch as a
@@ -429,7 +429,7 @@ func (s *Store) claimCandidates(
 
 	rems := make([]*goredis.IntCmd, len(candidates))
 	for i, c := range candidates {
-		rems[i] = pipe.ZRem(ctx, queueKey(c.queue), c.id)
+		rems[i] = pipe.ZRem(ctx, s.keys.queue(c.queue), c.id)
 	}
 
 	if _, err := pipe.Exec(ctx); err != nil {
@@ -445,7 +445,7 @@ func (s *Store) claimCandidates(
 			continue // another worker removed it first
 		}
 
-		key := jobKey(c.id)
+		key := s.keys.job(c.id)
 
 		var e jobEntity
 		if getErr := s.getEntity(ctx, key, &e); getErr != nil {

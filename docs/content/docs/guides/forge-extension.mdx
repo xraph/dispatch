@@ -47,6 +47,7 @@ Forge will call `ext.Start(ctx)` on application start and `ext.Stop(ctx)` on shu
 | `WithDisableMigrate()` | Skip auto-migration at startup | `false` |
 | `WithGroveDatabase(name)` | Resolve a grove.DB from DI by name | `""` |
 | `WithGroveKV(name)` | Resolve a grove KV store from DI by name | `""` |
+| `WithKVKeyPrefix(prefix)` | Namespace the Redis store's keys per tenant (grove KV path only) | `""` |
 
 ## Auto-migration
 
@@ -114,6 +115,19 @@ ext := extension.New(
 )
 ```
 
+When several dispatch instances share one Redis, give each its own key
+prefix. Every key, stream and pub/sub channel the store touches goes under
+it (`ws_acme:dispatch:job:<id>`), so instances never see each other's
+queues, cron locks or leadership. Leave it empty for a single instance and
+the keys stay `dispatch:*` as before:
+
+```go
+ext := extension.New(
+    extension.WithGroveKV("dispatch-kv"),
+    extension.WithKVKeyPrefix("ws_acme:"),
+)
+```
+
 ### Store resolution order
 
 The extension resolves its store in this order:
@@ -134,6 +148,7 @@ extensions:
     base_path: /api/dispatch
     grove_database: jobs
     grove_kv: dispatch-kv
+    key_prefix: "ws_acme:"
     concurrency: 20
     queues:
       - default
@@ -161,6 +176,7 @@ dispatch:
 | `BasePath` | `base_path` | `string` | `"/api/dispatch"` | URL prefix for all dispatch HTTP routes |
 | `GroveDatabase` | `grove_database` | `string` | `""` | Name of the grove.DB to resolve from DI; empty uses the default DB |
 | `GroveKV` | `grove_kv` | `string` | `""` | Name of the grove KV store to resolve from DI; empty uses the default KV |
+| `KeyPrefix` | `key_prefix` | `string` | `""` | Tenant prefix for every Redis key the grove KV store writes; empty keeps `dispatch:*` |
 | `Concurrency` | `concurrency` | `int` | `10` | Max concurrent jobs |
 | `Queues` | `queues` | `[]string` | `["default"]` | Queues to poll |
 | `DisableRoutes` | `disable_routes` | `bool` | `false` | Skip HTTP route registration |

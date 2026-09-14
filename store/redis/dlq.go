@@ -108,14 +108,14 @@ func fromDLQEntity(e *dlqEntity) (*dlq.Entry, error) {
 // PushDLQ adds a failed job entry to the dead letter queue.
 func (s *Store) PushDLQ(ctx context.Context, entry *dlq.Entry) error {
 	eID := entry.ID.String()
-	key := dlqKey(eID)
+	key := s.keys.dlq(eID)
 
 	e := toDLQEntity(entry)
 	if err := s.setEntity(ctx, key, e); err != nil {
 		return fmt.Errorf("dispatch/redis: push dlq set: %w", err)
 	}
 
-	if err := s.rdb.SAdd(ctx, dlqIDsKey, eID).Err(); err != nil {
+	if err := s.rdb.SAdd(ctx, s.keys.dlqIDs(), eID).Err(); err != nil {
 		return fmt.Errorf("dispatch/redis: push dlq index: %w", err)
 	}
 	return nil
@@ -123,7 +123,7 @@ func (s *Store) PushDLQ(ctx context.Context, entry *dlq.Entry) error {
 
 // ListDLQ returns DLQ entries matching the given options.
 func (s *Store) ListDLQ(ctx context.Context, opts dlq.ListOpts) ([]*dlq.Entry, error) {
-	ids, err := s.rdb.SMembers(ctx, dlqIDsKey).Result()
+	ids, err := s.rdb.SMembers(ctx, s.keys.dlqIDs()).Result()
 	if err != nil {
 		return nil, fmt.Errorf("dispatch/redis: list dlq: %w", err)
 	}
@@ -131,7 +131,7 @@ func (s *Store) ListDLQ(ctx context.Context, opts dlq.ListOpts) ([]*dlq.Entry, e
 	entries := make([]*dlq.Entry, 0, len(ids))
 	for _, eID := range ids {
 		var e dlqEntity
-		if getErr := s.getEntity(ctx, dlqKey(eID), &e); getErr != nil {
+		if getErr := s.getEntity(ctx, s.keys.dlq(eID), &e); getErr != nil {
 			continue
 		}
 		if opts.Queue != "" && e.Queue != opts.Queue {
@@ -150,7 +150,7 @@ func (s *Store) ListDLQ(ctx context.Context, opts dlq.ListOpts) ([]*dlq.Entry, e
 // GetDLQ retrieves a DLQ entry by ID.
 func (s *Store) GetDLQ(ctx context.Context, entryID id.DLQID) (*dlq.Entry, error) {
 	var e dlqEntity
-	if err := s.getEntity(ctx, dlqKey(entryID.String()), &e); err != nil {
+	if err := s.getEntity(ctx, s.keys.dlq(entryID.String()), &e); err != nil {
 		if isNotFound(err) {
 			return nil, dispatch.ErrDLQNotFound
 		}
@@ -161,7 +161,7 @@ func (s *Store) GetDLQ(ctx context.Context, entryID id.DLQID) (*dlq.Entry, error
 
 // ReplayDLQ marks a DLQ entry as replayed.
 func (s *Store) ReplayDLQ(ctx context.Context, entryID id.DLQID) error {
-	key := dlqKey(entryID.String())
+	key := s.keys.dlq(entryID.String())
 	var e dlqEntity
 	if err := s.getEntity(ctx, key, &e); err != nil {
 		if isNotFound(err) {
@@ -177,14 +177,14 @@ func (s *Store) ReplayDLQ(ctx context.Context, entryID id.DLQID) error {
 
 // PurgeDLQ removes DLQ entries with FailedAt before the given time.
 func (s *Store) PurgeDLQ(ctx context.Context, before time.Time) (int64, error) {
-	ids, err := s.rdb.SMembers(ctx, dlqIDsKey).Result()
+	ids, err := s.rdb.SMembers(ctx, s.keys.dlqIDs()).Result()
 	if err != nil {
 		return 0, fmt.Errorf("dispatch/redis: purge dlq smembers: %w", err)
 	}
 
 	var purged int64
 	for _, eID := range ids {
-		key := dlqKey(eID)
+		key := s.keys.dlq(eID)
 		var e dlqEntity
 		if getErr := s.getEntity(ctx, key, &e); getErr != nil {
 			continue
@@ -193,7 +193,7 @@ func (s *Store) PurgeDLQ(ctx context.Context, before time.Time) (int64, error) {
 		if e.FailedAt.Before(before) {
 			pipe := s.rdb.TxPipeline()
 			pipe.Del(ctx, key)
-			pipe.SRem(ctx, dlqIDsKey, eID)
+			pipe.SRem(ctx, s.keys.dlqIDs(), eID)
 			if _, pErr := pipe.Exec(ctx); pErr != nil {
 				return purged, fmt.Errorf("dispatch/redis: purge dlq del: %w", pErr)
 			}
@@ -205,7 +205,7 @@ func (s *Store) PurgeDLQ(ctx context.Context, before time.Time) (int64, error) {
 
 // CountDLQ returns the total number of entries in the dead letter queue.
 func (s *Store) CountDLQ(ctx context.Context) (int64, error) {
-	count, err := s.rdb.SCard(ctx, dlqIDsKey).Result()
+	count, err := s.rdb.SCard(ctx, s.keys.dlqIDs()).Result()
 	if err != nil {
 		return 0, fmt.Errorf("dispatch/redis: count dlq: %w", err)
 	}

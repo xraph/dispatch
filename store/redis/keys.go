@@ -2,109 +2,129 @@ package redis
 
 import "fmt"
 
-// Redis key naming conventions for dispatch data.
-// All keys are prefixed with "dispatch:" to avoid collisions.
+// keys builds every Redis key and channel name the store touches. All of
+// them sit under "dispatch:" so the store can share a Redis with other
+// users of the same database; a tenant prefix on top of that lets several
+// dispatch instances share one Redis without seeing each other's queues,
+// cron locks or leadership.
+type keys struct {
+	prefix string
+}
 
-const keyPrefix = "dispatch:"
+// base is the namespace every dispatch key lives under, tenant or not.
+const base = "dispatch:"
+
+func newKeys(prefix string) keys { return keys{prefix: prefix} }
+
+// full composes the key that hits Redis. The tenant prefix goes outside
+// the dispatch namespace (ws_acme:dispatch:job:1) so everything a tenant
+// owns shares one leading segment, the same layout the tenant's other
+// Redis keys already use; an empty prefix yields the historical key.
+func (k keys) full(suffix string) string {
+	return k.prefix + base + suffix
+}
 
 // ── Job keys ──
 
-// jobKey returns the key for a job entity: dispatch:job:{id}
-func jobKey(id string) string { return keyPrefix + "job:" + id }
+// job returns the key for a job entity.
+func (k keys) job(id string) string { return k.full("job:" + id) }
 
-// queueKey returns the Sorted Set key for a queue: dispatch:queue:{name}
-func queueKey(name string) string { return keyPrefix + "queue:" + name }
+// queue returns the Sorted Set key for a queue.
+func (k keys) queue(name string) string { return k.full("queue:" + name) }
 
-// jobIDsKey is the Set tracking all job IDs for enumeration.
-const jobIDsKey = keyPrefix + "job_ids"
+// jobIDs is the Set tracking all job IDs for enumeration.
+func (k keys) jobIDs() string { return k.full("job_ids") }
+
+// wakeChannel is the pub/sub channel that announces newly enqueued jobs.
+func (k keys) wakeChannel() string { return k.full("jobs:wake") }
 
 // ── Workflow keys ──
 
-// runKey returns the key for a workflow run entity: dispatch:run:{id}
-func runKey(id string) string { return keyPrefix + "run:" + id }
+// run returns the key for a workflow run entity.
+func (k keys) run(id string) string { return k.full("run:" + id) }
 
-// runIDsKey is the Set tracking all run IDs for enumeration.
-const runIDsKey = keyPrefix + "run_ids"
+// runIDs is the Set tracking all run IDs for enumeration.
+func (k keys) runIDs() string { return k.full("run_ids") }
 
-// checkpointKey returns the key for a checkpoint: dispatch:checkpoint:{runID}:{step}
-func checkpointKey(runID, step string) string {
-	return fmt.Sprintf("%scheckpoint:%s:%s", keyPrefix, runID, step)
+// checkpoint returns the key for a checkpoint.
+func (k keys) checkpoint(runID, step string) string {
+	return k.full(fmt.Sprintf("checkpoint:%s:%s", runID, step))
 }
 
-// checkpointIndexKey returns the Set key tracking checkpoints for a run.
-func checkpointIndexKey(runID string) string {
-	return keyPrefix + "checkpoint_idx:" + runID
+// checkpointIndex returns the Set key tracking checkpoints for a run.
+func (k keys) checkpointIndex(runID string) string {
+	return k.full("checkpoint_idx:" + runID)
 }
 
 // ── Cron keys ──
 
-// cronKey returns the key for a cron entry entity: dispatch:cron:{id}
-func cronKey(id string) string { return keyPrefix + "cron:" + id }
+// cron returns the key for a cron entry entity.
+func (k keys) cron(id string) string { return k.full("cron:" + id) }
 
-// cronIDsKey is the Set tracking all cron IDs for enumeration.
-const cronIDsKey = keyPrefix + "cron_ids"
+// cronIDs is the Set tracking all cron IDs for enumeration.
+func (k keys) cronIDs() string { return k.full("cron_ids") }
 
-// cronNamesKey maps cron names to IDs for duplicate detection.
-const cronNamesKey = keyPrefix + "cron_names"
+// cronNames maps cron names to IDs for duplicate detection.
+func (k keys) cronNames() string { return k.full("cron_names") }
 
 // ── DLQ keys ──
 
-// dlqKey returns the key for a DLQ entry entity: dispatch:dlq:{id}
-func dlqKey(id string) string { return keyPrefix + "dlq:" + id }
+// dlq returns the key for a DLQ entry entity.
+func (k keys) dlq(id string) string { return k.full("dlq:" + id) }
 
-// dlqIDsKey is the Set tracking all DLQ entry IDs for enumeration.
-const dlqIDsKey = keyPrefix + "dlq_ids"
+// dlqIDs is the Set tracking all DLQ entry IDs for enumeration.
+func (k keys) dlqIDs() string { return k.full("dlq_ids") }
 
 // ── Event keys ──
 
-// eventKey returns the key for an event entity: dispatch:event:{id}
-func eventKey(id string) string { return keyPrefix + "event:" + id }
+// event returns the key for an event entity.
+func (k keys) event(id string) string { return k.full("event:" + id) }
 
-// eventStreamKey returns the Stream key for an event name: dispatch:events:{name}
-func eventStreamKey(name string) string { return keyPrefix + "events:" + name }
+// eventStream returns the Stream key for an event name.
+func (k keys) eventStream(name string) string { return k.full("events:" + name) }
 
 // ── Cluster keys ──
 
-// workerKey returns the key for a worker entity: dispatch:worker:{id}
-func workerKey(id string) string { return keyPrefix + "worker:" + id }
+// worker returns the key for a worker entity.
+func (k keys) worker(id string) string { return k.full("worker:" + id) }
 
-// workerIDsKey is the Set tracking all worker IDs for enumeration.
-const workerIDsKey = keyPrefix + "worker_ids"
+// workerIDs is the Set tracking all worker IDs for enumeration.
+func (k keys) workerIDs() string { return k.full("worker_ids") }
 
-// leaderKey stores the current leader worker ID.
-const leaderKey = keyPrefix + "leader"
+// leader stores the current leader worker ID.
+func (k keys) leader() string { return k.full("leader") }
 
 // ── Artifact keys ──
 
-// artifactKey returns the key for an artifact entity: dispatch:artifact:{id}
-func artifactKey(id string) string { return keyPrefix + "artifact:" + id }
+// artifact returns the key for an artifact entity.
+func (k keys) artifact(id string) string { return k.full("artifact:" + id) }
 
-// artifactIDsKey is the Set tracking all artifact IDs for enumeration.
-const artifactIDsKey = keyPrefix + "artifact_ids"
+// artifactIDs is the Set tracking all artifact IDs for enumeration.
+func (k keys) artifactIDs() string { return k.full("artifact_ids") }
 
-// artifactKeyGuard maps live storage coordinates to an artifact ID. It is
+// artifactGuard maps live storage coordinates to an artifact ID. It is
 // claimed with SETNX so concurrent creates at the same coordinates resolve
 // to one winner, and released on soft-delete so a purged key is reusable.
-func artifactKeyGuard(backend, bucket, key string) string {
-	return fmt.Sprintf("%sartifact_key:%s:%s:%s", keyPrefix, backend, bucket, key)
+func (k keys) artifactGuard(backend, bucket, key string) string {
+	return k.full(fmt.Sprintf("artifact_key:%s:%s:%s", backend, bucket, key))
 }
 
-// artifactEphemeralKey is the Sorted Set of ephemeral artifact IDs scored
+// artifactEphemeral is the Sorted Set of ephemeral artifact IDs scored
 // by creation time. Durable artifacts are never members, which is this
 // backend's form of the SQL "lifecycle = 'ephemeral'" literal.
-const artifactEphemeralKey = keyPrefix + "artifact_ephemeral"
+func (k keys) artifactEphemeral() string { return k.full("artifact_ephemeral") }
 
-// artifactDeletedKey is the Sorted Set of soft-deleted artifact IDs scored
+// artifactDeleted is the Sorted Set of soft-deleted artifact IDs scored
 // by deletion time, driving the purge pass.
-const artifactDeletedKey = keyPrefix + "artifact_deleted"
+func (k keys) artifactDeleted() string { return k.full("artifact_deleted") }
 
-// artifactLinksKey is the Set of link members pointing at an artifact.
-func artifactLinksKey(artifactID string) string {
-	return keyPrefix + "artifact_links:" + artifactID
+// artifactLinks is the Set of link members pointing at an artifact.
+func (k keys) artifactLinks(artifactID string) string {
+	return k.full("artifact_links:" + artifactID)
 }
 
-// ownerLinksKey is the Hash of an owner's artifact links, keyed by
+// ownerLinks is the Hash of an owner's artifact links, keyed by
 // "name\x00attempt".
-func ownerLinksKey(kind, ownerID string) string {
-	return fmt.Sprintf("%sartifact_owner_links:%s:%s", keyPrefix, kind, ownerID)
+func (k keys) ownerLinks(kind, ownerID string) string {
+	return k.full(fmt.Sprintf("artifact_owner_links:%s:%s", kind, ownerID))
 }

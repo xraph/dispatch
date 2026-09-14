@@ -7,10 +7,6 @@ import (
 	dispatchstore "github.com/xraph/dispatch/store"
 )
 
-// wakeChannel is the pub/sub channel used to signal that new jobs were
-// enqueued. EnqueueJob publishes to it; StartWakeListener subscribes.
-const wakeChannel = "dispatch:jobs:wake"
-
 var _ dispatchstore.WakeNotifier = (*Store)(nil)
 
 // notifyWake signals listening instances that pending jobs exist.
@@ -18,7 +14,7 @@ var _ dispatchstore.WakeNotifier = (*Store)(nil)
 // failed publish only costs poll latency and is not worth failing the
 // enqueue over.
 func (s *Store) notifyWake(ctx context.Context) {
-	_ = s.rdb.Publish(ctx, wakeChannel, "").Err() //nolint:errcheck // best-effort: polling covers missed wakes
+	_ = s.rdb.Publish(ctx, s.keys.wakeChannel(), "").Err() //nolint:errcheck // best-effort: polling covers missed wakes
 }
 
 // StartWakeListener subscribes to the dispatch wake channel and invokes
@@ -30,7 +26,7 @@ func (s *Store) notifyWake(ctx context.Context) {
 func (s *Store) StartWakeListener(ctx context.Context, wake func()) (func(), error) {
 	ctx, cancel := context.WithCancel(ctx)
 
-	sub := s.rdb.Subscribe(ctx, wakeChannel)
+	sub := s.rdb.Subscribe(ctx, s.keys.wakeChannel())
 	// Confirm the subscription is established so callers know push is
 	// live before relying on it.
 	if _, err := sub.Receive(ctx); err != nil {
