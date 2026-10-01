@@ -16,8 +16,6 @@ import (
 	"time"
 
 	"github.com/xraph/forge"
-	"github.com/xraph/forge/extensions/dashboard"
-	"github.com/xraph/forge/extensions/dashboard/contributor"
 	"github.com/xraph/grove"
 	"github.com/xraph/grove/kv"
 	"github.com/xraph/vessel"
@@ -30,7 +28,6 @@ import (
 	"github.com/xraph/dispatch/artifact/cache"
 	"github.com/xraph/dispatch/artifact/sweeper"
 	"github.com/xraph/dispatch/backoff"
-	dispatchdash "github.com/xraph/dispatch/dashboard"
 	"github.com/xraph/dispatch/dwp"
 	"github.com/xraph/dispatch/engine"
 	"github.com/xraph/dispatch/ext"
@@ -51,11 +48,8 @@ const ExtensionDescription = "Durable execution engine for background jobs, work
 // ExtensionVersion is the semantic version.
 const ExtensionVersion = "0.1.0"
 
-// Ensure Extension implements forge.Extension and dashboard.DashboardAware at compile time.
-var (
-	_ forge.Extension          = (*Extension)(nil)
-	_ dashboard.DashboardAware = (*Extension)(nil)
-)
+// Ensure Extension implements forge.Extension at compile time.
+var _ forge.Extension = (*Extension)(nil)
 
 // Extension adapts Dispatch as a Forge extension. It implements the
 // forge.Extension interface so Dispatch can be mounted into any Forge app.
@@ -690,19 +684,4 @@ func (e *Extension) resolveGroveKV(fapp forge.App) (*kv.Store, error) {
 		return nil, fmt.Errorf("default grove kv store not found in container: %w", err)
 	}
 	return s, nil
-}
-
-// DashboardContributor implements dashboard.DashboardAware. It returns a
-// LocalContributor that renders dispatch pages, widgets, and settings in the
-// Forge dashboard using templ + ForgeUI.
-func (e *Extension) DashboardContributor() contributor.LocalContributor {
-	basePath := e.config.BasePath
-	if basePath == "" {
-		basePath = "/dispatch"
-	}
-	return dispatchdash.New(
-		dispatchdash.NewManifest(),
-		e.eng,
-		basePath,
-	)
 }
