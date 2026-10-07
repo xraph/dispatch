@@ -59,11 +59,16 @@ const backfillChunk = 500
 // as two round trips, a delete landing between them (it removes the ID
 // from the set and the index in one MULTI) would show the set one member
 // ahead of the index, and the list would run a full backfill although
-// nothing is missing. Worse, a delete that committed between that
-// backfill's SMEMBERS snapshot and its ZADD would have its member put
-// back in the index for good, since nothing removes index members except
-// the delete that already ran. With the counts in one MULTI a delete is
-// either wholly before the snapshot or wholly after it.
+// nothing is missing. With the counts in one MULTI, a delete is either
+// wholly before them or wholly after them, so the check itself cannot be
+// fooled into a backfill by a delete in flight.
+//
+// The SMEMBERS that follows is not in that MULTI. When a backfill does run
+// (legacy rows, or a rolling upgrade), a delete that lands between the
+// SMEMBERS and the ZADD can have its member put back in the index, since
+// nothing removes index members except the delete that already ran. That
+// is harmless to results, because the reads skip a member whose entity is
+// gone, and it is the same kind of leftover as the one described below.
 //
 // On this release every create writes its index member before, or in the
 // same MULTI as, its ID-set member, and every delete removes both in one

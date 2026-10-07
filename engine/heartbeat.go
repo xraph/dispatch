@@ -52,12 +52,14 @@ func (eng *Engine) workerHeartbeatInterval() time.Duration {
 //
 // The loop's context is detached from ctx: Start's caller may cancel ctx
 // once Start returns, and the row must outlive that. Only stopHeartbeat
-// ends it. A second Start while the loop runs is a no-op.
+// ends it. A second Start while the loop runs is a no-op, and so is a
+// Start that comes after stopHeartbeat: Stop has deregistered the row, and
+// a loop begun now would register it again with nothing left to stop it.
 func (eng *Engine) startHeartbeat(ctx context.Context) {
 	eng.heartbeatMu.Lock()
 	defer eng.heartbeatMu.Unlock()
 
-	if eng.heartbeatCancel != nil {
+	if eng.heartbeatCancel != nil || eng.heartbeatStopped {
 		return
 	}
 
@@ -89,9 +91,11 @@ func (eng *Engine) startHeartbeat(ctx context.Context) {
 
 // stopHeartbeat ends the loop and waits for it to exit, or for ctx to
 // end, whichever comes first. Safe when the loop never started and safe
-// to call twice.
+// to call twice. It also marks the heartbeat stopped for good, so a
+// startHeartbeat that runs afterwards starts nothing.
 func (eng *Engine) stopHeartbeat(ctx context.Context) {
 	eng.heartbeatMu.Lock()
+	eng.heartbeatStopped = true
 	cancel, done := eng.heartbeatCancel, eng.heartbeatDone
 	eng.heartbeatCancel, eng.heartbeatDone = nil, nil
 	eng.heartbeatMu.Unlock()

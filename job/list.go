@@ -40,7 +40,15 @@ type Page struct {
 	// Complete is false when a backend stopped scanning at its budget
 	// before it could fill the page or prove there was nothing left. The
 	// page is then not evidence that no more rows match: continue from
-	// NextCursor. Backends that filter at their index always report true.
+	// NextCursor.
+	//
+	// Only a backend that stops at a scan budget (redis) ever reports
+	// false. The SQL and document backends always finish the search and
+	// report true, and that is not a promise that the call is cheap: a
+	// selective NamePrefix uses no index on postgres (starts_with), sqlite
+	// (substr) or mongo (anchored regex), so a rare or prefix-only filter
+	// can walk the whole table before it finds limit+1 matches or reaches
+	// the end. Bound list calls with a context deadline.
 	Complete bool
 }
 

@@ -161,3 +161,25 @@ func TestEngine_StopLeavesNoHeartbeatWriting(t *testing.T) {
 		time.Sleep(heartbeatInterval)
 	}
 }
+
+// TestEngine_StopBeforeHeartbeatStartLeavesNoLoop covers Stop winning the
+// race against Start: Stop finds no loop to cancel and deregisters the row,
+// and the heartbeat start that follows must not launch a loop, or its first
+// beat would register the stopped worker again.
+func TestEngine_StopBeforeHeartbeatStartLeavesNoLoop(t *testing.T) {
+	eng, s := buildHeartbeatEngine(t)
+	ctx := context.Background()
+
+	if err := eng.Stop(ctx); err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+
+	engine.StartHeartbeatForTest(ctx, eng)
+
+	for range 10 {
+		if _, err := s.GetWorker(ctx, eng.WorkerID()); !errors.Is(err, dispatch.ErrWorkerNotFound) {
+			t.Fatalf("GetWorker after Stop = %v, want dispatch.ErrWorkerNotFound: a heartbeat started after Stop", err)
+		}
+		time.Sleep(heartbeatInterval)
+	}
+}

@@ -119,11 +119,15 @@ type Engine struct {
 	self cluster.Worker
 
 	// heartbeatCancel and heartbeatDone belong to the running row
-	// heartbeat; both are nil when it is not running. heartbeatMu guards
-	// them so Start and Stop can race without leaking the goroutine.
-	heartbeatMu     sync.Mutex
-	heartbeatCancel context.CancelFunc
-	heartbeatDone   chan struct{}
+	// heartbeat; both are nil when it is not running. heartbeatStopped is
+	// set by stopHeartbeat even when no loop is running, and
+	// startHeartbeat does nothing once it is set. heartbeatMu guards all
+	// three, so Start and Stop can race in either order without leaking a
+	// goroutine or registering a stopped worker's row again.
+	heartbeatMu      sync.Mutex
+	heartbeatCancel  context.CancelFunc
+	heartbeatDone    chan struct{}
+	heartbeatStopped bool
 
 	// wakeStop terminates the store wake listener (store.WakeNotifier);
 	// nil when the store has no push capability.
