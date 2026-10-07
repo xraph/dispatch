@@ -33,6 +33,7 @@ const (
 	PrefixEvent      Prefix = "evt"
 	PrefixWorker     Prefix = "wkr"
 	PrefixArtifact   Prefix = "art"
+	PrefixUsage      Prefix = "use"
 )
 
 // ID is the primary identifier type for all Dispatch entities.
@@ -140,6 +141,9 @@ type WorkerID = ID
 // ArtifactID is a type-safe identifier for artifacts (prefix: "art").
 type ArtifactID = ID
 
+// UsageID is a type-safe identifier for usage records (prefix: "use").
+type UsageID = ID
+
 // AnyID is a type alias that accepts any valid prefix.
 type AnyID = ID
 
@@ -174,6 +178,9 @@ func NewWorkerID() ID { return New(PrefixWorker) }
 // NewArtifactID generates a new unique artifact ID.
 func NewArtifactID() ID { return New(PrefixArtifact) }
 
+// NewUsageID generates a new unique usage record ID.
+func NewUsageID() ID { return New(PrefixUsage) }
+
 // ──────────────────────────────────────────────────
 // Convenience parsers
 // ──────────────────────────────────────────────────
@@ -204,6 +211,9 @@ func ParseWorkerID(s string) (ID, error) { return ParseWithPrefix(s, PrefixWorke
 
 // ParseArtifactID parses a string and validates the "art" prefix.
 func ParseArtifactID(s string) (ID, error) { return ParseWithPrefix(s, PrefixArtifact) }
+
+// ParseUsageID parses a string and validates the "use" prefix.
+func ParseUsageID(s string) (ID, error) { return ParseWithPrefix(s, PrefixUsage) }
 
 // ParseAny parses a string into an ID without type checking the prefix.
 func ParseAny(s string) (ID, error) { return Parse(s) }

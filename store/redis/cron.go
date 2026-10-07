@@ -83,11 +83,12 @@ func (s *Store) RegisterCron(ctx context.Context, entry *cron.Entry) error {
 	key := s.keys.cron(eID)
 
 	// Check for duplicate name.
-	existing, err := s.rdb.HGet(ctx, s.keys.cronNames(), entry.Name).Result()
-	if err != nil && !isRedisNil(err) {
+	existing, err := s.kv.HGet(ctx, s.keys.cronNames(), entry.Name)
+	if err != nil && !isNotFound(err) {
 		return fmt.Errorf("dispatch/redis: register cron check name: %w", err)
 	}
-	if existing != "" {
+
+	if len(existing) > 0 {
 		return dispatch.ErrDuplicateCron
 	}
 
@@ -96,11 +97,11 @@ func (s *Store) RegisterCron(ctx context.Context, entry *cron.Entry) error {
 		return fmt.Errorf("dispatch/redis: register cron set: %w", setErr)
 	}
 
-	pipe := s.rdb.TxPipeline()
-	pipe.SAdd(ctx, s.keys.cronIDs(), eID)
-	pipe.HSet(ctx, s.keys.cronNames(), entry.Name, eID)
-	_, err = pipe.Exec(ctx)
-	if err != nil {
+	if _, err = s.kv.SAdd(ctx, s.keys.cronIDs(), eID); err != nil {
+		return fmt.Errorf("dispatch/redis: register cron indexes: %w", err)
+	}
+
+	if _, err = s.kv.HSet(ctx, s.keys.cronNames(), map[string][]byte{entry.Name: []byte(eID)}); err != nil {
 		return fmt.Errorf("dispatch/redis: register cron indexes: %w", err)
 	}
 	return nil
@@ -120,7 +121,7 @@ func (s *Store) GetCron(ctx context.Context, entryID id.CronID) (*cron.Entry, er
 
 // ListCrons returns all cron entries.
 func (s *Store) ListCrons(ctx context.Context) ([]*cron.Entry, error) {
-	ids, err := s.rdb.SMembers(ctx, s.keys.cronIDs()).Result()
+	ids, err := s.kv.SMembers(ctx, s.keys.cronIDs())
 	if err != nil {
 		return nil, fmt.Errorf("dispatch/redis: list crons: %w", err)
 	}
@@ -244,15 +245,23 @@ func (s *Store) DeleteCron(ctx context.Context, entryID id.CronID) error {
 		return fmt.Errorf("dispatch/redis: delete cron get: %w", err)
 	}
 
-	pipe := s.rdb.TxPipeline()
-	pipe.Del(ctx, key)
-	pipe.SRem(ctx, s.keys.cronIDs(), eID)
-	if e.Name != "" {
-		pipe.HDel(ctx, s.keys.cronNames(), e.Name)
-	}
-	_, err := pipe.Exec(ctx)
-	if err != nil {
+	// The entity, the id index, and the name index are three writes with
+	// no transaction between them. Nothing reads a cron entry through the
+	// indexes alone, so a crash mid-delete leaves a dangling index entry
+	// that the next list skips rather than a half-deleted entry.
+	if err := s.kv.Delete(ctx, key); err != nil {
 		return fmt.Errorf("dispatch/redis: delete cron: %w", err)
 	}
+
+	if _, err := s.kv.SRem(ctx, s.keys.cronIDs(), eID); err != nil {
+		return fmt.Errorf("dispatch/redis: delete cron index: %w", err)
+	}
+
+	if e.Name != "" {
+		if _, err := s.kv.HDel(ctx, s.keys.cronNames(), e.Name); err != nil {
+			return fmt.Errorf("dispatch/redis: delete cron name index: %w", err)
+		}
+	}
+
 	return nil
 }

@@ -22,14 +22,15 @@ import (
 
 // Ensure Store implements all subsystem interfaces at compile time.
 var (
-	_ job.Store      = (*Store)(nil)
-	_ job.LeaseStore = (*Store)(nil)
-	_ workflow.Store = (*Store)(nil)
-	_ cron.Store     = (*Store)(nil)
-	_ dlq.Store      = (*Store)(nil)
-	_ event.Store    = (*Store)(nil)
-	_ cluster.Store  = (*Store)(nil)
-	_ artifact.Store = (*Store)(nil)
+	_ job.Store         = (*Store)(nil)
+	_ job.LeaseStore    = (*Store)(nil)
+	_ workflow.Store    = (*Store)(nil)
+	_ cron.Store        = (*Store)(nil)
+	_ dlq.Store         = (*Store)(nil)
+	_ event.Store       = (*Store)(nil)
+	_ cluster.Store     = (*Store)(nil)
+	_ artifact.Store    = (*Store)(nil)
+	_ job.UsageRecorder = (*Store)(nil)
 )
 
 // Store is a grove ORM implementation of store.Store using PostgreSQL dialect.

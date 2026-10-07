@@ -9,7 +9,8 @@ import (
 	"strconv"
 	"time"
 
-	goredis "github.com/redis/go-redis/v9"
+	"github.com/xraph/grove/kv"
+	kvdriver "github.com/xraph/grove/kv/driver"
 
 	"github.com/xraph/dispatch/artifact"
 	"github.com/xraph/dispatch/id"
@@ -132,23 +133,25 @@ func linkField(name string, attempt int) string {
 func (s *Store) CreateArtifact(ctx context.Context, a *artifact.Artifact, link *artifact.Link) error {
 	guard := s.keys.artifactGuard(a.Backend, a.Bucket, a.Key)
 
-	ok, err := s.rdb.SetNX(ctx, guard, a.ID.String(), 0).Result()
+	// The guard is claimed with a set-if-absent, which is what makes two
+	// concurrent creates at the same coordinates resolve to one winner.
+	err := s.kv.SetRaw(ctx, guard, []byte(a.ID.String()), kv.WithNX())
 	if err != nil {
-		return fmt.Errorf("dispatch/redis: create artifact guard: %w", err)
-	}
+		if errors.Is(err, kv.ErrConflict) {
+			return artifact.ErrExists
+		}
 
-	if !ok {
-		return artifact.ErrExists
+		return fmt.Errorf("dispatch/redis: create artifact guard: %w", err)
 	}
 
 	if err := s.setEntity(ctx, s.keys.artifact(a.ID.String()), toArtifactEntity(a)); err != nil {
 		// Release the guard so the coordinates are not permanently burned.
-		s.rdb.Del(ctx, guard)
+		_ = s.kv.Delete(ctx, guard) //nolint:errcheck // releasing the guard is best effort
 
 		return fmt.Errorf("dispatch/redis: create artifact: %w", err)
 	}
 
-	if err := s.rdb.SAdd(ctx, s.keys.artifactIDs(), a.ID.String()).Err(); err != nil {
+	if _, err := s.kv.SAdd(ctx, s.keys.artifactIDs(), a.ID.String()); err != nil {
 		return fmt.Errorf("dispatch/redis: index artifact: %w", err)
 	}
 
@@ -157,7 +160,8 @@ func (s *Store) CreateArtifact(ctx context.Context, a *artifact.Artifact, link *
 	// no durable artifact is ever a member.
 	if a.Lifecycle == artifact.Ephemeral {
 		score := float64(a.CreatedAt.UnixNano())
-		if err := s.rdb.ZAdd(ctx, s.keys.artifactEphemeral(), goredis.Z{Score: score, Member: a.ID.String()}).Err(); err != nil {
+		if _, err := s.kv.ZAdd(ctx, s.keys.artifactEphemeral(),
+			kvdriver.ScoredMember{Score: score, Member: a.ID.String()}); err != nil {
 			return fmt.Errorf("dispatch/redis: index ephemeral artifact: %w", err)
 		}
 	}
@@ -200,12 +204,12 @@ func (s *Store) loadArtifact(ctx context.Context, artifactID string) (*artifact.
 
 // FindArtifactByKey retrieves a live artifact by its storage coordinates.
 func (s *Store) FindArtifactByKey(ctx context.Context, backend, bucket, key string) (*artifact.Artifact, error) {
-	got, err := s.rdb.Get(ctx, s.keys.artifactGuard(backend, bucket, key)).Result()
+	got, err := s.kv.GetRaw(ctx, s.keys.artifactGuard(backend, bucket, key))
 	if err != nil {
 		return nil, artifact.ErrNotFound
 	}
 
-	return s.GetArtifact(ctx, id.MustParse(got))
+	return s.GetArtifact(ctx, id.MustParse(string(got)))
 }
 
 // UpdateArtifact persists size, hash, content type, and expiry. Lifecycle,
@@ -230,7 +234,7 @@ func (s *Store) UpdateArtifact(ctx context.Context, a *artifact.Artifact) error 
 
 // ListArtifacts returns artifacts matching the given options, newest first.
 func (s *Store) ListArtifacts(ctx context.Context, opts artifact.ListOpts) ([]*artifact.Artifact, error) {
-	ids, err := s.rdb.SMembers(ctx, s.keys.artifactIDs()).Result()
+	ids, err := s.kv.SMembers(ctx, s.keys.artifactIDs())
 	if err != nil {
 		return nil, fmt.Errorf("dispatch/redis: list artifact ids: %w", err)
 	}
@@ -300,12 +304,13 @@ func (s *Store) LinkArtifact(ctx context.Context, link *artifact.Link) error {
 	owner := artifact.OwnerRef{Kind: link.OwnerKind, ID: link.OwnerID}
 	field := linkField(link.Name, link.Attempt)
 
-	if err := s.rdb.HSet(ctx, s.keys.ownerLinks(string(owner.Kind), owner.ID), field, raw).Err(); err != nil {
+	if _, err := s.kv.HSet(ctx, s.keys.ownerLinks(string(owner.Kind), owner.ID),
+		map[string][]byte{field: raw}); err != nil {
 		return fmt.Errorf("dispatch/redis: link artifact: %w", err)
 	}
 
 	member := string(link.OwnerKind) + "\x00" + link.OwnerID + "\x00" + field
-	if err := s.rdb.SAdd(ctx, s.keys.artifactLinks(link.ArtifactID.String()), member).Err(); err != nil {
+	if _, err := s.kv.SAdd(ctx, s.keys.artifactLinks(link.ArtifactID.String()), member); err != nil {
 		return fmt.Errorf("dispatch/redis: index artifact link: %w", err)
 	}
 
@@ -314,7 +319,7 @@ func (s *Store) LinkArtifact(ctx context.Context, link *artifact.Link) error {
 
 // ListLinks returns every link belonging to the given owner.
 func (s *Store) ListLinks(ctx context.Context, owner artifact.OwnerRef) ([]*artifact.Link, error) {
-	vals, err := s.rdb.HGetAll(ctx, s.keys.ownerLinks(string(owner.Kind), owner.ID)).Result()
+	vals, err := s.kv.HGetAll(ctx, s.keys.ownerLinks(string(owner.Kind), owner.ID))
 	if err != nil {
 		return nil, fmt.Errorf("dispatch/redis: list links: %w", err)
 	}
@@ -323,7 +328,7 @@ func (s *Store) ListLinks(ctx context.Context, owner artifact.OwnerRef) ([]*arti
 
 	for _, raw := range vals {
 		var e linkEntity
-		if uerr := json.Unmarshal([]byte(raw), &e); uerr != nil {
+		if uerr := json.Unmarshal(raw, &e); uerr != nil {
 			return nil, fmt.Errorf("dispatch/redis: unmarshal link: %w", uerr)
 		}
 
@@ -449,7 +454,7 @@ func (s *Store) SweepEphemeral(
 		limit = defaultSweepLimit
 	}
 
-	ids, err := s.rdb.ZRange(ctx, s.keys.artifactEphemeral(), 0, -1).Result()
+	ids, err := s.kv.ZRange(ctx, s.keys.artifactEphemeral(), kvdriver.RangeSpec{})
 	if err != nil {
 		return nil, fmt.Errorf("dispatch/redis: sweep ephemeral: %w", err)
 	}
@@ -515,7 +520,7 @@ func (s *Store) SweepEphemeral(
 
 // linksForArtifact resolves every link pointing at an artifact.
 func (s *Store) linksForArtifact(ctx context.Context, artifactID string) ([]*artifact.Link, error) {
-	members, err := s.rdb.SMembers(ctx, s.keys.artifactLinks(artifactID)).Result()
+	members, err := s.kv.SMembers(ctx, s.keys.artifactLinks(artifactID))
 	if err != nil {
 		return nil, fmt.Errorf("dispatch/redis: list artifact links: %w", err)
 	}
@@ -530,13 +535,13 @@ func (s *Store) linksForArtifact(ctx context.Context, artifactID string) ([]*art
 
 		owner := artifact.OwnerRef{Kind: artifact.OwnerKind(kind), ID: ownerID}
 
-		raw, herr := s.rdb.HGet(ctx, s.keys.ownerLinks(string(owner.Kind), owner.ID), field).Result()
+		raw, herr := s.kv.HGet(ctx, s.keys.ownerLinks(string(owner.Kind), owner.ID), field)
 		if herr != nil {
 			continue
 		}
 
 		var e linkEntity
-		if uerr := json.Unmarshal([]byte(raw), &e); uerr != nil {
+		if uerr := json.Unmarshal(raw, &e); uerr != nil {
 			return nil, fmt.Errorf("dispatch/redis: unmarshal link: %w", uerr)
 		}
 
@@ -668,10 +673,10 @@ func (s *Store) SweepOrphans(
 
 	// The ephemeral index is scored by creation time, so the cutoff is a
 	// range query rather than a scan.
-	ids, err := s.rdb.ZRangeByScore(ctx, s.keys.artifactEphemeral(), &goredis.ZRangeBy{
-		Min: "-inf",
-		Max: strconv.FormatInt(cutoff.UnixNano(), 10),
-	}).Result()
+	ids, err := s.kv.ZRange(ctx, s.keys.artifactEphemeral(), kvdriver.RangeSpec{
+		Max:    float64(cutoff.UnixNano()),
+		HasMax: true,
+	})
 	if err != nil {
 		return nil, fmt.Errorf("dispatch/redis: sweep orphans: %w", err)
 	}
@@ -700,7 +705,7 @@ func (s *Store) SweepOrphans(
 			continue
 		}
 
-		n, cerr := s.rdb.SCard(ctx, s.keys.artifactLinks(a.ID.String())).Result()
+		n, cerr := s.kv.SCard(ctx, s.keys.artifactLinks(a.ID.String()))
 		if cerr != nil {
 			return nil, fmt.Errorf("dispatch/redis: count artifact links: %w", cerr)
 		}
@@ -743,14 +748,14 @@ func (s *Store) markDeleted(
 
 		// Release the live-key guard so the coordinates become reusable,
 		// and index the deletion time for the purge pass.
-		s.rdb.Del(ctx, s.keys.artifactGuard(clone.Backend, clone.Bucket, clone.Key))
+		_ = s.kv.Delete(ctx, s.keys.artifactGuard(clone.Backend, clone.Bucket, clone.Key)) //nolint:errcheck // releasing the guard is best effort
 
-		if err := s.rdb.ZAdd(ctx, s.keys.artifactDeleted(),
-			goredis.Z{Score: float64(at.UnixNano()), Member: clone.ID.String()}).Err(); err != nil {
+		if _, err := s.kv.ZAdd(ctx, s.keys.artifactDeleted(),
+			kvdriver.ScoredMember{Score: float64(at.UnixNano()), Member: clone.ID.String()}); err != nil {
 			return nil, fmt.Errorf("dispatch/redis: index deleted artifact: %w", err)
 		}
 
-		if err := s.rdb.ZRem(ctx, s.keys.artifactEphemeral(), clone.ID.String()).Err(); err != nil {
+		if _, err := s.kv.ZRem(ctx, s.keys.artifactEphemeral(), clone.ID.String()); err != nil {
 			return nil, fmt.Errorf("dispatch/redis: deindex ephemeral artifact: %w", err)
 		}
 
@@ -772,10 +777,10 @@ func (s *Store) ListPurgeable(
 
 	cutoff := time.Now().UTC().Add(-grace)
 
-	ids, err := s.rdb.ZRangeByScore(ctx, s.keys.artifactDeleted(), &goredis.ZRangeBy{
-		Min: "-inf",
-		Max: strconv.FormatInt(cutoff.UnixNano(), 10),
-	}).Result()
+	ids, err := s.kv.ZRange(ctx, s.keys.artifactDeleted(), kvdriver.RangeSpec{
+		Max:    float64(cutoff.UnixNano()),
+		HasMax: true,
+	})
 	if err != nil {
 		return nil, fmt.Errorf("dispatch/redis: list purgeable: %w", err)
 	}
@@ -817,25 +822,34 @@ func (s *Store) PurgeArtifact(ctx context.Context, artifactID id.ArtifactID) err
 
 	for _, l := range links {
 		owner := artifact.OwnerRef{Kind: l.OwnerKind, ID: l.OwnerID}
-		if herr := s.rdb.HDel(ctx, s.keys.ownerLinks(string(owner.Kind), owner.ID), linkField(l.Name, l.Attempt)).Err(); herr != nil {
+		if _, herr := s.kv.HDel(ctx, s.keys.ownerLinks(string(owner.Kind), owner.ID),
+			linkField(l.Name, l.Attempt)); herr != nil {
 			return fmt.Errorf("dispatch/redis: purge artifact link: %w", herr)
 		}
 	}
 
 	a, err := s.loadArtifact(ctx, key)
 	if err == nil {
-		s.rdb.Del(ctx, s.keys.artifactGuard(a.Backend, a.Bucket, a.Key))
+		_ = s.kv.Delete(ctx, s.keys.artifactGuard(a.Backend, a.Bucket, a.Key)) //nolint:errcheck // releasing the guard is best effort
 	}
 
-	pipe := s.rdb.TxPipeline()
-	pipe.Del(ctx, s.keys.artifact(key))
-	pipe.Del(ctx, s.keys.artifactLinks(key))
-	pipe.SRem(ctx, s.keys.artifactIDs(), key)
-	pipe.ZRem(ctx, s.keys.artifactEphemeral(), key)
-	pipe.ZRem(ctx, s.keys.artifactDeleted(), key)
-
-	if _, err := pipe.Exec(ctx); err != nil {
+	// Purge is the end of a two-phase deletion: the artifact was already
+	// soft-deleted and its bytes are gone, so these writes only reclaim
+	// index space. A crash partway leaves entries pointing at a record
+	// that no longer exists, which every read already skips, and the next
+	// purge pass finishes the job.
+	if err := s.kv.Delete(ctx, s.keys.artifact(key), s.keys.artifactLinks(key)); err != nil {
 		return fmt.Errorf("dispatch/redis: purge artifact: %w", err)
+	}
+
+	if _, err := s.kv.SRem(ctx, s.keys.artifactIDs(), key); err != nil {
+		return fmt.Errorf("dispatch/redis: purge artifact id index: %w", err)
+	}
+
+	for _, index := range []string{s.keys.artifactEphemeral(), s.keys.artifactDeleted()} {
+		if _, err := s.kv.ZRem(ctx, index, key); err != nil {
+			return fmt.Errorf("dispatch/redis: purge artifact index: %w", err)
+		}
 	}
 
 	return nil

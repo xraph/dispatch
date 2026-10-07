@@ -7,7 +7,7 @@ import (
 	"strconv"
 	"time"
 
-	goredis "github.com/redis/go-redis/v9"
+	kvdriver "github.com/xraph/grove/kv/driver"
 
 	"github.com/xraph/dispatch"
 	"github.com/xraph/dispatch/id"
@@ -200,16 +200,21 @@ func (s *Store) EnqueueJob(ctx context.Context, j *job.Job) error {
 		return fmt.Errorf("dispatch/redis: enqueue set entity: %w", setErr)
 	}
 
-	pipe := s.rdb.TxPipeline()
-	pipe.SAdd(ctx, s.keys.jobIDs(), jID)
-
-	// Add to queue sorted set: score = priority (negated for DESC) + time component.
-	score := jobScore(j.Priority, j.RunAt)
-	pipe.ZAdd(ctx, s.keys.queue(j.Queue), goredis.Z{Score: score, Member: jID})
-
-	_, err = pipe.Exec(ctx)
-	if err != nil {
+	// The entity is written above and is authoritative; these two index
+	// writes follow it. A crash between them leaves the job in the id set
+	// but off its queue, where the stale-job reaper finds it -- the same
+	// state a crash between a pipelined SADD and ZADD produced, since
+	// this was never a transaction that either index write could roll
+	// back.
+	if _, err = s.kv.SAdd(ctx, s.keys.jobIDs(), jID); err != nil {
 		return fmt.Errorf("dispatch/redis: enqueue job indexes: %w", err)
+	}
+
+	// Queue score is priority (negated for DESC) plus a time component.
+	score := jobScore(j.Priority, j.RunAt)
+	if _, err = s.kv.ZAdd(ctx, s.keys.queue(j.Queue),
+		kvdriver.ScoredMember{Score: score, Member: jID}); err != nil {
+		return fmt.Errorf("dispatch/redis: enqueue job queue index: %w", err)
 	}
 	s.notifyWake(ctx)
 	return nil
@@ -284,8 +289,8 @@ func (s *Store) UpdateJob(ctx context.Context, j *job.Job) error {
 	runnable := j.State == job.StatePending || j.State == job.StateRetrying
 
 	if runnable {
-		z := goredis.Z{Score: jobScore(j.Priority, j.RunAt), Member: jID}
-		if zErr := s.rdb.ZAdd(ctx, qk, z).Err(); zErr != nil {
+		z := kvdriver.ScoredMember{Score: jobScore(j.Priority, j.RunAt), Member: jID}
+		if _, zErr := s.kv.ZAdd(ctx, qk, z); zErr != nil {
 			return fmt.Errorf("dispatch/redis: update job index add: %w", zErr)
 		}
 	}
@@ -295,7 +300,7 @@ func (s *Store) UpdateJob(ctx context.Context, j *job.Job) error {
 	}
 
 	if !runnable {
-		if zErr := s.rdb.ZRem(ctx, qk, jID).Err(); zErr != nil {
+		if _, zErr := s.kv.ZRem(ctx, qk, jID); zErr != nil {
 			return fmt.Errorf("dispatch/redis: update job index remove: %w", zErr)
 		}
 	}
@@ -317,21 +322,28 @@ func (s *Store) DeleteJob(ctx context.Context, jobID id.JobID) error {
 		return fmt.Errorf("dispatch/redis: delete job get: %w", err)
 	}
 
-	// Delete entity via raw Redis DEL (KV store may not have Delete).
-	pipe := s.rdb.TxPipeline()
-	pipe.Del(ctx, key)
-	pipe.SRem(ctx, s.keys.jobIDs(), jID)
-	pipe.ZRem(ctx, s.keys.queue(e.Queue), jID)
-	_, err := pipe.Exec(ctx)
-	if err != nil {
+	// Entity first, then its indexes. A crash partway leaves an index
+	// entry pointing at a key that is gone, which every read already
+	// tolerates -- the entity is authoritative and a missing one means
+	// the job does not exist.
+	if err := s.kv.Delete(ctx, key); err != nil {
 		return fmt.Errorf("dispatch/redis: delete job: %w", err)
 	}
+
+	if _, err := s.kv.SRem(ctx, s.keys.jobIDs(), jID); err != nil {
+		return fmt.Errorf("dispatch/redis: delete job id index: %w", err)
+	}
+
+	if _, err := s.kv.ZRem(ctx, s.keys.queue(e.Queue), jID); err != nil {
+		return fmt.Errorf("dispatch/redis: delete job queue index: %w", err)
+	}
+
 	return nil
 }
 
 // ListJobsByState returns jobs matching the given state.
 func (s *Store) ListJobsByState(ctx context.Context, state job.State, opts job.ListOpts) ([]*job.Job, error) {
-	ids, err := s.rdb.SMembers(ctx, s.keys.jobIDs()).Result()
+	ids, err := s.kv.SMembers(ctx, s.keys.jobIDs())
 	if err != nil {
 		return nil, fmt.Errorf("dispatch/redis: list jobs smembers: %w", err)
 	}
@@ -379,7 +391,7 @@ func (s *Store) HeartbeatJob(ctx context.Context, jobID id.JobID, _ id.WorkerID)
 func (s *Store) ReapStaleJobs(ctx context.Context, threshold time.Duration) ([]*job.Job, error) {
 	cutoff := now().Add(-threshold)
 
-	ids, err := s.rdb.SMembers(ctx, s.keys.jobIDs()).Result()
+	ids, err := s.kv.SMembers(ctx, s.keys.jobIDs())
 	if err != nil {
 		return nil, fmt.Errorf("dispatch/redis: reap smembers: %w", err)
 	}
@@ -411,7 +423,7 @@ func (s *Store) ReapStaleJobs(ctx context.Context, threshold time.Duration) ([]*
 
 // CountJobs returns the number of jobs matching the given options.
 func (s *Store) CountJobs(ctx context.Context, opts job.CountOpts) (int64, error) {
-	ids, err := s.rdb.SMembers(ctx, s.keys.jobIDs()).Result()
+	ids, err := s.kv.SMembers(ctx, s.keys.jobIDs())
 	if err != nil {
 		return 0, fmt.Errorf("dispatch/redis: count smembers: %w", err)
 	}

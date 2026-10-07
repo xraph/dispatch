@@ -115,7 +115,7 @@ func (s *Store) PushDLQ(ctx context.Context, entry *dlq.Entry) error {
 		return fmt.Errorf("dispatch/redis: push dlq set: %w", err)
 	}
 
-	if err := s.rdb.SAdd(ctx, s.keys.dlqIDs(), eID).Err(); err != nil {
+	if _, err := s.kv.SAdd(ctx, s.keys.dlqIDs(), eID); err != nil {
 		return fmt.Errorf("dispatch/redis: push dlq index: %w", err)
 	}
 	return nil
@@ -123,7 +123,7 @@ func (s *Store) PushDLQ(ctx context.Context, entry *dlq.Entry) error {
 
 // ListDLQ returns DLQ entries matching the given options.
 func (s *Store) ListDLQ(ctx context.Context, opts dlq.ListOpts) ([]*dlq.Entry, error) {
-	ids, err := s.rdb.SMembers(ctx, s.keys.dlqIDs()).Result()
+	ids, err := s.kv.SMembers(ctx, s.keys.dlqIDs())
 	if err != nil {
 		return nil, fmt.Errorf("dispatch/redis: list dlq: %w", err)
 	}
@@ -177,7 +177,7 @@ func (s *Store) ReplayDLQ(ctx context.Context, entryID id.DLQID) error {
 
 // PurgeDLQ removes DLQ entries with FailedAt before the given time.
 func (s *Store) PurgeDLQ(ctx context.Context, before time.Time) (int64, error) {
-	ids, err := s.rdb.SMembers(ctx, s.keys.dlqIDs()).Result()
+	ids, err := s.kv.SMembers(ctx, s.keys.dlqIDs())
 	if err != nil {
 		return 0, fmt.Errorf("dispatch/redis: purge dlq smembers: %w", err)
 	}
@@ -191,11 +191,12 @@ func (s *Store) PurgeDLQ(ctx context.Context, before time.Time) (int64, error) {
 		}
 
 		if e.FailedAt.Before(before) {
-			pipe := s.rdb.TxPipeline()
-			pipe.Del(ctx, key)
-			pipe.SRem(ctx, s.keys.dlqIDs(), eID)
-			if _, pErr := pipe.Exec(ctx); pErr != nil {
+			if pErr := s.kv.Delete(ctx, key); pErr != nil {
 				return purged, fmt.Errorf("dispatch/redis: purge dlq del: %w", pErr)
+			}
+
+			if _, pErr := s.kv.SRem(ctx, s.keys.dlqIDs(), eID); pErr != nil {
+				return purged, fmt.Errorf("dispatch/redis: purge dlq index: %w", pErr)
 			}
 			purged++
 		}
@@ -205,7 +206,7 @@ func (s *Store) PurgeDLQ(ctx context.Context, before time.Time) (int64, error) {
 
 // CountDLQ returns the total number of entries in the dead letter queue.
 func (s *Store) CountDLQ(ctx context.Context) (int64, error) {
-	count, err := s.rdb.SCard(ctx, s.keys.dlqIDs()).Result()
+	count, err := s.kv.SCard(ctx, s.keys.dlqIDs())
 	if err != nil {
 		return 0, fmt.Errorf("dispatch/redis: count dlq: %w", err)
 	}

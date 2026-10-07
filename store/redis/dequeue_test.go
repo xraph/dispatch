@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	goredis "github.com/redis/go-redis/v9"
+	"github.com/xraph/grove/hook"
 
 	"github.com/xraph/grove/kv/drivers/redisdriver"
 
@@ -273,11 +273,17 @@ func TestDequeueOrdersNullPrimaryInputHashAsUnpreferred(t *testing.T) {
 // Scan cost
 // ──────────────────────────────────────────────────
 
-// countingHook tallies every command this client sends, pipelined ones
-// individually. A pipeline is one round trip but N commands of Redis
-// CPU, and Redis is single-threaded, so it is the command count — not
+// countingHook tallies the keys every kv command touches.
+//
+// Keys rather than calls, because a batch read is one call but N keys of
+// Redis CPU, and Redis is single-threaded: it is the per-key work — not
 // the round-trip count — that decides whether a deep queue starves
-// enqueues, heartbeats and lease renewals.
+// enqueues, heartbeats and lease renewals. MGetRaw reporting all its keys
+// is what keeps this honest, since a full scan hides behind a single call
+// otherwise.
+//
+// It hooks the kv store rather than a Redis client, so this measures the
+// same thing whatever driver is underneath.
 type countingHook struct {
 	mu sync.Mutex
 	n  int
@@ -304,22 +310,18 @@ func (h *countingHook) reset() {
 	h.n = 0
 }
 
-func (h *countingHook) DialHook(next goredis.DialHook) goredis.DialHook { return next }
+// BeforeQuery implements hook.PreQueryHook.
+func (h *countingHook) BeforeQuery(_ context.Context, qc *hook.QueryContext) (*hook.HookResult, error) {
+	keys, _ := qc.Values["_kv_keys"].([]string)
 
-func (h *countingHook) ProcessHook(next goredis.ProcessHook) goredis.ProcessHook {
-	return func(ctx context.Context, cmd goredis.Cmder) error {
+	// A command with no keys is still one unit of work.
+	if n := len(keys); n > 0 {
+		h.add(n)
+	} else {
 		h.add(1)
-
-		return next(ctx, cmd)
 	}
-}
 
-func (h *countingHook) ProcessPipelineHook(next goredis.ProcessPipelineHook) goredis.ProcessPipelineHook {
-	return func(ctx context.Context, cmds []goredis.Cmder) error {
-		h.add(len(cmds))
-
-		return next(ctx, cmds)
-	}
+	return nil, nil
 }
 
 // TestUnboundedDequeueDoesNotScanTheWholeQueue pins the promise the rest
@@ -366,10 +368,10 @@ func TestUnboundedDequeueDoesNotScanTheWholeQueue(t *testing.T) {
 		}
 	}
 
-	hook := &countingHook{}
-	redisdriver.UnwrapClient(s.KV()).AddHook(hook)
+	counter := &countingHook{}
+	s.KV().Hooks().AddHook(counter)
 
-	hook.reset()
+	counter.reset()
 
 	got, err := s.DequeueJobs(ctx, job.DequeueOpts{
 		Queues: []string{queue},
@@ -392,14 +394,14 @@ func TestUnboundedDequeueDoesNotScanTheWholeQueue(t *testing.T) {
 		}
 	}
 
-	if n := hook.count(); n > maxCommands {
+	if n := counter.count(); n > maxCommands {
 		t.Fatalf("an unbounded dequeue of %d jobs from a %d-deep queue cost %d Redis commands "+
 			"(want <= %d): the scan is proportional to the backlog, so the deeper the queue "+
 			"the more Redis CPU every poll of every worker burns",
 			limit, backlog, n, maxCommands)
 	}
 
-	t.Logf("unbounded dequeue: %d Redis commands at a backlog of %d", hook.count(), backlog)
+	t.Logf("unbounded dequeue: %d keys touched at a backlog of %d", counter.count(), backlog)
 }
 
 // TestBoundedDequeueStillSeesPastTheWindow is the other half of the
