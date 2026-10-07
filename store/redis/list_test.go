@@ -308,3 +308,63 @@ func TestListJobs_pagesThroughIDsFromOneMillisecond(t *testing.T) {
 		t.Fatalf("same-millisecond jobs across pages:\n got  %v\n want %v", got, want)
 	}
 }
+
+// The set and index counts that decide whether to backfill must come from
+// one MULTI. As two round trips, a delete landing between them makes the
+// set look one member ahead of the index, and the list rebuilds the whole
+// index for nothing (and can put back a member a concurrent delete just
+// removed). A race cannot be forced deterministically, so this pins the
+// shape instead: the counts travel in one MULTI, and a list over an index
+// that is in step with its set, including after a delete, never reads the
+// whole set.
+func TestListJobs_readsTheBackfillCountsInOneMulti(t *testing.T) {
+	ctx := context.Background()
+	s := redisstore.New(setupTestKV(t))
+
+	q := "counts-" + id.NewJobID().String()
+	var first *job.Job
+	for i := range 3 {
+		j := storetest.PendingJob(fmt.Sprintf("counts-%d", i), q, 0)
+		if err := s.EnqueueJob(ctx, j); err != nil {
+			t.Fatalf("enqueue %d: %v", i, err)
+		}
+		if first == nil {
+			first = j
+		}
+	}
+	if err := s.DeleteJob(ctx, first.ID); err != nil {
+		t.Fatalf("DeleteJob: %v", err)
+	}
+
+	sent := s.RecordCommandsForTest()
+	page, err := s.ListJobs(ctx, job.ListJobsOpts{Queue: q})
+	if err != nil {
+		t.Fatalf("ListJobs: %v", err)
+	}
+	if len(page.Jobs) != 2 {
+		t.Fatalf("listed %d jobs, want the 2 that were not deleted", len(page.Jobs))
+	}
+
+	singles, pipelines := sent()
+	for _, name := range singles {
+		switch name {
+		case "scard", "zcard":
+			t.Errorf("%s was sent on its own; the two counts must share one MULTI", name)
+		case "smembers", "zadd":
+			t.Errorf("%s was sent: an index in step with its set must not backfill", name)
+		}
+	}
+
+	var counted bool
+	for _, p := range pipelines {
+		if slices.Contains(p, "scard") && slices.Contains(p, "zcard") {
+			counted = true
+			if p[0] != "multi" || p[len(p)-1] != "exec" {
+				t.Errorf("counts pipeline = %v, want it wrapped in multi ... exec", p)
+			}
+		}
+	}
+	if !counted {
+		t.Errorf("no pipeline carried both SCARD and ZCARD; pipelines were %v", pipelines)
+	}
+}

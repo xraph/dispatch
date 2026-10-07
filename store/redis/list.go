@@ -92,7 +92,7 @@ func (sc indexScan[T]) page(ctx context.Context, s *Store, cursor id.ID, limit i
 	}
 
 	out := scanResult[T]{rows: []T{}}
-	matched := make([]string, 0, limit)
+	lastReturned := ""
 	examined := 0
 	lastSeen := ""
 
@@ -154,12 +154,12 @@ func (sc indexScan[T]) page(ctx context.Context, s *Store, cursor id.ID, limit i
 			}
 
 			if len(out.rows) == limit {
-				out.next, out.complete = matched[limit-1], true
+				out.next, out.complete = lastReturned, true
 
 				return out, nil
 			}
 			out.rows = append(out.rows, row)
-			matched = append(matched, m.Member)
+			lastReturned = m.Member
 		}
 
 		if exhausted {

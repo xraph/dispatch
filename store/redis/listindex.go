@@ -55,35 +55,44 @@ const backfillChunk = 500
 // entity's created-order index when the set has outgrown it. Every list
 // call runs it before reading the index; the check is two O(1) counts.
 //
+// The two counts are read in one MULTI, so they describe one instant. Read
+// as two round trips, a delete landing between them (it removes the ID
+// from the set and the index in one MULTI) would show the set one member
+// ahead of the index, and the list would run a full backfill although
+// nothing is missing. Worse, a delete that committed between that
+// backfill's SMEMBERS snapshot and its ZADD would have its member put
+// back in the index for good, since nothing removes index members except
+// the delete that already ran. With the counts in one MULTI a delete is
+// either wholly before the snapshot or wholly after it.
+//
 // On this release every create writes its index member before, or in the
-// same MULTI as, its ID-set member, so the set holds more members than
-// the index only when something wrote the set alone. That is every row
-// from a release before the index existed, and every row a process still
-// on that release writes during a rolling upgrade. Either way this ZADDs
-// the whole set with its scores. ZADD of a member already present with
-// the same score changes nothing, so a backfill racing another backfill
-// or a create is harmless.
+// same MULTI as, its ID-set member, and every delete removes both in one
+// MULTI. So a snapshot shows the set holding more members than the index
+// only when something wrote the set alone. That is every row from a
+// release before the index existed, and every row a process still on that
+// release writes during a rolling upgrade. Either way this ZADDs the whole
+// set with its scores. ZADD of a member already present with the same
+// score changes nothing, so a backfill racing another backfill or a create
+// is harmless.
 //
 // The index can also hold more members than the set, and that is no
-// reason to backfill. A create writes its member before its entity, and a
-// delete racing a backfill can leave a member whose entity is gone; the
-// reads skip both. The one gap is a rolling upgrade in which a previous
-// release process deletes rows (SREM without ZREM) and also adds them:
-// each stale member it leaves can offset one row it adds, and that row
-// stays out of the lists until the counts next differ. Once every process
-// runs this release, nothing writes the set without the index.
+// reason to backfill. A create writes its member before its entity, so a
+// crash in between leaves a member whose entity never arrives; the reads
+// skip it. The one gap is a rolling upgrade in which a previous release
+// process deletes rows (SREM without ZREM) and also adds them: each stale
+// member it leaves can offset one row it adds, and that row stays out of
+// the lists until the counts next differ. Once every process runs this
+// release, nothing writes the set without the index.
 func (s *Store) ensureBackfilled(ctx context.Context, entity, idsKey string) error {
 	index := s.keys.byCreated(entity)
 
-	inSet, err := s.kv.SCard(ctx, idsKey)
-	if err != nil {
-		return fmt.Errorf("dispatch/redis: count %s ids: %w", entity, err)
+	pipe := s.rdb.TxPipeline()
+	setCount := pipe.SCard(ctx, idsKey)
+	indexCount := pipe.ZCard(ctx, index)
+	if _, err := pipe.Exec(ctx); err != nil {
+		return fmt.Errorf("dispatch/redis: count %s ids and index: %w", entity, err)
 	}
-
-	inIndex, err := s.kv.ZCard(ctx, index)
-	if err != nil {
-		return fmt.Errorf("dispatch/redis: count %s index: %w", entity, err)
-	}
+	inSet, inIndex := setCount.Val(), indexCount.Val()
 
 	if inSet <= inIndex {
 		return nil
