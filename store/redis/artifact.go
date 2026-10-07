@@ -141,6 +141,13 @@ func (s *Store) CreateArtifact(ctx context.Context, a *artifact.Artifact, link *
 		return artifact.ErrExists
 	}
 
+	// Index before the entity; indexCreated says why the order matters.
+	if err := s.indexCreated(ctx, entityArtifact, a.ID); err != nil {
+		s.rdb.Del(ctx, guard)
+
+		return fmt.Errorf("dispatch/redis: create artifact created index: %w", err)
+	}
+
 	if err := s.setEntity(ctx, s.keys.artifact(a.ID.String()), toArtifactEntity(a)); err != nil {
 		// Release the guard so the coordinates are not permanently burned.
 		s.rdb.Del(ctx, guard)
@@ -831,6 +838,7 @@ func (s *Store) PurgeArtifact(ctx context.Context, artifactID id.ArtifactID) err
 	pipe.Del(ctx, s.keys.artifact(key))
 	pipe.Del(ctx, s.keys.artifactLinks(key))
 	pipe.SRem(ctx, s.keys.artifactIDs(), key)
+	pipe.ZRem(ctx, s.keys.byCreated(entityArtifact), key)
 	pipe.ZRem(ctx, s.keys.artifactEphemeral(), key)
 	pipe.ZRem(ctx, s.keys.artifactDeleted(), key)
 

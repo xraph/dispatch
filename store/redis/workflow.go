@@ -89,6 +89,11 @@ func (s *Store) CreateRun(ctx context.Context, run *workflow.Run) error {
 		return dispatch.ErrJobAlreadyExists // reuse duplicate sentinel
 	}
 
+	// Index before the entity; indexCreated says why the order matters.
+	if err := s.indexCreated(ctx, entityRun, run.ID); err != nil {
+		return fmt.Errorf("dispatch/redis: create run created index: %w", err)
+	}
+
 	e := toRunEntity(run)
 	if err := s.setEntity(ctx, key, e); err != nil {
 		return fmt.Errorf("dispatch/redis: create run set: %w", err)

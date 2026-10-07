@@ -110,6 +110,11 @@ func (s *Store) PushDLQ(ctx context.Context, entry *dlq.Entry) error {
 	eID := entry.ID.String()
 	key := s.keys.dlq(eID)
 
+	// Index before the entity; indexCreated says why the order matters.
+	if err := s.indexCreated(ctx, entityDLQ, entry.ID); err != nil {
+		return fmt.Errorf("dispatch/redis: push dlq created index: %w", err)
+	}
+
 	e := toDLQEntity(entry)
 	if err := s.setEntity(ctx, key, e); err != nil {
 		return fmt.Errorf("dispatch/redis: push dlq set: %w", err)
@@ -194,6 +199,7 @@ func (s *Store) PurgeDLQ(ctx context.Context, before time.Time) (int64, error) {
 			pipe := s.rdb.TxPipeline()
 			pipe.Del(ctx, key)
 			pipe.SRem(ctx, s.keys.dlqIDs(), eID)
+			pipe.ZRem(ctx, s.keys.byCreated(entityDLQ), eID)
 			if _, pErr := pipe.Exec(ctx); pErr != nil {
 				return purged, fmt.Errorf("dispatch/redis: purge dlq del: %w", pErr)
 			}

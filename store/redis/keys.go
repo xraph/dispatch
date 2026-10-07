@@ -128,3 +128,13 @@ func (k keys) artifactLinks(artifactID string) string {
 func (k keys) ownerLinks(kind, ownerID string) string {
 	return k.full(fmt.Sprintf("artifact_owner_links:%s:%s", kind, ownerID))
 }
+
+// ── Created-order index keys ──
+
+// byCreated is the Sorted Set of every ID of one entity kind (entityJob,
+// entityRun, entityDLQ, entityArtifact) scored by the Unix millisecond
+// minted into the ID. The paged lists walk it newest first. The *_ids
+// sets stay the source of truth for everything else, and a list call
+// backfills the index from them whenever a set holds more members than
+// its index.
+func (k keys) byCreated(entity string) string { return k.full(entity + "_by_created") }

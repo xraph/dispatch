@@ -202,6 +202,7 @@ func (s *Store) EnqueueJob(ctx context.Context, j *job.Job) error {
 
 	pipe := s.rdb.TxPipeline()
 	pipe.SAdd(ctx, s.keys.jobIDs(), jID)
+	pipe.ZAdd(ctx, s.keys.byCreated(entityJob), goredis.Z{Score: createdScore(j.ID), Member: jID})
 
 	// Add to queue sorted set: score = priority (negated for DESC) + time component.
 	score := jobScore(j.Priority, j.RunAt)
@@ -321,6 +322,7 @@ func (s *Store) DeleteJob(ctx context.Context, jobID id.JobID) error {
 	pipe := s.rdb.TxPipeline()
 	pipe.Del(ctx, key)
 	pipe.SRem(ctx, s.keys.jobIDs(), jID)
+	pipe.ZRem(ctx, s.keys.byCreated(entityJob), jID)
 	pipe.ZRem(ctx, s.keys.queue(e.Queue), jID)
 	_, err := pipe.Exec(ctx)
 	if err != nil {
