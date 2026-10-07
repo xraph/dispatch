@@ -529,9 +529,19 @@ type workerModel struct {
 	LastSeen    time.Time `grove:"last_seen,notnull"`
 	Metadata    string    `grove:"metadata,notnull,default:'{}'"`
 	CreatedAt   time.Time `grove:"created_at,notnull"`
+
+	// Capacity uses the nullable TEXT encoding jobModel's resource sets
+	// use: resource.EncodeSetString writes NULL for a zero Set, so a
+	// worker that advertised nothing reads back as a nil Set.
+	Capacity *string `grove:"capacity"`
 }
 
-func toWorkerModel(w *cluster.Worker) *workerModel {
+func toWorkerModel(w *cluster.Worker) (*workerModel, error) {
+	capacity, err := resource.EncodeSetString(w.Capacity)
+	if err != nil {
+		return nil, fmt.Errorf("dispatch/sqlite: encode worker capacity: %w", err)
+	}
+
 	return &workerModel{
 		ID:          w.ID.String(),
 		Hostname:    w.Hostname,
@@ -543,7 +553,8 @@ func toWorkerModel(w *cluster.Worker) *workerModel {
 		LastSeen:    w.LastSeen,
 		Metadata:    mapToJSON(w.Metadata),
 		CreatedAt:   w.CreatedAt,
-	}
+		Capacity:    capacity,
+	}, nil
 }
 
 func fromWorkerModel(m *workerModel) (*cluster.Worker, error) {
@@ -552,12 +563,18 @@ func fromWorkerModel(m *workerModel) (*cluster.Worker, error) {
 		return nil, fmt.Errorf("dispatch/sqlite: parse worker id %q: %w", m.ID, err)
 	}
 
+	capacity, err := resource.DecodeSetString(m.Capacity)
+	if err != nil {
+		return nil, fmt.Errorf("dispatch/sqlite: decode worker capacity: %w", err)
+	}
+
 	return &cluster.Worker{
 		ID:          parsedID,
 		Hostname:    m.Hostname,
 		Queues:      jsonToStrings(m.Queues),
 		Concurrency: m.Concurrency,
 		State:       cluster.WorkerState(m.State),
+		Capacity:    capacity,
 		IsLeader:    m.IsLeader,
 		LeaderUntil: strToTime(m.LeaderUntil),
 		LastSeen:    m.LastSeen,

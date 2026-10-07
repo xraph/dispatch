@@ -13,13 +13,17 @@ import (
 // RegisterWorker adds a new worker to the cluster registry.
 // Uses ON CONFLICT to upsert if the worker already exists.
 func (s *Store) RegisterWorker(ctx context.Context, w *cluster.Worker) error {
-	m := toWorkerModel(w)
-	_, err := s.sdb.NewInsert(m).
+	m, err := toWorkerModel(w)
+	if err != nil {
+		return err
+	}
+	_, err = s.sdb.NewInsert(m).
 		OnConflict("(id) DO UPDATE").
 		Set("hostname = EXCLUDED.hostname").
 		Set("queues = EXCLUDED.queues").
 		Set("concurrency = EXCLUDED.concurrency").
 		Set("state = EXCLUDED.state").
+		Set("capacity = EXCLUDED.capacity").
 		Set("last_seen = EXCLUDED.last_seen").
 		Set("metadata = EXCLUDED.metadata").
 		Exec(ctx)
@@ -57,6 +61,22 @@ func (s *Store) HeartbeatWorker(ctx context.Context, workerID id.WorkerID) error
 		return dispatch.ErrWorkerNotFound
 	}
 	return nil
+}
+
+// GetWorker returns one registered worker.
+func (s *Store) GetWorker(ctx context.Context, workerID id.WorkerID) (*cluster.Worker, error) {
+	m := new(workerModel)
+	err := s.sdb.NewSelect(m).
+		Where("id = ?", workerID.String()).
+		Limit(1).
+		Scan(ctx)
+	if err != nil {
+		if isNoRows(err) {
+			return nil, dispatch.ErrWorkerNotFound
+		}
+		return nil, fmt.Errorf("dispatch/sqlite: get worker: %w", err)
+	}
+	return fromWorkerModel(m)
 }
 
 // ListWorkers returns all registered workers.

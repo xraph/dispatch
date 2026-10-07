@@ -520,9 +520,19 @@ type workerModel struct {
 	LastSeen    time.Time         `grove:"last_seen,notnull,default:current_timestamp"`
 	Metadata    map[string]string `grove:"metadata,type:jsonb"`
 	CreatedAt   time.Time         `grove:"created_at,notnull,default:current_timestamp"`
+
+	// Capacity uses the jsonb codec jobModel's resource sets use:
+	// resource.EncodeSet writes NULL for a zero Set, so a worker that
+	// advertised nothing reads back as a nil Set.
+	Capacity []byte `grove:"capacity,type:jsonb"`
 }
 
-func toWorkerModel(w *cluster.Worker) *workerModel {
+func toWorkerModel(w *cluster.Worker) (*workerModel, error) {
+	capacity, err := resource.EncodeSet(w.Capacity)
+	if err != nil {
+		return nil, fmt.Errorf(errPrefix+"encode worker capacity: %w", err)
+	}
+
 	return &workerModel{
 		ID:          w.ID.String(),
 		Hostname:    w.Hostname,
@@ -534,7 +544,8 @@ func toWorkerModel(w *cluster.Worker) *workerModel {
 		LastSeen:    w.LastSeen,
 		Metadata:    w.Metadata,
 		CreatedAt:   w.CreatedAt,
-	}
+		Capacity:    capacity,
+	}, nil
 }
 
 func fromWorkerModel(m *workerModel) (*cluster.Worker, error) {
@@ -543,12 +554,18 @@ func fromWorkerModel(m *workerModel) (*cluster.Worker, error) {
 		return nil, fmt.Errorf(errPrefix+"parse worker id %q: %w", m.ID, err)
 	}
 
+	capacity, err := resource.DecodeSet(m.Capacity)
+	if err != nil {
+		return nil, fmt.Errorf(errPrefix+"decode worker capacity: %w", err)
+	}
+
 	return &cluster.Worker{
 		ID:          parsedID,
 		Hostname:    m.Hostname,
 		Queues:      m.Queues,
 		Concurrency: m.Concurrency,
 		State:       cluster.WorkerState(m.State),
+		Capacity:    capacity,
 		IsLeader:    m.IsLeader,
 		LeaderUntil: m.LeaderUntil,
 		LastSeen:    m.LastSeen,

@@ -8,6 +8,7 @@ import (
 	"github.com/xraph/dispatch"
 	"github.com/xraph/dispatch/cluster"
 	"github.com/xraph/dispatch/id"
+	"github.com/xraph/dispatch/resource"
 )
 
 // ── JSON model for KV storage ──
@@ -23,6 +24,11 @@ type workerEntity struct {
 	LastSeen    time.Time         `json:"last_seen"`
 	Metadata    map[string]string `json:"metadata,omitempty"`
 	CreatedAt   time.Time         `json:"created_at"`
+
+	// Capacity is the JSON object the job and DLQ entities use for their
+	// resource sets; omitempty keeps a zero Set out of the entity, so it
+	// reads back as nil.
+	Capacity resource.Set `json:"capacity,omitempty"`
 }
 
 func toWorkerEntity(w *cluster.Worker) *workerEntity {
@@ -37,6 +43,7 @@ func toWorkerEntity(w *cluster.Worker) *workerEntity {
 		LastSeen:    w.LastSeen,
 		Metadata:    w.Metadata,
 		CreatedAt:   w.CreatedAt,
+		Capacity:    w.Capacity,
 	}
 }
 
@@ -52,6 +59,7 @@ func fromWorkerEntity(e *workerEntity) (*cluster.Worker, error) {
 		Queues:      e.Queues,
 		Concurrency: e.Concurrency,
 		State:       cluster.WorkerState(e.State),
+		Capacity:    e.Capacity,
 		IsLeader:    e.IsLeader,
 		LeaderUntil: e.LeaderUntil,
 		LastSeen:    e.LastSeen,
@@ -100,8 +108,16 @@ func (s *Store) DeregisterWorker(ctx context.Context, workerID id.WorkerID) erro
 }
 
 // HeartbeatWorker updates the last-seen timestamp for a worker.
+//
+// The read and the write are two round trips, so a DeleteStaleWorkers
+// that lands between them deletes the entity and its worker_ids member,
+// then the write puts the entity back alone. Re-adding the member here
+// heals that: without it the heartbeat keeps succeeding against a worker
+// ListWorkers cannot see, and the engine, which re-registers only on
+// ErrWorkerNotFound, never notices. SAdd of an existing member is a no-op.
 func (s *Store) HeartbeatWorker(ctx context.Context, workerID id.WorkerID) error {
-	key := s.keys.worker(workerID.String())
+	wID := workerID.String()
+	key := s.keys.worker(wID)
 
 	var e workerEntity
 	if err := s.getEntity(ctx, key, &e); err != nil {
@@ -112,7 +128,26 @@ func (s *Store) HeartbeatWorker(ctx context.Context, workerID id.WorkerID) error
 	}
 
 	e.LastSeen = now()
-	return s.setEntity(ctx, key, &e)
+	if err := s.setEntity(ctx, key, &e); err != nil {
+		return fmt.Errorf("dispatch/redis: heartbeat set: %w", err)
+	}
+
+	if err := s.rdb.SAdd(ctx, s.keys.workerIDs(), wID).Err(); err != nil {
+		return fmt.Errorf("dispatch/redis: heartbeat index: %w", err)
+	}
+	return nil
+}
+
+// GetWorker returns one registered worker.
+func (s *Store) GetWorker(ctx context.Context, workerID id.WorkerID) (*cluster.Worker, error) {
+	var e workerEntity
+	if err := s.getEntity(ctx, s.keys.worker(workerID.String()), &e); err != nil {
+		if isNotFound(err) {
+			return nil, dispatch.ErrWorkerNotFound
+		}
+		return nil, fmt.Errorf("dispatch/redis: get worker: %w", err)
+	}
+	return fromWorkerEntity(&e)
 }
 
 // ListWorkers returns all registered workers.

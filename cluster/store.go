@@ -16,8 +16,14 @@ type Store interface {
 	DeregisterWorker(ctx context.Context, workerID id.WorkerID) error
 
 	// HeartbeatWorker updates the last-seen timestamp for a worker,
-	// indicating it is still alive.
+	// indicating it is still alive. It returns dispatch.ErrWorkerNotFound
+	// when the row is gone, which the engine's heartbeat takes as the
+	// signal to register the worker again.
 	HeartbeatWorker(ctx context.Context, workerID id.WorkerID) error
+
+	// GetWorker returns one registered worker, or dispatch.ErrWorkerNotFound
+	// when no row exists for workerID.
+	GetWorker(ctx context.Context, workerID id.WorkerID) (*Worker, error)
 
 	// ListWorkers returns all registered workers.
 	ListWorkers(ctx context.Context) ([]*Worker, error)

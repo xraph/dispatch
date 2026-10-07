@@ -522,10 +522,14 @@ type workerModel struct {
 	LastSeen    time.Time         `grove:"last_seen,notnull" bson:"last_seen"`
 	Metadata    map[string]string `grove:"metadata"       bson:"metadata,omitempty"`
 	CreatedAt   time.Time         `grove:"created_at,notnull" bson:"created_at"`
+
+	// Capacity is a native BSON subdocument, as the resource sets on
+	// jobModel are. A zero Set is stored as null and reads back as nil.
+	Capacity resource.Set `grove:"capacity" bson:"capacity,omitempty"`
 }
 
 func toWorkerModel(w *cluster.Worker) *workerModel {
-	return &workerModel{
+	m := &workerModel{
 		ID:          w.ID.String(),
 		Hostname:    w.Hostname,
 		Queues:      w.Queues,
@@ -537,6 +541,14 @@ func toWorkerModel(w *cluster.Worker) *workerModel {
 		Metadata:    w.Metadata,
 		CreatedAt:   w.CreatedAt,
 	}
+
+	// Left nil for a zero Set, for the reason toJobModel gives: nil is
+	// what reads back, never an empty subdocument.
+	if !w.Capacity.IsZero() {
+		m.Capacity = w.Capacity
+	}
+
+	return m
 }
 
 func fromWorkerModel(m *workerModel) (*cluster.Worker, error) {
@@ -551,6 +563,7 @@ func fromWorkerModel(m *workerModel) (*cluster.Worker, error) {
 		Queues:      m.Queues,
 		Concurrency: m.Concurrency,
 		State:       cluster.WorkerState(m.State),
+		Capacity:    m.Capacity,
 		IsLeader:    m.IsLeader,
 		LeaderUntil: m.LeaderUntil,
 		LastSeen:    m.LastSeen,

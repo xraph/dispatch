@@ -689,6 +689,29 @@ func init() {
 						DROP COLUMN IF EXISTS primary_input_hash`)
 			},
 		},
+
+		// cluster.Worker.Capacity had no column, so every worker read back
+		// with an empty capacity and the enqueue-time fleet check, which
+		// takes the largest capacity among live workers, never saw one.
+		&migrate.Migration{
+			Name:    "worker_capacity_column",
+			Version: "20261008120000",
+			Up: func(ctx context.Context, exec migrate.Executor) error {
+				// Under the lock timeout for the reason given on
+				// job_resource_columns. A nullable column with no default
+				// is a catalog update, not a table rewrite, and every
+				// running worker heartbeats this table, so a long wait for
+				// its lock would stall them all.
+				return withLockTimeout(ctx, exec, `
+					ALTER TABLE dispatch_workers
+						ADD COLUMN IF NOT EXISTS capacity JSONB`)
+			},
+			Down: func(ctx context.Context, exec migrate.Executor) error {
+				return withLockTimeout(ctx, exec, `
+					ALTER TABLE dispatch_workers
+						DROP COLUMN IF EXISTS capacity`)
+			},
+		},
 	)
 }
 

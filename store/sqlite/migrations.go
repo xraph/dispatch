@@ -614,6 +614,24 @@ func init() {
 				return nil
 			},
 		},
+
+		// cluster.Worker.Capacity had no column, so every worker read back
+		// with an empty capacity and the enqueue-time fleet check, which
+		// takes the largest capacity among live workers, never saw one.
+		&migrate.Migration{
+			Name:    "worker_capacity_column",
+			Version: "20261008120000",
+			Up: func(ctx context.Context, exec migrate.Executor) error {
+				// Guarded like every other ADD COLUMN here: SQLite has no
+				// ADD COLUMN IF NOT EXISTS, and grove runs Up outside a
+				// transaction. Nullable TEXT, matching the resource sets on
+				// dispatch_jobs and dispatch_dlq.
+				return addColumnIfMissing(ctx, exec, "dispatch_workers", "capacity", `TEXT`)
+			},
+			Down: func(ctx context.Context, exec migrate.Executor) error {
+				return dropColumnIfPresent(ctx, exec, "dispatch_workers", "capacity")
+			},
+		},
 	)
 }
 

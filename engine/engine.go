@@ -232,16 +232,13 @@ func WithResourceDefaults(global resource.Set, perQueue map[string]resource.Set)
 // declared its own 2 GiB would hard-reject the tessellation job the
 // heavy tier runs perfectly well.
 //
-// The check cannot derive the fleet maximum for itself, because
-// cluster.Worker.Capacity does not round-trip. Only store/memory carries
-// it; postgres, sqlite, mongo, redis and the k8s provider all enumerate
-// worker fields by hand and drop it, so a worker registered with
-// {memory: 64GiB} reads back an empty map. MaxWorkerCapacity therefore
-// sees this value and — on memory alone — whatever live workers
-// published, never the real fleet maximum. Persisting Capacity in those
-// four models would make the derivation honest and is tracked as
-// follow-up work; until then, declaring the ceiling is the operator's
-// job or the check stays off.
+// The check cannot derive the fleet maximum for itself. Every store
+// backend now persists cluster.Worker.Capacity (the k8s provider still
+// drops it), but a worker's row carries only what that worker passed
+// here, so a fleet in which nobody declared reads back with no capacity
+// at all. MaxWorkerCapacity therefore starts from this value and lets
+// live workers' published capacities raise it, never lower it.
+// Declaring the ceiling is the operator's job, or the check stays off.
 //
 // It is deliberately NOT defaulted from WithResourceManager's capacity.
 // That default read as a convenience and behaved as a silent rescope of
@@ -513,7 +510,7 @@ func Build(d *dispatch.Dispatcher, opts ...Option) (*Engine, error) {
 		// The manager describes THIS process; workerCapacity is the floor
 		// of a fleet-wide check. Defaulting one from the other rescoped
 		// the question to one process, and because cluster.Worker.Capacity
-		// does not round-trip on four of the five backends, nothing could
+		// did not then round-trip on four of the five backends, nothing could
 		// raise it back to the fleet maximum afterwards — so a light API
 		// worker rejected at enqueue every job bigger than itself. See
 		// WithWorkerCapacity.

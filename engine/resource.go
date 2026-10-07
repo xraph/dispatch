@@ -269,11 +269,11 @@ func inputSizes(bindings map[string]artifact.Ref) (
 //
 // It is empty unless an operator called WithWorkerCapacity, and that
 // gate is the whole correctness argument. The registry cannot supply the
-// fleet maximum on its own: cluster.Worker.Capacity round-trips only on
-// store/memory — postgres, sqlite, mongo, redis and the k8s provider all
-// enumerate worker fields by hand and drop it — so a fleet whose largest
-// worker has 64 GiB reads back as a fleet of workers with no capacity at
-// all. Deriving the ceiling from whatever this process happens to know
+// fleet maximum on its own: a worker's row carries only the capacity
+// that worker declared through WithWorkerCapacity (and the k8s provider
+// does not persist it at all), so a fleet whose largest worker has
+// 64 GiB but declared nothing reads back as a fleet of workers with no
+// capacity. Deriving the ceiling from whatever this process happens to know
 // therefore does not converge on the truth; it converges on THIS
 // process, and rejects at enqueue every job bigger than the pod that
 // enqueued it. Requiring the declaration also keeps the common path free

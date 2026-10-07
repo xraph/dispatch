@@ -3,6 +3,8 @@ package memory
 import (
 	"context"
 	"fmt"
+	"maps"
+	"slices"
 	"sort"
 	"sync"
 	"time"
@@ -817,12 +819,31 @@ func (m *Store) AckEvent(_ context.Context, eventID id.EventID) error {
 // Cluster Store
 // ──────────────────────────────────────────────────
 
-// RegisterWorker adds a new worker to the cluster registry.
+// cloneWorker returns a copy of w that shares no maps, slices or pointers
+// with it. The store keeps its own copy and hands out copies, because the
+// engine's heartbeat writes LastSeen on one goroutine while the dashboard
+// and the fleet capacity check read workers on others.
+func cloneWorker(w *cluster.Worker) *cluster.Worker {
+	out := *w
+	out.Queues = slices.Clone(w.Queues)
+	out.Capacity = w.Capacity.Clone()
+	out.Metadata = maps.Clone(w.Metadata)
+
+	if w.LeaderUntil != nil {
+		until := *w.LeaderUntil
+		out.LeaderUntil = &until
+	}
+
+	return &out
+}
+
+// RegisterWorker adds a worker to the cluster registry, replacing any
+// existing entry with the same ID.
 func (m *Store) RegisterWorker(_ context.Context, w *cluster.Worker) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	m.workers[w.ID.String()] = w
+	m.workers[w.ID.String()] = cloneWorker(w)
 	return nil
 }
 
@@ -852,6 +873,18 @@ func (m *Store) HeartbeatWorker(_ context.Context, workerID id.WorkerID) error {
 	return nil
 }
 
+// GetWorker returns a copy of one registered worker.
+func (m *Store) GetWorker(_ context.Context, workerID id.WorkerID) (*cluster.Worker, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	w, ok := m.workers[workerID.String()]
+	if !ok {
+		return nil, dispatch.ErrWorkerNotFound
+	}
+	return cloneWorker(w), nil
+}
+
 // ListWorkers returns all registered workers.
 func (m *Store) ListWorkers(_ context.Context) ([]*cluster.Worker, error) {
 	m.mu.RLock()
@@ -859,7 +892,7 @@ func (m *Store) ListWorkers(_ context.Context) ([]*cluster.Worker, error) {
 
 	result := make([]*cluster.Worker, 0, len(m.workers))
 	for _, w := range m.workers {
-		result = append(result, w)
+		result = append(result, cloneWorker(w))
 	}
 
 	sort.Slice(result, func(i, k int) bool {
@@ -879,7 +912,7 @@ func (m *Store) ReapDeadWorkers(_ context.Context, threshold time.Duration) ([]*
 	var dead []*cluster.Worker
 	for _, w := range m.workers {
 		if w.LastSeen.Before(cutoff) {
-			dead = append(dead, w)
+			dead = append(dead, cloneWorker(w))
 		}
 	}
 	return dead, nil
@@ -962,5 +995,5 @@ func (m *Store) GetLeader(_ context.Context) (*cluster.Worker, error) {
 	if !ok {
 		return nil, nil
 	}
-	return w, nil
+	return cloneWorker(w), nil
 }
