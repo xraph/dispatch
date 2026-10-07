@@ -113,6 +113,18 @@ type Engine struct {
 	clusterStore cluster.Store
 	scheduler    *cron.Scheduler
 
+	// self is the cluster row Build registered for this worker. The row
+	// heartbeat (heartbeat.go) registers it again from here when another
+	// instance's stale sweep has deleted it.
+	self cluster.Worker
+
+	// heartbeatCancel and heartbeatDone belong to the running row
+	// heartbeat; both are nil when it is not running. heartbeatMu guards
+	// them so Start and Stop can race without leaking the goroutine.
+	heartbeatMu     sync.Mutex
+	heartbeatCancel context.CancelFunc
+	heartbeatDone   chan struct{}
+
 	// wakeStop terminates the store wake listener (store.WakeNotifier);
 	// nil when the store has no push capability.
 	wakeStop func()
@@ -577,17 +589,20 @@ func Build(d *dispatch.Dispatcher, opts ...Option) (*Engine, error) {
 	if hostnameErr != nil {
 		hostname = "unknown"
 	}
-	w := &cluster.Worker{
+	registeredAt := time.Now().UTC()
+	eng.self = cluster.Worker{
 		ID:          eng.pool.WorkerID(),
 		Hostname:    hostname,
 		Queues:      config.Queues,
 		Concurrency: config.Concurrency,
 		Capacity:    eng.workerCapacity.Clone(),
 		State:       cluster.WorkerActive,
-		LastSeen:    time.Now().UTC(),
-		CreatedAt:   time.Now().UTC(),
+		LastSeen:    registeredAt,
+		CreatedAt:   registeredAt,
 	}
-	if regErr := cls.RegisterWorker(context.Background(), w); regErr != nil {
+	// A failure here is not fatal: the row heartbeat started by Start
+	// registers the row on its first beat when it finds it missing.
+	if regErr := cls.RegisterWorker(context.Background(), eng.workerRow()); regErr != nil {
 		logger.Warn("failed to register worker in cluster store", log.String("error", regErr.Error()))
 	}
 
@@ -749,6 +764,9 @@ func (eng *Engine) Start(ctx context.Context) error {
 		}
 	}
 
+	// Keep this worker's cluster row alive. See startHeartbeat.
+	eng.startHeartbeat(ctx)
+
 	return nil
 }
 
@@ -759,6 +777,11 @@ func (eng *Engine) Stop(ctx context.Context) error {
 		eng.wakeStop()
 		eng.wakeStop = nil
 	}
+
+	// Stop the row heartbeat before deregistering. A beat that ran after
+	// the delete would find the row missing and register it again,
+	// leaving a stopped worker listed as live until the next sweep.
+	eng.stopHeartbeat(ctx)
 
 	// Deregister this worker from the cluster.
 	if err := eng.clusterStore.DeregisterWorker(ctx, eng.pool.WorkerID()); err != nil {
