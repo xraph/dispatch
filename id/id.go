@@ -9,6 +9,7 @@ import (
 	"database/sql/driver"
 	"encoding/binary"
 	"fmt"
+	"time"
 
 	"go.jetify.com/typeid/v2"
 )
@@ -234,6 +235,27 @@ func (i ID) Prefix() Prefix {
 // IsNil reports whether this ID is the zero value.
 func (i ID) IsNil() bool {
 	return !i.valid
+}
+
+// Time returns the creation instant carried in the ID's UUIDv7 timestamp,
+// at millisecond precision. The nil ID returns the zero time.
+//
+// Stores that keep IDs in an unordered structure (redis sets) use it to
+// score an ordered index, which is why it lives here and not in a store.
+func (i ID) Time() time.Time {
+	if !i.valid {
+		return time.Time{}
+	}
+
+	b := i.inner.Bytes()
+	if len(b) < 6 {
+		return time.Time{}
+	}
+
+	ms := int64(b[0])<<40 | int64(b[1])<<32 | int64(b[2])<<24 |
+		int64(b[3])<<16 | int64(b[4])<<8 | int64(b[5])
+
+	return time.UnixMilli(ms).UTC()
 }
 
 // MarshalText implements encoding.TextMarshaler.
