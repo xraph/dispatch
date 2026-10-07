@@ -231,7 +231,7 @@ templ-watch:
 	templ generate --watch ./dashboard/...
 
 ## all: Run templ generate, check, test, and build
-all: templ check test build
+all: check test build
 	@echo "$(GREEN)✓ All tasks complete$(NC)"
 
 # Short aliases
