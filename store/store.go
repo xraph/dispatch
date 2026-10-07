@@ -33,12 +33,16 @@ type WakeNotifier interface {
 // A single backend (postgres, bun, sqlite, etc.) implements all of them.
 type Store interface {
 	job.Store
+	job.Lister
 	workflow.Store
+	workflow.PageLister
 	cron.Store
 	dlq.Store
+	dlq.PageLister
 	event.Store
 	cluster.Store
 	artifact.Store
+	artifact.PageLister
 
 	// Migrate runs all schema migrations.
 	Migrate(ctx context.Context) error
