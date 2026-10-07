@@ -712,7 +712,67 @@ func init() {
 						DROP COLUMN IF EXISTS capacity`)
 			},
 		},
+
+		// The paged lists read newest first by ID with optional exact-match
+		// filters. With no index ending in id, a filtered page either walks
+		// the primary key backwards and drops every row that fails the
+		// filter, which reads most of a large table when matches are rare,
+		// or fetches every match and sorts them. An index on (filter, id)
+		// turns the filter into an index condition and hands rows back
+		// already in ID order, so a page stops after limit+1 rows.
+		//
+		// The name prefix filter gets no index. starts_with can only use
+		// a B-tree under the C collation, and even then the index returns
+		// matches in name order, so every match would still be sorted by
+		// ID before the first row came back. A prefix rides on whichever
+		// index the other filters choose, or on the primary key.
+		&migrate.Migration{
+			Name:    "list_order_indexes",
+			Version: "20261008130000",
+			Up: func(ctx context.Context, exec migrate.Executor) error {
+				// CONCURRENTLY, with an invalid leftover dropped first,
+				// for the reasons given on add_job_lease_columns: a plain
+				// CREATE INDEX blocks every write to the table for the
+				// whole build, and dispatch_jobs is the fleet's hottest
+				// table. The other three tables take a write on every dead
+				// letter, workflow step and upload, so they get the same
+				// treatment.
+				for _, ix := range listOrderIndexes {
+					if err := dropIfInvalid(ctx, exec, ix.name); err != nil {
+						return err
+					}
+
+					if _, err := exec.Exec(ctx, `CREATE INDEX CONCURRENTLY IF NOT EXISTS `+
+						ix.name+` ON `+ix.table+` (`+ix.columns+`)`); err != nil {
+						return err
+					}
+				}
+
+				return nil
+			},
+			Down: func(ctx context.Context, exec migrate.Executor) error {
+				for _, ix := range listOrderIndexes {
+					if _, err := exec.Exec(ctx,
+						`DROP INDEX CONCURRENTLY IF EXISTS `+ix.name); err != nil {
+						return err
+					}
+				}
+
+				return nil
+			},
+		},
 	)
+}
+
+// listOrderIndexes are the indexes list_order_indexes builds, one per
+// exact-match filter a paged list can narrow by. Each ends in id so a
+// backward walk returns the filtered rows newest first.
+var listOrderIndexes = []struct{ name, table, columns string }{
+	{"idx_dispatch_jobs_list_state", "dispatch_jobs", "state, id"},
+	{"idx_dispatch_jobs_list_queue", "dispatch_jobs", "queue, id"},
+	{"idx_dispatch_dlq_list_queue", "dispatch_dlq", "queue, id"},
+	{"idx_dispatch_workflow_runs_list_state", "dispatch_workflow_runs", "state, id"},
+	{"idx_dispatch_artifacts_list_scope", "dispatch_artifacts", "scope_app_id, id"},
 }
 
 // ddlLockTimeout bounds how long a DDL statement waits for its ACCESS

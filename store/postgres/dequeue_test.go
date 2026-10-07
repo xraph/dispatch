@@ -160,6 +160,13 @@ func TestDequeueBoundedQueryPlanUsesDequeueIndex(t *testing.T) {
 		// and two per claim on the busiest table in the schema for a plan
 		// the planner would never pick. Its absence is asserted below.
 		`DROP INDEX idx_dispatch_jobs_state`,
+		// The paged list indexes (migration list_order_indexes) lead with
+		// state and with queue. Every row here is pending, so they are no
+		// bigger than the partial dequeue index and narrower, and win on
+		// cost the same way. On a real table, where finished jobs far
+		// outnumber pending ones, the partial index is the small one.
+		`DROP INDEX idx_dispatch_jobs_list_state`,
+		`DROP INDEX idx_dispatch_jobs_list_queue`,
 	} {
 		if _, execErr := conn.Exec(ctx, stmt); execErr != nil {
 			t.Fatalf("%s: %v", stmt, execErr)

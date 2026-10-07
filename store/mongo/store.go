@@ -173,6 +173,8 @@ func migrationIndexes() map[string][]mongod.IndexModel {
 				{Key: "scope_app_id", Value: 1},
 				{Key: "scope_org_id", Value: 1},
 			}},
+			// Paged list by tenant. See listOrderKeys.
+			listOrderKeys("scope_app_id"),
 		},
 		colArtifactLinks: {
 			{
@@ -212,10 +214,15 @@ func migrationIndexes() map[string][]mongod.IndexModel {
 			}},
 			// Lease index for the expired-lease reclaim scan.
 			{Keys: bson.D{{Key: "state", Value: 1}, {Key: "lease_expires_at", Value: 1}}},
+			// Paged list by state and by queue. See listOrderKeys.
+			listOrderKeys("state"),
+			listOrderKeys("queue"),
 		},
 		colWorkflowRuns: {
 			{Keys: bson.D{{Key: "state", Value: 1}}},
 			{Keys: bson.D{{Key: "created_at", Value: 1}}},
+			// Paged list by state. See listOrderKeys.
+			listOrderKeys("state"),
 		},
 		colCheckpoints: {
 			// Unique compound index on (run_id, step_name).
@@ -241,6 +248,8 @@ func migrationIndexes() map[string][]mongod.IndexModel {
 				{Key: "queue", Value: 1},
 				{Key: "failed_at", Value: -1},
 			}},
+			// Paged list by queue. See listOrderKeys.
+			listOrderKeys("queue"),
 		},
 		colEvents: {
 			// Pending events index for subscribe.
@@ -283,4 +292,23 @@ func migrationIndexes() map[string][]mongod.IndexModel {
 			},
 		},
 	}
+}
+
+// listOrderKeys is the index a paged list reads through when it filters
+// on field: the filter first, then _id descending, the order every page
+// is read in. Mongo turns the filter into index bounds and returns the
+// matches already newest first, so a page stops after limit+1 documents
+// instead of sorting every match or walking _id and discarding the rest.
+// A one-element $in, which ListJobs sends for one state, is planned as an
+// equality. Several states become one scan per state, merged in _id order
+// (SORT_MERGE), which still needs no sort.
+//
+// The name prefix filter gets no index. An anchored regex can use an
+// index on name, but that index returns matches in name order, so every
+// match would still be sorted by _id before the first one came back.
+func listOrderKeys(field string) mongod.IndexModel {
+	return mongod.IndexModel{Keys: bson.D{
+		{Key: field, Value: 1},
+		{Key: "_id", Value: -1},
+	}}
 }

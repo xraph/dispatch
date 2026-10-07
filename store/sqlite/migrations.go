@@ -632,7 +632,55 @@ func init() {
 				return dropColumnIfPresent(ctx, exec, "dispatch_workers", "capacity")
 			},
 		},
+
+		// The paged lists read newest first by ID with optional exact-match
+		// filters. With no index ending in id, a filtered page either scans
+		// the primary key's index backwards and drops every row that fails
+		// the filter, or searches a single-column index and sorts every
+		// match in a temporary B-tree. An index on (filter, id) does both
+		// jobs at once, so a page stops after limit+1 rows.
+		//
+		// The name prefix filter gets no index. It is a substr comparison,
+		// which no index serves, and an index on name would return matches
+		// in name order anyway, so every match would still be sorted by ID.
+		// A prefix rides on whichever index the other filters choose.
+		&migrate.Migration{
+			Name:    "list_order_indexes",
+			Version: "20261008130000",
+			Up: func(ctx context.Context, exec migrate.Executor) error {
+				// IF NOT EXISTS on each, so a run that failed partway, with
+				// no row in grove_migrations, converges on the retry.
+				for _, ix := range listOrderIndexes {
+					if _, err := exec.Exec(ctx, `CREATE INDEX IF NOT EXISTS `+
+						ix.name+` ON `+ix.table+` (`+ix.columns+`)`); err != nil {
+						return err
+					}
+				}
+
+				return nil
+			},
+			Down: func(ctx context.Context, exec migrate.Executor) error {
+				for _, ix := range listOrderIndexes {
+					if _, err := exec.Exec(ctx, `DROP INDEX IF EXISTS `+ix.name); err != nil {
+						return err
+					}
+				}
+
+				return nil
+			},
+		},
 	)
+}
+
+// listOrderIndexes are the indexes list_order_indexes builds, one per
+// exact-match filter a paged list can narrow by. Each ends in id so the
+// filtered rows come back in ID order without a sort.
+var listOrderIndexes = []struct{ name, table, columns string }{
+	{"idx_dispatch_jobs_list_state", "dispatch_jobs", "state, id"},
+	{"idx_dispatch_jobs_list_queue", "dispatch_jobs", "queue, id"},
+	{"idx_dispatch_dlq_list_queue", "dispatch_dlq", "queue, id"},
+	{"idx_dispatch_workflow_runs_list_state", "dispatch_workflow_runs", "state, id"},
+	{"idx_dispatch_artifacts_list_scope", "dispatch_artifacts", "scope_app_id, id"},
 }
 
 // columnExists reports whether table already has the named column.

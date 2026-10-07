@@ -23,8 +23,9 @@ var (
 
 // pageQuery finishes a keyset page: rows strictly below the cursor, newest
 // first by ID, and one row past the limit so the caller can tell whether
-// another page exists without a second query. The primary key index
-// serves both the predicate and the ordering.
+// another page exists without a second query. The primary key serves
+// both the predicate and the ordering, or, when a filter has one, a list
+// index from migration list_order_indexes whose last column is id.
 func pageQuery(q *pgdriver.SelectQuery, cursor id.ID, limit int) *pgdriver.SelectQuery {
 	if !cursor.IsNil() {
 		q = q.Where("id < ?", cursor.String())
@@ -91,7 +92,15 @@ func (s *Store) ListJobs(ctx context.Context, opts job.ListJobsOpts) (job.Page, 
 	var models []jobModel
 	q := s.pgdb.NewSelect(&models)
 
-	if len(opts.States) > 0 {
+	switch {
+	case len(opts.States) == 1:
+		// Equality, not ANY: Postgres reads idx_dispatch_jobs_list_state
+		// in ID order for state = $1, but not for state = ANY($1), even
+		// with one element. Several states cannot come out of that index
+		// in one ordered walk, so for them the planner chooses between the
+		// primary key and a sort.
+		q = q.Where("state = ?", string(opts.States[0]))
+	case len(opts.States) > 1:
 		states := make([]string, len(opts.States))
 		for i, st := range opts.States {
 			states[i] = string(st)
