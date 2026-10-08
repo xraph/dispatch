@@ -2,6 +2,7 @@ package runtime_test
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"sync"
 	"sync/atomic"
@@ -190,6 +191,108 @@ func TestActivityResultDrainsInflightHeartbeat(t *testing.T) {
 		t.Fatalf("result missed final persisted heartbeat: %+v", outcome)
 	}
 	runTask(t, w, durable.TaskWorkflow)
+}
+
+type lateHeartbeatCommitStore struct {
+	durable.Store
+	mu         sync.Mutex
+	pending    *durable.HeartbeatRequest
+	loseResult bool
+}
+
+func (s *lateHeartbeatCommitStore) RecordHeartbeat(_ context.Context, r durable.HeartbeatRequest) (durable.Receipt, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.pending == nil {
+		s.pending = &r
+	}
+	// The client has returned, but the server transaction has not settled yet.
+	return durable.Receipt{}, errors.New("heartbeat outcome unknown")
+}
+
+func (s *lateHeartbeatCommitStore) GetTask(ctx context.Context, key durable.Key, id string) (durable.Task, error) {
+	snapshot, err := s.Store.GetTask(ctx, key, id)
+	if err != nil {
+		return snapshot, err
+	}
+	s.mu.Lock()
+	pending := s.pending
+	s.pending = nil
+	s.mu.Unlock()
+	if pending != nil {
+		// Commit after the checkpoint snapshot, before its result transition.
+		if _, err = s.Store.RecordHeartbeat(ctx, *pending); err != nil {
+			return durable.Task{}, err
+		}
+	}
+	return snapshot, nil
+}
+
+func (s *lateHeartbeatCommitStore) CommitTransition(ctx context.Context, r durable.CommitRequest) (durable.Receipt, error) {
+	receipt, err := s.Store.CommitTransition(ctx, r)
+	if err != nil {
+		return receipt, err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.loseResult && len(r.Events) > 0 && r.Events[0].Type == drt.EventActivityCompleted {
+		s.loseResult = false
+		return durable.Receipt{}, errors.New("result acknowledgement lost")
+	}
+	return receipt, nil
+}
+
+func TestActivityResultIncludesLateHeartbeatCommit(t *testing.T) {
+	for _, mode := range []string{"success", "retry", "lost_result_ack"} {
+		t.Run(mode, func(t *testing.T) {
+			s := &lateHeartbeatCommitStore{Store: memory.New(), loseResult: mode == "lost_result_ack"}
+			options := workerOptions(t)
+			policy := retryOptions(2)
+			policy.HeartbeatTimeout = time.Second
+			options.Workflows["order"] = retryWorkflow(policy)
+			options.Activities["charge"] = func(ctx context.Context, info drt.ActivityInfo, _ []byte) ([]byte, error) {
+				if info.Attempt == 1 {
+					if err := info.Heartbeat(ctx, []byte("offset:42")); err == nil {
+						return nil, errors.New("test did not leave an uncertain heartbeat")
+					}
+					if mode == "retry" {
+						return nil, errors.New("retry")
+					}
+				} else if string(info.HeartbeatDetails()) != "offset:42" {
+					return nil, errors.New("retry lost late heartbeat progress")
+				}
+				return []byte("paid"), nil
+			}
+			w := newWorker(t, s, options)
+			key := startWorkerRun(t, w, options)
+			runTask(t, w, durable.TaskWorkflow)
+			runTask(t, w, durable.TaskActivity)
+			events, err := s.ReadHistory(t.Context(), key, 0, 100)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var recorded struct {
+				Heartbeat *drt.HeartbeatCheckpoint `json:"heartbeat"`
+			}
+			if err = json.Unmarshal(events[len(events)-1].Payload, &recorded); err != nil || recorded.Heartbeat == nil ||
+				recorded.Heartbeat.Sequence != 1 || string(recorded.Heartbeat.Details) != "offset:42" {
+				t.Fatalf("result published obsolete progress: %+v %v", recorded.Heartbeat, err)
+			}
+			if mode == "retry" {
+				task, getErr := s.GetTask(t.Context(), key, "command:1")
+				if getErr != nil {
+					t.Fatal(getErr)
+				}
+				time.Sleep(time.Until(task.AvailableAt) + time.Millisecond)
+				runTask(t, w, durable.TaskActivity)
+			}
+			runTask(t, w, durable.TaskWorkflow)
+			execution, err := s.GetExecution(t.Context(), key)
+			if err != nil || execution.State != durable.StateCompleted || string(execution.Output) != "paid" {
+				t.Fatalf("late heartbeat made replay fail: %+v %v", execution, err)
+			}
+		})
+	}
 }
 
 func TestActivityHeartbeatTimeoutRetriesAndRecoversProgress(t *testing.T) {

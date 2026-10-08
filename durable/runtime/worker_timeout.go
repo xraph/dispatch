@@ -26,7 +26,7 @@ func (w *Worker) processActivityTimeout(ctx context.Context, task durable.Task, 
 		}
 		prior := history.attempts[command.ID]
 		if prior.value.Attempt > 0 && !prior.failed {
-			checkpoint, checkpointErr := w.activityCheckpoint(ctx, task, prior)
+			checkpoint, _, checkpointErr := w.activityCheckpoint(ctx, task, prior)
 			if checkpointErr != nil {
 				return checkpointErr
 			}

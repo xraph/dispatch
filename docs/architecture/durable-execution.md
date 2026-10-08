@@ -427,8 +427,11 @@ persisted progress; it does not silently buffer or throttle calls. An unknown
 outcome retains the exact request until its receipt is resolved. Calls serialize
 within the attempt. The callback is bound to the activity context and cannot keep
 writing after the handler has returned. Result publication drains in-flight calls
-before reading the final persisted checkpoint. A receipt retry confirms the
-original write; it does not extend that write's deadline again.
+before reading the final persisted checkpoint. It also guards the task version
+read with that checkpoint: an uncertain server write may finish after its client
+call returns. If progress changed, the result reloads the checkpoint before
+committing. A receipt retry confirms the original write; it does not extend that
+write's deadline again.
 
 HeartbeatTimeout is recorded in ActivityOptions. Zero permits progress recording
 without a progress timeout. A missed heartbeat follows the activity retry policy.
@@ -439,8 +442,8 @@ The initial heartbeat clock begins at the durable attempt start.
 New attempt-start events record that heartbeats were enabled and the copied
 starting progress. Results and failed-attempt events record a final checkpoint
 containing the store timestamp, ownership epoch, heartbeat sequence and details.
-Old histories without heartbeat activation retain their existing interpretation. Replay checks
-checkpoint presence, timing, shape, inherited progress, matching final failure
+Old histories without heartbeat activation retain their existing interpretation.
+Replay checks checkpoint presence, timing, shape, inherited progress, matching final failure
 metadata and timeout classification. Heartbeats themselves do not add events.
 A workflow can inspect a copied checkpoint through ActivityError while errors.As
 still exposes its underlying ApplicationError.
@@ -468,3 +471,20 @@ keeps its external idempotency key. A coordinator with no activity handlers can
 publish the heartbeat timeout. The durable PostgreSQL race suite passes in
 35.587 seconds. Repository tests, make f, make l (zero issues), and races across
 engine (18.549 seconds), runtime (3.342 seconds) and memory (2.782 seconds) pass.
+
+Independent review of 02d69a6 through 8f5666b reproduced a late heartbeat commit
+between checkpoint capture and result publication. Execution revision alone could
+not detect the changed progress. A retry then inherited details missing from its
+failure event, making its history fail replay. The regression fails for success,
+retry and a lost result acknowledgement before the fix. Final transitions now
+guard the source task version and reload after a definite observation conflict.
+Ambiguous commits still retry the identical request. The regression and focused
+heartbeat race tests pass (1.990 seconds). The reviewer independently passed the
+runtime race suite (3.333 seconds), reported no other findings and set no behavior
+aside as outside the review.
+
+After that fix, make f, make l (zero issues), go test ./..., and engine/durable/
+memory race tests pass. The runtime race suite completes in 3.477 seconds and the
+full durable PostgreSQL race suite in 36.246 seconds. These checks close the
+scoped heartbeat implementation review. Asynchronous completion, receipt
+retention, Dashboard flows and process-kill/failover/load qualification remain open.

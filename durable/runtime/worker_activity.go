@@ -81,6 +81,7 @@ func (w *Worker) processActivity(ctx context.Context, task durable.Task, payload
 func (w *Worker) finishActivity(ctx context.Context, task durable.Task, payload taskPayload, epoch int64, outcome Outcome) error {
 	command := payload.Command
 	delay := retryDelay(*command.ActivityOptions.RetryPolicy, outcome.Attempt, outcome.Failure)
+	conflict := durable.ErrRevisionConflict
 	for range 16 {
 		execution, history, err := w.effectSnapshot(ctx, task, command)
 		if err != nil {
@@ -90,12 +91,15 @@ func (w *Worker) finishActivity(ctx context.Context, task durable.Task, payload 
 		if prior.failed || prior.value.Attempt != outcome.Attempt || prior.value.Epoch != epoch {
 			return w.effectConflict(ctx, task, "activity result does not match active attempt")
 		}
-		checkpoint, checkpointErr := w.activityCheckpoint(ctx, task, prior)
+		checkpoint, condition, checkpointErr := w.activityCheckpoint(ctx, task, prior)
 		if checkpointErr != nil {
 			return checkpointErr
 		}
 		outcome.Heartbeat = checkpoint
 		request := taskRequest(task, execution.Revision)
+		if condition != nil {
+			request.Conditions = []durable.TaskCondition{*condition}
+		}
 		if outcome.Failure != nil {
 			failed := ActivityAttempt{Version: 1, CommandID: command.ID, Attempt: outcome.Attempt, Epoch: epoch, Failure: outcome.Failure, RetryAfter: delay, Timeout: outcome.Timeout,
 				HeartbeatEnabled: prior.value.HeartbeatEnabled, Heartbeat: checkpoint}
@@ -123,9 +127,10 @@ func (w *Worker) finishActivity(ctx context.Context, task durable.Task, payload 
 			request.Events = append(request.Events, durable.EventInput{Type: EventActivityCompleted, Payload: data})
 			request.Tasks = []durable.TaskSpec{{ID: fmt.Sprintf("workflow:%d", execution.Revision+1), Kind: durable.TaskWorkflow, Queue: payload.WorkflowQueue}}
 		}
-		if err = w.persist(ctx, request); !errors.Is(err, durable.ErrRevisionConflict) {
+		if err = w.persist(ctx, request); !errors.Is(err, durable.ErrRevisionConflict) && !errors.Is(err, durable.ErrTaskConflict) {
 			return err
 		}
+		conflict = err
 	}
-	return durable.ErrRevisionConflict
+	return conflict
 }

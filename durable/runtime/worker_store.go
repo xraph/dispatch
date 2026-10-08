@@ -45,7 +45,7 @@ func taskRequest(task durable.Task, revision int64) durable.CommitRequest {
 }
 
 // Persist retries the exact request after an ambiguous error. Only an explicit
-// revision conflict permits rebuilding its content against a newer snapshot.
+// revision or task observation conflict permits rebuilding against a new snapshot.
 func (w *Worker) persist(ctx context.Context, request durable.CommitRequest) error {
 	var last error
 	for attempt := range 3 {

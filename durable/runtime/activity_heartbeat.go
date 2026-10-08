@@ -73,21 +73,24 @@ func validateHeartbeat(prior recordedAttempt, checkpoint *HeartbeatCheckpoint, a
 	return nil
 }
 
-func (w *Worker) activityCheckpoint(ctx context.Context, task durable.Task, prior recordedAttempt) (*HeartbeatCheckpoint, error) {
+func (w *Worker) activityCheckpoint(ctx context.Context, task durable.Task, prior recordedAttempt) (*HeartbeatCheckpoint, *durable.TaskCondition, error) {
 	if !prior.value.HeartbeatEnabled {
-		return nil, nil
+		return nil, nil, nil
 	}
 	current, err := storeCall(ctx, w, func(callCtx context.Context) (durable.Task, error) {
 		return w.store.GetTask(callCtx, task.Key, task.ID)
 	})
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	if current.Done || current.Token() != task.Token() {
-		return nil, durable.ErrLeaseLost
+		return nil, nil, durable.ErrLeaseLost
 	}
 	if current.HeartbeatEpoch != prior.value.Epoch || current.HeartbeatAt.IsZero() {
-		return nil, w.effectConflict(ctx, task, "heartbeat state does not match active attempt")
+		return nil, nil, w.effectConflict(ctx, task, "heartbeat state does not match active attempt")
 	}
-	return &HeartbeatCheckpoint{At: current.HeartbeatAt, Epoch: current.HeartbeatEpoch, Sequence: current.HeartbeatSequence, Details: bytes.Clone(current.Progress)}, nil
+	// A timed-out client call may still commit on the server. Bind publication
+	// to this exact progress observation, not just the execution revision.
+	condition := &durable.TaskCondition{TaskID: current.ID, Version: current.Version}
+	return &HeartbeatCheckpoint{At: current.HeartbeatAt, Epoch: current.HeartbeatEpoch, Sequence: current.HeartbeatSequence, Details: bytes.Clone(current.Progress)}, condition, nil
 }
