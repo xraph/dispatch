@@ -141,40 +141,48 @@ func (s *Store) ReapDeadWorkers(ctx context.Context, threshold time.Duration) ([
 }
 
 // AcquireLeadership attempts to become the cluster leader.
-// Uses a multi-step approach: clear expired, check active, claim.
+// The unique leader index protects the claim after the expiry check.
 func (s *Store) AcquireLeadership(ctx context.Context, workerID id.WorkerID, ttl time.Duration) (bool, error) {
 	wID := workerID.String()
 	now := time.Now().UTC()
 	until := now.Add(ttl)
 
-	// Step 1: Clear any expired leader.
-	_, err := s.sdb.NewUpdate((*workerModel)(nil)).
-		Set("is_leader = ?", false).
-		Set("leader_until = NULL").
-		Where("is_leader = ? AND leader_until < ?", true, now).
-		Exec(ctx)
+	leader, err := s.readLeader(ctx)
 	if err != nil {
-		return false, fmt.Errorf("dispatch/sqlite: clear expired leader: %w", err)
+		return false, err
 	}
-
-	// Step 2: Check if there's already an active leader that isn't us.
-	var activeLeaderID string
-	err = s.sdb.NewSelect().
-		TableExpr("dispatch_workers").
-		Column("id").
-		Where("is_leader = ? AND leader_until >= ?", true, now).
-		Limit(1).
-		Scan(ctx, &activeLeaderID)
-	if err != nil {
-		if !isNoRows(err) {
-			return false, fmt.Errorf("dispatch/sqlite: check leader: %w", err)
+	if leader != nil {
+		if leader.LeaderUntil != nil && !leader.LeaderUntil.Before(now) {
+			if leader.ID != workerID {
+				return false, nil
+			}
+		} else {
+			// Compare parsed instants in Go. leader_until stores RFC 3339 text,
+			// while a bound time.Time uses the driver's different text format.
+			clear := s.sdb.NewUpdate((*workerModel)(nil)).
+				Set("is_leader = ?", false).
+				Set("leader_until = NULL").
+				Where("id = ? AND is_leader = ?", leader.ID.String(), true)
+			if leader.LeaderUntil == nil {
+				clear = clear.Where("leader_until IS NULL")
+			} else {
+				clear = clear.Where("leader_until = ?", leader.LeaderUntil.UTC().Format(time.RFC3339Nano))
+			}
+			result, clearErr := clear.Exec(ctx)
+			if clearErr != nil {
+				return false, fmt.Errorf("dispatch/sqlite: clear expired leader: %w", clearErr)
+			}
+			n, rowsErr := result.RowsAffected()
+			if rowsErr != nil {
+				return false, fmt.Errorf("dispatch/sqlite: clear expired leader rows affected: %w", rowsErr)
+			}
+			if n == 0 {
+				return false, nil // The observed lease changed before it could be cleared.
+			}
 		}
-		// No active leader -- proceed to claim.
-	} else if activeLeaderID != wID {
-		return false, nil
 	}
 
-	// Step 3: Claim or re-claim leadership.
+	// Claim or re-claim leadership.
 	untilStr := until.UTC().Format(time.RFC3339Nano)
 	res, claimErr := s.sdb.NewUpdate((*workerModel)(nil)).
 		Set("is_leader = ?", true).
@@ -211,10 +219,20 @@ func (s *Store) RenewLeadership(ctx context.Context, workerID id.WorkerID, ttl t
 
 // GetLeader returns the current cluster leader, or nil if there is no leader.
 func (s *Store) GetLeader(ctx context.Context) (*cluster.Worker, error) {
-	now := time.Now().UTC()
+	leader, err := s.readLeader(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if leader == nil || leader.LeaderUntil == nil || leader.LeaderUntil.Before(time.Now()) {
+		return nil, nil
+	}
+	return leader, nil
+}
+
+func (s *Store) readLeader(ctx context.Context) (*cluster.Worker, error) {
 	m := new(workerModel)
 	err := s.sdb.NewSelect(m).
-		Where("is_leader = ? AND leader_until >= ?", true, now).
+		Where("is_leader = ?", true).
 		Limit(1).
 		Scan(ctx)
 	if err != nil {
@@ -222,6 +240,11 @@ func (s *Store) GetLeader(ctx context.Context) (*cluster.Worker, error) {
 			return nil, nil
 		}
 		return nil, fmt.Errorf("dispatch/sqlite: get leader: %w", err)
+	}
+	if m.LeaderUntil != nil {
+		if _, parseErr := time.Parse(time.RFC3339Nano, *m.LeaderUntil); parseErr != nil {
+			return nil, fmt.Errorf("dispatch/sqlite: parse leader expiry: %w", parseErr)
+		}
 	}
 	return fromWorkerModel(m)
 }
