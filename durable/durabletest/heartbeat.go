@@ -88,7 +88,7 @@ func heartbeatProgress(t *testing.T, s durable.Store) {
 		t.Fatalf("heartbeat did not invalidate task observation: %v", err)
 	}
 	release := durable.CommitRequest{Key: r.Key, RequestID: "retry", ExpectedRevision: 3, Token: task.Token(),
-		Events: []durable.EventInput{{Type: "attempt.failed"}}, TaskUpdate: &durable.TaskUpdate{Action: durable.TaskRetry, RetryAfter: time.Microsecond}}
+		Events: []durable.EventInput{{Type: "attempt.failed"}}, TaskUpdate: &durable.TaskUpdate{Action: durable.TaskRetry, RetryAt: task.AvailableAt}}
 	if _, err = s.CommitTransition(t.Context(), release); err != nil {
 		t.Fatal(err)
 	}
