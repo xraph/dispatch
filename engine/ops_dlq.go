@@ -131,10 +131,10 @@ type ReplayAllResult struct {
 // earlier replays in place.
 //
 // It returns an error only when the entries cannot be listed or ctx ends,
-// together with what it had done by then, and emits nothing in that case.
-// Otherwise it emits one OperatorAction of kind ext.ActionDLQReplayed,
-// with no entry ID and Count set to the number replayed (zero included:
-// an operator asked, and the record says what came of it).
+// together with what it had done by then. One OperatorAction records the
+// committed replay count, including when a later read fails. A completed
+// operation with no replays also emits a zero count. An interrupted operation
+// that changed no entries emits nothing.
 func (eng *Engine) ReplayAllDLQ(ctx context.Context, opts ReplayAllOpts) (ReplayAllResult, error) {
 	var res ReplayAllResult
 
@@ -142,6 +142,16 @@ func (eng *Engine) ReplayAllDLQ(ctx context.Context, opts ReplayAllOpts) (Replay
 	if !ok {
 		return res, errors.New("dispatch: dlq store does not support paged listing")
 	}
+
+	completed := false
+	defer func() {
+		if completed || res.Replayed > 0 {
+			eng.extensions.EmitOperatorAction(ctx, ext.Action{
+				Kind:  ext.ActionDLQReplayed,
+				Count: int64(res.Replayed),
+			})
+		}
+	}()
 
 	limit := opts.Limit
 	if limit <= 0 {
@@ -191,11 +201,7 @@ func (eng *Engine) ReplayAllDLQ(ctx context.Context, opts ReplayAllOpts) (Replay
 		cursor = page.NextCursor
 	}
 
-	eng.extensions.EmitOperatorAction(ctx, ext.Action{
-		Kind:  ext.ActionDLQReplayed,
-		Count: int64(res.Replayed),
-	})
-
+	completed = true
 	return res, nil
 }
 
@@ -222,23 +228,22 @@ var errNoPurgeCutoff = errors.New("dispatch: dlq purge needs a non-zero before t
 // before, and returns how many went. A zero before is refused: it matches
 // nothing, so it can only be a caller that forgot to set it. One
 // OperatorAction of kind ext.ActionDLQPurged, with Count set, is emitted
-// on success, including when nothing matched.
+// on success, including when nothing matched. A store that reports partial
+// progress with an error retains that count and emits it before returning.
 func (eng *Engine) PurgeDLQ(ctx context.Context, before time.Time) (int64, error) {
 	if before.IsZero() {
 		return 0, errNoPurgeCutoff
 	}
 
 	n, err := eng.dlqService.DLQStore().PurgeDLQ(ctx, before)
-	if err != nil {
-		return 0, err
+	if err == nil || n > 0 {
+		eng.extensions.EmitOperatorAction(ctx, ext.Action{
+			Kind:  ext.ActionDLQPurged,
+			Count: n,
+		})
 	}
 
-	eng.extensions.EmitOperatorAction(ctx, ext.Action{
-		Kind:  ext.ActionDLQPurged,
-		Count: n,
-	})
-
-	return n, nil
+	return n, err
 }
 
 // CountDLQPurge is PurgeDLQ's dry run: how many entries a purge with the

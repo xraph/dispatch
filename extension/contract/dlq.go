@@ -35,9 +35,11 @@ type BeforeInput struct {
 	Before string `json:"before"`
 }
 type DLQPurgeResult struct {
-	Before string `json:"before"`
-	Count  int64  `json:"count"`
-	AsOf   string `json:"asOf"`
+	Before      string    `json:"before"`
+	Count       int64     `json:"count"`
+	Interrupted bool      `json:"interrupted"`
+	Failure     *fc.Error `json:"failure"`
+	AsOf        string    `json:"asOf"`
 }
 type DeletedResult struct {
 	ID   string `json:"id"`
@@ -135,10 +137,18 @@ func dlqPurgeHandler(deps Deps, preview bool) func(context.Context, BeforeInput,
 		} else {
 			n, err = deps.Engine.PurgeDLQ(ctx, before)
 		}
-		if err != nil {
+		if preview && err != nil {
 			return DLQPurgeResult{}, err
 		}
-		return DLQPurgeResult{Before: before.Format(time.RFC3339Nano), Count: n, AsOf: time.Now().UTC().Format(time.RFC3339Nano)}, nil
+		out := DLQPurgeResult{Before: before.Format(time.RFC3339Nano), Count: n, Interrupted: err != nil, AsOf: time.Now().UTC().Format(time.RFC3339Nano)}
+		if err != nil {
+			mapped := deps.mapError(intent, err)
+			var failure *fc.Error
+			if errors.As(mapped, &failure) {
+				out.Failure = failure
+			}
+		}
+		return out, nil
 	})
 }
 func dlqReplayHandler(deps Deps) func(context.Context, IDInput, fc.Principal) (DLQReplayResult, error) {
