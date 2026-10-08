@@ -13,7 +13,8 @@ checks against fixtures and a real SQLite engine.
 | Operator actions and REST routes | Committed in Slice 2 through `c84a71e`, including replay generation fencing | Build, unit tests, focused race tests and ordinary lint passed; final review approved |
 | Engine inspection | Committed through `6de5530` | Read-only snapshot and version tests pass under race; full build/unit and ordinary lint pass; final review approved with one comment correction |
 | Five-backend operator persistence | Implemented | Memory, PostgreSQL, SQLite, MongoDB and Redis exercised under race; container startup failures required serial reruns |
-| Contract contributor | Pending | Not tested |
+| Contract foundation | Committed in `10f4f90` | Request bounds, actor propagation, wire primitives and error mapping pass; build/unit/lint pass; reviewed |
+| Contract domain bindings and contributor | Pending | No registered intents yet |
 | React plugin, ten navigation entries | Pending | No browser evidence |
 | Stateful fixtures and host wiring | Pending | No browser evidence |
 | Real SQLite browser flows | Pending | Not tested |
