@@ -14,7 +14,8 @@ checks against fixtures and a real SQLite engine.
 | Engine inspection | Committed through `6de5530` | Read-only snapshot and version tests pass under race; full build/unit and ordinary lint pass; final review approved with one comment correction |
 | Five-backend operator persistence | Implemented | Memory, PostgreSQL, SQLite, MongoDB and Redis exercised under race; container startup failures required serial reruns |
 | Contract foundation | Committed in `10f4f90` | Request bounds, actor propagation, wire primitives and error mapping pass; build/unit/lint pass; reviewed |
-| Contract domain bindings and contributor | Pending | No registered intents yet |
+| Job contract and contributor | Committed through `134460b` | Five job intents, runtime discovery and HTTP invalidations pass; job read identity tests pass on all five backends under race; full build/unit/lint and final review pass |
+| Remaining contract domains | Pending | Dead letters, cron, workflows, workers, queues, handlers, artifacts, overview and config are not registered yet |
 | React plugin, ten navigation entries | Pending | No browser evidence |
 | Stateful fixtures and host wiring | Pending | No browser evidence |
 | Real SQLite browser flows | Pending | Not tested |
@@ -24,6 +25,12 @@ Integration-tag lint currently reports a pre-existing `err` shadow in
 `store/redis/store_test.go:54`. The first combined backend run had one Redis
 container startup failure and one PostgreSQL container startup skip. All 204 Redis
 tests and the omitted PostgreSQL case passed when rerun serially.
+
+The job contract checks used the concurrent Forge/Grove dependency upgrade in the
+current checkout. Importing the runtime dashboard interface in its test added
+required indirect modules and checksums. Those module files remain with the
+concurrent dependency work; a clean committed dependency baseline is still part of
+the final verification.
 
 ## Page and supporting template inventory
 
