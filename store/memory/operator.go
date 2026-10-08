@@ -171,7 +171,7 @@ func (m *Store) UpdateCronNextRun(_ context.Context, entryID id.CronID, nextRunA
 
 // ReopenRun moves a finished run back to running. The check and the write
 // happen under one lock, so of two concurrent reopens exactly one wins.
-func (m *Store) ReopenRun(_ context.Context, runID id.RunID) error {
+func (m *Store) ReopenRun(_ context.Context, runID id.RunID, expectedGeneration int64) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -180,11 +180,12 @@ func (m *Store) ReopenRun(_ context.Context, runID id.RunID) error {
 	if !ok {
 		return dispatch.ErrRunNotFound
 	}
-	if r.State == workflow.RunStateRunning {
-		return fmt.Errorf("%w: run %s is %s", dispatch.ErrInvalidState, runID, r.State)
+	if r.State == workflow.RunStateRunning || r.ReplayGeneration != expectedGeneration {
+		return fmt.Errorf("%w: run %s is %s or its replay generation changed", dispatch.ErrInvalidState, runID, r.State)
 	}
 
 	reopened := *r
+	reopened.ReplayGeneration++
 	reopened.State = workflow.RunStateRunning
 	reopened.Error = ""
 	reopened.CompletedAt = nil

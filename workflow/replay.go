@@ -31,6 +31,9 @@ type ReplayPlan struct {
 	// State is the run's state when the plan was made. ReplayFrom
 	// refuses a running run, so a caller can refuse it early from here.
 	State RunState `json:"state"`
+
+	// Generation fences the claim against the run used for this plan.
+	Generation int64 `json:"generation"`
 }
 
 // PlanReplay reports what ReplayFrom would do for the run and step,
@@ -96,11 +99,12 @@ func (r *Runner) planReplay(ctx context.Context, runID id.RunID, fromStep string
 	}
 
 	return &ReplayPlan{
-		RunID:    runID,
-		FromStep: fromStep,
-		Version:  version,
-		Reruns:   reruns,
-		State:    run.State,
+		RunID:      runID,
+		FromStep:   fromStep,
+		Version:    version,
+		Reruns:     reruns,
+		State:      run.State,
+		Generation: run.ReplayGeneration,
 	}, runner, nil
 }
 
@@ -149,7 +153,7 @@ func (r *Runner) ReplayFrom(ctx context.Context, runID id.RunID, fromStep string
 
 	// The claim. Of two replays that both planned, one reopens the run
 	// and the other is refused here.
-	if reopenErr := r.store.ReopenRun(ctx, runID); reopenErr != nil {
+	if reopenErr := r.store.ReopenRun(ctx, runID, plan.Generation); reopenErr != nil {
 		return nil, fmt.Errorf("reopen run %s: %w", runID, reopenErr)
 	}
 

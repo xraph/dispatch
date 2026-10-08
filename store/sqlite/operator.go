@@ -196,7 +196,7 @@ func (s *Store) UpdateCronNextRun(ctx context.Context, entryID id.CronID, nextRu
 }
 
 // ReopenRun moves a finished run back to running, for exactly one caller.
-func (s *Store) ReopenRun(ctx context.Context, runID id.RunID) error {
+func (s *Store) ReopenRun(ctx context.Context, runID id.RunID, expectedGeneration int64) error {
 	now := time.Now().UTC()
 
 	var rows int64
@@ -205,9 +205,11 @@ func (s *Store) ReopenRun(ctx context.Context, runID id.RunID) error {
 			Set("state = ?", string(workflow.RunStateRunning)).
 			Set("error = ?", "").
 			Set("completed_at = NULL").
+			Set("replay_generation = replay_generation + 1").
 			Set("updated_at = ?", now).
 			Where("id = ?", runID.String()).
 			Where("state <> ?", string(workflow.RunStateRunning)).
+			Where("replay_generation = ?", expectedGeneration).
 			Exec(ctx)
 		if execErr != nil {
 			return execErr
@@ -229,5 +231,5 @@ func (s *Store) ReopenRun(ctx context.Context, runID id.RunID) error {
 		return err
 	}
 
-	return fmt.Errorf("%w: run %s is %s", dispatch.ErrInvalidState, runID, run.State)
+	return fmt.Errorf("%w: run %s is %s or its replay generation changed", dispatch.ErrInvalidState, runID, run.State)
 }

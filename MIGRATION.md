@@ -10,7 +10,7 @@ checks against fixtures and a real SQLite engine.
 | Area | Implementation | Verification |
 |---|---|---|
 | Worker heartbeat and five-backend cursor reads | Committed in Slice 1 | Store conformance and heartbeat tests passed |
-| Operator actions and REST routes | Committed in Slice 2 through `271da77` | Build, unit tests, focused race tests and ordinary lint passed; final review in progress |
+| Operator actions and REST routes | Committed in Slice 2 through `271da77`; replay generation fix under review | Build, unit tests and focused race tests passed; final review found and reproduced a delayed replay claim race |
 | Five-backend operator persistence | Implemented | Memory, PostgreSQL, SQLite, MongoDB and Redis exercised under race; container startup failures required serial reruns |
 | Contract contributor | Pending | Not tested |
 | React plugin, ten navigation entries | Pending | No browser evidence |
@@ -92,6 +92,14 @@ cannot be mistaken for implementing new host extension points.
 `ResumeAll` still runs during startup without a cross-instance execution lock.
 Ordinary workflow starts still execute in their caller. Neither is claimed as fixed
 by the replay operation.
+
+Replay claims now compare a stored generation as well as the state. An overlapping
+request cannot reopen the run after its competitor has already finished. Store
+updates also reject an older generation, and SQL migrations default existing runs
+to generation zero. MongoDB documents and Redis records without the field use zero.
+Every node serving replay actions must run this version; an older binary has no
+generation check. Custom workflow stores must implement the new `ReopenRun`
+argument and preserve the generation on reads and conditional updates.
 
 Cron and cron-fired jobs do not acquire tenant scope. Empty scope filters mean
 every scope. The dashboard is an operator tool, so these boundaries must remain

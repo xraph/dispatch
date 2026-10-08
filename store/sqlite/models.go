@@ -204,8 +204,9 @@ type workflowRunModel struct {
 
 	// Version is the workflow definition version the run executes; 0
 	// means unversioned. ParentRunID is NULL for a top-level run.
-	Version     int     `grove:"version,notnull,default:0"`
-	ParentRunID *string `grove:"parent_run_id"`
+	Version          int     `grove:"version,notnull,default:0"`
+	ReplayGeneration int64   `grove:"replay_generation,notnull,default:0"`
+	ParentRunID      *string `grove:"parent_run_id"`
 }
 
 func toRunModel(r *workflow.Run) *workflowRunModel {
@@ -216,20 +217,21 @@ func toRunModel(r *workflow.Run) *workflowRunModel {
 	}
 
 	return &workflowRunModel{
-		ID:          r.ID.String(),
-		Name:        r.Name,
-		State:       string(r.State),
-		Input:       r.Input,
-		Output:      r.Output,
-		Error:       r.Error,
-		ScopeAppID:  r.ScopeAppID,
-		ScopeOrgID:  r.ScopeOrgID,
-		StartedAt:   r.StartedAt,
-		CompletedAt: r.CompletedAt,
-		CreatedAt:   r.CreatedAt,
-		UpdatedAt:   r.UpdatedAt,
-		Version:     r.Version,
-		ParentRunID: parentRunID,
+		ID:               r.ID.String(),
+		Name:             r.Name,
+		State:            string(r.State),
+		Input:            r.Input,
+		Output:           r.Output,
+		Error:            r.Error,
+		ScopeAppID:       r.ScopeAppID,
+		ScopeOrgID:       r.ScopeOrgID,
+		StartedAt:        r.StartedAt,
+		CompletedAt:      r.CompletedAt,
+		CreatedAt:        r.CreatedAt,
+		UpdatedAt:        r.UpdatedAt,
+		Version:          r.Version,
+		ReplayGeneration: r.ReplayGeneration,
+		ParentRunID:      parentRunID,
 	}
 }
 
@@ -253,18 +255,19 @@ func fromRunModel(m *workflowRunModel) (*workflow.Run, error) {
 			CreatedAt: m.CreatedAt,
 			UpdatedAt: m.UpdatedAt,
 		},
-		ID:          parsedID,
-		Name:        m.Name,
-		State:       workflow.RunState(m.State),
-		Input:       m.Input,
-		Output:      m.Output,
-		Error:       m.Error,
-		ScopeAppID:  m.ScopeAppID,
-		ScopeOrgID:  m.ScopeOrgID,
-		StartedAt:   m.StartedAt,
-		CompletedAt: m.CompletedAt,
-		Version:     m.Version,
-		ParentRunID: parentRunID,
+		ID:               parsedID,
+		Name:             m.Name,
+		State:            workflow.RunState(m.State),
+		Input:            m.Input,
+		Output:           m.Output,
+		Error:            m.Error,
+		ScopeAppID:       m.ScopeAppID,
+		ScopeOrgID:       m.ScopeOrgID,
+		StartedAt:        m.StartedAt,
+		CompletedAt:      m.CompletedAt,
+		Version:          m.Version,
+		ReplayGeneration: m.ReplayGeneration,
+		ParentRunID:      parentRunID,
 	}, nil
 }
 

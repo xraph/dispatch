@@ -14,11 +14,12 @@ import (
 // a run out of a finished state into running.
 type Reopener interface {
 	// ReopenRun sets state = running, error = "" and completed_at = null
-	// (and stamps updated_at) only if the run is not already running. It
-	// leaves every other field alone. When the run is running it returns
+	// (and stamps updated_at) only if the run is not already running and
+	// ReplayGeneration equals expectedGeneration. It increments the generation
+	// atomically. When the run is running or the generation changed it returns
 	// an error wrapping dispatch.ErrInvalidState that names the state;
 	// when the run does not exist, dispatch.ErrRunNotFound. The check and
 	// the write are one atomic step: of two concurrent reopens, exactly
 	// one wins.
-	ReopenRun(ctx context.Context, runID id.RunID) error
+	ReopenRun(ctx context.Context, runID id.RunID, expectedGeneration int64) error
 }

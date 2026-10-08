@@ -38,6 +38,10 @@ type Run struct {
 	// Zero means version 1 (unversioned).
 	Version int `json:"version,omitempty"`
 
+	// ReplayGeneration advances on each successful replay claim. A plan
+	// must still match this generation when it reopens the run.
+	ReplayGeneration int64 `json:"replay_generation"`
+
 	// ParentRunID links this run to its parent (nil for top-level runs).
 	ParentRunID *id.RunID `json:"parent_run_id,omitempty"`
 }

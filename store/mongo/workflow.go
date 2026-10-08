@@ -44,12 +44,15 @@ func (s *Store) UpdateRun(ctx context.Context, run *workflow.Run) error {
 	m := toRunModel(run)
 	m.UpdatedAt = now()
 	col := s.mdb.Collection(colWorkflowRuns)
-	res, err := col.ReplaceOne(ctx, bson.M{"_id": m.ID}, m)
+	res, err := col.ReplaceOne(ctx, runGenerationFilter(m.ID, run.ReplayGeneration), m)
 	if err != nil {
 		return fmt.Errorf("dispatch/mongo: update run: %w", err)
 	}
 	if res.MatchedCount == 0 {
-		return dispatch.ErrRunNotFound
+		if _, getErr := s.GetRun(ctx, run.ID); getErr != nil {
+			return getErr
+		}
+		return fmt.Errorf("%w: run %s replay generation changed", dispatch.ErrInvalidState, run.ID)
 	}
 	return nil
 }

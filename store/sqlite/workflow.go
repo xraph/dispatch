@@ -43,13 +43,16 @@ func (s *Store) GetRun(ctx context.Context, runID id.RunID) (*workflow.Run, erro
 func (s *Store) UpdateRun(ctx context.Context, run *workflow.Run) error {
 	m := toRunModel(run)
 	m.UpdatedAt = time.Now().UTC()
-	res, err := s.sdb.NewUpdate(m).WherePK().Exec(ctx)
+	res, err := s.sdb.NewUpdate(m).WherePK().Where("replay_generation = ?", run.ReplayGeneration).Exec(ctx)
 	if err != nil {
 		return fmt.Errorf("dispatch/sqlite: update run: %w", err)
 	}
 	rows, _ := res.RowsAffected() //nolint:errcheck // driver always returns nil
 	if rows == 0 {
-		return dispatch.ErrRunNotFound
+		if _, getErr := s.GetRun(ctx, run.ID); getErr != nil {
+			return getErr
+		}
+		return fmt.Errorf("%w: run %s replay generation changed", dispatch.ErrInvalidState, run.ID)
 	}
 	return nil
 }

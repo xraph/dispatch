@@ -182,14 +182,15 @@ func (s *Store) DeleteDLQ(ctx context.Context, entryID id.DLQID) error {
 // write are one compare-and-set (updateEntity), so of two concurrent
 // reopens exactly one wins and the other re-reads the run, finds it
 // running, and is refused.
-func (s *Store) ReopenRun(ctx context.Context, runID id.RunID) error {
+func (s *Store) ReopenRun(ctx context.Context, runID id.RunID, expectedGeneration int64) error {
 	return updateEntity(ctx, s, s.keys.run(runID.String()), dispatch.ErrRunNotFound,
 		func(e *runEntity) error {
-			if workflow.RunState(e.State) == workflow.RunStateRunning {
-				return fmt.Errorf("%w: run %s is %s", dispatch.ErrInvalidState, runID, e.State)
+			if workflow.RunState(e.State) == workflow.RunStateRunning || e.ReplayGeneration != expectedGeneration {
+				return fmt.Errorf("%w: run %s is %s or its replay generation changed", dispatch.ErrInvalidState, runID, e.State)
 			}
 
 			e.State = string(workflow.RunStateRunning)
+			e.ReplayGeneration++
 			e.Error = ""
 			e.CompletedAt = nil
 			e.UpdatedAt = now()

@@ -31,6 +31,7 @@ var operatorColumns = []struct {
 	{"dispatch_dlq", "replayed_job_id", "text", "YES"},
 	{"dispatch_workflow_runs", "parent_run_id", "text", "YES"},
 	{"dispatch_workflow_runs", "version", "integer", "NO"},
+	{"dispatch_workflow_runs", "replay_generation", "bigint", "NO"},
 }
 
 // operatorIndexes are the indexes the two migrations build, with the tail
@@ -276,7 +277,7 @@ func TestRunVersionAndParentRoundTrip(t *testing.T) {
 
 	read("after CreateRun")
 
-	if err := s.ReopenRun(ctx, child.ID); err != nil {
+	if err := s.ReopenRun(ctx, child.ID, child.ReplayGeneration); err != nil {
 		t.Fatalf("ReopenRun: %v", err)
 	}
 	read("after ReopenRun")

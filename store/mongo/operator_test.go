@@ -66,6 +66,37 @@ func TestWorkflowConformance(t *testing.T) {
 	})
 }
 
+func TestReopenLegacyRunWithoutGeneration(t *testing.T) {
+	uri := startMongo(t)
+	s := openStore(t, uri)
+	ctx := context.Background()
+	run := &workflow.Run{Entity: dispatch.NewEntity(), ID: id.NewRunID(), Name: "legacy", State: workflow.RunStateCompleted, StartedAt: time.Now().UTC()}
+	if err := s.CreateRun(ctx, run); err != nil {
+		t.Fatal(err)
+	}
+	col := rawDatabase(t, uri).Collection("dispatch_workflow_runs")
+	if _, err := col.UpdateOne(ctx, bson.M{"_id": run.ID.String()}, bson.M{"$unset": bson.M{"replay_generation": ""}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.ReopenRun(ctx, run.ID, 0); err != nil {
+		t.Fatal(err)
+	}
+	got, err := s.GetRun(ctx, run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.ReplayGeneration != 1 {
+		t.Fatalf("generation = %d, want 1", got.ReplayGeneration)
+	}
+	got.State = workflow.RunStateCompleted
+	if err := s.UpdateRun(ctx, got); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.ReopenRun(ctx, run.ID, 0); !errors.Is(err, dispatch.ErrInvalidState) {
+		t.Fatalf("stale claim = %v", err)
+	}
+}
+
 // TestClaimReplayMatchesBothUnreplayedShapes covers the document shape the
 // suite cannot produce. PushDLQ goes through grove's insert, which writes
 // replayed_at as an explicit null; an entry written by the raw driver, or

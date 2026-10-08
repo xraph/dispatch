@@ -44,6 +44,7 @@ func RunWorkflowSuite(t *testing.T, newStore func(t *testing.T) WorkflowStore) {
 		{"ReopenRunningRunIsRefused", testReopenRunningRun},
 		{"ReopenRunUnknown", testReopenUnknownRun},
 		{"ReopenRunConcurrentExactlyOneWinner", testReopenRunConcurrent},
+		{"ReopenRunRejectsStaleGenerationAfterCompletion", testReopenRunStaleGeneration},
 		{"ParentRunIDRoundTripsAndListChildRuns", testParentRunIDAndChildren},
 		{"VersionRoundTripsAsWritten", testVersionRoundTrips},
 	}
@@ -168,7 +169,7 @@ func assertReopened(t *testing.T, before, after *workflow.Run) {
 func testReopenFailedRun(t *testing.T, s WorkflowStore) {
 	before := createChildSuiteRun(t, s, workflow.RunStateFailed)
 
-	if err := s.ReopenRun(context.Background(), before.ID); err != nil {
+	if err := s.ReopenRun(context.Background(), before.ID, before.ReplayGeneration); err != nil {
 		t.Fatalf("ReopenRun(failed): %v", err)
 	}
 
@@ -178,7 +179,7 @@ func testReopenFailedRun(t *testing.T, s WorkflowStore) {
 func testReopenCompletedRun(t *testing.T, s WorkflowStore) {
 	before := createChildSuiteRun(t, s, workflow.RunStateCompleted)
 
-	if err := s.ReopenRun(context.Background(), before.ID); err != nil {
+	if err := s.ReopenRun(context.Background(), before.ID, before.ReplayGeneration); err != nil {
 		t.Fatalf("ReopenRun(completed): %v", err)
 	}
 
@@ -188,7 +189,7 @@ func testReopenCompletedRun(t *testing.T, s WorkflowStore) {
 func testReopenRunningRun(t *testing.T, s WorkflowStore) {
 	before := createSuiteRun(t, s, workflow.RunStateRunning)
 
-	err := s.ReopenRun(context.Background(), before.ID)
+	err := s.ReopenRun(context.Background(), before.ID, before.ReplayGeneration)
 	if !errors.Is(err, dispatch.ErrInvalidState) {
 		t.Fatalf("ReopenRun(running) error = %v, want one wrapping ErrInvalidState", err)
 	}
@@ -200,7 +201,7 @@ func testReopenRunningRun(t *testing.T, s WorkflowStore) {
 }
 
 func testReopenUnknownRun(t *testing.T, s WorkflowStore) {
-	err := s.ReopenRun(context.Background(), id.NewRunID())
+	err := s.ReopenRun(context.Background(), id.NewRunID(), 0)
 	if !errors.Is(err, dispatch.ErrRunNotFound) {
 		t.Fatalf("ReopenRun(unknown) error = %v, want ErrRunNotFound", err)
 	}
@@ -213,12 +214,44 @@ func testReopenRunConcurrent(t *testing.T, s WorkflowStore) {
 		run := createSuiteRun(t, s, workflow.RunStateFailed)
 
 		res := raceAttempts(concurrentReopeners, dispatch.ErrInvalidState, func(int) error {
-			return s.ReopenRun(ctx, run.ID)
+			return s.ReopenRun(ctx, run.ID, run.ReplayGeneration)
 		})
 		res.assertOneWinner(t, fmt.Sprintf("round %d: concurrent ReopenRun", round))
 
 		if got := mustGetRun(t, s, run.ID); got.State != workflow.RunStateRunning {
 			t.Errorf("round %d: State = %s after the race, want running", round, got.State)
+		}
+	}
+}
+
+func testReopenRunStaleGeneration(t *testing.T, s WorkflowStore) {
+	ctx := context.Background()
+	initial := createSuiteRun(t, s, workflow.RunStateCompleted)
+	for generation := int64(0); generation < 3; generation++ {
+		if err := s.ReopenRun(ctx, initial.ID, generation); err != nil {
+			t.Fatal(err)
+		}
+		run := *mustGetRun(t, s, initial.ID)
+		if run.ReplayGeneration != generation+1 {
+			t.Fatalf("generation = %d, want %d", run.ReplayGeneration, generation+1)
+		}
+		run.State = workflow.RunStateCompleted
+		now := time.Now().UTC()
+		run.CompletedAt = &now
+		if err := s.UpdateRun(ctx, &run); err != nil {
+			t.Fatal(err)
+		}
+		if err := s.ReopenRun(ctx, initial.ID, generation); !errors.Is(err, dispatch.ErrInvalidState) {
+			t.Fatalf("stale claim error = %v, want ErrInvalidState", err)
+		}
+		stale := *initial
+		stale.ReplayGeneration = generation
+		if err := s.UpdateRun(ctx, &stale); !errors.Is(err, dispatch.ErrInvalidState) {
+			t.Fatalf("stale write error = %v, want ErrInvalidState", err)
+		}
+		after := mustGetRun(t, s, initial.ID)
+		if after.ReplayGeneration != generation+1 || after.State != workflow.RunStateCompleted {
+			t.Fatalf("stale request changed completed run: %+v", after)
 		}
 	}
 }
@@ -285,7 +318,7 @@ func testVersionRoundTrips(t *testing.T, s WorkflowStore) {
 		t.Fatalf("Version = %d after CreateRun, want 3: the store dropped it", got.Version)
 	}
 
-	if err := s.ReopenRun(context.Background(), got.ID); err != nil {
+	if err := s.ReopenRun(context.Background(), got.ID, got.ReplayGeneration); err != nil {
 		t.Fatalf("ReopenRun: %v", err)
 	}
 	if after := mustGetRun(t, s, got.ID); after.Version != 3 {

@@ -344,12 +344,12 @@ func TestRunVersionAndParentRoundTrip(t *testing.T) {
 
 	check("after CreateRun")
 
-	if err := s.ReopenRun(ctx, r.ID); err != nil {
+	if err := s.ReopenRun(ctx, r.ID, r.ReplayGeneration); err != nil {
 		t.Fatalf("ReopenRun: %v", err)
 	}
 	check("after ReopenRun")
 
-	if !errors.Is(s.ReopenRun(ctx, r.ID), dispatch.ErrInvalidState) {
+	if !errors.Is(s.ReopenRun(ctx, r.ID, r.ReplayGeneration), dispatch.ErrInvalidState) {
 		t.Fatal("a second ReopenRun on the now running run did not wrap ErrInvalidState")
 	}
 }

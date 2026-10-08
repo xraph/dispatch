@@ -31,6 +31,10 @@ var operatorSchema = []struct {
 		table: "dispatch_workflow_runs", columns: []string{"version", "parent_run_id"},
 		index: "idx_dispatch_workflow_runs_parent", indexColumns: []string{"parent_run_id", "id"},
 	},
+	{
+		migration: "workflow_replay_generation", version: "20261009140000",
+		table: "dispatch_workflow_runs", columns: []string{"replay_generation"},
+	},
 }
 
 // assertOperatorSchema checks every column and index in operatorSchema is
@@ -47,6 +51,9 @@ func assertOperatorSchema(t *testing.T, drv driver.Driver, want bool) {
 			}
 		}
 
+		if s.index == "" {
+			continue
+		}
 		owner := queryStrings(t, drv,
 			`SELECT tbl_name FROM sqlite_master WHERE type = 'index' AND name = ?`, s.index)
 		if !want {

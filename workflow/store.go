@@ -26,7 +26,9 @@ type Store interface {
 	// GetRun retrieves a workflow run by ID.
 	GetRun(ctx context.Context, runID id.RunID) (*Run, error)
 
-	// UpdateRun persists changes to an existing workflow run.
+	// UpdateRun persists changes to an existing workflow run. It refuses a
+	// ReplayGeneration that no longer matches with dispatch.ErrInvalidState,
+	// so an old execution cannot overwrite a later replay's claim.
 	UpdateRun(ctx context.Context, run *Run) error
 
 	// ListRuns returns workflow runs matching the given options.

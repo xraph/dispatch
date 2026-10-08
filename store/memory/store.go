@@ -371,7 +371,8 @@ func (m *Store) CreateRun(_ context.Context, run *workflow.Run) error {
 	if _, exists := m.runs[key]; exists {
 		return dispatch.ErrJobAlreadyExists // reuse for "already exists"
 	}
-	m.runs[key] = run
+	stored := *run
+	m.runs[key] = &stored
 	return nil
 }
 
@@ -384,7 +385,8 @@ func (m *Store) GetRun(_ context.Context, runID id.RunID) (*workflow.Run, error)
 	if !ok {
 		return nil, dispatch.ErrRunNotFound
 	}
-	return r, nil
+	copyRun := *r
+	return &copyRun, nil
 }
 
 // UpdateRun persists changes to an existing workflow run.
@@ -393,11 +395,16 @@ func (m *Store) UpdateRun(_ context.Context, run *workflow.Run) error {
 	defer m.mu.Unlock()
 
 	key := run.ID.String()
-	if _, ok := m.runs[key]; !ok {
+	current, ok := m.runs[key]
+	if !ok {
 		return dispatch.ErrRunNotFound
 	}
+	if current.ReplayGeneration != run.ReplayGeneration {
+		return fmt.Errorf("%w: run %s replay generation changed", dispatch.ErrInvalidState, run.ID)
+	}
 	run.UpdatedAt = time.Now().UTC()
-	m.runs[key] = run
+	stored := *run
+	m.runs[key] = &stored
 	return nil
 }
 

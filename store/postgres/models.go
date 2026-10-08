@@ -181,20 +181,21 @@ func fromJobModel(m *jobModel) (*job.Job, error) {
 type workflowRunModel struct {
 	grove.BaseModel `grove:"table:dispatch_workflow_runs"`
 
-	ID          string     `grove:"id,pk"`
-	Name        string     `grove:"name,notnull"`
-	State       string     `grove:"state,notnull,default:'running'"`
-	Input       []byte     `grove:"input,type:bytea"`
-	Output      []byte     `grove:"output,type:bytea"`
-	Error       string     `grove:"error"`
-	ScopeAppID  string     `grove:"scope_app_id"`
-	ScopeOrgID  string     `grove:"scope_org_id"`
-	StartedAt   time.Time  `grove:"started_at,notnull,default:current_timestamp"`
-	CompletedAt *time.Time `grove:"completed_at"`
-	CreatedAt   time.Time  `grove:"created_at,notnull,default:current_timestamp"`
-	UpdatedAt   time.Time  `grove:"updated_at,notnull,default:current_timestamp"`
-	ParentRunID *string    `grove:"parent_run_id"`
-	Version     int        `grove:"version,notnull,default:0"`
+	ID               string     `grove:"id,pk"`
+	Name             string     `grove:"name,notnull"`
+	State            string     `grove:"state,notnull,default:'running'"`
+	Input            []byte     `grove:"input,type:bytea"`
+	Output           []byte     `grove:"output,type:bytea"`
+	Error            string     `grove:"error"`
+	ScopeAppID       string     `grove:"scope_app_id"`
+	ScopeOrgID       string     `grove:"scope_org_id"`
+	StartedAt        time.Time  `grove:"started_at,notnull,default:current_timestamp"`
+	CompletedAt      *time.Time `grove:"completed_at"`
+	CreatedAt        time.Time  `grove:"created_at,notnull,default:current_timestamp"`
+	UpdatedAt        time.Time  `grove:"updated_at,notnull,default:current_timestamp"`
+	ParentRunID      *string    `grove:"parent_run_id"`
+	Version          int        `grove:"version,notnull,default:0"`
+	ReplayGeneration int64      `grove:"replay_generation,notnull,default:0"`
 }
 
 func toRunModel(r *workflow.Run) *workflowRunModel {
@@ -205,20 +206,21 @@ func toRunModel(r *workflow.Run) *workflowRunModel {
 	}
 
 	return &workflowRunModel{
-		ID:          r.ID.String(),
-		Name:        r.Name,
-		State:       string(r.State),
-		Input:       r.Input,
-		Output:      r.Output,
-		Error:       r.Error,
-		ScopeAppID:  r.ScopeAppID,
-		ScopeOrgID:  r.ScopeOrgID,
-		StartedAt:   r.StartedAt,
-		CompletedAt: r.CompletedAt,
-		CreatedAt:   r.CreatedAt,
-		UpdatedAt:   r.UpdatedAt,
-		ParentRunID: parentRunID,
-		Version:     r.Version,
+		ID:               r.ID.String(),
+		Name:             r.Name,
+		State:            string(r.State),
+		Input:            r.Input,
+		Output:           r.Output,
+		Error:            r.Error,
+		ScopeAppID:       r.ScopeAppID,
+		ScopeOrgID:       r.ScopeOrgID,
+		StartedAt:        r.StartedAt,
+		CompletedAt:      r.CompletedAt,
+		CreatedAt:        r.CreatedAt,
+		UpdatedAt:        r.UpdatedAt,
+		ParentRunID:      parentRunID,
+		Version:          r.Version,
+		ReplayGeneration: r.ReplayGeneration,
 	}
 }
 
@@ -242,18 +244,19 @@ func fromRunModel(m *workflowRunModel) (*workflow.Run, error) {
 			CreatedAt: m.CreatedAt,
 			UpdatedAt: m.UpdatedAt,
 		},
-		ID:          parsedID,
-		Name:        m.Name,
-		State:       workflow.RunState(m.State),
-		Input:       m.Input,
-		Output:      m.Output,
-		Error:       m.Error,
-		ScopeAppID:  m.ScopeAppID,
-		ScopeOrgID:  m.ScopeOrgID,
-		StartedAt:   m.StartedAt,
-		CompletedAt: m.CompletedAt,
-		Version:     m.Version,
-		ParentRunID: parentRunID,
+		ID:               parsedID,
+		Name:             m.Name,
+		State:            workflow.RunState(m.State),
+		Input:            m.Input,
+		Output:           m.Output,
+		Error:            m.Error,
+		ScopeAppID:       m.ScopeAppID,
+		ScopeOrgID:       m.ScopeOrgID,
+		StartedAt:        m.StartedAt,
+		CompletedAt:      m.CompletedAt,
+		Version:          m.Version,
+		ReplayGeneration: m.ReplayGeneration,
+		ParentRunID:      parentRunID,
 	}, nil
 }
 

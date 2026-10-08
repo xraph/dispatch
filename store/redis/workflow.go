@@ -29,8 +29,9 @@ type runEntity struct {
 	// Version and ParentRunID were dropped by every write before this
 	// release, so a run written then reads back as unversioned (latest)
 	// and top-level. Both are omitted when zero, like on workflow.Run.
-	Version     int    `json:"version,omitempty"`
-	ParentRunID string `json:"parent_run_id,omitempty"`
+	Version          int    `json:"version,omitempty"`
+	ReplayGeneration int64  `json:"replay_generation"`
+	ParentRunID      string `json:"parent_run_id,omitempty"`
 }
 
 func toRunEntity(r *workflow.Run) *runEntity {
@@ -40,20 +41,21 @@ func toRunEntity(r *workflow.Run) *runEntity {
 	}
 
 	return &runEntity{
-		ID:          r.ID.String(),
-		Name:        r.Name,
-		State:       string(r.State),
-		Input:       r.Input,
-		Output:      r.Output,
-		Error:       r.Error,
-		ScopeAppID:  r.ScopeAppID,
-		ScopeOrgID:  r.ScopeOrgID,
-		StartedAt:   r.StartedAt,
-		CompletedAt: r.CompletedAt,
-		CreatedAt:   r.CreatedAt,
-		UpdatedAt:   r.UpdatedAt,
-		Version:     r.Version,
-		ParentRunID: parentRunID,
+		ID:               r.ID.String(),
+		Name:             r.Name,
+		State:            string(r.State),
+		Input:            r.Input,
+		Output:           r.Output,
+		Error:            r.Error,
+		ScopeAppID:       r.ScopeAppID,
+		ScopeOrgID:       r.ScopeOrgID,
+		StartedAt:        r.StartedAt,
+		CompletedAt:      r.CompletedAt,
+		CreatedAt:        r.CreatedAt,
+		UpdatedAt:        r.UpdatedAt,
+		Version:          r.Version,
+		ReplayGeneration: r.ReplayGeneration,
+		ParentRunID:      parentRunID,
 	}
 }
 
@@ -77,18 +79,19 @@ func fromRunEntity(e *runEntity) (*workflow.Run, error) {
 			CreatedAt: e.CreatedAt,
 			UpdatedAt: e.UpdatedAt,
 		},
-		ID:          rID,
-		Name:        e.Name,
-		State:       workflow.RunState(e.State),
-		Input:       e.Input,
-		Output:      e.Output,
-		Error:       e.Error,
-		ScopeAppID:  e.ScopeAppID,
-		ScopeOrgID:  e.ScopeOrgID,
-		StartedAt:   e.StartedAt,
-		CompletedAt: e.CompletedAt,
-		Version:     e.Version,
-		ParentRunID: parentRunID,
+		ID:               rID,
+		Name:             e.Name,
+		State:            workflow.RunState(e.State),
+		Input:            e.Input,
+		Output:           e.Output,
+		Error:            e.Error,
+		ScopeAppID:       e.ScopeAppID,
+		ScopeOrgID:       e.ScopeOrgID,
+		StartedAt:        e.StartedAt,
+		CompletedAt:      e.CompletedAt,
+		Version:          e.Version,
+		ReplayGeneration: e.ReplayGeneration,
+		ParentRunID:      parentRunID,
 	}, nil
 }
 
@@ -144,17 +147,15 @@ func (s *Store) GetRun(ctx context.Context, runID id.RunID) (*workflow.Run, erro
 // UpdateRun persists changes to an existing workflow run.
 func (s *Store) UpdateRun(ctx context.Context, run *workflow.Run) error {
 	key := s.keys.run(run.ID.String())
-	exists, err := s.entityExists(ctx, key)
-	if err != nil {
-		return fmt.Errorf("dispatch/redis: update run exists: %w", err)
-	}
-	if !exists {
-		return dispatch.ErrRunNotFound
-	}
-
 	e := toRunEntity(run)
 	e.UpdatedAt = now()
-	return s.setEntity(ctx, key, e)
+	return updateEntity(ctx, s, key, dispatch.ErrRunNotFound, func(current *runEntity) error {
+		if current.ReplayGeneration != run.ReplayGeneration {
+			return fmt.Errorf("%w: run %s replay generation changed", dispatch.ErrInvalidState, run.ID)
+		}
+		*current = *e
+		return nil
+	})
 }
 
 // ListRuns returns workflow runs matching the given options.

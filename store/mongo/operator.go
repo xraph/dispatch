@@ -183,15 +183,15 @@ func (s *Store) UpdateCronNextRun(ctx context.Context, entryID id.CronID, nextRu
 // ReopenRun moves a run that is not running back to running, clearing
 // its error and completion time. The state condition is in the filter,
 // so of two concurrent reopens exactly one matches.
-func (s *Store) ReopenRun(ctx context.Context, runID id.RunID) error {
+func (s *Store) ReopenRun(ctx context.Context, runID id.RunID, expectedGeneration int64) error {
 	col := s.mdb.Collection(colWorkflowRuns)
+	filter := runGenerationFilter(runID.String(), expectedGeneration)
+	filter["state"] = bson.M{"$ne": string(workflow.RunStateRunning)}
 
 	res, err := col.UpdateOne(ctx,
+		filter,
 		bson.M{
-			"_id":   runID.String(),
-			"state": bson.M{"$ne": string(workflow.RunStateRunning)},
-		},
-		bson.M{
+			"$inc": bson.M{"replay_generation": 1},
 			"$set": bson.M{
 				"state":      string(workflow.RunStateRunning),
 				"error":      "",
@@ -218,5 +218,16 @@ func (s *Store) ReopenRun(ctx context.Context, runID id.RunID) error {
 		return fmt.Errorf("dispatch/mongo: reopen run: %w", err)
 	}
 
-	return fmt.Errorf("%w: run %s is %s", dispatch.ErrInvalidState, runID, m.State)
+	return fmt.Errorf("%w: run %s is %s or its replay generation changed", dispatch.ErrInvalidState, runID, m.State)
+}
+
+// Documents written before generations existed participate as generation zero.
+func runGenerationFilter(runID string, generation int64) bson.M {
+	filter := bson.M{"_id": runID}
+	if generation == 0 {
+		filter["$or"] = bson.A{bson.M{"replay_generation": 0}, bson.M{"replay_generation": bson.M{"$exists": false}}}
+	} else {
+		filter["replay_generation"] = generation
+	}
+	return filter
 }
