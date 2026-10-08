@@ -604,3 +604,22 @@ After that correction, make f, make l (zero issues), go test ./..., and engine,
 durable, runtime and memory race tests pass. The full durable PostgreSQL race
 suite passes in 52.569 seconds. Callback intent construction and runtime retry
 resolution remain required before the SDK can recover callbacks through this API.
+
+Independent review of 78c57ae through 0e2ab44 found one migration defect: an empty
+schema before the receipt table's schema in search_path could make the downgrade
+guard inspect the wrong schema and report success without removing the column.
+The regression reproduces false success both with legacy-only receipts and with
+retained intent receipts. The guard now resolves the same table as the migration
+lock. Both regressions and the ordinary downgrade tests pass (5.469 seconds).
+
+The reviewer independently passed durable/runtime/memory races and PostgreSQL
+shared conformance plus intent tests (11.413 seconds). No other findings or
+deferred minors were reported. Runtime intent construction, callback resolution,
+credential issuance, remote authorization and the remaining durability roadmap
+are still required. They were explicitly outside this store review, not removed
+from the full implementation goal.
+
+After the review fix, make f, make l (zero issues), go test ./..., and engine,
+durable, runtime and memory race tests pass. The full durable PostgreSQL race
+suite passes in 55.585 seconds. This closes the scoped store review and its
+single corrective pass.

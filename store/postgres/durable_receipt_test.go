@@ -5,6 +5,7 @@ package postgres_test
 import (
 	"context"
 	"errors"
+	"net/url"
 	"strings"
 	"testing"
 	"time"
@@ -257,5 +258,83 @@ func TestDurableIntentDowngrade(t *testing.T) {
 	}
 	if got, found, lookupErr := s.LookupReceipt(t.Context(), intentLookup(r)); lookupErr != nil || !found || got != receipt {
 		t.Fatalf("failed downgrade changed receipt: %+v %v %v", got, found, lookupErr)
+	}
+}
+
+func TestDurableIntentDowngradeSearchPath(t *testing.T) {
+	for _, mode := range []string{"legacy", "retained"} {
+		t.Run(mode, func(t *testing.T) {
+			s, dsn := setupTestStoreConnection(t)
+			r := intentCompletion(t, s)
+			var receipt durable.Receipt
+			if mode == "retained" {
+				var err error
+				receipt, err = s.CommitTransition(t.Context(), r)
+				if err != nil {
+					t.Fatal(err)
+				}
+			}
+			if _, err := pgdriver.Unwrap(s.DB()).Exec(t.Context(), `CREATE SCHEMA app`); err != nil {
+				t.Fatal(err)
+			}
+			endpoint, err := url.Parse(dsn)
+			if err != nil {
+				t.Fatal(err)
+			}
+			query := endpoint.Query()
+			query.Set("search_path", "app,public")
+			endpoint.RawQuery = query.Encode()
+			drv := pgdriver.New()
+			if err = drv.Open(t.Context(), endpoint.String()); err != nil {
+				t.Fatal(err)
+			}
+			db, err := grove.Open(drv)
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = db.Close() })
+			pg := pgdriver.Unwrap(db)
+			var schema string
+			if err = pg.QueryRow(t.Context(), `SELECT current_schema()`).Scan(&schema); err != nil || schema != "app" {
+				t.Fatalf("search path not configured: %q %v", schema, err)
+			}
+			executor, err := migrate.NewExecutorFor(pg)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var migration *migrate.Migration
+			for _, candidate := range postgres.Migrations.Migrations() {
+				if candidate.Version == "20261015120000" {
+					migration = candidate
+				}
+			}
+			if migration == nil {
+				t.Fatal("intent migration not registered")
+			}
+			err = migration.Down(t.Context(), executor)
+			if mode == "retained" {
+				if err == nil || !strings.Contains(err.Error(), "retained intent receipts prevent downgrade") {
+					t.Fatalf("retained intent downgrade bypassed by search path: %v", err)
+				}
+				if got, found, lookupErr := postgres.New(db).LookupReceipt(t.Context(), intentLookup(r)); lookupErr != nil || !found || got != receipt {
+					t.Fatalf("failed downgrade changed receipt: %+v %v %v", got, found, lookupErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			var exists bool
+			if err = pg.QueryRow(t.Context(), `SELECT EXISTS(SELECT 1 FROM pg_attribute WHERE attrelid='dispatch_execution_receipts'::regclass AND attname='intent_digest' AND NOT attisdropped)`).Scan(&exists); err != nil || exists {
+				t.Fatalf("downgrade reported success without removing column: %v %v", exists, err)
+			}
+			if err = migration.Down(t.Context(), executor); err != nil {
+				t.Fatalf("downgrade retry: %v", err)
+			}
+			if err = migration.Up(t.Context(), executor); err != nil {
+				t.Fatal(err)
+			}
+			replayLegacyHandoff(t, postgres.New(db), r)
+		})
 	}
 }

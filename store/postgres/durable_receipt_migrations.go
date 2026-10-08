@@ -19,8 +19,8 @@ func init() {
 			// callback cannot save an intent after the guard has passed.
 			_, err := exec.Exec(ctx, `DO $$ BEGIN
                 LOCK TABLE dispatch_execution_receipts IN ACCESS EXCLUSIVE MODE;
-                IF EXISTS (SELECT 1 FROM information_schema.columns
-                    WHERE table_schema=current_schema() AND table_name='dispatch_execution_receipts' AND column_name='intent_digest') THEN
+                IF EXISTS (SELECT 1 FROM pg_catalog.pg_attribute
+                    WHERE attrelid='dispatch_execution_receipts'::regclass AND attname='intent_digest' AND NOT attisdropped) THEN
                     IF EXISTS (SELECT 1 FROM dispatch_execution_receipts WHERE intent_digest <> '') THEN
                         RAISE EXCEPTION 'retained intent receipts prevent downgrade';
                     END IF;
