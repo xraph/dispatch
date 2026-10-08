@@ -1,0 +1,187 @@
+package runtime
+
+import (
+	"bytes"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"time"
+	"unicode/utf8"
+
+	"github.com/xraph/dispatch/durable"
+)
+
+type recordedOutcome struct {
+	value Outcome
+	at    time.Time
+}
+
+type replayHistory struct {
+	commands []Command
+	outcomes map[string]recordedOutcome
+	terminal durable.State
+	output   []byte
+	failure  *ApplicationError
+}
+
+// Evaluate replays a complete history snapshot through LastSequence. It produces
+// a decision without writing state or running activities. Errors must never be
+// converted into successful workflow transitions by a caller.
+func Evaluate(execution durable.Execution, events []durable.Event, handler WorkflowFunc) (decision Decision, evalErr error) {
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			decision = Decision{}
+			evalErr = fmt.Errorf("%w: %v", ErrWorkflowPanic, recovered)
+		}
+	}()
+	if handler == nil {
+		return Decision{}, fmt.Errorf("%w: workflow handler is required", durable.ErrInvalid)
+	}
+	history, err := parseHistory(execution, events)
+	if err != nil {
+		return Decision{}, err
+	}
+	w := &Workflow{now: execution.CreatedAt, history: history, ids: make(map[string]bool)}
+	output, handlerErr := invoke(w, handler, bytes.Clone(execution.Input))
+	if w.fault != nil {
+		return Decision{}, w.fault
+	}
+	if w.cursor < len(history.commands) {
+		return Decision{}, fmt.Errorf("%w: omitted command %d", ErrNondeterministic, w.cursor+1)
+	}
+	decision = Decision{Commands: w.commands, State: durable.StateCompleted, Output: bytes.Clone(output)}
+	if w.blocked {
+		decision.State, decision.Output = durable.StateRunning, nil
+	} else if handlerErr != nil {
+		decision.State, decision.Output = durable.StateFailed, nil
+		var failure *ApplicationError
+		if errors.As(handlerErr, &failure) {
+			if failure == nil {
+				return Decision{}, fmt.Errorf("%w: nil application failure", durable.ErrInvalid)
+			}
+			copyFailure := *failure
+			decision.Failure = &copyFailure
+		} else {
+			decision.Failure = &ApplicationError{Type: "application", Message: handlerErr.Error()}
+		}
+	}
+	if decision.Failure != nil && !validFailure(decision.Failure) {
+		return Decision{}, fmt.Errorf("%w: invalid application failure", durable.ErrInvalid)
+	}
+	if history.terminal != "" && (decision.State != history.terminal || len(decision.Commands) != 0 ||
+		!bytes.Equal(decision.Output, history.output) || !sameFailure(decision.Failure, history.failure)) {
+		return Decision{}, fmt.Errorf("%w: terminal result changed", ErrNondeterministic)
+	}
+	return decision, nil
+}
+
+func invoke(w *Workflow, handler WorkflowFunc, input []byte) (output []byte, err error) {
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			if _, yielded := recovered.(flowControl); !yielded {
+				w.fault = fmt.Errorf("%w: %v", ErrWorkflowPanic, recovered)
+			}
+		}
+	}()
+	return handler(w, input)
+}
+
+func parseHistory(execution durable.Execution, events []durable.Event) (replayHistory, error) {
+	result := replayHistory{outcomes: make(map[string]recordedOutcome)}
+	if len(events) == 0 || len(events) > 100000 || execution.LastSequence != int64(len(events)) ||
+		execution.CreatedAt.IsZero() || events[0].Type != EventStarted ||
+		!events[0].Time.Equal(execution.CreatedAt) || !bytes.Equal(events[0].Payload, execution.Input) {
+		return result, fmt.Errorf("%w: missing or inconsistent execution history", ErrHistory)
+	}
+	commands := make(map[string]Command)
+	for i, event := range events {
+		if event.Sequence != int64(i+1) || event.Time.IsZero() || result.terminal != "" {
+			return result, fmt.Errorf("%w: invalid event sequence %d", ErrHistory, event.Sequence)
+		}
+		switch event.Type {
+		case EventStarted:
+			if i != 0 {
+				return result, fmt.Errorf("%w: repeated start event", ErrHistory)
+			}
+		case EventCommandScheduled:
+			var command Command
+			if err := decode(event.Payload, &command); err != nil {
+				return result, err
+			}
+			_, duplicate := commands[command.ID]
+			if command.validate() != nil || command.Index != int64(len(result.commands)+1) || duplicate {
+				return result, fmt.Errorf("%w: invalid command at event %d", ErrHistory, event.Sequence)
+			}
+			commands[command.ID] = command
+			result.commands = append(result.commands, command)
+		case EventActivityCompleted, EventTimerFired:
+			if err := parseOutcome(&result, commands, event); err != nil {
+				return result, err
+			}
+		case EventWorkflowWaiting:
+			if len(event.Payload) != 0 {
+				return result, fmt.Errorf("%w: invalid waiting event", ErrHistory)
+			}
+		case EventWorkflowCompleted:
+			result.terminal, result.output = durable.StateCompleted, bytes.Clone(event.Payload)
+		case EventWorkflowFailed:
+			var failure ApplicationError
+			if err := decode(event.Payload, &failure); err != nil {
+				return result, err
+			}
+			if !validFailure(&failure) {
+				return result, fmt.Errorf("%w: missing failure type", ErrHistory)
+			}
+			result.terminal, result.failure = durable.StateFailed, &failure
+		default:
+			return result, fmt.Errorf("%w: unknown event %q", ErrHistory, event.Type)
+		}
+	}
+	if (result.terminal == "" && execution.State != durable.StateRunning) ||
+		(result.terminal != "" && (result.terminal != execution.State || !bytes.Equal(result.output, execution.Output))) {
+		return result, fmt.Errorf("%w: terminal projection mismatch", ErrHistory)
+	}
+	return result, nil
+}
+
+func parseOutcome(history *replayHistory, commands map[string]Command, event durable.Event) error {
+	var outcome Outcome
+	if err := decode(event.Payload, &outcome); err != nil {
+		return err
+	}
+	command, exists := commands[outcome.CommandID]
+	_, duplicate := history.outcomes[outcome.CommandID]
+	if outcome.Version != 1 || !exists || duplicate || (outcome.Failure != nil && (len(outcome.Output) != 0 || !validFailure(outcome.Failure))) {
+		return fmt.Errorf("%w: invalid outcome at event %d", ErrHistory, event.Sequence)
+	}
+	if (event.Type == EventActivityCompleted && command.Kind != durable.TaskActivity) ||
+		(event.Type == EventTimerFired && (command.Kind != durable.TaskTimer || len(outcome.Output) != 0 || outcome.Failure != nil || event.Time.Before(command.Deadline))) {
+		return fmt.Errorf("%w: outcome does not match scheduled command", ErrHistory)
+	}
+	history.outcomes[outcome.CommandID] = recordedOutcome{value: outcome, at: event.Time}
+	return nil
+}
+
+func decode(data []byte, value any) error {
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(value); err != nil {
+		return fmt.Errorf("%w: %w", ErrHistory, err)
+	}
+	if err := decoder.Decode(new(any)); !errors.Is(err, io.EOF) {
+		return fmt.Errorf("%w: trailing JSON content", ErrHistory)
+	}
+	return nil
+}
+
+func sameFailure(a, b *ApplicationError) bool {
+	if a == nil || b == nil {
+		return a == b
+	}
+	return *a == *b
+}
+
+func validFailure(failure *ApplicationError) bool {
+	return validID(failure.Type) && utf8.ValidString(failure.Message)
+}
