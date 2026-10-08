@@ -19,6 +19,7 @@ checks against fixtures and a real SQLite engine.
 | Cron contract | Committed through `7e49bb1` | Memory/SQLite state and DST preview tests, HTTP controls and invalidations pass under race; full build/unit/lint pass; final review approved |
 | Workflow checkpoint order | Committed through `5011ffe` | Preview, timeline and pruning share the timestamp/ID boundary; exact persisted ties pass on all five stores under race with no skips; full build/unit/lint pass; final review approved |
 | Workflow contract | Implemented and reviewed | Four intents and HTTP invalidations pass; run identity and detail tests pass on all five backends under race; stale confirmations refuse without mutation; review's Redis identity gap reproduced and fixed; full build/unit/lint pass |
+| Operational read prerequisites | Committed through `1c4e319` | Redis counts, worker/leader and cron reads reject outages and corrupt identity; 36 affected tests/subtests pass under race with no skips; engine reports its existing worker heartbeat/stale timing; full build/unit/lint and final review pass |
 | Remaining contract domains | Pending | Workers, queues, handlers, artifacts, overview and config are not registered yet |
 | React plugin, ten navigation entries | Pending | No browser evidence |
 | Stateful fixtures and host wiring | Pending | No browser evidence |
