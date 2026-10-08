@@ -20,7 +20,8 @@ checks against fixtures and a real SQLite engine.
 | Workflow checkpoint order | Committed through `5011ffe` | Preview, timeline and pruning share the timestamp/ID boundary; exact persisted ties pass on all five stores under race with no skips; full build/unit/lint pass; final review approved |
 | Workflow contract | Implemented and reviewed | Four intents and HTTP invalidations pass; run identity and detail tests pass on all five backends under race; stale confirmations refuse without mutation; review's Redis identity gap reproduced and fixed; full build/unit/lint pass |
 | Operational read prerequisites | Committed through `1c4e319` | Redis counts, worker/leader and cron reads reject outages and corrupt identity; 36 affected tests/subtests pass under race with no skips; engine reports its existing worker heartbeat/stale timing; full build/unit/lint and final review pass |
-| Remaining contract domains | Pending | Workers, queues, handlers, artifacts, overview and config are not registered yet |
+| Operational contract | Committed through `982899e` | Eight queries pass through HTTP; workers, queues and overview pass on all five stores under race with no skips; settings and local/remote boundaries verified; final review's SQLite claim race reproduced and fixed; full build/unit and engine/extension/SQLite race checks pass |
+| Artifact contract | Pending | Artifact reads and short-lived download URLs are not registered yet |
 | React plugin, ten navigation entries | Pending | No browser evidence |
 | Stateful fixtures and host wiring | Pending | No browser evidence |
 | Real SQLite browser flows | Pending | Not tested |
@@ -102,6 +103,20 @@ cannot be mistaken for implementing new host extension points.
 | Job usage | Deferred until xraph/dispatch#33 merges; no fabricated usage panel |
 
 ## Known boundaries
+
+Worker heartbeat age uses the serving engine's stale threshold. Remote workers
+do not record their configured interval, and a recent row does not establish that
+the worker pool has started. Local resource leases and configured queue counters
+describe only the serving process. Unconfigured queues have no measured local
+active count. Queue discovery cannot enumerate historical queues with no current
+worker or local registration, but their names remain usable as job filters.
+
+SQLite leader acquisition now uses a conditional database write after inspecting
+the recorded lease. A 24-contender regression has one successful claim and one
+leader row, both from an empty registry and after expiry. The store compares parsed
+lease timestamps, preserves an observed renewal while clearing expiry, and rejects
+ambiguous legacy leader rows for repair instead of choosing one arbitrarily.
+Other backends' leadership concurrency is outside this verification.
 
 `ResumeAll` still runs during startup without a cross-instance execution lock.
 Ordinary workflow starts still execute in their caller. Neither is claimed as fixed
