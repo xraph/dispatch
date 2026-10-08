@@ -5,13 +5,14 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
-	"time"
 
 	"github.com/xraph/forge"
 
 	"github.com/xraph/dispatch"
 	"github.com/xraph/dispatch/id"
 	"github.com/xraph/dispatch/job"
+	"github.com/xraph/dispatch/resource"
+	"github.com/xraph/dispatch/workflow"
 )
 
 func (a *API) listJobs(ctx forge.Context, req *ListJobsRequest) ([]*job.Job, error) {
@@ -50,72 +51,36 @@ func (a *API) getJob(ctx forge.Context, _ *GetJobRequest) (*job.Job, error) {
 		return nil, mapStoreError(err)
 	}
 
-	return j, ctx.JSON(http.StatusOK, j)
+	return nil, ctx.JSON(http.StatusOK, j)
 }
 
+// cancelJob cancels a pending, retrying or running job through the
+// engine. A running job's worker stops when it next touches its lease.
+// Any other state answers 409.
 func (a *API) cancelJob(ctx forge.Context, _ *CancelJobRequest) (*struct{}, error) {
 	jobID, err := id.ParseJobID(ctx.Param("jobId"))
 	if err != nil {
 		return nil, forge.BadRequest(fmt.Sprintf("invalid job ID: %v", err))
 	}
 
-	js, ok := a.eng.Dispatcher().Store().(job.Store)
-	if !ok {
-		return nil, fmt.Errorf("store does not implement job.Store")
-	}
-
-	j, err := js.GetJob(ctx.Context(), jobID)
-	if err != nil {
-		return nil, mapStoreError(err)
-	}
-
-	if j.State != job.StatePending && j.State != job.StateRetrying {
-		return nil, forge.BadRequest(fmt.Sprintf("can only cancel pending or retrying jobs, current state: %s", j.State))
-	}
-
-	now := time.Now().UTC()
-	j.State = job.StateCancelled
-	j.CompletedAt = &now
-	if updateErr := js.UpdateJob(ctx.Context(), j); updateErr != nil {
-		return nil, fmt.Errorf("cancel job: %w", updateErr)
+	if _, cancelErr := a.eng.CancelJob(ctx.Context(), jobID); cancelErr != nil {
+		return nil, mapStoreError(cancelErr)
 	}
 
 	return nil, ctx.NoContent(http.StatusNoContent)
 }
 
+// retryJob puts a failed job back to pending through the engine, which
+// claims the job's dead letter entry first. Any other state, or an entry
+// already replayed, answers 409.
 func (a *API) retryJob(ctx forge.Context, _ *RetryJobRequest) (*struct{}, error) {
 	jobID, err := id.ParseJobID(ctx.Param("jobId"))
 	if err != nil {
 		return nil, forge.BadRequest(fmt.Sprintf("invalid job ID: %v", err))
 	}
 
-	js, ok := a.eng.Dispatcher().Store().(job.Store)
-	if !ok {
-		return nil, fmt.Errorf("store does not implement job.Store")
-	}
-
-	j, err := js.GetJob(ctx.Context(), jobID)
-	if err != nil {
-		return nil, mapStoreError(err)
-	}
-
-	if j.State != job.StateFailed {
-		return nil, forge.BadRequest(fmt.Sprintf("can only retry failed jobs, current state: %s", j.State))
-	}
-
-	now := time.Now().UTC()
-	j.State = job.StatePending
-	j.RetryCount = 0
-	j.LastError = ""
-	j.RunAt = now
-	j.CompletedAt = nil
-	// Clears StartedAt along with the worker and lease fields the failed
-	// run left behind. Without it the retried job carries a lapsed
-	// lease_expires_at into pending, which a claim that grants no lease
-	// never overwrites — see job.Job.ClearOwnership for why that livelocks.
-	j.ClearOwnership()
-	if updateErr := js.UpdateJob(ctx.Context(), j); updateErr != nil {
-		return nil, fmt.Errorf("retry job: %w", updateErr)
+	if _, retryErr := a.eng.RetryJob(ctx.Context(), jobID); retryErr != nil {
+		return nil, mapStoreError(retryErr)
 	}
 
 	return nil, ctx.NoContent(http.StatusNoContent)
@@ -163,15 +128,33 @@ func (a *API) jobCounts(ctx forge.Context) error {
 	return ctx.JSON(http.StatusOK, resp)
 }
 
-// mapStoreError converts dispatch sentinel errors to forge HTTP errors.
+// mapStoreError converts dispatch sentinel errors to forge HTTP errors:
+// not found answers 404, an operator action the current state refuses
+// answers 409, and a workflow runner that has shut down answers 503.
+// Anything else passes through and answers 500.
 func mapStoreError(err error) error {
-	if err == nil {
+	switch {
+	case err == nil:
 		return nil
-	}
-	if isNotFound(err) {
+	case isNotFound(err):
 		return forge.NotFound(err.Error())
+	case isConflict(err):
+		return forge.NewHTTPError(http.StatusConflict, err.Error())
+	case errors.Is(err, workflow.ErrRunnerShutdown):
+		return forge.NewHTTPError(http.StatusServiceUnavailable, err.Error())
+	default:
+		return err
 	}
-	return err
+}
+
+// isConflict reports a refusal that comes from the state of things, not
+// from the request: the job, run or schedule is in a state that does not
+// allow the action, the entry was already replayed, or no worker in the
+// fleet is big enough for the job.
+func isConflict(err error) bool {
+	return errors.Is(err, dispatch.ErrInvalidState) ||
+		errors.Is(err, dispatch.ErrDLQAlreadyReplayed) ||
+		errors.Is(err, resource.ErrUnschedulable)
 }
 
 func isNotFound(err error) bool {

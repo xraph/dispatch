@@ -75,7 +75,7 @@ GET /v1/jobs/{jobId}
 
 ### Cancel job
 
-Cancels a job in `pending` or `retrying` state.
+Cancels a job in `pending`, `retrying` or `running` state. A running job is marked cancelled at once. Its worker cancels the handler's context when it next renews the lease; a handler that ignores cancellation can keep running.
 
 ```http
 POST /v1/jobs/{jobId}/cancel
@@ -83,7 +83,19 @@ POST /v1/jobs/{jobId}/cancel
 
 **Response `204 No Content`**
 
-**Response `400 Bad Request`:** If the job is not in a cancellable state.
+**Response `409 Conflict`:** The job is `completed`, `failed` or already `cancelled`.
+
+### Retry job
+
+Puts a `failed` job back to `pending` with its retry count and error cleared. If the job has a DLQ entry, the retry claims it, so the entry cannot also be replayed into a second copy of the job.
+
+```http
+POST /v1/jobs/{jobId}/retry
+```
+
+**Response `204 No Content`**
+
+**Response `409 Conflict`:** The job is not `failed`, or its DLQ entry was already replayed.
 
 ### Job counts
 
@@ -164,6 +176,44 @@ GET /v1/workflows/runs/{runId}
 
 **Response `404 Not Found`:** `{"error": "run not found"}`
 
+### Plan a replay
+
+Reports what replaying the run from `step` would do, without changing anything. `reruns` lists the checkpointed steps after `step` that would run again.
+
+```http
+GET /v1/workflows/runs/{runId}/replay?step=charge-card
+```
+
+**Response `200 OK`:**
+```json
+{
+  "run_id": "run_01h455vb4pex5vsknk084sn02q",
+  "from_step": "charge-card",
+  "version": 2,
+  "reruns": ["send-receipt"],
+  "state": "failed"
+}
+```
+
+**Response `409 Conflict`:** The step has no checkpoint, or the run's version is no longer registered.
+
+### Replay a run from a step
+
+Re-runs a finished run from `step` on the version it started on. The checkpoints up to and including `step` are kept, so those steps are skipped. The response comes back once the replay has started; the run continues in the background.
+
+```http
+POST /v1/workflows/runs/{runId}/replay
+Content-Type: application/json
+
+{"step": "charge-card"}
+```
+
+**Response `202 Accepted`:** The replay plan, as above.
+
+**Response `409 Conflict`:** The run is `running`, the step has no checkpoint, or the run's version is no longer registered.
+
+**Response `503 Service Unavailable`:** The engine is shutting down.
+
 ---
 
 ## Dead Letter Queue
@@ -208,7 +258,7 @@ GET /v1/dlq/{entryId}
 
 ### Replay DLQ entry
 
-Re-enqueues the entry as a new `pending` job in its original queue.
+Re-enqueues the entry as a new `pending` job in its original queue. An entry is replayed at most once.
 
 ```http
 POST /v1/dlq/{entryId}/replay
@@ -216,20 +266,72 @@ POST /v1/dlq/{entryId}/replay
 
 **Response `201 Created`:** The newly created `job.Job` object.
 
-### Purge DLQ
+**Response `409 Conflict`:** The entry was already replayed (or its job retried), or no worker is big enough to run the job.
 
-Removes DLQ entries older than a threshold.
+### Delete DLQ entry
+
+Permanently removes one entry.
 
 ```http
-POST /v1/dlq/purge
+DELETE /v1/dlq/{entryId}
 ```
+
+**Response `204 No Content`**
+
+### Replay all DLQ entries
+
+Replays every entry not yet replayed, newest first. Entries are claimed one at a time, so this is not a transaction: an entry somebody else replays meanwhile counts as a conflict.
+
+```http
+POST /v1/dlq/replay-all?queue=default&limit=100
+```
+
+Query parameters:
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `queue` | string | Only entries from this queue (default: every queue) |
+| `limit` | int | Most entries to try, up to 1000 (default: 1000) |
 
 **Response `200 OK`:**
 ```json
 {
-  "purged": 42
+  "replayed": 40,
+  "conflicts": 1,
+  "errors": 2,
+  "error_messages": ["dlq_01h455vb4pex5vsknk084sn02q: dispatch/resource: no worker can satisfy the requirement"]
 }
 ```
+
+`errors` counts the entries that failed for any reason other than a conflict. Each of those can be replayed again. `error_messages` holds the first 20.
+
+### Purge DLQ
+
+Removes DLQ entries that failed before a cutoff. Give `before` or `older_than`, not both; with neither, the cutoff is 30 days ago.
+
+```http
+POST /v1/dlq/purge?older_than=168h&dry_run=true
+```
+
+Query parameters:
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `before` | string | RFC 3339 time, e.g. `2026-10-01T00:00:00Z` |
+| `older_than` | string | Positive Go duration, e.g. `72h` |
+| `dry_run` | bool | Count the matching entries without deleting them |
+
+**Response `200 OK`:**
+```json
+{
+  "purged": 0,
+  "matched": 42,
+  "dry_run": true,
+  "before": "2026-09-30T12:00:00Z"
+}
+```
+
+`matched` is how many entries failed before the cutoff; `purged` is how many were deleted, always `0` on a dry run.
 
 ### DLQ count
 
@@ -280,11 +382,15 @@ GET /v1/crons/{cronId}
 
 ### Enable cron entry
 
+The next run is computed from now, so an entry that was off past its old next run does not fire a catch-up.
+
 ```http
 POST /v1/crons/{cronId}/enable
 ```
 
 **Response `200 OK`:** Updated cron entry with `enabled: true`.
+
+**Response `409 Conflict`:** The schedule never fires (for example `0 0 30 2 *`).
 
 ### Disable cron entry
 
@@ -303,6 +409,16 @@ DELETE /v1/crons/{cronId}
 ```
 
 **Response `204 No Content`**
+
+### Trigger cron entry
+
+Enqueues the entry's job now, with its payload and queue. The schedule is left alone, and a disabled entry can be triggered too.
+
+```http
+POST /v1/crons/{cronId}/trigger
+```
+
+**Response `201 Created`:** The enqueued `job.Job` object.
 
 ---
 
@@ -350,4 +466,6 @@ All errors return a JSON object:
 |----------|-------------|
 | Resource not found | `404` |
 | Invalid input | `400` |
+| Refused in the current state | `409` |
+| Engine shutting down | `503` |
 | Internal error | `500` |

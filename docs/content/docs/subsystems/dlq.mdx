@@ -45,10 +45,11 @@ POST /v1/dlq/:entryId/replay
 
 ## Purge
 
-Remove all DLQ entries:
+Remove the entries that failed before a cutoff, 30 days ago unless you give `before` (RFC 3339) or `older_than` (a Go duration). Add `dry_run=true` to count them first:
 
 ```bash
 POST /v1/dlq/purge
+POST /v1/dlq/purge?older_than=168h&dry_run=true
 ```
 
 This is destructive and irreversible. Use with caution.

@@ -67,19 +67,21 @@ func (a *API) registerJobRoutes(router forge.Router) {
 
 	_ = g.POST("/jobs/:jobId/cancel", a.cancelJob,
 		forge.WithSummary("Cancel job"),
-		forge.WithDescription("Cancels a pending or retrying job."),
+		forge.WithDescription("Cancels a pending, retrying or running job. A running job's worker stops when it next renews its lease."),
 		forge.WithOperationID("cancelJob"),
 		forge.WithRequestSchema(CancelJobRequest{}),
 		forge.WithNoContentResponse(),
+		conflictResponse("The job is completed, failed or already cancelled"),
 		forge.WithErrorResponses(),
 	)
 
 	_ = g.POST("/jobs/:jobId/retry", a.retryJob,
 		forge.WithSummary("Retry job"),
-		forge.WithDescription("Retries a failed job by resetting it to pending state."),
+		forge.WithDescription("Retries a failed job by resetting it to pending state. Claims the job's DLQ entry, if it has one, so the entry cannot also be replayed."),
 		forge.WithOperationID("retryJob"),
 		forge.WithRequestSchema(RetryJobRequest{}),
 		forge.WithNoContentResponse(),
+		conflictResponse("The job is not failed, or its DLQ entry was already replayed"),
 		forge.WithErrorResponses(),
 	)
 
@@ -121,6 +123,27 @@ func (a *API) registerWorkflowRoutes(router forge.Router) {
 		forge.WithResponseSchema(http.StatusOK, "Workflow run details", &workflow.Run{}),
 		forge.WithErrorResponses(),
 	)
+
+	_ = g.GET("/workflows/runs/:runId/replay", a.planWorkflowReplay,
+		forge.WithSummary("Plan workflow replay"),
+		forge.WithDescription("Reports what replaying the run from a step would do, without changing anything."),
+		forge.WithOperationID("planWorkflowReplay"),
+		forge.WithRequestSchema(PlanWorkflowReplayRequest{}),
+		forge.WithResponseSchema(http.StatusOK, "Replay plan", &workflow.ReplayPlan{}),
+		conflictResponse("The step has no checkpoint, or the run's version is not registered"),
+		forge.WithErrorResponses(),
+	)
+
+	_ = g.POST("/workflows/runs/:runId/replay", a.replayWorkflow,
+		forge.WithSummary("Replay workflow run"),
+		forge.WithDescription("Re-runs a finished run from a step on its own version. Answers once the replay has started; the run continues in the background."),
+		forge.WithOperationID("replayWorkflowRun"),
+		forge.WithRequestSchema(ReplayWorkflowRequest{}),
+		forge.WithResponseSchema(http.StatusAccepted, "Replay started", &workflow.ReplayPlan{}),
+		conflictResponse("The run is running, the step has no checkpoint, or the run's version is not registered"),
+		forge.WithResponseSchema(http.StatusServiceUnavailable, "The workflow runner has shut down", ErrorResponse{}),
+		forge.WithErrorResponses(),
+	)
 }
 
 // registerDLQRoutes registers dead letter queue management routes.
@@ -147,25 +170,37 @@ func (a *API) registerDLQRoutes(router forge.Router) {
 
 	_ = g.POST("/dlq/:entryId/replay", a.replayDLQ,
 		forge.WithSummary("Replay DLQ entry"),
-		forge.WithDescription("Re-enqueues a DLQ entry as a new pending job."),
+		forge.WithDescription("Re-enqueues a DLQ entry as a new pending job. An entry is replayed at most once."),
 		forge.WithOperationID("dispatchReplayDLQ"),
 		forge.WithRequestSchema(ReplayDLQRequest{}),
 		forge.WithCreatedResponse(&job.Job{}),
+		conflictResponse("The entry was already replayed, or no worker can run the job"),
+		forge.WithErrorResponses(),
+	)
+
+	_ = g.DELETE("/dlq/:entryId", a.deleteDLQ,
+		forge.WithSummary("Delete DLQ entry"),
+		forge.WithDescription("Permanently removes one DLQ entry."),
+		forge.WithOperationID("deleteDLQ"),
+		forge.WithRequestSchema(DeleteDLQRequest{}),
+		forge.WithNoContentResponse(),
 		forge.WithErrorResponses(),
 	)
 
 	_ = g.POST("/dlq/replay-all", a.replayAllDLQ,
 		forge.WithSummary("Replay all DLQ entries"),
-		forge.WithDescription("Re-enqueues all unreplayed DLQ entries as new pending jobs."),
+		forge.WithDescription("Re-enqueues unreplayed DLQ entries as new pending jobs, newest first, optionally in one queue and up to a limit."),
 		forge.WithOperationID("replayAllDLQ"),
+		forge.WithRequestSchema(ReplayAllDLQRequest{}),
 		forge.WithResponseSchema(http.StatusOK, "Replay result", ReplayAllDLQResponse{}),
 		forge.WithErrorResponses(),
 	)
 
 	_ = g.POST("/dlq/purge", a.purgeDLQ,
 		forge.WithSummary("Purge DLQ"),
-		forge.WithDescription("Removes old DLQ entries."),
+		forge.WithDescription("Removes DLQ entries that failed before a cutoff: before, older_than, or 30 days ago when neither is given. dry_run counts them instead."),
 		forge.WithOperationID("purgeDLQ"),
+		forge.WithRequestSchema(PurgeDLQRequest{}),
 		forge.WithResponseSchema(http.StatusOK, "Purge result", PurgeDLQResponse{}),
 		forge.WithErrorResponses(),
 	)
@@ -203,10 +238,11 @@ func (a *API) registerCronRoutes(router forge.Router) {
 
 	_ = g.POST("/crons/:cronId/enable", a.enableCron,
 		forge.WithSummary("Enable cron entry"),
-		forge.WithDescription("Enables a disabled cron entry."),
+		forge.WithDescription("Enables a cron entry. Its next run is computed from now, so it does not fire a catch-up."),
 		forge.WithOperationID("enableCron"),
 		forge.WithRequestSchema(EnableCronRequest{}),
 		forge.WithResponseSchema(http.StatusOK, "Enabled cron entry", &cron.Entry{}),
+		conflictResponse("The schedule never fires"),
 		forge.WithErrorResponses(),
 	)
 
@@ -227,6 +263,22 @@ func (a *API) registerCronRoutes(router forge.Router) {
 		forge.WithNoContentResponse(),
 		forge.WithErrorResponses(),
 	)
+
+	_ = g.POST("/crons/:cronId/trigger", a.triggerCron,
+		forge.WithSummary("Trigger cron entry"),
+		forge.WithDescription("Enqueues the entry's job now. The schedule is left alone, and a disabled entry can be triggered too."),
+		forge.WithOperationID("triggerCron"),
+		forge.WithRequestSchema(TriggerCronRequest{}),
+		forge.WithCreatedResponse(&job.Job{}),
+		conflictResponse("No worker can run the job"),
+		forge.WithErrorResponses(),
+	)
+}
+
+// conflictResponse documents the 409 an operator route answers when the
+// current state refuses the action. WithErrorResponses does not list 409.
+func conflictResponse(description string) forge.RouteOption {
+	return forge.WithResponseSchema(http.StatusConflict, description, ErrorResponse{})
 }
 
 // registerStatsRoutes registers aggregate statistics routes.
