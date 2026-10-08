@@ -104,6 +104,7 @@ type Engine struct {
 	stopOnce sync.Once
 
 	// Workflow subsystem.
+	durable    *durableEngine
 	wfRegistry *workflow.Registry
 	wfRunner   *workflow.Runner
 	eventBus   *event.Bus
@@ -395,6 +396,9 @@ func Build(d *dispatch.Dispatcher, opts ...Option) (*Engine, error) {
 
 	for _, opt := range opts {
 		opt(eng)
+	}
+	if err := eng.buildDurable(st); err != nil {
+		return nil, err
 	}
 
 	// Assemble the executor registry now that WithExecutor options have
@@ -726,12 +730,25 @@ func (eng *Engine) EnqueueRaw(ctx context.Context, name string, payload []byte, 
 
 // Health checks the health of the engine by pinging the dispatcher's store.
 func (eng *Engine) Health(ctx context.Context) error {
+	if err := eng.durableError(); err != nil {
+		return fmt.Errorf("durable workflow worker: %w", err)
+	}
 	return eng.d.Store().Ping(ctx)
 }
 
 // Start begins job processing by starting the worker pool and cron scheduler.
 // It also resumes any workflow runs left in "running" state (crash recovery).
-func (eng *Engine) Start(ctx context.Context) error {
+func (eng *Engine) Start(ctx context.Context) (startErr error) {
+	if err := eng.startDurable(ctx); err != nil {
+		return err
+	}
+	defer func() {
+		if startErr != nil && eng.durable != nil {
+			cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+			defer cancel()
+			startErr = errors.Join(startErr, eng.stopDurable(cleanupCtx))
+		}
+	}()
 	// Resume any interrupted workflow runs (best-effort, non-fatal).
 	if resumeErr := eng.wfRunner.ResumeAll(ctx); resumeErr != nil {
 		eng.logger.Warn("failed to resume workflow runs",
@@ -771,6 +788,7 @@ func (eng *Engine) Start(ctx context.Context) error {
 
 // Stop gracefully shuts down the engine.
 func (eng *Engine) Stop(ctx context.Context) error {
+	durableErr := eng.stopDurable(ctx)
 	// Stop the store wake listener first; it only reduces poll latency.
 	if eng.wakeStop != nil {
 		eng.wakeStop()
@@ -813,7 +831,7 @@ func (eng *Engine) Stop(ctx context.Context) error {
 	// this method, is not itself idempotent.
 	eng.stopOnce.Do(eng.closeExecutors)
 
-	return stopErr
+	return errors.Join(stopErr, durableErr)
 }
 
 // closeExecutors releases every configured executor's resources, logging

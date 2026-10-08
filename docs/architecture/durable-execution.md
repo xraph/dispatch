@@ -38,16 +38,16 @@ Store tests alone do not qualify a workflow runtime or a deployment.
 
 | Requirement | Implementation status | Evidence required |
 | --- | --- | --- |
-| Atomic history, state, tasks, and durable receipts | Memory and PostgreSQL stores implemented; runtime integration open | Shared memory/PostgreSQL conformance, rollback, concurrent writers, ambiguous-response retry |
-| Fenced task claims and durable timer deadlines | Store contract implemented; worker recovery open | Expiry, same-owner reclaim, concurrent claims, restart recovery |
-| Deterministic Go workflow runtime | Open | Recorded-history replay with no repeated external effects, changed-command rejection |
+| Atomic history, state, tasks, and durable receipts | Memory and PostgreSQL stores integrated with initial Go runtime | Shared memory/PostgreSQL conformance, rollback, concurrent writers, ambiguous-response retry |
+| Fenced task claims and durable timer deadlines | Store contract and renewable workers implemented; process-kill qualification open | Expiry, same-owner reclaim, concurrent claims, restart recovery |
+| Deterministic Go workflow runtime | Activity, timer and future replay implemented; SDK expansion open | Recorded-history replay with no repeated external effects, changed-command rejection |
 | Activity retries and timeout classes | Open | Queue, attempt, overall and heartbeat deadlines; heartbeat progress; asynchronous completion |
 | Signals, queries, updates and signal-with-start | Open | Namespace isolation, deduplication, atomic acceptance, update results, read-only queries |
 | Child workflows and cancellation | Open | Stable child identity, duplicate creation prevention, parent-close policies, cancellation propagation |
 | Compensation, pause, termination and reset | Open | Resumable compensation attempts, audited controls, immutable reset lineage |
 | Continue-as-new and run chains | Open | Bounded history, message handoff and version inheritance |
 | Schedules | Open | Overlap, catch-up, backfill, timezones and unique scheduled occurrences |
-| Deployment versioning | Open | Pinned build routing, gradual rollout, patch markers, replay checks, drainage |
+| Deployment versioning | Pinned build polling implemented; rollout and patch markers open | Pinned build routing, gradual rollout, patch markers, replay checks, drainage |
 | Distributed scheduling | Open | Partition ownership, long polling, fairness, fleet-wide quotas and backpressure under load |
 | Payloads and artifacts | Open | Codec/schema metadata, encryption, accepted-output publication, retention and archival |
 | Namespace security and audit | Open | Authorization on every read/write/poll, scoped credentials, denial tests and audit delivery |
@@ -108,3 +108,39 @@ A separate regression proved migration retries failed after schema creation; the
 migration now tolerates that retry without deleting existing execution data.
 These are store-level checks. Process crash recovery, deterministic execution,
 dashboard flows, failover and load qualification remain open.
+
+## Initial Go runtime
+
+Enable the runtime explicitly with `engine.WithDurableWorkflows`. Supply a
+namespace, queue, build ID, worker owner and handler maps in `runtime.Options`.
+`StartDurableWorkflow` accepts a `durable.StartRequest` containing the same routing
+and stable workflow, run and request IDs. It persists work before execution starts.
+Unsupported stores fail engine construction. Checkpoint workflows keep their
+existing API and their existing guarantees.
+
+Your workflow handler uses `Activity`, `Timer`, `Future.Get` and `Now`. Schedule
+multiple futures before calling `Get` to run activities in parallel. An unresolved
+future yields a decision. When a worker resumes the run, the handler replays from
+its beginning and receives saved results. Changed command inputs, ordering, IDs,
+activity types, queues and timer deadlines fail replay before new work is saved.
+
+Activity handlers receive `ActivityInfo.IdempotencyKey()`, a stable key across task
+attempts. Pass it to external services that support idempotency. A worker can lose
+its lease after an external service accepts an operation, so exactly-once external
+effects are not promised. Lease loss and shutdown cancel the activity context;
+activity handlers must observe it. Arbitrary blocking Go code cannot be preempted.
+
+Workers renew grants while processing. Result publication and the workflow wakeup
+share one transaction. Unknown commit outcomes retry the same request, and an
+explicit revision conflict reloads the latest history. Polls filter by pinned build
+inside the store. Engine health surfaces a failed durable worker. Polling is bounded
+and configurable; partition scheduling and long polling remain separate work.
+
+2026-10-08: evaluator tests cover saved activity results and typed failures,
+parallel futures, logical time, fixed timer deadlines, malformed histories,
+changed or omitted commands, payload isolation and panics. Worker tests force
+concurrent result revision conflicts, recover a lost commit response, check lease
+renewal and loss, verify cross-queue wakeups, and stop without closing unfinished
+runs. PostgreSQL repeats build-isolation and runtime recovery checks with a new
+connection pool and worker. These checks do not qualify database failover,
+process-kill recovery, activity timeout/retry policies or the remaining SDK APIs.
