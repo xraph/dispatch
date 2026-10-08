@@ -26,7 +26,7 @@ func (w *Worker) processActivity(ctx context.Context, task durable.Task, payload
 		}
 		prior := history.attempts[command.ID]
 		if prior.value.Epoch >= task.Epoch {
-			return fmt.Errorf("%w: activity grant already started", ErrHistory)
+			return w.effectConflict(ctx, task, "activity grant already started")
 		}
 		if prior.value.Attempt > 0 && !prior.failed {
 			// This claim belongs to a replacement worker. Resolve the previous attempt
@@ -36,7 +36,7 @@ func (w *Worker) processActivity(ctx context.Context, task durable.Task, payload
 			return w.finishActivity(ctx, task, payload, prior.value.Epoch, outcome)
 		}
 		if prior.failed && !task.AvailableAt.Equal(prior.retryAt) {
-			return fmt.Errorf("%w: activity retry availability differs from history", ErrHistory)
+			return w.effectConflict(ctx, task, "activity retry availability differs from history")
 		}
 		attempt := ActivityAttempt{Version: 1, CommandID: command.ID, Attempt: prior.value.Attempt + 1, Epoch: task.Epoch}
 		data, err := json.Marshal(attempt)
@@ -86,7 +86,7 @@ func (w *Worker) finishActivity(ctx context.Context, task durable.Task, payload 
 		}
 		prior := history.attempts[command.ID]
 		if prior.failed || prior.value.Attempt != outcome.Attempt || prior.value.Epoch != epoch {
-			return fmt.Errorf("%w: activity result does not match active attempt", ErrHistory)
+			return w.effectConflict(ctx, task, "activity result does not match active attempt")
 		}
 		request := taskRequest(task, execution.Revision)
 		if outcome.Failure != nil {

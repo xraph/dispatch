@@ -330,3 +330,27 @@ The combined timeout implementation passes make f, make l, go test ./...,
 engine/runtime/memory race tests and the PostgreSQL durable integration race suite.
 These checks do not qualify process kills, database failover or sustained load.
 Heartbeat progress, asynchronous completion and the rest of the roadmap remain open.
+
+The independent timeout review found a worker-liveness bug: an overall timeout
+could commit before a late handler returned and before renewal observed ownership
+loss. The worker misclassified the valid completed history as corruption and
+stopped all pollers. A regression reproduced that shutdown. The fix reports lease
+loss for a superseded result, and the same worker now completes an unrelated
+activity after the timeout wins. A second regression reproduced delayed claim
+delivery after a replacement worker started; that path now reports lease loss too.
+
+When an attempt or deadline disagrees with a valid history, the runtime checks the
+current task grant before reporting corruption. A changed grant is normal
+contention. An unchanged grant still reports the history error. This adds a store
+read only on disagreement paths; malformed histories and mismatched commands
+remain errors.
+
+The review found no other actionable issues. It independently ran runtime and
+memory race tests. Heartbeats, asynchronous completion, dashboard flows, bounded
+history and other platform features remain outside this timeout review. Process
+kills, database failover and sustained load remain unqualified.
+
+After the review fixes, make f, make l (zero issues), go test ./..., the
+engine/runtime/memory race suites and the PostgreSQL durable integration race
+suite pass. The PostgreSQL suite completed in 27.001 seconds. This closes the
+timeout implementation review; the qualification limits above still apply.

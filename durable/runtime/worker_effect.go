@@ -26,7 +26,7 @@ func (w *Worker) processEffect(ctx context.Context, task durable.Task) error {
 	if command.Kind == durable.TaskActivity && command.Version == 2 {
 		return w.processActivity(ctx, task, payload)
 	}
-	execution, history, err := w.effectSnapshot(ctx, task, command)
+	execution, _, err := w.effectSnapshot(ctx, task, command)
 	if err != nil {
 		return err
 	}
@@ -51,13 +51,10 @@ func (w *Worker) processEffect(ctx context.Context, task durable.Task) error {
 			return context.Cause(ctx)
 		}
 		if attempt > 0 {
-			execution, history, err = w.effectSnapshot(ctx, task, command)
+			execution, _, err = w.effectSnapshot(ctx, task, command)
 			if err != nil {
 				return err
 			}
-		}
-		if _, exists := history.outcomes[command.ID]; exists {
-			return fmt.Errorf("%w: effect already has a result", ErrHistory)
 		}
 		request := taskRequest(task, execution.Revision)
 		eventType := EventActivityCompleted
@@ -87,9 +84,26 @@ func (w *Worker) effectSnapshot(ctx context.Context, task durable.Task, command 
 		return execution, history, fmt.Errorf("%w: effect task does not match command history", ErrHistory)
 	}
 	if _, exists := history.outcomes[command.ID]; exists {
-		return execution, history, fmt.Errorf("%w: effect task already completed", ErrHistory)
+		// A timeout processor or replacement worker can publish a valid result
+		// before this worker observes lease loss. Its result is now superseded.
+		return execution, history, fmt.Errorf("%w: effect task already completed", durable.ErrLeaseLost)
 	}
 	return execution, history, nil
+}
+
+// A valid history can advance beyond a delayed claim or handler result. Check
+// current ownership before treating a disagreement with that claim as corrupt.
+func (w *Worker) effectConflict(ctx context.Context, task durable.Task, reason string) error {
+	current, err := storeCall(ctx, w, func(callCtx context.Context) (durable.Task, error) {
+		return w.store.GetTask(callCtx, task.Key, task.ID)
+	})
+	if err != nil {
+		return err
+	}
+	if current.Done || current.Token() != task.Token() {
+		return fmt.Errorf("%w: %s", durable.ErrLeaseLost, reason)
+	}
+	return fmt.Errorf("%w: %s", ErrHistory, reason)
 }
 
 func callActivity(ctx context.Context, handler ActivityFunc, info ActivityInfo, input []byte) (outcome Outcome, callErr error) {
