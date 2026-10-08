@@ -14,6 +14,7 @@ import (
 	"github.com/xraph/dispatch/cluster"
 	"github.com/xraph/dispatch/cron"
 	"github.com/xraph/dispatch/dlq"
+	"github.com/xraph/dispatch/durable"
 	"github.com/xraph/dispatch/event"
 	"github.com/xraph/dispatch/id"
 	"github.com/xraph/dispatch/job"
@@ -47,6 +48,7 @@ type Store struct {
 
 	artifacts     map[string]*artifact.Artifact
 	artifactLinks []*artifact.Link
+	executions    map[durable.Key]*executionRecord
 
 	// leader tracks the current cluster leader worker ID string.
 	leader      string
@@ -64,6 +66,7 @@ func New() *Store {
 		events:      make(map[string]*event.Event),
 		workers:     make(map[string]*cluster.Worker),
 		artifacts:   make(map[string]*artifact.Artifact),
+		executions:  make(map[durable.Key]*executionRecord),
 	}
 }
 
