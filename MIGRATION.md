@@ -18,7 +18,8 @@ checks against fixtures and a real SQLite engine.
 | Dead-letter contract | Committed through `edb7da1` | Reads/actions pass on all five backends under race; HTTP invalidations verified; review's partial purge and audit gaps reproduced and fixed; full build/unit/lint pass |
 | Cron contract | Committed through `7e49bb1` | Memory/SQLite state and DST preview tests, HTTP controls and invalidations pass under race; full build/unit/lint pass; final review approved |
 | Workflow checkpoint order | Committed through `5011ffe` | Preview, timeline and pruning share the timestamp/ID boundary; exact persisted ties pass on all five stores under race with no skips; full build/unit/lint pass; final review approved |
-| Remaining contract domains | Pending | Workflows, workers, queues, handlers, artifacts, overview and config are not registered yet |
+| Workflow contract | Implemented and reviewed | Four intents and HTTP invalidations pass; run identity and detail tests pass on all five backends under race; stale confirmations refuse without mutation; review's Redis identity gap reproduced and fixed; full build/unit/lint pass |
+| Remaining contract domains | Pending | Workers, queues, handlers, artifacts, overview and config are not registered yet |
 | React plugin, ten navigation entries | Pending | No browser evidence |
 | Stateful fixtures and host wiring | Pending | No browser evidence |
 | Real SQLite browser flows | Pending | Not tested |
@@ -117,6 +118,17 @@ Checkpoint order is creation time, then checkpoint ID. The replay preview and al
 five stores use that same boundary, including when MongoDB timestamp precision
 puts several checkpoints at the same time. Replay retains the target and earlier
 ties, and removes later ties.
+
+The workflow contract requires the generation returned by `workflows.replayPreview`
+when you submit `workflows.replayFrom`. A completed competing replay invalidates
+that confirmation. Existing engine callers retain their original API; callers
+with a preview can use `ReplayWorkflowFromGeneration`.
+
+Redis workflow reads now reject transport, decode and key/entity identity errors.
+A missing index member can still be skipped, but an unreadable record cannot
+silently disappear from the timeline or child list. Pruning validates every
+checkpoint before deleting. A write failure can still leave some later
+checkpoints deleted; the runner records a launch failure for recovery.
 
 Cron and cron-fired jobs do not acquire tenant scope. Empty scope filters mean
 every scope. The dashboard is an operator tool, so these boundaries must remain
