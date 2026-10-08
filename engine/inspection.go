@@ -3,6 +3,7 @@ package engine
 import (
 	"os"
 	"slices"
+	"time"
 
 	"github.com/xraph/dispatch"
 	"github.com/xraph/dispatch/cron"
@@ -13,16 +14,17 @@ import (
 
 // Inspection describes the serving process. It makes no fleet-wide health claim.
 type Inspection struct {
-	Config                                      dispatch.Config
-	Pool                                        worker.Settings
-	Cron                                        cron.Settings
-	ResourceDefaults                            resource.Set
-	QueueResources                              map[string]resource.Set
-	WorkerCapacity                              resource.Set
-	WorkerCustomKeys                            []string
-	ResourceManagerEnabled, EstimatorConfigured bool
-	ScratchRoot                                 string
-	WakeNotifierSupported                       bool
+	Config                                        dispatch.Config
+	Pool                                          worker.Settings
+	Cron                                          cron.Settings
+	ResourceDefaults                              resource.Set
+	QueueResources                                map[string]resource.Set
+	WorkerCapacity                                resource.Set
+	WorkerCustomKeys                              []string
+	ResourceManagerEnabled, EstimatorConfigured   bool
+	ScratchRoot                                   string
+	WakeNotifierSupported                         bool
+	WorkerHeartbeatInterval, WorkerStaleThreshold time.Duration
 }
 
 // Inspect returns detached configuration and effective subsystem settings.
@@ -44,5 +46,6 @@ func (eng *Engine) Inspect() Inspection {
 		WorkerCapacity: eng.workerCapacity.Clone(), WorkerCustomKeys: slices.Clone(eng.workerCustomKeys),
 		ResourceManagerEnabled: eng.resources != nil, EstimatorConfigured: eng.estimator != nil,
 		ScratchRoot: scratch, WakeNotifierSupported: wakeSupported,
+		WorkerHeartbeatInterval: eng.workerHeartbeatInterval(), WorkerStaleThreshold: eng.staleWorkerThreshold(),
 	}
 }
