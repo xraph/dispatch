@@ -1,0 +1,13 @@
+schemaVersion: 1
+contributor:
+  name: dispatch
+  envelope: { supports: [v1], preferred: v1 }
+  capabilities: [dispatch.read, dispatch.write]
+
+# Operator-wide. Scope fields are explicit filters, never principal claims.
+intents:
+  - { name: jobs.list, kind: query, version: 1, capability: read }
+  - { name: jobs.get, kind: query, version: 1, capability: read }
+  - { name: jobs.counts, kind: query, version: 1, capability: read }
+  - { name: jobs.cancel, kind: command, version: 1, capability: write, invalidates: [jobs.list, jobs.get, jobs.counts, queues.list, queues.get, overview.summary] }
+  - { name: jobs.retry, kind: command, version: 1, capability: write, invalidates: [jobs.list, jobs.get, jobs.counts, queues.list, queues.get, overview.summary, dlq.list, dlq.get] }
