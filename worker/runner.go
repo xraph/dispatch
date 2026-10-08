@@ -240,9 +240,12 @@ func (r *Runner) Close() error {
 //   - An ordinary failure with retries exhausted: marks failed, pushes
 //     to DLQ, emits JobFailed + JobDLQ, same as the permanent case.
 //   - Any of the terminal writes above losing the race to
-//     job.ErrLeaseLost: abandonLostLease writes nothing to the store at
+//     job.ErrLeaseLost, or the pool having cancelled the attempt with
+//     that cause: abandonLostLease writes nothing to the store at
 //     all — the current lease holder's own write must stand untouched —
-//     and only emits JobFailed so extensions still observe the loss.
+//     and only emits JobCancelled when the row says an operator
+//     cancelled it, or JobFailed otherwise, so extensions still observe
+//     the loss.
 func (r *Runner) Execute(ctx context.Context, j *job.Job) error {
 	terminal, err := r.terminalFor(j)
 	if err != nil {
@@ -266,6 +269,16 @@ func (r *Runner) Execute(ctx context.Context, j *job.Job) error {
 	start := time.Now()
 	execErr := r.mw(ctx, j, terminal)
 	elapsed := time.Since(start)
+
+	// The pool cancels an attempt with job.ErrLeaseLost as the cause once
+	// a renewal tells it the row moved on (Pool.sendHeartbeats). Any
+	// terminal write from here would be refused by the fence anyway, and
+	// on a backend that honours the context it fails first as
+	// context.Canceled, which no call site below routes to
+	// abandonLostLease. Abandon now, while the cause is still known.
+	if cause := context.Cause(ctx); errors.Is(cause, job.ErrLeaseLost) {
+		return r.abandonLostLease(ctx, j, cause)
+	}
 
 	now := time.Now().UTC()
 	j.UpdatedAt = now
@@ -984,18 +997,61 @@ func (r *Runner) updateJob(ctx context.Context, j *job.Job) error {
 // losing attempt's outputs is SweepEphemeral's owner-terminal path, once
 // every owner that links them has gone terminal.
 //
-// The extension registry emit reuses EmitJobFailed rather than adding a
-// new event: audit_hook and relay_hook both already implement
+// One reason for the loss is not a failure at all: an operator cancelled
+// the job while it ran (engine.CancelJob writes the row cancelled, which
+// is what fails the fence). So the row is read once, and a cancelled row
+// is reported through EmitJobCancelled with the row as stored. Every
+// other loss, a reclaim above all, reuses EmitJobFailed rather than
+// adding a new event: audit_hook and relay_hook both already implement
 // ext.JobFailed, so they observe a lost lease with no new plumbing.
+//
+// The read and both emits run on a context detached from ctx's
+// cancellation. ctx is usually the attempt's own context, which the pool
+// has just cancelled, and a read through it would fail on every backend
+// that honours the context.
 func (r *Runner) abandonLostLease(ctx context.Context, j *job.Job, cause error) error {
+	detached := context.WithoutCancel(ctx)
+
+	if cur := r.cancelledRow(detached, j.ID); cur != nil {
+		r.logger.Info("job cancelled while running, discarding terminal write",
+			log.String("job_id", j.ID.String()),
+			log.String("job_name", j.Name),
+		)
+
+		r.extensions.EmitJobCancelled(detached, cur)
+
+		return cause
+	}
+
 	r.logger.Warn("lease lost, discarding terminal write",
 		log.String("job_id", j.ID.String()),
 		log.String("job_name", j.Name),
 	)
 
-	r.extensions.EmitJobFailed(ctx, j, cause)
+	r.extensions.EmitJobFailed(detached, j, cause)
 
 	return cause
+}
+
+// leaseLostReadTimeout bounds the single read abandonLostLease makes to
+// learn why a lease was lost. The attempt is already over, so a slow
+// store only delays which event is reported, never the job.
+const leaseLostReadTimeout = 5 * time.Second
+
+// cancelledRow returns the stored job when its state is cancelled, and
+// nil otherwise, including when the read fails. A failed read reports
+// the loss as JobFailed, which is what every lost lease reported before
+// cancellation existed.
+func (r *Runner) cancelledRow(ctx context.Context, jobID id.JobID) *job.Job {
+	readCtx, cancel := context.WithTimeout(ctx, leaseLostReadTimeout)
+	defer cancel()
+
+	cur, err := r.store.GetJob(readCtx, jobID)
+	if err != nil || cur == nil || cur.State != job.StateCancelled {
+		return nil
+	}
+
+	return cur
 }
 
 // handleSuccess marks the job as completed and emits the lifecycle event.
