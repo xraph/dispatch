@@ -25,9 +25,20 @@ type runEntity struct {
 	CompletedAt *time.Time `json:"completed_at,omitempty"`
 	CreatedAt   time.Time  `json:"created_at"`
 	UpdatedAt   time.Time  `json:"updated_at"`
+
+	// Version and ParentRunID were dropped by every write before this
+	// release, so a run written then reads back as unversioned (latest)
+	// and top-level. Both are omitted when zero, like on workflow.Run.
+	Version     int    `json:"version,omitempty"`
+	ParentRunID string `json:"parent_run_id,omitempty"`
 }
 
 func toRunEntity(r *workflow.Run) *runEntity {
+	var parentRunID string
+	if r.ParentRunID != nil {
+		parentRunID = r.ParentRunID.String()
+	}
+
 	return &runEntity{
 		ID:          r.ID.String(),
 		Name:        r.Name,
@@ -41,6 +52,8 @@ func toRunEntity(r *workflow.Run) *runEntity {
 		CompletedAt: r.CompletedAt,
 		CreatedAt:   r.CreatedAt,
 		UpdatedAt:   r.UpdatedAt,
+		Version:     r.Version,
+		ParentRunID: parentRunID,
 	}
 }
 
@@ -48,6 +61,15 @@ func fromRunEntity(e *runEntity) (*workflow.Run, error) {
 	rID, err := id.ParseRunID(e.ID)
 	if err != nil {
 		return nil, fmt.Errorf("dispatch/redis: parse run id: %w", err)
+	}
+
+	var parentRunID *id.RunID
+	if e.ParentRunID != "" {
+		parsed, parseErr := id.ParseRunID(e.ParentRunID)
+		if parseErr != nil {
+			return nil, fmt.Errorf("dispatch/redis: parse parent run id: %w", parseErr)
+		}
+		parentRunID = &parsed
 	}
 
 	return &workflow.Run{
@@ -65,6 +87,8 @@ func fromRunEntity(e *runEntity) (*workflow.Run, error) {
 		ScopeOrgID:  e.ScopeOrgID,
 		StartedAt:   e.StartedAt,
 		CompletedAt: e.CompletedAt,
+		Version:     e.Version,
+		ParentRunID: parentRunID,
 	}, nil
 }
 

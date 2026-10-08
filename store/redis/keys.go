@@ -75,6 +75,16 @@ func (k keys) dlq(id string) string { return k.full("dlq:" + id) }
 // dlqIDs is the Set tracking all DLQ entry IDs for enumeration.
 func (k keys) dlqIDs() string { return k.full("dlq_ids") }
 
+// dlqByJob is the Set of DLQ entry IDs recorded for one failed job, so
+// GetDLQByJobID reads a handful of members instead of every entry.
+func (k keys) dlqByJob(jobID string) string { return k.full("dlq_by_job:" + jobID) }
+
+// dlqJobIndexed is the Set of DLQ entry IDs that are already in their
+// job's dlqByJob set. It mirrors dlqIDs member for member once every row
+// is indexed, so comparing the two counts tells GetDLQByJobID whether a
+// row written before the per-job index exists still needs adding.
+func (k keys) dlqJobIndexed() string { return k.full("dlq_job_indexed") }
+
 // ── Event keys ──
 
 // event returns the key for an event entity.

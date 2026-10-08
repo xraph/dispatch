@@ -2,6 +2,7 @@ package redis
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
@@ -140,78 +141,111 @@ func (s *Store) ListCrons(ctx context.Context) ([]*cron.Entry, error) {
 	return entries, nil
 }
 
+// The lock, the last and next run, and the enabled flag all live in one
+// JSON blob per entry, so every write that changes one of them rewrites
+// the whole blob. Each of them goes through updateEntity (cas.go), which
+// only writes over the exact value it read. A scheduler write that read
+// the entry before an operator disabled it therefore re-reads and keeps
+// the disable, instead of putting enabled back; and two workers that both
+// read the entry unlocked cannot both take the lock.
+
+// errCronLockHeld is AcquireCronLock's refusal inside updateEntity: the
+// lock belongs to another worker and has not expired.
+var errCronLockHeld = errors.New("dispatch/redis: cron lock held by another worker")
+
 // AcquireCronLock attempts to acquire a distributed lock for a cron entry.
+// Of several workers racing for a free lock, exactly one gets true.
 func (s *Store) AcquireCronLock(ctx context.Context, entryID id.CronID, workerID id.WorkerID, ttl time.Duration) (bool, error) {
-	eID := entryID.String()
-	key := s.keys.cron(eID)
 	wID := workerID.String()
-	t := now()
-	until := t.Add(ttl)
 
-	// Read current entity.
-	var e cronEntity
-	if err := s.getEntity(ctx, key, &e); err != nil {
-		if isNotFound(err) {
-			return false, dispatch.ErrCronNotFound
-		}
-		return false, fmt.Errorf("dispatch/redis: acquire cron lock get: %w", err)
-	}
+	err := updateEntity(ctx, s, s.keys.cron(entryID.String()), dispatch.ErrCronNotFound,
+		func(e *cronEntity) error {
+			t := now()
+			if e.LockedBy != "" && e.LockedBy != wID && e.LockedUntil != nil && e.LockedUntil.After(t) {
+				return errCronLockHeld
+			}
 
-	// Check current lock state.
-	if e.LockedBy != "" && e.LockedBy != wID {
-		// Someone else holds the lock -- check if expired.
-		if e.LockedUntil != nil && e.LockedUntil.After(t) {
-			return false, nil // lock still valid
-		}
-	}
+			until := t.Add(ttl)
+			e.LockedBy = wID
+			e.LockedUntil = &until
+			e.UpdatedAt = t
 
-	// Acquire or re-acquire.
-	e.LockedBy = wID
-	e.LockedUntil = &until
-	e.UpdatedAt = t
-	if err := s.setEntity(ctx, key, &e); err != nil {
-		return false, fmt.Errorf("dispatch/redis: acquire cron lock set: %w", err)
+			return nil
+		})
+	switch {
+	case err == nil:
+		return true, nil
+	case errors.Is(err, errCronLockHeld):
+		return false, nil
+	case errors.Is(err, dispatch.ErrCronNotFound):
+		return false, err
+	default:
+		return false, fmt.Errorf("dispatch/redis: acquire cron lock: %w", err)
 	}
-	return true, nil
 }
 
-// ReleaseCronLock releases the distributed lock for a cron entry.
+// ReleaseCronLock releases the distributed lock for a cron entry. It is a
+// no-op when the entry is gone or the lock is not this worker's.
 func (s *Store) ReleaseCronLock(ctx context.Context, entryID id.CronID, workerID id.WorkerID) error {
-	key := s.keys.cron(entryID.String())
 	wID := workerID.String()
 
-	var e cronEntity
-	if err := s.getEntity(ctx, key, &e); err != nil {
-		if isNotFound(err) {
-			return nil // entry gone, no-op
-		}
-		return fmt.Errorf("dispatch/redis: release cron lock get: %w", err)
+	err := updateEntity(ctx, s, s.keys.cron(entryID.String()), errSkipWrite,
+		func(e *cronEntity) error {
+			if e.LockedBy != wID {
+				return errSkipWrite
+			}
+
+			e.LockedBy = ""
+			e.LockedUntil = nil
+			e.UpdatedAt = now()
+
+			return nil
+		})
+	if err != nil && !errors.Is(err, errSkipWrite) {
+		return fmt.Errorf("dispatch/redis: release cron lock: %w", err)
 	}
 
-	if e.LockedBy != wID {
-		return nil // not our lock, no-op
-	}
-
-	e.LockedBy = ""
-	e.LockedUntil = nil
-	e.UpdatedAt = now()
-	return s.setEntity(ctx, key, &e)
+	return nil
 }
 
-// UpdateCronLastRun records when a cron entry last fired.
+// UpdateCronLastRun records when a cron entry last fired, and nothing else.
 func (s *Store) UpdateCronLastRun(ctx context.Context, entryID id.CronID, at time.Time) error {
-	key := s.keys.cron(entryID.String())
-	var e cronEntity
-	if err := s.getEntity(ctx, key, &e); err != nil {
-		if isNotFound(err) {
-			return dispatch.ErrCronNotFound
-		}
-		return fmt.Errorf("dispatch/redis: update last run get: %w", err)
-	}
+	return updateEntity(ctx, s, s.keys.cron(entryID.String()), dispatch.ErrCronNotFound,
+		func(e *cronEntity) error {
+			e.LastRunAt = &at
+			e.UpdatedAt = now()
 
-	e.LastRunAt = &at
-	e.UpdatedAt = now()
-	return s.setEntity(ctx, key, &e)
+			return nil
+		})
+}
+
+// SetCronEnabled sets enabled, sets next_run_at when nextRunAt is non-nil,
+// and stamps updated_at. Every other field keeps whatever the entry holds
+// at the moment of the write.
+func (s *Store) SetCronEnabled(ctx context.Context, entryID id.CronID, enabled bool, nextRunAt *time.Time) error {
+	return updateEntity(ctx, s, s.keys.cron(entryID.String()), dispatch.ErrCronNotFound,
+		func(e *cronEntity) error {
+			e.Enabled = enabled
+			if nextRunAt != nil {
+				next := *nextRunAt
+				e.NextRunAt = &next
+			}
+			e.UpdatedAt = now()
+
+			return nil
+		})
+}
+
+// UpdateCronNextRun sets next_run_at and stamps updated_at, and never
+// touches enabled.
+func (s *Store) UpdateCronNextRun(ctx context.Context, entryID id.CronID, nextRunAt time.Time) error {
+	return updateEntity(ctx, s, s.keys.cron(entryID.String()), dispatch.ErrCronNotFound,
+		func(e *cronEntity) error {
+			e.NextRunAt = &nextRunAt
+			e.UpdatedAt = now()
+
+			return nil
+		})
 }
 
 // UpdateCronEntry updates a cron entry.

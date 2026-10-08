@@ -48,3 +48,26 @@ func TestKeys_createdIndexes(t *testing.T) {
 		t.Errorf("unprefixed byCreated(job) = %q, want %q", got, "dispatch:job_by_created")
 	}
 }
+
+// The per-job DLQ index is pinned for the same reason as the created
+// indexes: a rename would orphan every set already built and make every
+// lookup rebuild them.
+func TestKeys_dlqJobIndex(t *testing.T) {
+	tests := []struct {
+		name string
+		got  string
+		want string
+	}{
+		{"dlqByJob", newKeys("ws_acme:").dlqByJob("job_1"), "ws_acme:dispatch:dlq_by_job:job_1"},
+		{"dlqJobIndexed", newKeys("ws_acme:").dlqJobIndexed(), "ws_acme:dispatch:dlq_job_indexed"},
+		{"unprefixed dlqByJob", newKeys("").dlqByJob("job_1"), "dispatch:dlq_by_job:job_1"},
+		{"unprefixed dlqJobIndexed", newKeys("").dlqJobIndexed(), "dispatch:dlq_job_indexed"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if tt.got != tt.want {
+				t.Errorf("%s = %q, want %q", tt.name, tt.got, tt.want)
+			}
+		})
+	}
+}
