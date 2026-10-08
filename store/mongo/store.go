@@ -250,6 +250,9 @@ func migrationIndexes() map[string][]mongod.IndexModel {
 			}},
 			// Paged list by queue. See listOrderKeys.
 			listOrderKeys("queue"),
+			// GetDLQByJobID: the entries for one job, newest first, so
+			// the newest is the first document the index yields.
+			listOrderKeys("job_id"),
 		},
 		colEvents: {
 			// Pending events index for subscribe.

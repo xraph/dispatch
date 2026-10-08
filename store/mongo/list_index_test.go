@@ -66,6 +66,7 @@ func TestListIndexesExistAfterMigrate(t *testing.T) {
 		{"dispatch_jobs", "state:1,_id:-1"},
 		{"dispatch_jobs", "queue:1,_id:-1"},
 		{"dispatch_dlq", "queue:1,_id:-1"},
+		{"dispatch_dlq", "job_id:1,_id:-1"},
 		{"dispatch_workflow_runs", "state:1,_id:-1"},
 		{"dispatch_artifacts", "scope_app_id:1,_id:-1"},
 	} {
