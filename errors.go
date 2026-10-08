@@ -21,6 +21,15 @@ var (
 	ErrJobAlreadyExists = errors.New("dispatch: job already exists")
 	ErrDuplicateCron    = errors.New("dispatch: duplicate cron entry")
 
+	// ErrDLQAlreadyExists is what PushDLQ returns for an entry ID that is
+	// already in the dead letter queue. A push never overwrites an entry.
+	ErrDLQAlreadyExists = errors.New("dispatch: dlq entry already exists")
+
+	// ErrDLQAlreadyReplayed is what dlq.ReplayClaimer.ClaimReplay returns
+	// when the entry was claimed by an earlier replay or retry, so the
+	// same failure is never turned back into work twice.
+	ErrDLQAlreadyReplayed = errors.New("dispatch: dlq entry already replayed")
+
 	// State errors.
 	ErrInvalidState       = errors.New("dispatch: invalid state transition")
 	ErrMaxRetriesExceeded = errors.New("dispatch: max retries exceeded")

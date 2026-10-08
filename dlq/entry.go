@@ -34,6 +34,12 @@ type Entry struct {
 	ReplayedAt *time.Time `json:"replayed_at,omitempty"`
 	CreatedAt  time.Time  `json:"created_at"`
 
+	// ReplayedJobID is the job a replay created, or for a retry the
+	// retried job itself. ClaimReplay sets it together with ReplayedAt,
+	// and it is nil while the entry is unreplayed. An entry marked by the
+	// older ReplayDLQ has ReplayedAt set and this nil.
+	ReplayedJobID *id.JobID `json:"replayed_job_id,omitempty"`
+
 	// Priority is the claim ordering the job was enqueued with.
 	Priority int `json:"priority,omitempty"`
 

@@ -670,12 +670,18 @@ func (m *Store) DeleteCron(_ context.Context, entryID id.CronID) error {
 // DLQ Store
 // ──────────────────────────────────────────────────
 
-// PushDLQ adds a failed job entry to the dead letter queue.
+// PushDLQ adds a failed job entry to the dead letter queue. An ID that is
+// already there is refused with dispatch.ErrDLQAlreadyExists rather than
+// overwritten, which would silently drop a replay claim.
 func (m *Store) PushDLQ(_ context.Context, entry *dlq.Entry) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	m.dlqs[entry.ID.String()] = entry
+	key := entry.ID.String()
+	if _, exists := m.dlqs[key]; exists {
+		return dispatch.ErrDLQAlreadyExists
+	}
+	m.dlqs[key] = entry
 	return nil
 }
 
