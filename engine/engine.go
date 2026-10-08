@@ -792,6 +792,15 @@ func (eng *Engine) Stop(ctx context.Context) error {
 		eng.logger.Error("cron scheduler stop error", log.String("error", err.Error()))
 	}
 
+	// Let in-flight workflow replays finish before the dispatcher goes,
+	// up to ctx's deadline. Shutdown also refuses any replay asked for
+	// from here on. A replay still going when ctx expires is left to
+	// finish; if the process exits first, its run is still running in
+	// the store and the next Start resumes it, so this only logs.
+	if err := eng.wfRunner.Shutdown(ctx); err != nil {
+		eng.logger.Warn("workflow runner shutdown incomplete", log.String("error", err.Error()))
+	}
+
 	stopErr := eng.d.Stop(ctx)
 
 	// Close the executors last. The dispatcher stop above drains the worker

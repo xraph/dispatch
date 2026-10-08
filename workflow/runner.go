@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"sync"
 	"time"
 
 	log "github.com/xraph/go-utils/log"
@@ -32,6 +33,17 @@ type Runner struct {
 	eventStore event.Store
 	emitter    RunEmitter
 	logger     log.Logger
+
+	// The background launcher (lifecycle.go). life is the context every
+	// background run executes under, and stopLife cancels it. inflight
+	// counts the background runs Shutdown waits for. closed refuses new
+	// launches once Shutdown has begun; lifeMu orders it against
+	// inflight.Add, so Shutdown never waits on a group that can still grow.
+	life     context.Context
+	stopLife context.CancelFunc
+	lifeMu   sync.Mutex
+	closed   bool
+	inflight sync.WaitGroup
 }
 
 // NewRunner creates a workflow runner.
@@ -42,12 +54,15 @@ func NewRunner(
 	emitter RunEmitter,
 	logger log.Logger,
 ) *Runner {
+	life, stopLife := context.WithCancel(context.Background())
 	return &Runner{
 		registry:   registry,
 		store:      store,
 		eventStore: eventStore,
 		emitter:    emitter,
 		logger:     logger,
+		life:       life,
+		stopLife:   stopLife,
 	}
 }
 
