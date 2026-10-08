@@ -142,7 +142,21 @@ func (s *Store) GetRun(ctx context.Context, runID id.RunID) (*workflow.Run, erro
 		}
 		return nil, fmt.Errorf("dispatch/redis: get run: %w", err)
 	}
-	return fromRunEntity(&e)
+	run, err := fromRunEntity(&e)
+	if err != nil {
+		return nil, err
+	}
+	if err := validateRunIdentity(run, runID.String()); err != nil {
+		return nil, err
+	}
+	return run, nil
+}
+
+func validateRunIdentity(run *workflow.Run, member string) error {
+	if run.ID.String() != member {
+		return fmt.Errorf("dispatch/redis: run identity mismatch for key %s", member)
+	}
+	return nil
 }
 
 // UpdateRun persists changes to an existing workflow run.
@@ -181,6 +195,9 @@ func (s *Store) ListRuns(ctx context.Context, opts workflow.ListOpts) ([]*workfl
 		r, convErr := fromRunEntity(&e)
 		if convErr != nil {
 			return nil, fmt.Errorf("dispatch/redis: list runs convert: %w", convErr)
+		}
+		if identityErr := validateRunIdentity(r, rID); identityErr != nil {
+			return nil, identityErr
 		}
 		runs = append(runs, r)
 	}

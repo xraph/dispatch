@@ -41,11 +41,12 @@ const (
 // walk, which ID set backfills it, where each member's entity lives, how
 // to decode it and which rows to keep.
 type indexScan[T any] struct {
-	entity string
-	ids    string
-	keyOf  func(member string) string
-	decode func(raw []byte) (T, error)
-	match  func(T) bool
+	entity   string
+	ids      string
+	keyOf    func(member string) string
+	decode   func(raw []byte) (T, error)
+	validate func(T, string) error
+	match    func(T) bool
 }
 
 // scanResult is one page of an indexScan, in the shape every Page type
@@ -149,6 +150,11 @@ func (sc indexScan[T]) page(ctx context.Context, s *Store, cursor id.ID, limit i
 			if dErr != nil {
 				return scanResult[T]{}, fmt.Errorf("dispatch/redis: decode %s %s: %w", sc.entity, m.Member, dErr)
 			}
+			if sc.validate != nil {
+				if identityErr := sc.validate(row, m.Member); identityErr != nil {
+					return scanResult[T]{}, identityErr
+				}
+			}
 			if !sc.match(row) {
 				continue
 			}
@@ -187,6 +193,7 @@ func countMatching[T any](
 	keyOf func(member string) string,
 	decode func(raw []byte) (T, error),
 	match func(T) bool,
+	validate func(T, string) error,
 ) (int64, error) {
 	members, err := s.kv.SMembers(ctx, idsKey)
 	if err != nil {
@@ -215,6 +222,11 @@ func countMatching[T any](
 			row, dErr := decode(raw)
 			if dErr != nil {
 				return 0, fmt.Errorf("dispatch/redis: count decode %s: %w", chunk[i], dErr)
+			}
+			if validate != nil {
+				if identityErr := validate(row, chunk[i]); identityErr != nil {
+					return 0, identityErr
+				}
 			}
 			if match(row) {
 				n++
@@ -292,11 +304,12 @@ func (s *Store) ListRunsPage(ctx context.Context, opts workflow.ListRunsPageOpts
 	}
 
 	res, err := indexScan[*workflow.Run]{
-		entity: entityRun,
-		ids:    s.keys.runIDs(),
-		keyOf:  s.keys.run,
-		decode: decodeRun,
-		match:  opts.Match,
+		entity:   entityRun,
+		ids:      s.keys.runIDs(),
+		keyOf:    s.keys.run,
+		decode:   decodeRun,
+		validate: validateRunIdentity,
+		match:    opts.Match,
 	}.page(ctx, s, cursor, opts.Limit)
 	if err != nil {
 		return workflow.RunPage{}, err
@@ -308,7 +321,7 @@ func (s *Store) ListRunsPage(ctx context.Context, opts workflow.ListRunsPageOpts
 // CountRuns counts workflow runs by state and exact name. It reads every
 // run: O(n) on Redis, like CountJobs.
 func (s *Store) CountRuns(ctx context.Context, opts workflow.CountRunsOpts) (int64, error) {
-	return countMatching(ctx, s, s.keys.runIDs(), s.keys.run, decodeRun, opts.Match)
+	return countMatching(ctx, s, s.keys.runIDs(), s.keys.run, decodeRun, opts.Match, validateRunIdentity)
 }
 
 // ListDLQPage returns dead letter entries newest first by ID, filtered
@@ -336,7 +349,7 @@ func (s *Store) ListDLQPage(ctx context.Context, opts dlq.PageOpts) (dlq.Page, e
 // CountDLQEntries counts dead letter entries under the given filters. It
 // reads every entry: O(n) on Redis, like CountJobs.
 func (s *Store) CountDLQEntries(ctx context.Context, opts dlq.CountOpts) (int64, error) {
-	return countMatching(ctx, s, s.keys.dlqIDs(), s.keys.dlq, decodeDLQ, opts.Match)
+	return countMatching(ctx, s, s.keys.dlqIDs(), s.keys.dlq, decodeDLQ, opts.Match, nil)
 }
 
 // ListArtifactsPage returns artifacts newest first by ID, filtered and
