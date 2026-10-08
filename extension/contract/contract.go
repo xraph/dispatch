@@ -35,6 +35,14 @@ func command[I, O any](intent string, fn func(context.Context, I, fc.Principal) 
 
 func bindings(deps Deps) []binding {
 	return []binding{
+		query("workers.list", workersListHandler(deps)),
+		query("workers.get", workersGetHandler(deps)),
+		query("queues.list", queuesListHandler(deps)),
+		query("queues.get", queuesGetHandler(deps)),
+		query("handlers.list", handlersListHandler(deps)),
+		query("handlers.get", handlersGetHandler(deps)),
+		query("engine.config", engineConfigHandler(deps)),
+		query("overview.summary", overviewSummaryHandler(deps)),
 		query("workflows.list", workflowsListHandler(deps)),
 		query("workflows.get", workflowsGetHandler(deps)),
 		query("workflows.replayPreview", workflowsReplayPreviewHandler(deps)),
