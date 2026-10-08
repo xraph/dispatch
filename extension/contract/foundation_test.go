@@ -50,7 +50,7 @@ func TestWirePayloadsPreserveJSONAndDistinguishGob(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if string(encoded) != `{"kind":"json","json":{"id":9007199254740993}}` {
+	if string(encoded) != `{"kind":"json","json":{"id":9007199254740993},"jsonText":"{\"id\":9007199254740993}"}` {
 		t.Fatalf("payload = %s", encoded)
 	}
 	for _, checkpoint := range []bool{false, true} {

@@ -37,16 +37,17 @@ func timestampPtr(t *time.Time) *string {
 	return timestamp(*t)
 }
 
-// Payload exposes JSON as JSON and opaque content only as a size.
+// Payload exposes JSON with its original text and opaque content only as a size.
 type Payload struct {
-	Kind  string          `json:"kind"`
-	JSON  json.RawMessage `json:"json,omitempty"`
-	Bytes *int            `json:"bytes,omitempty"`
+	Kind     string          `json:"kind"`
+	JSON     json.RawMessage `json:"json,omitempty"`
+	JSONText string          `json:"jsonText,omitempty"`
+	Bytes    *int            `json:"bytes,omitempty"`
 }
 
 func projectPayload(data []byte, checkpoint bool) Payload {
 	if json.Valid(data) {
-		return Payload{Kind: "json", JSON: bytes.Clone(data)}
+		return Payload{Kind: "json", JSON: bytes.Clone(data), JSONText: string(data)}
 	}
 	kind := "binary"
 	if checkpoint {
