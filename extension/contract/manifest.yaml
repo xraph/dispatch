@@ -6,6 +6,10 @@ contributor:
 
 # Operator-wide. Scope fields are explicit filters, never principal claims.
 intents:
+  - { name: artifacts.list, kind: query, version: 1, capability: read }
+  - { name: artifacts.get, kind: query, version: 1, capability: read }
+  - { name: artifacts.forJob, kind: query, version: 1, capability: read }
+  - { name: artifacts.presign, kind: query, version: 1, capability: read }
   - { name: workers.list, kind: query, version: 1, capability: read }
   - { name: workers.get, kind: query, version: 1, capability: read }
   - { name: queues.list, kind: query, version: 1, capability: read }

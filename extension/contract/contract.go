@@ -35,6 +35,10 @@ func command[I, O any](intent string, fn func(context.Context, I, fc.Principal) 
 
 func bindings(deps Deps) []binding {
 	return []binding{
+		query("artifacts.list", artifactsListHandler(deps)),
+		query("artifacts.get", artifactsGetHandler(deps)),
+		query("artifacts.forJob", artifactsForJobHandler(deps)),
+		query("artifacts.presign", artifactsPresignHandler(deps)),
 		query("workers.list", workersListHandler(deps)),
 		query("workers.get", workersGetHandler(deps)),
 		query("queues.list", queuesListHandler(deps)),
