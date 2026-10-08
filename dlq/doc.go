@@ -31,8 +31,10 @@
 // # Replay
 //
 // Replaying an entry re-enqueues the original job with the same payload.
-// Use the admin API (POST /v1/dlq/:entryId/replay) or call the store
-// directly. Replay sets ReplayedAt on the DLQ entry.
+// Use engine.Engine.ReplayDLQ, the admin API (POST /v1/dlq/:entryId/replay)
+// or [Service.Replay]. Every one of them claims the entry first
+// ([ReplayClaimer.ClaimReplay]), which sets ReplayedAt and ReplayedJobID,
+// so an entry is replayed into at most one job however many callers try.
 //
 // # Admin API
 //

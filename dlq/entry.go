@@ -11,10 +11,11 @@ import (
 // moved to the dead letter queue for inspection or replay.
 //
 // The fields below the identity block exist so Replay can rebuild a job
-// that behaves like the one that failed. Replay calls EnqueueJob directly
-// rather than going back through the engine, so nothing re-derives these
-// for it: whatever the entry does not carry, the replayed job silently
-// takes a default for. They are stored as the effective values from the
+// that behaves like the one that failed. Replay enqueues the job it
+// builds as it is, through the engine's prepared-job path or straight to
+// the job store, and neither re-derives these from the definition:
+// whatever the entry does not carry, the replayed job silently takes a
+// default for. They are stored as the effective values from the
 // failed job rather than looked up from the definition by name, because a
 // definition's declaration is only half the story. The enqueue site can
 // override every one of them, and a definition can be changed or removed

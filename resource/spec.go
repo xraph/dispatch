@@ -187,7 +187,7 @@ func Resolve(ctx context.Context, in ResolveInput) (Spec, error) {
 		Class:    in.Class,
 	}
 
-	if err := checkSchedulable(spec.Requests, in.MaxCapacity); err != nil {
+	if err := CheckSchedulable(spec.Requests, in.MaxCapacity); err != nil {
 		return Spec{}, err
 	}
 
@@ -218,10 +218,16 @@ func defaultLimits(requests, declared, override Set) Set {
 	return limits
 }
 
-// checkSchedulable rejects a requirement no worker could ever satisfy.
-// An empty maxCapacity means capacity is unknown, which disables the
-// check rather than rejecting everything.
-func checkSchedulable(requests, maxCapacity Set) error {
+// CheckSchedulable rejects a requirement no worker could ever satisfy,
+// with an error wrapping ErrUnschedulable that names each dimension that
+// does not fit. An empty maxCapacity means capacity is unknown, which
+// disables the check rather than rejecting everything.
+//
+// Resolve runs it on the requirement it resolves. It is exported for a
+// caller that already holds a resolved requirement, such as a dead
+// letter replay carrying the failed job's Resources, and must check it
+// against today's fleet without resolving it again.
+func CheckSchedulable(requests, maxCapacity Set) error {
 	if len(maxCapacity) == 0 {
 		return nil
 	}

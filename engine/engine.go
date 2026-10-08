@@ -413,8 +413,10 @@ func Build(d *dispatch.Dispatcher, opts ...Option) (*Engine, error) {
 		eng.bo = backoff.DefaultStrategy()
 	}
 
-	// Create the DLQ service.
-	eng.dlqService = dlq.NewService(ds, js)
+	// Create the DLQ service. Its replays enqueue through the engine, so
+	// a replayed job is checked against the fleet, wakes the pool and is
+	// reported to extensions like any other enqueue.
+	eng.dlqService = dlq.NewService(ds, js, dlq.WithEnqueuer(eng.enqueuePrepared))
 
 	// Create the workflow subsystem.
 	emitter := &extRunEmitter{r: eng.extensions}
@@ -715,17 +717,10 @@ func (eng *Engine) EnqueueRaw(ctx context.Context, name string, payload []byte, 
 		return nil, err
 	}
 
-	if err := eng.jobStore.EnqueueJob(ctx, j); err != nil {
+	if err := eng.commitEnqueue(ctx, j); err != nil {
 		return nil, err
 	}
 
-	// Nudge the local worker pool so in-process enqueues are picked up
-	// immediately instead of waiting out the idle poll backoff.
-	if eng.pool != nil {
-		eng.pool.Wake()
-	}
-
-	eng.extensions.EmitJobEnqueued(ctx, j)
 	return j, nil
 }
 
