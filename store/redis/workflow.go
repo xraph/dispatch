@@ -170,14 +170,17 @@ func (s *Store) ListRuns(ctx context.Context, opts workflow.ListOpts) ([]*workfl
 	for _, rID := range ids {
 		var e runEntity
 		if getErr := s.getEntity(ctx, s.keys.run(rID), &e); getErr != nil {
-			continue
+			if isNotFound(getErr) {
+				continue
+			}
+			return nil, fmt.Errorf("dispatch/redis: list runs read: %w", getErr)
 		}
 		if opts.State != "" && workflow.RunState(e.State) != opts.State {
 			continue
 		}
 		r, convErr := fromRunEntity(&e)
 		if convErr != nil {
-			continue
+			return nil, fmt.Errorf("dispatch/redis: list runs convert: %w", convErr)
 		}
 		runs = append(runs, r)
 	}
@@ -234,11 +237,20 @@ func (s *Store) ListCheckpoints(ctx context.Context, runID id.RunID) ([]*workflo
 		key := s.keys.checkpoint(rID, step)
 		var e checkpointEntity
 		if getErr := s.getEntity(ctx, key, &e); getErr != nil {
-			continue
+			if isNotFound(getErr) {
+				continue
+			}
+			return nil, fmt.Errorf("dispatch/redis: list checkpoints read: %w", getErr)
 		}
 
-		cpID, _ := id.ParseCheckpointID(e.ID)  //nolint:errcheck // best-effort
-		rIDParsed, _ := id.ParseRunID(e.RunID) //nolint:errcheck // best-effort
+		cpID, parseErr := id.ParseCheckpointID(e.ID)
+		if parseErr != nil || cpID.IsNil() {
+			return nil, fmt.Errorf("dispatch/redis: invalid checkpoint ID %q", e.ID)
+		}
+		rIDParsed, parseErr := id.ParseRunID(e.RunID)
+		if parseErr != nil || rIDParsed != runID || e.StepName != step {
+			return nil, fmt.Errorf("dispatch/redis: checkpoint identity mismatch for run %s step %q", runID, step)
+		}
 
 		checkpoints = append(checkpoints, &workflow.Checkpoint{
 			ID:        cpID,
@@ -274,36 +286,33 @@ func (s *Store) ListChildRuns(ctx context.Context, parentRunID id.RunID) ([]*wor
 // DeleteCheckpointsAfter removes all checkpoints created after the
 // given step name (by creation order). Used for workflow replay.
 func (s *Store) DeleteCheckpointsAfter(ctx context.Context, runID id.RunID, afterStep string) error {
-	rID := runID.String()
-
-	// Get the target checkpoint's time.
-	var target checkpointEntity
-	if err := s.getEntity(ctx, s.keys.checkpoint(rID, afterStep), &target); err != nil {
-		if isNotFound(err) {
-			return nil // step not found; nothing to delete
-		}
-		return fmt.Errorf("dispatch/redis: get target checkpoint: %w", err)
-	}
-
-	// List all step names for this run.
-	steps, err := s.rdb.SMembers(ctx, s.keys.checkpointIndex(rID)).Result()
+	// Resolve the whole boundary before deleting anything. A failed read
+	// cannot turn into a replay that silently keeps a later checkpoint.
+	checkpoints, err := s.ListCheckpoints(ctx, runID)
 	if err != nil {
-		return fmt.Errorf("dispatch/redis: list checkpoint steps: %w", err)
+		return err
 	}
-
-	for _, step := range steps {
-		key := s.keys.checkpoint(rID, step)
-		var e checkpointEntity
-		if getErr := s.getEntity(ctx, key, &e); getErr != nil {
+	var target *workflow.Checkpoint
+	for _, cp := range checkpoints {
+		if cp.StepName == afterStep {
+			target = cp
+			break
+		}
+	}
+	if target == nil {
+		return nil
+	}
+	rID := runID.String()
+	for _, cp := range checkpoints {
+		if workflow.CompareCheckpoints(cp, target) <= 0 {
 			continue
 		}
-		if e.CreatedAt.After(target.CreatedAt) || (e.CreatedAt.Equal(target.CreatedAt) && e.ID > target.ID) {
-			if delErr := s.rdb.Del(ctx, key).Err(); delErr != nil {
-				return fmt.Errorf("delete checkpoint %s: %w", key, delErr)
-			}
-			if remErr := s.rdb.SRem(ctx, s.keys.checkpointIndex(rID), step).Err(); remErr != nil {
-				return fmt.Errorf("remove checkpoint index %s: %w", step, remErr)
-			}
+		key := s.keys.checkpoint(rID, cp.StepName)
+		if err := s.rdb.Del(ctx, key).Err(); err != nil {
+			return fmt.Errorf("delete checkpoint %s: %w", key, err)
+		}
+		if err := s.rdb.SRem(ctx, s.keys.checkpointIndex(rID), cp.StepName).Err(); err != nil {
+			return fmt.Errorf("remove checkpoint index %s: %w", cp.StepName, err)
 		}
 	}
 	return nil
