@@ -9,13 +9,15 @@ import (
 
 // History event types understood by this version of the Go runtime.
 const (
-	EventStarted           = "execution.started"
-	EventCommandScheduled  = "workflow.command_scheduled"
-	EventWorkflowWaiting   = "workflow.waiting"
-	EventActivityCompleted = "activity.completed"
-	EventTimerFired        = "timer.fired"
-	EventWorkflowCompleted = "workflow.completed"
-	EventWorkflowFailed    = "workflow.failed"
+	EventStarted                = "execution.started"
+	EventCommandScheduled       = "workflow.command_scheduled"
+	EventWorkflowWaiting        = "workflow.waiting"
+	EventActivityCompleted      = "activity.completed"
+	EventActivityAttemptStarted = "activity.attempt_started"
+	EventActivityAttemptFailed  = "activity.attempt_failed"
+	EventTimerFired             = "timer.fired"
+	EventWorkflowCompleted      = "workflow.completed"
+	EventWorkflowFailed         = "workflow.failed"
 )
 
 // Evaluation errors leave the workflow task uncommitted for operator recovery.
@@ -32,21 +34,23 @@ type WorkflowFunc func(*Workflow, []byte) ([]byte, error)
 // Command records one decision before its associated task can execute.
 // Index is one-based and monotonically increasing within a run.
 type Command struct {
-	Version  int              `json:"version"`
-	Index    int64            `json:"index"`
-	ID       string           `json:"id"`
-	Kind     durable.TaskKind `json:"kind"`
-	Name     string           `json:"name,omitempty"`
-	Queue    string           `json:"queue,omitempty"`
-	Input    []byte           `json:"input,omitempty"`
-	Delay    time.Duration    `json:"delay,omitempty"`
-	Deadline time.Time        `json:"deadline,omitempty"`
+	Version         int              `json:"version"`
+	Index           int64            `json:"index"`
+	ID              string           `json:"id"`
+	Kind            durable.TaskKind `json:"kind"`
+	Name            string           `json:"name,omitempty"`
+	Queue           string           `json:"queue,omitempty"`
+	Input           []byte           `json:"input,omitempty"`
+	Delay           time.Duration    `json:"delay,omitempty"`
+	Deadline        time.Time        `json:"deadline,omitempty"`
+	ActivityOptions *ActivityOptions `json:"activity_options,omitempty"`
 }
 
 // ApplicationError is a recorded application failure. Type allows deterministic handling.
 type ApplicationError struct {
-	Type    string `json:"type"`
-	Message string `json:"message"`
+	Type         string `json:"type"`
+	Message      string `json:"message"`
+	NonRetryable bool   `json:"non_retryable,omitempty"`
 }
 
 func (f *ApplicationError) Error() string { return f.Message }
@@ -56,6 +60,7 @@ func (f *ApplicationError) Error() string { return f.Message }
 type Outcome struct {
 	Version   int               `json:"version"`
 	CommandID string            `json:"command_id"`
+	Attempt   int64             `json:"attempt,omitempty"`
 	Output    []byte            `json:"output,omitempty"`
 	Failure   *ApplicationError `json:"failure,omitempty"`
 }

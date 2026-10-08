@@ -20,6 +20,7 @@ type recordedOutcome struct {
 type replayHistory struct {
 	commands []Command
 	outcomes map[string]recordedOutcome
+	attempts map[string]recordedAttempt
 	terminal durable.State
 	output   []byte
 	failure  *ApplicationError
@@ -88,7 +89,7 @@ func invoke(w *Workflow, handler WorkflowFunc, input []byte) (output []byte, err
 }
 
 func parseHistory(execution durable.Execution, events []durable.Event) (replayHistory, error) {
-	result := replayHistory{outcomes: make(map[string]recordedOutcome)}
+	result := replayHistory{outcomes: make(map[string]recordedOutcome), attempts: make(map[string]recordedAttempt)}
 	if len(events) == 0 || len(events) > 100000 || execution.LastSequence != int64(len(events)) ||
 		execution.CreatedAt.IsZero() || events[0].Type != EventStarted ||
 		!events[0].Time.Equal(execution.CreatedAt) || !bytes.Equal(events[0].Payload, execution.Input) {
@@ -115,6 +116,10 @@ func parseHistory(execution durable.Execution, events []durable.Event) (replayHi
 			}
 			commands[command.ID] = command
 			result.commands = append(result.commands, command)
+		case EventActivityAttemptStarted, EventActivityAttemptFailed:
+			if err := parseActivityAttempt(&result, commands, event); err != nil {
+				return result, err
+			}
 		case EventActivityCompleted, EventTimerFired:
 			if err := parseOutcome(&result, commands, event); err != nil {
 				return result, err
@@ -138,6 +143,11 @@ func parseHistory(execution durable.Execution, events []durable.Event) (replayHi
 			return result, fmt.Errorf("%w: unknown event %q", ErrHistory, event.Type)
 		}
 	}
+	for id, attempt := range result.attempts {
+		if _, done := result.outcomes[id]; attempt.failed && attempt.value.RetryAfter == 0 && !done {
+			return result, fmt.Errorf("%w: final attempt failure has no outcome", ErrHistory)
+		}
+	}
 	if (result.terminal == "" && execution.State != durable.StateRunning) ||
 		(result.terminal != "" && (result.terminal != execution.State || !bytes.Equal(result.output, execution.Output))) {
 		return result, fmt.Errorf("%w: terminal projection mismatch", ErrHistory)
@@ -152,12 +162,17 @@ func parseOutcome(history *replayHistory, commands map[string]Command, event dur
 	}
 	command, exists := commands[outcome.CommandID]
 	_, duplicate := history.outcomes[outcome.CommandID]
-	if outcome.Version != 1 || !exists || duplicate || (outcome.Failure != nil && (len(outcome.Output) != 0 || !validFailure(outcome.Failure))) {
+	if !exists || duplicate || (outcome.Failure != nil && (len(outcome.Output) != 0 || !validFailure(outcome.Failure))) {
 		return fmt.Errorf("%w: invalid outcome at event %d", ErrHistory, event.Sequence)
 	}
 	if (event.Type == EventActivityCompleted && command.Kind != durable.TaskActivity) ||
-		(event.Type == EventTimerFired && (command.Kind != durable.TaskTimer || len(outcome.Output) != 0 || outcome.Failure != nil || event.Time.Before(command.Deadline))) {
+		(event.Type == EventTimerFired && (command.Kind != durable.TaskTimer || outcome.Version != 1 || outcome.Attempt != 0 || len(outcome.Output) != 0 || outcome.Failure != nil || event.Time.Before(command.Deadline))) {
 		return fmt.Errorf("%w: outcome does not match scheduled command", ErrHistory)
+	}
+	if command.Kind == durable.TaskActivity {
+		if err := validateActivityOutcome(history, command, outcome, event.Time); err != nil {
+			return err
+		}
 	}
 	history.outcomes[outcome.CommandID] = recordedOutcome{value: outcome, at: event.Time}
 	return nil

@@ -25,7 +25,9 @@ type ActivityInfo struct {
 	Key       durable.Key
 	CommandID string
 	BuildID   string
-	Attempt   int64
+	// Attempt counts durable starts for version 2 activities. Legacy activities
+	// expose the task claim count, which can include claims lost before execution.
+	Attempt int64
 }
 
 // IdempotencyKey is stable across attempts, and distinct across runs/namespaces.

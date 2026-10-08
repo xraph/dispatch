@@ -20,6 +20,9 @@ func (w *Worker) processEffect(ctx context.Context, task durable.Task) error {
 		task.ID != fmt.Sprintf("command:%d", command.Index) || !validID(payload.WorkflowQueue) {
 		return fmt.Errorf("%w: invalid effect task payload", ErrHistory)
 	}
+	if command.Kind == durable.TaskActivity && command.Version == 2 {
+		return w.processActivity(ctx, task, payload)
+	}
 	execution, history, err := w.effectSnapshot(ctx, task, command)
 	if err != nil {
 		return err

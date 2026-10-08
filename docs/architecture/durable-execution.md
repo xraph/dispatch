@@ -41,7 +41,7 @@ Store tests alone do not qualify a workflow runtime or a deployment.
 | Atomic history, state, tasks, and durable receipts | Memory and PostgreSQL stores integrated with initial Go runtime | Shared memory/PostgreSQL conformance, rollback, concurrent writers, ambiguous-response retry |
 | Fenced task claims and durable timer deadlines | Store contract and renewable workers implemented; process-kill qualification open | Expiry, same-owner reclaim, concurrent claims, restart recovery |
 | Deterministic Go workflow runtime | Activity, timer and future replay implemented; SDK expansion open | Recorded-history replay with no repeated external effects, changed-command rejection |
-| Activity retries and timeout classes | Transactional retry, progress, deadline and conditional cancellation primitives implemented; activity policies and processors open | Queue, attempt, overall and heartbeat deadlines; heartbeat progress; asynchronous completion |
+| Activity retries and timeout classes | Persisted attempts, retry policies and interrupted-attempt recovery implemented; timeout processors, heartbeats and asynchronous completion open | Queue, attempt, overall and heartbeat deadlines; heartbeat progress; asynchronous completion |
 | Signals, queries, updates and signal-with-start | Open | Namespace isolation, deduplication, atomic acceptance, update results, read-only queries |
 | Child workflows and cancellation | Open | Stable child identity, duplicate creation prevention, parent-close policies, cancellation propagation |
 | Compensation, pause, termination and reset | Open | Resumable compensation attempts, audited controls, immutable reset lineage |
@@ -153,8 +153,8 @@ An independent review of 48c6a0b through ebcb3e7 found no actionable correctness
 issues in this scoped runtime. Its reviewer reran focused runtime and engine race
 tests; the PostgreSQL and full-suite evidence came from the implementation checks.
 
-Next: implement persisted activity attempts, retry policies, timeout classes and
-heartbeat progress. Durable execution visibility also needs store-level ordered
+Next: implement activity timeout classes, heartbeat progress and asynchronous
+completion. Durable execution visibility also needs store-level ordered
 list/task reads and real Go dashboard contracts before the React plugin can show
 these runs. Current dashboard workflow reads describe checkpoint runs only. Add
 an execution list and detail view with ordered history, pending work and lease
@@ -211,3 +211,46 @@ engine, durable runtime and memory, and the full PostgreSQL integration suite
 passes with the race detector. The reviewer confirmed the lock-order correction
 and reported no further findings in the fix. Process-kill recovery and the
 activity-policy layer remain unqualified.
+
+## Activity attempts and retries
+
+Use `ActivityWithOptions` for a recorded retry policy.
+Version 1 `Activity` commands retain their existing behavior. New commands store
+normalized options, so changing a policy for an existing run fails replay instead
+of silently changing its recovery behavior.
+
+Each attempt starts in history before external code runs. Failed attempts record
+the failure and chosen delay while releasing the task for a persisted retry.
+Exhaustion or a non-retryable failure publishes one final outcome and a workflow
+wakeup in the same transaction. The default policy uses a one-second initial
+interval, coefficient two, a maximum interval of 100 times the initial interval,
+and unlimited attempts. Set maximum attempts to one to disable retries. Both
+explicit non-retryable failures and configured error types stop retrying.
+
+Attempt numbers count durable starts, independently from ownership claims. If a
+replacement claims a task with an unfinished attempt, it records a worker-lost
+failure and applies that attempt's retry policy before invoking external code
+again. A claim lost before an attempt starts does not consume an activity attempt.
+The idempotency key remains stable across attempts; an interrupted operation may
+already have affected an external service.
+
+This layer still needs timeout processors, heartbeat progress and asynchronous
+completion. Unlimited retries also require the planned bounded-history and
+continue-as-new work for sustained operation. No broad runtime qualification is
+claimed by the activity retry implementation alone.
+
+2026-10-08: runtime race tests cover exponential retry delays and caps, final
+attempt limits, explicit and type-based non-retryable failures, stable operation
+identity, concurrent result conflicts and replacement workers. Lost start,
+failure and completion acknowledgements do not duplicate history. A handler does
+not run when every start acknowledgement is lost. A claim lost before recording
+a start does not consume an activity attempt.
+
+Replay tests reject changed policies, skipped attempts, reused ownership epochs,
+early retries, incorrect delays and mismatched final results. PostgreSQL tests
+replace the connection pool after a reported failure and after an interrupted
+attempt. Both retain retry timing and complete with one final outcome. These are
+connection and worker replacement checks; process-kill qualification remains open.
+
+The activity retry change passes make f, make l, go test ./..., engine/runtime/
+memory race tests and the PostgreSQL durable integration suite with race detection.

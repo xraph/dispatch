@@ -41,6 +41,16 @@ func (w *Workflow) Activity(id, name, queue string, input []byte) *Future {
 	return w.schedule(Command{ID: id, Kind: durable.TaskActivity, Name: name, Queue: queue, Input: bytes.Clone(input)})
 }
 
+// ActivityWithOptions captures a retry policy in a version 2 activity command.
+// Use this for new workflows; changing saved options is nondeterministic replay.
+func (w *Workflow) ActivityWithOptions(id, name, queue string, input []byte, options ActivityOptions) *Future {
+	normalized, err := normalizeActivityOptions(options)
+	if err != nil {
+		w.stop(err)
+	}
+	return w.schedule(Command{Version: 2, ID: id, Kind: durable.TaskActivity, Name: name, Queue: queue, Input: bytes.Clone(input), ActivityOptions: &normalized})
+}
+
 // Timer schedules a durable delay from Now, rounded up to store clock precision.
 // No worker or goroutine needs to stay alive while this future is pending.
 func (w *Workflow) Timer(id string, delay time.Duration) *Future {
@@ -60,7 +70,10 @@ func (w *Workflow) schedule(command Command) *Future {
 	if w.blocked || w.fault != nil {
 		w.stop(fmt.Errorf("%w: workflow continued after an unresolved future", durable.ErrInvalid))
 	}
-	command.Version, command.Index = 1, int64(w.cursor+1)
+	if command.Version == 0 {
+		command.Version = 1
+	}
+	command.Index = int64(w.cursor + 1)
 	if err := command.validate(); err != nil {
 		w.stop(err)
 	}
@@ -113,16 +126,28 @@ func validID(value string) bool {
 }
 
 func (c Command) validate() error {
-	if c.Version != 1 || c.Index < 1 || !validID(c.ID) || (c.Queue != "" && !validID(c.Queue)) {
+	if (c.Version != 1 && c.Version != 2) || c.Index < 1 || !validID(c.ID) || (c.Queue != "" && !validID(c.Queue)) {
 		return fmt.Errorf("%w: invalid command version, index, ID or queue", durable.ErrInvalid)
 	}
 	switch c.Kind {
 	case durable.TaskActivity:
+		if c.Version == 1 && c.ActivityOptions != nil {
+			return fmt.Errorf("%w: legacy activity cannot set options", durable.ErrInvalid)
+		}
+		if c.Version == 2 {
+			if c.ActivityOptions == nil {
+				return fmt.Errorf("%w: activity options required", durable.ErrInvalid)
+			}
+			normalized, err := normalizeActivityOptions(*c.ActivityOptions)
+			if err != nil || !sameActivityOptions(c.ActivityOptions, &normalized) {
+				return fmt.Errorf("%w: activity options must be normalized", durable.ErrInvalid)
+			}
+		}
 		if !validID(c.Name) || c.Delay != 0 || !c.Deadline.IsZero() {
 			return fmt.Errorf("%w: invalid activity command", durable.ErrInvalid)
 		}
 	case durable.TaskTimer:
-		if c.Delay <= 0 || c.Deadline.IsZero() || c.Deadline.Year() < 1 || c.Deadline.Year() > 9999 ||
+		if c.Version != 1 || c.ActivityOptions != nil || c.Delay <= 0 || c.Deadline.IsZero() || c.Deadline.Year() < 1 || c.Deadline.Year() > 9999 ||
 			c.Name != "" || c.Queue != "" || len(c.Input) != 0 {
 			return fmt.Errorf("%w: invalid timer command", durable.ErrInvalid)
 		}
@@ -135,5 +160,5 @@ func (c Command) validate() error {
 func sameCommand(a, b Command) bool {
 	return a.Version == b.Version && a.Index == b.Index && a.ID == b.ID && a.Kind == b.Kind &&
 		a.Name == b.Name && a.Queue == b.Queue && bytes.Equal(a.Input, b.Input) &&
-		a.Delay == b.Delay && a.Deadline.Equal(b.Deadline)
+		a.Delay == b.Delay && a.Deadline.Equal(b.Deadline) && sameActivityOptions(a.ActivityOptions, b.ActivityOptions)
 }
