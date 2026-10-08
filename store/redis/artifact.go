@@ -202,7 +202,14 @@ func (s *Store) loadArtifact(ctx context.Context, artifactID string) (*artifact.
 		return nil, fmt.Errorf("dispatch/redis: get artifact: %w", err)
 	}
 
-	return fromArtifactEntity(&e)
+	a, err := fromArtifactEntity(&e)
+	if err != nil {
+		return nil, err
+	}
+	if err := validateArtifactIdentity(a, artifactID); err != nil {
+		return nil, err
+	}
+	return a, nil
 }
 
 // FindArtifactByKey retrieves a live artifact by its storage coordinates.

@@ -57,6 +57,12 @@ func New(t *trovelib.Trove, opts ...Option) *Backend {
 // Name identifies this backend.
 func (b *Backend) Name() string { return b.name }
 
+// SupportsPresign reports the current underlying driver's signing capability.
+func (b *Backend) SupportsPresign() bool {
+	_, ok := b.trove.Driver().(trovedriver.PresignDriver)
+	return ok
+}
+
 // translate maps Trove's permanent failures onto the artifact plane's.
 //
 // This distinction is load-bearing. Callers use

@@ -361,11 +361,12 @@ func (s *Store) ListArtifactsPage(ctx context.Context, opts artifact.PageOpts) (
 	}
 
 	res, err := indexScan[*artifact.Artifact]{
-		entity: entityArtifact,
-		ids:    s.keys.artifactIDs(),
-		keyOf:  s.keys.artifact,
-		decode: decodeArtifact,
-		match:  opts.Match,
+		entity:   entityArtifact,
+		ids:      s.keys.artifactIDs(),
+		keyOf:    s.keys.artifact,
+		decode:   decodeArtifact,
+		validate: validateArtifactIdentity,
+		match:    opts.Match,
 	}.page(ctx, s, cursor, opts.Limit)
 	if err != nil {
 		return artifact.Page{}, err
