@@ -50,10 +50,10 @@ func lockTaskConditions(ctx context.Context, tx driver.Tx, r durable.CommitReque
 
 func saveExecutionTaskState(ctx context.Context, tx driver.Tx, task durable.Task) error {
 	_, err := tx.Exec(ctx, `UPDATE dispatch_execution_tasks SET
-        available_at=$5, owner=$6, lease_until=$7, version=$8, deadline_at=$9, progress=$10, done=$11
+        available_at=$5, owner=$6, lease_until=$7, version=$8, deadline_at=$9, progress=$10, done=$11, lease_kind=$12
         WHERE namespace=$1 AND workflow_id=$2 AND run_id=$3 AND task_id=$4`,
 		task.Namespace, task.WorkflowID, task.RunID, task.ID, task.AvailableAt, task.Owner,
-		taskNullableTime(task.LeaseUntil), task.Version, taskNullableTime(task.DeadlineAt), executionBytes(task.Progress), task.Done)
+		taskNullableTime(task.LeaseUntil), task.Version, taskNullableTime(task.DeadlineAt), executionBytes(task.Progress), task.Done, string(task.LeaseKind))
 	return err
 }
 

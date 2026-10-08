@@ -36,6 +36,8 @@ type Store interface {
 	ReadHistory(ctx context.Context, key Key, after int64, limit int) ([]Event, error)
 	// ClaimTask returns nil when no eligible task exists. Reclaims increment epoch.
 	ClaimTask(context.Context, ClaimRequest) (*Task, error)
+	// ClaimTimeoutTask grants expired activity processing without consuming an execution attempt.
+	ClaimTimeoutTask(context.Context, TimeoutClaimRequest) (*Task, error)
 	RenewTask(context.Context, Key, TaskToken, time.Duration) (time.Time, error)
 	CommitTransition(context.Context, CommitRequest) (Receipt, error)
 }

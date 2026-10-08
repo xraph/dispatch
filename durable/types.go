@@ -76,6 +76,8 @@ type TaskSpec struct {
 	// measured from the resolved availability, including a queued retry delay.
 	AvailableAfter time.Duration `json:"available_after,omitempty"`
 	DeadlineAfter  time.Duration `json:"deadline_after,omitempty"`
+	// DeadlineLimit caps the resolved deadline, including when availability is later.
+	DeadlineLimit *time.Time `json:"deadline_limit,omitempty"`
 }
 
 // Task is a persisted unit of work. Claims attach an ownership grant; its epoch
@@ -83,26 +85,34 @@ type TaskSpec struct {
 type Task struct {
 	Key
 	TaskSpec
-	Owner      string    `json:"owner"`
-	Epoch      int64     `json:"epoch"`
-	Attempt    int64     `json:"attempt"`
-	LeaseUntil time.Time `json:"lease_until"`
-	Version    int64     `json:"version"`
-	DeadlineAt time.Time `json:"deadline_at,omitempty"`
-	Progress   []byte    `json:"progress,omitempty"`
-	Done       bool      `json:"done"`
+	Owner      string        `json:"owner"`
+	Epoch      int64         `json:"epoch"`
+	Attempt    int64         `json:"attempt"`
+	LeaseUntil time.Time     `json:"lease_until"`
+	Version    int64         `json:"version"`
+	DeadlineAt time.Time     `json:"deadline_at,omitempty"`
+	Progress   []byte        `json:"progress,omitempty"`
+	Done       bool          `json:"done"`
+	LeaseKind  TaskLeaseKind `json:"lease_kind,omitempty"`
 }
+
+// TaskLeaseKind distinguishes execution grants from timeout processing grants.
+// The zero value is execution, preserving older task-token serialization.
+type TaskLeaseKind string
+
+const LeaseTimeout TaskLeaseKind = "timeout"
 
 // TaskToken identifies a particular ownership grant, not just a worker.
 type TaskToken struct {
-	TaskID string `json:"task_id"`
-	Owner  string `json:"owner"`
-	Epoch  int64  `json:"epoch"`
+	TaskID    string        `json:"task_id"`
+	Owner     string        `json:"owner"`
+	Epoch     int64         `json:"epoch"`
+	LeaseKind TaskLeaseKind `json:"lease_kind,omitempty"`
 }
 
 // Token returns the ownership grant required for renewal and completion.
 func (t Task) Token() TaskToken {
-	return TaskToken{TaskID: t.ID, Owner: t.Owner, Epoch: t.Epoch}
+	return TaskToken{TaskID: t.ID, Owner: t.Owner, Epoch: t.Epoch, LeaseKind: t.LeaseKind}
 }
 
 // StartRequest creates a run, its first event and its initial workflow task.
@@ -123,6 +133,15 @@ type ClaimRequest struct {
 	Namespace     string
 	Queue         string
 	Kind          TaskKind
+	Owner         string
+	LeaseDuration time.Duration
+}
+
+// TimeoutClaimRequest polls expired activities across queues in one namespace.
+// BuildID is optional at the trusted store boundary; runtime workers require it.
+type TimeoutClaimRequest struct {
+	Namespace     string
+	BuildID       string
 	Owner         string
 	LeaseDuration time.Duration
 }
@@ -173,6 +192,10 @@ type TaskUpdate struct {
 	RetryAfter    time.Duration  `json:"retry_after,omitempty"`
 	DeadlineAfter *time.Duration `json:"deadline_after,omitempty"`
 	Progress      *[]byte        `json:"progress,omitempty"`
+	// DeadlineLimit caps a newly calculated or retained deadline.
+	DeadlineLimit *time.Time `json:"deadline_limit,omitempty"`
+	// LeaseDuration renews a retained execution grant in the same transaction.
+	LeaseDuration time.Duration `json:"lease_duration,omitempty"`
 }
 
 // TaskCondition protects an observation of an unfinished task in the same run.

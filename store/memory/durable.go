@@ -153,12 +153,51 @@ func (m *Store) ClaimTask(ctx context.Context, r durable.ClaimRequest) (*durable
 	if selected.Version == math.MaxInt64 || selected.Epoch == math.MaxInt64 || selected.Attempt == math.MaxInt64 {
 		return nil, durable.ErrInvalid
 	}
-	selected.Owner, selected.LeaseUntil = r.Owner, durable.Timestamp(now.Add(r.LeaseDuration))
+	selected.Owner, selected.LeaseUntil, selected.LeaseKind = r.Owner, durable.Timestamp(now.Add(r.LeaseDuration)), ""
 	if !selected.DeadlineAt.IsZero() && selected.LeaseUntil.After(selected.DeadlineAt) {
 		selected.LeaseUntil = selected.DeadlineAt
 	}
 	selected.Epoch++
 	selected.Attempt++
+	selected.Version++
+	result := selected.Task
+	result.Payload, result.Progress = cloneBytes(result.Payload), cloneBytes(result.Progress)
+	return &result, nil
+}
+
+// ClaimTimeoutTask fences execution and grants independent timeout processing.
+func (m *Store) ClaimTimeoutTask(ctx context.Context, r durable.TimeoutClaimRequest) (*durable.Task, error) {
+	if err := r.Validate(); err != nil {
+		return nil, err
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	now := durable.Timestamp(time.Now())
+	var selected *durableTask
+	for key, record := range m.executions {
+		if key.Namespace != r.Namespace || record.execution.State != durable.StateRunning || (r.BuildID != "" && record.execution.BuildID != r.BuildID) {
+			continue
+		}
+		for _, task := range record.tasks {
+			if task.Done || task.Kind != durable.TaskActivity || task.DeadlineAt.IsZero() || task.DeadlineAt.After(now) || (task.LeaseKind == durable.LeaseTimeout && task.LeaseUntil.After(now)) {
+				continue
+			}
+			if selected == nil || task.DeadlineAt.Before(selected.DeadlineAt) {
+				selected = task
+			}
+		}
+	}
+	if selected == nil {
+		return nil, nil
+	}
+	if selected.Version == math.MaxInt64 || selected.Epoch == math.MaxInt64 {
+		return nil, durable.ErrInvalid
+	}
+	selected.Owner, selected.LeaseKind, selected.LeaseUntil = r.Owner, durable.LeaseTimeout, durable.Timestamp(now.Add(r.LeaseDuration))
+	selected.Epoch++
 	selected.Version++
 	result := selected.Task
 	result.Payload, result.Progress = cloneBytes(result.Payload), cloneBytes(result.Progress)
@@ -194,7 +233,7 @@ func (m *Store) RenewTask(ctx context.Context, key durable.Key, token durable.Ta
 		return time.Time{}, leaseErr
 	}
 	until := durable.Timestamp(now.Add(ttl))
-	if !task.DeadlineAt.IsZero() && until.After(task.DeadlineAt) {
+	if task.LeaseKind != durable.LeaseTimeout && !task.DeadlineAt.IsZero() && until.After(task.DeadlineAt) {
 		until = task.DeadlineAt
 	}
 	if until.After(task.LeaseUntil) {

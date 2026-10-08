@@ -18,7 +18,7 @@ func ValidateTaskID(id string) error {
 // ValidateTaskSpec rejects ambiguous availability and invalid relative durations.
 func ValidateTaskSpec(task TaskSpec) error {
 	if !identifier(task.ID) || !identifier(task.Queue) || !validKind(task.Kind) ||
-		task.AvailableAfter < 0 || task.DeadlineAfter < 0 ||
+		task.AvailableAfter < 0 || task.DeadlineAfter < 0 || !validDeadlineLimit(task.DeadlineLimit) ||
 		(!task.AvailableAt.IsZero() && (task.AvailableAfter != 0 || !validTaskTime(task.AvailableAt))) ||
 		(task.Kind == TaskTimer && task.AvailableAt.IsZero() && task.AvailableAfter == 0) {
 		return fmt.Errorf("%w: invalid task identity, routing or deadline", ErrInvalid)
@@ -48,13 +48,16 @@ func validateTaskControl(r CommitRequest) error {
 	if u == nil {
 		return nil
 	}
+	if !validDeadlineLimit(u.DeadlineLimit) || (u.LeaseDuration != 0 && (u.Action != TaskKeep || ValidateLease(u.LeaseDuration) != nil)) || (r.Token.LeaseKind == LeaseTimeout && u.Action == TaskKeep) {
+		return fmt.Errorf("%w: invalid deadline limit or retained grant renewal", ErrInvalid)
+	}
 	if (r.State != "" && r.State != StateRunning && u.Action != TaskComplete) ||
 		(u.DeadlineAfter != nil && *u.DeadlineAfter < 0) || u.RetryAfter < 0 {
 		return fmt.Errorf("%w: task update conflicts with execution state or duration", ErrInvalid)
 	}
 	switch u.Action {
 	case TaskComplete:
-		if u.DeadlineAfter != nil || u.Progress != nil || !u.RetryAt.IsZero() || u.RetryAfter != 0 {
+		if u.DeadlineAfter != nil || u.DeadlineLimit != nil || u.LeaseDuration != 0 || u.Progress != nil || !u.RetryAt.IsZero() || u.RetryAfter != 0 {
 			return fmt.Errorf("%w: completed task cannot be updated", ErrInvalid)
 		}
 	case TaskKeep:
@@ -70,6 +73,24 @@ func validateTaskControl(r CommitRequest) error {
 		return fmt.Errorf("%w: unknown task action", ErrInvalid)
 	}
 	return nil
+}
+
+func validDeadlineLimit(limit *time.Time) bool {
+	return limit == nil || (!limit.IsZero() && validTaskTime(*limit))
+}
+
+func capDeadline(deadline time.Time, limit *time.Time) (time.Time, error) {
+	if limit == nil {
+		return deadline, nil
+	}
+	normalized, err := TaskTimeAfter(*limit, 0)
+	if err != nil {
+		return time.Time{}, err
+	}
+	if deadline.IsZero() || normalized.Before(deadline) {
+		return normalized, nil
+	}
+	return deadline, nil
 }
 
 func validTaskTime(value time.Time) bool { return value.Year() >= 1 && value.Year() <= 9999 }
@@ -110,7 +131,12 @@ func NewTask(key Key, spec TaskSpec, now time.Time) (Task, error) {
 		}
 		task.DeadlineAt = deadline
 	}
-	task.AvailableAfter, task.DeadlineAfter = 0, 0
+	deadline, err := capDeadline(task.DeadlineAt, spec.DeadlineLimit)
+	if err != nil {
+		return Task{}, err
+	}
+	task.DeadlineAt = deadline
+	task.AvailableAfter, task.DeadlineAfter, task.DeadlineLimit = 0, 0, nil
 	task.Payload = bytes.Clone(spec.Payload)
 	return task, nil
 }
@@ -144,7 +170,7 @@ func UpdateTask(task Task, update *TaskUpdate, now time.Time) (Task, error) {
 				return Task{}, err
 			}
 		}
-		task.AvailableAt, task.Owner, task.LeaseUntil = available, "", time.Time{}
+		task.AvailableAt, task.Owner, task.LeaseUntil, task.LeaseKind = available, "", time.Time{}, ""
 	}
 	if update.DeadlineAfter != nil {
 		task.DeadlineAt = time.Time{}
@@ -158,6 +184,16 @@ func UpdateTask(task Task, update *TaskUpdate, now time.Time) (Task, error) {
 				return Task{}, err
 			}
 			task.DeadlineAt = deadline
+		}
+	}
+	deadline, err := capDeadline(task.DeadlineAt, update.DeadlineLimit)
+	if err != nil {
+		return Task{}, err
+	}
+	task.DeadlineAt = deadline
+	if update.LeaseDuration > 0 {
+		if until := Timestamp(now.Add(update.LeaseDuration)); until.After(task.LeaseUntil) {
+			task.LeaseUntil = until
 		}
 	}
 	if update.Progress != nil {

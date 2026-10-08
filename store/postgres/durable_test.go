@@ -157,7 +157,7 @@ func TestDurableMigrationRetry(t *testing.T) {
 	}
 	// Model a crash after schema creation but before the migration receipt.
 	_, err := pgdriver.Unwrap(s.DB()).Exec(t.Context(),
-		`DELETE FROM grove_migrations WHERE version IN ($1, $2)`, "20261010120000", "20261011120000")
+		`DELETE FROM grove_migrations WHERE version IN ($1, $2, $3)`, "20261010120000", "20261011120000", "20261012120000")
 	if err != nil {
 		t.Fatal(err)
 	}

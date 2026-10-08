@@ -258,3 +258,43 @@ Independent review of 070eead through 6ac3bf4 found no actionable correctness
 issues in the retry layer and independently reran the runtime race tests. The
 review did not qualify timeout processing, heartbeat progress, asynchronous
 completion, dashboard flows, bounded history, process kills, failover or load.
+
+## Activity timeout processing
+
+The next layer separates timeout ownership from execution ownership. An expired
+activity can be claimed for timeout processing within its namespace and pinned
+build, regardless of its activity queue. This grant fences earlier workers and
+has its own lease. Normal workers cannot publish late success before the timeout
+processor arrives. Timeout grants can record a final result or release a retry;
+they cannot turn an expired task back into a retained execution grant.
+
+An absolute deadline limit caps relative queue and attempt deadlines. The overall
+limit comes from the first schedule event's store timestamp. Backoff cannot move
+it later. Starting an attempt atomically replaces its queue deadline and renews
+its grant, so a short remaining queue deadline does not prematurely expire a
+successfully started attempt.
+
+Queue waiting ends at Dispatch's acknowledged durable attempt start. Queue and
+overall expiry are final failures; attempt expiry follows the recorded retry
+policy. Timeout processing does not need an activity handler. It records the
+outcome and next work in one transaction. Handler cancellation remains
+cooperative, while store fencing rejects all results from expired grants.
+
+The coordinator will classify timeouts from recorded schedule, start and retry
+history. Replay must reject early timeouts, incorrect timeout classes and results
+that do not match the attempt. Zero-valued options preserve existing histories.
+Heartbeat timeouts and asynchronous completion remain subsequent required work.
+
+2026-10-08: the store timeout-grant layer passes shared memory/PostgreSQL
+conformance, including early and concurrent claim rejection, namespace/build/type
+filters, forged-token rejection, independent renewal and reclaim, retry release,
+deadlines during backoff and atomic deadline replacement with lease renewal.
+Timeout grant identity survives a replaced PostgreSQL connection pool, and schema
+migration retries retain data. A captured pre-change request fingerprint remains
+unchanged. Regressions also verify that renewal cannot shorten a grant and that a
+timeout grant cannot commit against a future deadline after clock rollback.
+
+Store-layer checks pass make f, make l, go test ./..., engine/runtime/memory race
+tests and the PostgreSQL durable integration race suite. Runtime timeout options,
+classification, polling and recorded timeout outcomes are the next implementation
+step; these store tests do not establish that runtime behavior.

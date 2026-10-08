@@ -15,6 +15,9 @@ import (
 // Run exercises a store with unique namespaces so cases can share a database.
 func Run(t *testing.T, s durable.Store) {
 	t.Helper()
+	t.Run("timeout_grants", func(t *testing.T) { timeoutGrants(t, s) })
+	t.Run("deadline_limits", func(t *testing.T) { deadlineLimits(t, s) })
+	t.Run("retained_deadline_renewal", func(t *testing.T) { retainedDeadlineRenewal(t, s) })
 	t.Run("task_control", func(t *testing.T) { taskControl(t, s) })
 	t.Run("task_deadline", func(t *testing.T) { taskDeadline(t, s) })
 	t.Run("task_conditions", func(t *testing.T) { taskConditions(t, s) })

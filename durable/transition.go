@@ -42,6 +42,14 @@ func (r ClaimRequest) Validate() error {
 	return ValidateLease(r.LeaseDuration)
 }
 
+// Validate checks timeout-coordinator routing and its independent lease.
+func (r TimeoutClaimRequest) Validate() error {
+	if !identifier(r.Namespace) || !identifier(r.Owner) || (r.BuildID != "" && !identifier(r.BuildID)) {
+		return fmt.Errorf("%w: invalid timeout claim routing", ErrInvalid)
+	}
+	return ValidateLease(r.LeaseDuration)
+}
+
 // ValidateLease bounds ownership grants and rejects sub-microsecond durations.
 func ValidateLease(ttl time.Duration) error {
 	if ttl < time.Microsecond || ttl > 24*time.Hour {
@@ -52,7 +60,7 @@ func ValidateLease(ttl time.Duration) error {
 
 // Validate checks a task token's shape; the store checks its ownership.
 func (t TaskToken) Validate() error {
-	if !identifier(t.TaskID) || !identifier(t.Owner) || t.Epoch <= 0 {
+	if !identifier(t.TaskID) || !identifier(t.Owner) || t.Epoch <= 0 || (t.LeaseKind != "" && t.LeaseKind != LeaseTimeout) {
 		return fmt.Errorf("%w: task ID, owner and positive epoch are required", ErrInvalid)
 	}
 	return nil
@@ -124,10 +132,13 @@ func Timestamp(t time.Time) time.Time { return t.UTC().Truncate(time.Microsecond
 
 // CheckLease verifies ownership and expiry using the store's current time.
 func CheckLease(task Task, token TaskToken, now time.Time) error {
-	if task.Done || task.ID != token.TaskID || task.Owner != token.Owner || task.Epoch != token.Epoch {
+	if task.Done || task.ID != token.TaskID || task.Owner != token.Owner || task.Epoch != token.Epoch || task.LeaseKind != token.LeaseKind {
 		return ErrLeaseLost
 	}
-	if !task.DeadlineAt.IsZero() && !task.DeadlineAt.After(now) {
+	if task.LeaseKind == LeaseTimeout && (task.DeadlineAt.IsZero() || task.DeadlineAt.After(now)) {
+		return ErrTaskConflict
+	}
+	if task.LeaseKind != LeaseTimeout && !task.DeadlineAt.IsZero() && !task.DeadlineAt.After(now) {
 		return ErrTaskDeadline
 	}
 	if !task.LeaseUntil.After(now) {

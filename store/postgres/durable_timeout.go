@@ -1,0 +1,37 @@
+package postgres
+
+import (
+	"context"
+	"fmt"
+
+	"github.com/xraph/dispatch/durable"
+)
+
+// ClaimTimeoutTask grants expired activity processing across queues. The timeout
+// lease is independent of the expired business deadline and fences older grants.
+func (s *Store) ClaimTimeoutTask(ctx context.Context, r durable.TimeoutClaimRequest) (*durable.Task, error) {
+	if err := r.Validate(); err != nil {
+		return nil, err
+	}
+	task, err := scanTask(s.pgdb.QueryRow(ctx, `WITH candidate AS (
+  SELECT t.namespace,t.workflow_id,t.run_id,t.task_id
+  FROM dispatch_execution_tasks t JOIN dispatch_executions e USING(namespace,workflow_id,run_id)
+  WHERE t.namespace=$1 AND t.kind='activity' AND NOT t.done
+   AND e.state='running' AND ($2='' OR e.build_id=$2)
+   AND t.deadline_at <= clock_timestamp()
+   AND (t.lease_kind='' OR t.lease_until IS NULL OR t.lease_until <= clock_timestamp())
+  ORDER BY t.deadline_at,t.workflow_id,t.run_id,t.task_id
+  FOR UPDATE OF t SKIP LOCKED LIMIT 1
+ ) UPDATE dispatch_execution_tasks t SET owner=$3,epoch=t.epoch+1,version=t.version+1,
+  lease_kind='timeout',lease_until=clock_timestamp()+($4 * interval '1 microsecond')
+ FROM candidate c WHERE t.namespace=c.namespace AND t.workflow_id=c.workflow_id
+  AND t.run_id=c.run_id AND t.task_id=c.task_id RETURNING `+taskColumns,
+		r.Namespace, r.BuildID, r.Owner, r.LeaseDuration.Microseconds()))
+	if isNoRows(err) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf(errPrefix+"claim activity timeout: %w", err)
+	}
+	return task, nil
+}
