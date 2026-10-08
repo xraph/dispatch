@@ -15,7 +15,8 @@ checks against fixtures and a real SQLite engine.
 | Five-backend operator persistence | Implemented | Memory, PostgreSQL, SQLite, MongoDB and Redis exercised under race; container startup failures required serial reruns |
 | Contract foundation | Committed in `10f4f90` | Request bounds, actor propagation, wire primitives and error mapping pass; build/unit/lint pass; reviewed |
 | Job contract and contributor | Committed through `134460b` | Five job intents, runtime discovery and HTTP invalidations pass; job read identity tests pass on all five backends under race; full build/unit/lint and final review pass |
-| Remaining contract domains | Pending | Dead letters, cron, workflows, workers, queues, handlers, artifacts, overview and config are not registered yet |
+| Dead-letter contract | Committed through `edb7da1` | Reads/actions pass on all five backends under race; HTTP invalidations verified; review's partial purge and audit gaps reproduced and fixed; full build/unit/lint pass |
+| Remaining contract domains | Pending | Cron, workflows, workers, queues, handlers, artifacts, overview and config are not registered yet |
 | React plugin, ten navigation entries | Pending | No browser evidence |
 | Stateful fixtures and host wiring | Pending | No browser evidence |
 | Real SQLite browser flows | Pending | Not tested |
@@ -113,6 +114,16 @@ argument and preserve the generation on reads and conditional updates.
 Cron and cron-fired jobs do not acquire tenant scope. Empty scope filters mean
 every scope. The dashboard is an operator tool, so these boundaries must remain
 visible instead of being inferred from principal claims.
+
+Cursor lists use the established store order, descending entry ID. An imported
+entry with an older failure timestamp can appear ahead of an existing entry.
+
+Bulk replay and purge responses retain committed progress when a later operation
+fails. Their successful envelopes carry invalidations plus `interrupted` and a
+redacted `failure`; replay also reports per-entry `errors`. The UI must show these
+outcomes instead of treating every successful envelope as a completed batch.
+Operator hooks receive the committed count for interrupted replay and purge. A
+network retry keeps its idempotency key; a new operator retry needs a fresh one.
 
 We will record further review findings here with their resolution before retiring
 the old source. No passing unit suite establishes browser parity.
