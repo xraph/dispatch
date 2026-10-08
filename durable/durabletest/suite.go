@@ -21,6 +21,7 @@ func Run(t *testing.T, s durable.Store) {
 	t.Run("concurrent_claim", func(t *testing.T) { concurrentClaim(t, s) })
 	t.Run("concurrent_completion", func(t *testing.T) { concurrentCompletion(t, s) })
 	t.Run("expiry_and_reclaim", func(t *testing.T) { expiry(t, s) })
+	t.Run("build_isolation", func(t *testing.T) { buildIsolation(t, s) })
 	t.Run("namespace_isolation", func(t *testing.T) { isolation(t, s) })
 	t.Run("active_workflow_identity", func(t *testing.T) { activeIdentity(t, s) })
 	t.Run("durable_deadline", func(t *testing.T) { deadline(t, s) })
@@ -326,5 +327,18 @@ func validation(t *testing.T, s durable.Store) {
 	cancel()
 	if _, err := s.GetExecution(cancelled, r.Key); !errors.Is(err, context.Canceled) {
 		t.Fatalf("cancelled read: %v", err)
+	}
+}
+
+func buildIsolation(t *testing.T, s durable.Store) {
+	r := start(t, s)
+	request := durable.ClaimRequest{Namespace: r.Namespace, Queue: r.Queue,
+		Kind: durable.TaskWorkflow, Owner: "worker", LeaseDuration: time.Minute, BuildID: "v2"}
+	if task, err := s.ClaimTask(t.Context(), request); err != nil || task != nil {
+		t.Fatalf("wrong build claimed task: %+v, %v", task, err)
+	}
+	request.BuildID = r.BuildID
+	if task, err := s.ClaimTask(t.Context(), request); err != nil || task == nil {
+		t.Fatalf("matching build missed task: %+v, %v", task, err)
 	}
 }

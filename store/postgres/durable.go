@@ -96,7 +96,7 @@ func (s *Store) ClaimTask(ctx context.Context, r durable.ClaimRequest) (*durable
         FROM dispatch_execution_tasks t JOIN dispatch_executions e
           USING (namespace, workflow_id, run_id)
         WHERE t.namespace=$1 AND t.queue=$2 AND t.kind=$3 AND NOT t.done
-          AND e.state='running' AND t.available_at <= clock_timestamp()
+          AND e.state='running' AND ($6='' OR e.build_id=$6) AND t.available_at <= clock_timestamp()
           AND (t.lease_until IS NULL OR t.lease_until <= clock_timestamp())
         ORDER BY t.available_at, t.workflow_id, t.run_id, t.task_id
         FOR UPDATE OF t SKIP LOCKED LIMIT 1
@@ -104,7 +104,7 @@ func (s *Store) ClaimTask(ctx context.Context, r durable.ClaimRequest) (*durable
         attempt=t.attempt+1, lease_until=clock_timestamp()+($5 * interval '1 microsecond')
       FROM candidate c WHERE t.namespace=c.namespace AND t.workflow_id=c.workflow_id
         AND t.run_id=c.run_id AND t.task_id=c.task_id
-      RETURNING `+taskColumns, r.Namespace, r.Queue, string(r.Kind), r.Owner, r.LeaseDuration.Microseconds()))
+      RETURNING `+taskColumns, r.Namespace, r.Queue, string(r.Kind), r.Owner, r.LeaseDuration.Microseconds(), r.BuildID))
 	if isNoRows(err) {
 		return nil, nil
 	}

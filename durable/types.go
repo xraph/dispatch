@@ -108,6 +108,8 @@ type StartRequest struct {
 
 // ClaimRequest polls a single namespace, task kind and queue.
 type ClaimRequest struct {
+	// BuildID restricts claims to a pinned build. Empty permits any build.
+	BuildID       string
 	Namespace     string
 	Queue         string
 	Kind          TaskKind

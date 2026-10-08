@@ -3,6 +3,7 @@
 package postgres_test
 
 import (
+	"context"
 	"errors"
 	"testing"
 	"time"
@@ -12,6 +13,7 @@ import (
 
 	"github.com/xraph/dispatch/durable"
 	"github.com/xraph/dispatch/durable/durabletest"
+	drt "github.com/xraph/dispatch/durable/runtime"
 	"github.com/xraph/dispatch/store/postgres"
 )
 
@@ -153,5 +155,66 @@ func TestDurableMigrationRetry(t *testing.T) {
 	}
 	if execution, getErr := s.GetExecution(t.Context(), r.Key); getErr != nil || execution.Revision != 1 {
 		t.Fatalf("migration retry changed execution: %+v, %v", execution, getErr)
+	}
+}
+
+func TestDurableRuntimeRecovery(t *testing.T) {
+	s, dsn := setupTestStoreConnection(t)
+	options := drt.Options{Namespace: t.Name(), Queue: "orders", BuildID: "v1", Owner: "worker",
+		Workflows: map[string]drt.WorkflowFunc{"order": func(w *drt.Workflow, _ []byte) ([]byte, error) {
+			result, err := w.Activity("charge", "charge", "", nil).Get()
+			if err != nil {
+				return nil, err
+			}
+			if _, err = w.Timer("delay", time.Millisecond).Get(); err != nil {
+				return nil, err
+			}
+			return result, nil
+		}}}
+	calls := 0
+	options.Activities = map[string]drt.ActivityFunc{"charge": func(_ context.Context, _ drt.ActivityInfo, _ []byte) ([]byte, error) {
+		calls++
+		return []byte("paid"), nil
+	}}
+	worker, err := drt.NewWorker(s, options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	key := durable.Key{Namespace: options.Namespace, WorkflowID: "order", RunID: "run"}
+	if _, err = worker.StartExecution(t.Context(), durable.StartRequest{Key: key, RequestID: "start",
+		WorkflowType: "order", BuildID: options.BuildID, Queue: options.Queue}); err != nil {
+		t.Fatal(err)
+	}
+	for _, kind := range []durable.TaskKind{durable.TaskWorkflow, durable.TaskActivity, durable.TaskWorkflow} {
+		if worked, workErr := worker.RunOnce(t.Context(), kind); workErr != nil || !worked {
+			t.Fatalf("initial task %s: %t, %v", kind, worked, workErr)
+		}
+	}
+	if err = s.DB().Close(); err != nil {
+		t.Fatal(err)
+	}
+	drv := pgdriver.New()
+	if err = drv.Open(t.Context(), dsn); err != nil {
+		t.Fatal(err)
+	}
+	db, err := grove.Open(drv)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	reopened := postgres.New(db)
+	options.Owner = "replacement"
+	worker, err = drt.NewWorker(reopened, options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, kind := range []durable.TaskKind{durable.TaskTimer, durable.TaskWorkflow} {
+		if worked, workErr := worker.RunOnce(t.Context(), kind); workErr != nil || !worked {
+			t.Fatalf("recovery task %s: %t, %v", kind, worked, workErr)
+		}
+	}
+	execution, err := reopened.GetExecution(t.Context(), key)
+	if err != nil || execution.State != durable.StateCompleted || string(execution.Output) != "paid" || calls != 1 {
+		t.Fatalf("recovered execution: %+v, activity calls=%d, %v", execution, calls, err)
 	}
 }

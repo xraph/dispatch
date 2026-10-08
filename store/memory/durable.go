@@ -133,7 +133,8 @@ func (m *Store) ClaimTask(ctx context.Context, r durable.ClaimRequest) (*durable
 	now := durable.Timestamp(time.Now())
 	var selected *durableTask
 	for key, record := range m.executions {
-		if key.Namespace != r.Namespace || record.execution.State != durable.StateRunning {
+		if key.Namespace != r.Namespace || record.execution.State != durable.StateRunning ||
+			(r.BuildID != "" && record.execution.BuildID != r.BuildID) {
 			continue
 		}
 		for _, task := range record.tasks {

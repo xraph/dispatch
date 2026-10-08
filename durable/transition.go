@@ -36,7 +36,7 @@ func (r StartRequest) Validate() error {
 
 // Validate checks task routing and the requested lease duration.
 func (r ClaimRequest) Validate() error {
-	if !identifier(r.Namespace) || !identifier(r.Queue) || !identifier(r.Owner) || !validKind(r.Kind) {
+	if !identifier(r.Namespace) || !identifier(r.Queue) || !identifier(r.Owner) || !validKind(r.Kind) || (r.BuildID != "" && !identifier(r.BuildID)) {
 		return fmt.Errorf("%w: namespace, queue, owner and task kind are required", ErrInvalid)
 	}
 	return ValidateLease(r.LeaseDuration)
