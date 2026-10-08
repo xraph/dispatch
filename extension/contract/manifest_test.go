@@ -56,8 +56,12 @@ func TestEveryDeclaredIntentIsBound(t *testing.T) {
 
 func TestManifestCommandInvalidations(t *testing.T) {
 	want := map[string][]string{
-		"jobs.cancel": {"jobs.list", "jobs.get", "jobs.counts", "queues.list", "queues.get", "overview.summary"},
-		"jobs.retry":  {"jobs.list", "jobs.get", "jobs.counts", "queues.list", "queues.get", "overview.summary", "dlq.list", "dlq.get"},
+		"dlq.replay":    {"dlq.list", "dlq.get", "dlq.counts", "jobs.list", "jobs.counts", "queues.list", "queues.get", "overview.summary"},
+		"dlq.replayAll": {"dlq.list", "dlq.get", "dlq.counts", "jobs.list", "jobs.counts", "queues.list", "queues.get", "overview.summary"},
+		"dlq.delete":    {"dlq.list", "dlq.get", "dlq.counts", "dlq.purgePreview", "overview.summary"},
+		"dlq.purge":     {"dlq.list", "dlq.get", "dlq.counts", "dlq.purgePreview", "overview.summary"},
+		"jobs.cancel":   {"jobs.list", "jobs.get", "jobs.counts", "queues.list", "queues.get", "overview.summary"},
+		"jobs.retry":    {"jobs.list", "jobs.get", "jobs.counts", "queues.list", "queues.get", "overview.summary", "dlq.list", "dlq.get", "dlq.counts"},
 	}
 	found := 0
 	for _, intent := range loadManifest(t).Intents {

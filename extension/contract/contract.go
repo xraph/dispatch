@@ -35,6 +35,14 @@ func command[I, O any](intent string, fn func(context.Context, I, fc.Principal) 
 
 func bindings(deps Deps) []binding {
 	return []binding{
+		query("dlq.list", dlqListHandler(deps)),
+		query("dlq.get", dlqGetHandler(deps)),
+		query("dlq.counts", dlqCountsHandler(deps)),
+		query("dlq.purgePreview", dlqPurgeHandler(deps, true)),
+		command("dlq.replay", dlqReplayHandler(deps)),
+		command("dlq.replayAll", dlqReplayAllHandler(deps)),
+		command("dlq.delete", dlqDeleteHandler(deps)),
+		command("dlq.purge", dlqPurgeHandler(deps, false)),
 		query("jobs.list", jobsListHandler(deps)),
 		query("jobs.get", jobsGetHandler(deps)),
 		query("jobs.counts", jobsCountsHandler(deps)),

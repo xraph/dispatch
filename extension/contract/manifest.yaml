@@ -10,4 +10,12 @@ intents:
   - { name: jobs.get, kind: query, version: 1, capability: read }
   - { name: jobs.counts, kind: query, version: 1, capability: read }
   - { name: jobs.cancel, kind: command, version: 1, capability: write, invalidates: [jobs.list, jobs.get, jobs.counts, queues.list, queues.get, overview.summary] }
-  - { name: jobs.retry, kind: command, version: 1, capability: write, invalidates: [jobs.list, jobs.get, jobs.counts, queues.list, queues.get, overview.summary, dlq.list, dlq.get] }
+  - { name: jobs.retry, kind: command, version: 1, capability: write, invalidates: [jobs.list, jobs.get, jobs.counts, queues.list, queues.get, overview.summary, dlq.list, dlq.get, dlq.counts] }
+  - { name: dlq.list, kind: query, version: 1, capability: read }
+  - { name: dlq.get, kind: query, version: 1, capability: read }
+  - { name: dlq.counts, kind: query, version: 1, capability: read }
+  - { name: dlq.purgePreview, kind: query, version: 1, capability: read }
+  - { name: dlq.replay, kind: command, version: 1, capability: write, invalidates: [dlq.list, dlq.get, dlq.counts, jobs.list, jobs.counts, queues.list, queues.get, overview.summary] }
+  - { name: dlq.replayAll, kind: command, version: 1, capability: write, invalidates: [dlq.list, dlq.get, dlq.counts, jobs.list, jobs.counts, queues.list, queues.get, overview.summary] }
+  - { name: dlq.delete, kind: command, version: 1, capability: write, invalidates: [dlq.list, dlq.get, dlq.counts, dlq.purgePreview, overview.summary] }
+  - { name: dlq.purge, kind: command, version: 1, capability: write, invalidates: [dlq.list, dlq.get, dlq.counts, dlq.purgePreview, overview.summary] }
