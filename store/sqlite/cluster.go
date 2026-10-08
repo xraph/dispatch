@@ -159,16 +159,16 @@ func (s *Store) AcquireLeadership(ctx context.Context, workerID id.WorkerID, ttl
 		} else {
 			// Compare parsed instants in Go. leader_until stores RFC 3339 text,
 			// while a bound time.Time uses the driver's different text format.
-			clear := s.sdb.NewUpdate((*workerModel)(nil)).
+			clearQuery := s.sdb.NewUpdate((*workerModel)(nil)).
 				Set("is_leader = ?", false).
 				Set("leader_until = NULL").
 				Where("id = ? AND is_leader = ?", leader.ID.String(), true)
 			if leader.LeaderUntil == nil {
-				clear = clear.Where("leader_until IS NULL")
+				clearQuery = clearQuery.Where("leader_until IS NULL")
 			} else {
-				clear = clear.Where("leader_until = ?", leader.LeaderUntil.UTC().Format(time.RFC3339Nano))
+				clearQuery = clearQuery.Where("leader_until = ?", leader.LeaderUntil.UTC().Format(time.RFC3339Nano))
 			}
-			result, clearErr := clear.Exec(ctx)
+			result, clearErr := clearQuery.Exec(ctx)
 			if clearErr != nil {
 				return false, fmt.Errorf("dispatch/sqlite: clear expired leader: %w", clearErr)
 			}
