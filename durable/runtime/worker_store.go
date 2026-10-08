@@ -55,7 +55,7 @@ func (w *Worker) persist(ctx context.Context, request durable.CommitRequest) err
 		_, last = storeCall(ctx, w, func(callCtx context.Context) (durable.Receipt, error) {
 			return w.store.CommitTransition(callCtx, request)
 		})
-		if last == nil || errors.Is(last, durable.ErrInvalid) || errors.Is(last, durable.ErrLeaseLost) ||
+		if last == nil || errors.Is(last, durable.ErrTaskDeadline) || errors.Is(last, durable.ErrTaskConflict) || errors.Is(last, durable.ErrInvalid) || errors.Is(last, durable.ErrLeaseLost) ||
 			errors.Is(last, durable.ErrRevisionConflict) || errors.Is(last, durable.ErrClosed) ||
 			errors.Is(last, durable.ErrRequestConflict) || errors.Is(last, durable.ErrExists) || errors.Is(last, durable.ErrNotFound) {
 			return last

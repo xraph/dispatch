@@ -2,6 +2,7 @@ package memory
 
 import (
 	"context"
+	"math"
 	"time"
 
 	"github.com/xraph/dispatch/durable"
@@ -18,7 +19,6 @@ type executionRecord struct {
 
 type durableTask struct {
 	durable.Task
-	done bool
 }
 
 type durableReceipt struct {
@@ -57,7 +57,7 @@ func (m *Store) StartExecution(ctx context.Context, r durable.StartRequest) (dur
 		execution: durable.Execution{Key: r.Key, WorkflowType: r.WorkflowType, BuildID: r.BuildID,
 			State: durable.StateRunning, Revision: 1, LastSequence: 1, Input: cloneBytes(r.Input), CreatedAt: now, UpdatedAt: now},
 		history: []durable.Event{{EventInput: durable.EventInput{Type: "execution.started", Payload: cloneBytes(r.Input)}, Sequence: 1, Time: now}},
-		tasks: map[string]*durableTask{"workflow:1": {Task: durable.Task{Key: r.Key,
+		tasks: map[string]*durableTask{"workflow:1": {Task: durable.Task{Key: r.Key, Version: 1,
 			TaskSpec: durable.TaskSpec{ID: "workflow:1", Kind: durable.TaskWorkflow, Queue: r.Queue, AvailableAt: now}}}},
 		receipts: map[string]durableReceipt{r.RequestID: {digest: digest, value: receipt}},
 	}
@@ -138,7 +138,8 @@ func (m *Store) ClaimTask(ctx context.Context, r durable.ClaimRequest) (*durable
 			continue
 		}
 		for _, task := range record.tasks {
-			if task.done || task.Queue != r.Queue || task.Kind != r.Kind || task.AvailableAt.After(now) || task.LeaseUntil.After(now) {
+			if task.Done || task.Queue != r.Queue || task.Kind != r.Kind || task.AvailableAt.After(now) || task.LeaseUntil.After(now) ||
+				(!task.DeadlineAt.IsZero() && !task.DeadlineAt.After(now)) {
 				continue
 			}
 			if selected == nil || task.AvailableAt.Before(selected.AvailableAt) {
@@ -149,11 +150,18 @@ func (m *Store) ClaimTask(ctx context.Context, r durable.ClaimRequest) (*durable
 	if selected == nil {
 		return nil, nil
 	}
+	if selected.Version == math.MaxInt64 || selected.Epoch == math.MaxInt64 || selected.Attempt == math.MaxInt64 {
+		return nil, durable.ErrInvalid
+	}
 	selected.Owner, selected.LeaseUntil = r.Owner, durable.Timestamp(now.Add(r.LeaseDuration))
+	if !selected.DeadlineAt.IsZero() && selected.LeaseUntil.After(selected.DeadlineAt) {
+		selected.LeaseUntil = selected.DeadlineAt
+	}
 	selected.Epoch++
 	selected.Attempt++
+	selected.Version++
 	result := selected.Task
-	result.Payload = cloneBytes(result.Payload)
+	result.Payload, result.Progress = cloneBytes(result.Payload), cloneBytes(result.Progress)
 	return &result, nil
 }
 
@@ -179,10 +187,16 @@ func (m *Store) RenewTask(ctx context.Context, key durable.Key, token durable.Ta
 	}
 	task, ok := record.tasks[token.TaskID]
 	now := durable.Timestamp(time.Now())
-	if !ok || task.done || record.execution.State != durable.StateRunning || durable.CheckLease(task.Task, token, now) != nil {
+	if !ok || task.Done || record.execution.State != durable.StateRunning {
 		return time.Time{}, durable.ErrLeaseLost
 	}
+	if leaseErr := durable.CheckLease(task.Task, token, now); leaseErr != nil {
+		return time.Time{}, leaseErr
+	}
 	until := durable.Timestamp(now.Add(ttl))
+	if !task.DeadlineAt.IsZero() && until.After(task.DeadlineAt) {
+		until = task.DeadlineAt
+	}
 	if until.After(task.LeaseUntil) {
 		task.LeaseUntil = until
 	}
@@ -214,7 +228,7 @@ func (m *Store) CommitTransition(ctx context.Context, r durable.CommitRequest) (
 		return durable.Receipt{}, durable.ErrClosed
 	}
 	task, ok := record.tasks[r.Token.TaskID]
-	if !ok || task.done {
+	if !ok || task.Done {
 		return durable.Receipt{}, durable.ErrLeaseLost
 	}
 	now := durable.Timestamp(time.Now())
@@ -222,29 +236,52 @@ func (m *Store) CommitTransition(ctx context.Context, r durable.CommitRequest) (
 	if err != nil {
 		return durable.Receipt{}, err
 	}
+	for _, condition := range r.Conditions {
+		target, found := record.tasks[condition.TaskID]
+		if !found || durable.CheckTaskCondition(target.Task, condition, now) != nil {
+			return durable.Receipt{}, durable.ErrTaskConflict
+		}
+	}
+	updated, err := durable.UpdateTask(task.Task, r.TaskUpdate, now)
+	if err != nil {
+		return durable.Receipt{}, err
+	}
+	changes := map[string]durable.Task{task.ID: updated}
+	for _, taskID := range r.CancelTasks {
+		cancelled, cancelErr := durable.UpdateTask(record.tasks[taskID].Task, nil, now)
+		if cancelErr != nil {
+			return durable.Receipt{}, cancelErr
+		}
+		changes[taskID] = cancelled
+	}
+	if next.State != durable.StateRunning {
+		for taskID, pending := range record.tasks {
+			if _, changed := changes[taskID]; changed || pending.Done {
+				continue
+			}
+			cancelled, cancelErr := durable.UpdateTask(pending.Task, nil, now)
+			if cancelErr != nil {
+				return durable.Receipt{}, cancelErr
+			}
+			changes[taskID] = cancelled
+		}
+	}
 	for _, spec := range r.Tasks {
 		if _, exists := record.tasks[spec.ID]; exists {
 			return durable.Receipt{}, durable.ErrExists
 		}
+		created, createErr := durable.NewTask(r.Key, spec, now)
+		if createErr != nil {
+			return durable.Receipt{}, createErr
+		}
+		changes[spec.ID] = created
 	}
 	for i, evt := range r.Events {
 		evt.Payload = cloneBytes(evt.Payload)
 		record.history = append(record.history, durable.Event{EventInput: evt, Sequence: receipt.FirstSequence + int64(i), Time: now})
 	}
-	for _, spec := range r.Tasks {
-		spec.Payload = cloneBytes(spec.Payload)
-		if spec.AvailableAt.IsZero() {
-			spec.AvailableAt = now
-		} else {
-			spec.AvailableAt = durable.Timestamp(spec.AvailableAt)
-		}
-		record.tasks[spec.ID] = &durableTask{Task: durable.Task{Key: r.Key, TaskSpec: spec}}
-	}
-	task.done = true
-	if next.State != durable.StateRunning {
-		for _, pending := range record.tasks {
-			pending.done = true
-		}
+	for taskID, change := range changes {
+		record.tasks[taskID] = &durableTask{Task: change}
 	}
 	record.execution = next
 	record.receipts[r.RequestID] = durableReceipt{digest: digest, value: receipt}
@@ -252,3 +289,29 @@ func (m *Store) CommitTransition(ctx context.Context, r durable.CommitRequest) (
 }
 
 func cloneBytes(b []byte) []byte { return append([]byte(nil), b...) }
+
+// GetTask returns a copy of a pending or completed task in one execution.
+func (m *Store) GetTask(ctx context.Context, key durable.Key, taskID string) (durable.Task, error) {
+	if err := key.Validate(); err != nil {
+		return durable.Task{}, err
+	}
+	if err := durable.ValidateTaskID(taskID); err != nil {
+		return durable.Task{}, err
+	}
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	if err := ctx.Err(); err != nil {
+		return durable.Task{}, err
+	}
+	record, exists := m.executions[key]
+	if !exists {
+		return durable.Task{}, durable.ErrNotFound
+	}
+	task, exists := record.tasks[taskID]
+	if !exists {
+		return durable.Task{}, durable.ErrNotFound
+	}
+	result := task.Task
+	result.Payload, result.Progress = cloneBytes(result.Payload), cloneBytes(result.Progress)
+	return result, nil
+}

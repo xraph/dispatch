@@ -72,17 +72,18 @@ func (s *Store) ReadHistory(ctx context.Context, key durable.Key, after int64, l
 }
 
 const taskColumns = `t.namespace, t.workflow_id, t.run_id, t.task_id, t.kind, t.queue,
-    t.payload, t.available_at, t.owner, t.epoch, t.attempt, t.lease_until`
+    t.payload, t.available_at, t.owner, t.epoch, t.attempt, t.lease_until, t.version, t.deadline_at, t.progress, t.done`
 
 func scanTask(row driver.Row) (*durable.Task, error) {
 	var task durable.Task
-	var until sql.NullTime
+	var until, deadline sql.NullTime
 	err := row.Scan(&task.Namespace, &task.WorkflowID, &task.RunID, &task.ID, &task.Kind,
-		&task.Queue, &task.Payload, &task.AvailableAt, &task.Owner, &task.Epoch, &task.Attempt, &until)
+		&task.Queue, &task.Payload, &task.AvailableAt, &task.Owner, &task.Epoch, &task.Attempt, &until,
+		&task.Version, &deadline, &task.Progress, &task.Done)
 	if err != nil {
 		return nil, err
 	}
-	task.LeaseUntil = until.Time
+	task.LeaseUntil, task.DeadlineAt = until.Time, deadline.Time
 	return &task, nil
 }
 
@@ -98,10 +99,12 @@ func (s *Store) ClaimTask(ctx context.Context, r durable.ClaimRequest) (*durable
         WHERE t.namespace=$1 AND t.queue=$2 AND t.kind=$3 AND NOT t.done
           AND e.state='running' AND ($6='' OR e.build_id=$6) AND t.available_at <= clock_timestamp()
           AND (t.lease_until IS NULL OR t.lease_until <= clock_timestamp())
+          AND (t.deadline_at IS NULL OR t.deadline_at > clock_timestamp())
         ORDER BY t.available_at, t.workflow_id, t.run_id, t.task_id
         FOR UPDATE OF t SKIP LOCKED LIMIT 1
     ) UPDATE dispatch_execution_tasks t SET owner=$4, epoch=t.epoch+1,
-        attempt=t.attempt+1, lease_until=clock_timestamp()+($5 * interval '1 microsecond')
+        attempt=t.attempt+1, version=t.version+1,
+        lease_until=LEAST(clock_timestamp()+($5 * interval '1 microsecond'), t.deadline_at)
       FROM candidate c WHERE t.namespace=c.namespace AND t.workflow_id=c.workflow_id
         AND t.run_id=c.run_id AND t.task_id=c.task_id
       RETURNING `+taskColumns, r.Namespace, r.Queue, string(r.Kind), r.Owner, r.LeaseDuration.Microseconds(), r.BuildID))
@@ -160,6 +163,9 @@ func (s *Store) RenewTask(ctx context.Context, key durable.Key, token durable.Ta
 	until := durable.Timestamp(now.Add(ttl))
 	if task.LeaseUntil.After(until) {
 		until = task.LeaseUntil
+	}
+	if !task.DeadlineAt.IsZero() && until.After(task.DeadlineAt) {
+		until = task.DeadlineAt
 	}
 	_, err = tx.Exec(ctx, `UPDATE dispatch_execution_tasks SET lease_until=$5
         WHERE namespace=$1 AND workflow_id=$2 AND run_id=$3 AND task_id=$4`,

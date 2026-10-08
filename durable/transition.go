@@ -82,17 +82,15 @@ func (r CommitRequest) Validate() error {
 	}
 	seen := make(map[string]struct{}, len(r.Tasks))
 	for _, task := range r.Tasks {
-		if !identifier(task.ID) || !identifier(task.Queue) || !validKind(task.Kind) ||
-			(task.Kind == TaskTimer && task.AvailableAt.IsZero()) ||
-			(!task.AvailableAt.IsZero() && (task.AvailableAt.Year() < 1 || task.AvailableAt.Year() > 9999)) {
-			return fmt.Errorf("%w: invalid task identity, routing or deadline", ErrInvalid)
+		if err := ValidateTaskSpec(task); err != nil {
+			return err
 		}
 		if _, exists := seen[task.ID]; exists {
 			return fmt.Errorf("%w: duplicate task ID", ErrInvalid)
 		}
 		seen[task.ID] = struct{}{}
 	}
-	return nil
+	return validateTaskControl(r)
 }
 
 func validKind(kind TaskKind) bool {
@@ -126,7 +124,13 @@ func Timestamp(t time.Time) time.Time { return t.UTC().Truncate(time.Microsecond
 
 // CheckLease verifies ownership and expiry using the store's current time.
 func CheckLease(task Task, token TaskToken, now time.Time) error {
-	if task.ID != token.TaskID || task.Owner != token.Owner || task.Epoch != token.Epoch || !task.LeaseUntil.After(now) {
+	if task.Done || task.ID != token.TaskID || task.Owner != token.Owner || task.Epoch != token.Epoch {
+		return ErrLeaseLost
+	}
+	if !task.DeadlineAt.IsZero() && !task.DeadlineAt.After(now) {
+		return ErrTaskDeadline
+	}
+	if !task.LeaseUntil.After(now) {
 		return ErrLeaseLost
 	}
 	return nil

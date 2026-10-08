@@ -14,6 +14,8 @@ var (
 	ErrRequestConflict  = errors.New("durable: request ID reused with different content")
 	ErrRevisionConflict = errors.New("durable: execution revision changed")
 	ErrLeaseLost        = errors.New("durable: task lease lost")
+	ErrTaskConflict     = errors.New("durable: task observation changed")
+	ErrTaskDeadline     = errors.New("durable: task deadline expired")
 	ErrClosed           = errors.New("durable: execution closed")
 )
 
@@ -27,6 +29,8 @@ var (
 type Store interface {
 	StartExecution(context.Context, StartRequest) (Receipt, error)
 	GetExecution(context.Context, Key) (Execution, error)
+	// GetTask returns persisted state, including finished tasks, in one namespace.
+	GetTask(context.Context, Key, string) (Task, error)
 	// ReadHistory returns events after the exclusive cursor, in sequence order.
 	// Limits must be between 1 and 1000. A missing run is ErrNotFound.
 	ReadHistory(ctx context.Context, key Key, after int64, limit int) ([]Event, error)

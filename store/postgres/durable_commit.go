@@ -46,13 +46,15 @@ func insertExecutionEvent(ctx context.Context, tx driver.Tx, key durable.Key, ev
 }
 
 func insertExecutionTask(ctx context.Context, tx driver.Tx, key durable.Key, spec durable.TaskSpec, now time.Time) error {
-	if spec.AvailableAt.IsZero() {
-		spec.AvailableAt = now
+	task, err := durable.NewTask(key, spec, now)
+	if err != nil {
+		return err
 	}
-	_, err := tx.Exec(ctx, `INSERT INTO dispatch_execution_tasks
-        (namespace, workflow_id, run_id, task_id, kind, queue, payload, available_at)
-        VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`, key.Namespace, key.WorkflowID, key.RunID,
-		spec.ID, string(spec.Kind), spec.Queue, executionBytes(spec.Payload), durable.Timestamp(spec.AvailableAt))
+	_, err = tx.Exec(ctx, `INSERT INTO dispatch_execution_tasks
+        (namespace, workflow_id, run_id, task_id, kind, queue, payload, available_at, version, deadline_at, progress)
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`, key.Namespace, key.WorkflowID, key.RunID,
+		task.ID, string(task.Kind), task.Queue, executionBytes(task.Payload), task.AvailableAt,
+		task.Version, taskNullableTime(task.DeadlineAt), executionBytes(task.Progress))
 	if isDuplicateKey(err) {
 		return durable.ErrExists
 	}
@@ -148,12 +150,37 @@ func (s *Store) CommitTransition(ctx context.Context, r durable.CommitRequest) (
 	if err != nil {
 		return durable.Receipt{}, err
 	}
-	// Read time after acquiring both locks. Waiting for a lock can expire a lease.
+	conditions, err := lockTaskConditions(ctx, tx, r)
+	if err != nil {
+		return durable.Receipt{}, err
+	}
+	if r.State != "" && r.State != durable.StateRunning {
+		// Closure cancels all pending tasks, even those without explicit
+		// conditions. Acquire their locks before validating the source deadline.
+		_, err = tx.Exec(ctx, `SELECT 1 FROM dispatch_execution_tasks
+            WHERE namespace=$1 AND workflow_id=$2 AND run_id=$3 AND NOT done FOR UPDATE`,
+			r.Namespace, r.WorkflowID, r.RunID)
+		if err != nil {
+			return durable.Receipt{}, err
+		}
+	}
+	// Read time after acquiring every task lock. A lock wait can expire the
+	// source grant or make a target deadline eligible for cancellation.
 	now, err := executionTime(ctx, tx)
 	if err != nil {
 		return durable.Receipt{}, err
 	}
 	next, receipt, err := durable.Advance(current, *task, r, now)
+	if err != nil {
+		return durable.Receipt{}, err
+	}
+	for _, condition := range r.Conditions {
+		target, exists := conditions[condition.TaskID]
+		if !exists || durable.CheckTaskCondition(target, condition, now) != nil {
+			return durable.Receipt{}, durable.ErrTaskConflict
+		}
+	}
+	updated, err := durable.UpdateTask(*task, r.TaskUpdate, now)
 	if err != nil {
 		return durable.Receipt{}, err
 	}
@@ -175,11 +202,24 @@ func (s *Store) CommitTransition(ctx context.Context, r durable.CommitRequest) (
 			return durable.Receipt{}, taskErr
 		}
 	}
-	_, err = tx.Exec(ctx, `UPDATE dispatch_execution_tasks SET done=TRUE
-        WHERE namespace=$1 AND workflow_id=$2 AND run_id=$3 AND (task_id=$4 OR $5)`,
-		r.Namespace, r.WorkflowID, r.RunID, r.Token.TaskID, next.State != durable.StateRunning)
-	if err != nil {
-		return durable.Receipt{}, err
+	if taskErr := saveExecutionTaskState(ctx, tx, updated); taskErr != nil {
+		return durable.Receipt{}, taskErr
+	}
+	for _, taskID := range r.CancelTasks {
+		cancelled, cancelErr := durable.UpdateTask(conditions[taskID], nil, now)
+		if cancelErr != nil {
+			return durable.Receipt{}, cancelErr
+		}
+		if saveErr := saveExecutionTaskState(ctx, tx, cancelled); saveErr != nil {
+			return durable.Receipt{}, saveErr
+		}
+	}
+	if next.State != durable.StateRunning {
+		_, err = tx.Exec(ctx, `UPDATE dispatch_execution_tasks SET done=TRUE, version=version+1
+            WHERE namespace=$1 AND workflow_id=$2 AND run_id=$3 AND NOT done`, r.Namespace, r.WorkflowID, r.RunID)
+		if err != nil {
+			return durable.Receipt{}, err
+		}
 	}
 	if receiptErr := saveExecutionReceipt(ctx, tx, r.Key, r.RequestID, digest, receipt); receiptErr != nil {
 		return durable.Receipt{}, receiptErr

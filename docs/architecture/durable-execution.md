@@ -9,7 +9,7 @@ store explicitly; an unsupported store must never fall back to weaker guarantees
 
 An execution belongs to a namespace and has a stable workflow ID and a run ID.
 Only one open run may use a workflow ID in that namespace. An accepted transition
-atomically appends ordered history, updates execution state, finishes its task,
+atomically appends ordered history, updates execution state, updates its task,
 and schedules subsequent work. Every mutation has a request ID and a stored
 receipt. Repeating the same request returns its original receipt. Changing its
 contents while keeping its ID is an error.
@@ -41,7 +41,7 @@ Store tests alone do not qualify a workflow runtime or a deployment.
 | Atomic history, state, tasks, and durable receipts | Memory and PostgreSQL stores integrated with initial Go runtime | Shared memory/PostgreSQL conformance, rollback, concurrent writers, ambiguous-response retry |
 | Fenced task claims and durable timer deadlines | Store contract and renewable workers implemented; process-kill qualification open | Expiry, same-owner reclaim, concurrent claims, restart recovery |
 | Deterministic Go workflow runtime | Activity, timer and future replay implemented; SDK expansion open | Recorded-history replay with no repeated external effects, changed-command rejection |
-| Activity retries and timeout classes | Open | Queue, attempt, overall and heartbeat deadlines; heartbeat progress; asynchronous completion |
+| Activity retries and timeout classes | Transactional retry, progress, deadline and conditional cancellation primitives implemented; activity policies and processors open | Queue, attempt, overall and heartbeat deadlines; heartbeat progress; asynchronous completion |
 | Signals, queries, updates and signal-with-start | Open | Namespace isolation, deduplication, atomic acceptance, update results, read-only queries |
 | Child workflows and cancellation | Open | Stable child identity, duplicate creation prevention, parent-close policies, cancellation propagation |
 | Compensation, pause, termination and reset | Open | Resumable compensation attempts, audited controls, immutable reset lineage |
@@ -80,8 +80,9 @@ Store tests alone do not qualify a workflow runtime or a deployment.
   record in docs/architecture so progress is available in a fresh checkout.
 - The store boundary is trusted engine infrastructure, not a client command API.
   Authentication and semantic command validation belong to the coordinator.
-- PostgreSQL supplies lease timestamps. Memory uses its own clock. Callers supply
-  absolute task deadlines but cannot supply lease time or an event sequence.
+- PostgreSQL supplies lease timestamps. Memory uses its own clock. Callers can
+  supply absolute availability or relative delays and timeouts. They cannot supply
+  lease time or an event sequence.
 - Receipts must survive at least as long as the run history. A successful receipt
   remains readable by an identical retry even after a task is reclaimed or the run
   closes. A new mutation must pass the current lease and revision checks.
@@ -159,3 +160,54 @@ these runs. Current dashboard workflow reads describe checkpoint runs only. Add
 an execution list and detail view with ordered history, pending work and lease
 state, explicit namespace filters, and distinct unsupported/error/empty states.
 The rest of the requirements table remains authoritative and open.
+
+## Activity lifecycle foundation
+
+An activity needs a worker lease and separate execution/progress deadlines. A
+lease renewal must not extend an activity timeout. Deadline enforcement uses
+store time and runs after database locks are acquired, including when a worker
+tries to publish a late success before a timeout processor reaches the task.
+
+Task control extends the existing transaction. You can retain a task while
+recording attempt state, release it for a durable retry, or finish it. Retained
+and retried tasks keep their identity. Retry release invalidates the old token
+immediately; the next claim increments its epoch and attempt. Progress is copied
+into persisted task state. It is separate from external side effects.
+
+Task versions protect observations. A timeout processor reads a task, then commits
+with that version and an expired-deadline condition. If completion, retry or
+progress changed the task first, the condition rejects the entire transition.
+Cancellation and the timeout outcome then commit together. A normal lease renewal
+does not change the task version because it does not extend the activity deadline.
+
+Relative task availability and deadlines are resolved against one store timestamp
+per transaction. A newly scheduled task's deadline starts at its availability;
+a retained task's new deadline starts at the transition time. Retrying resolves
+its next availability first, then its next queue deadline. Clearing a deadline
+requires an explicit update. Existing tasks without deadlines retain their current
+lease semantics.
+
+These primitives precede activity policies and timeout processors. The next layer
+must persist attempt starts before invoking handlers, distinguish queue/attempt/
+overall/heartbeat timeouts, retain heartbeat details across attempts, record retry
+backoff and failure classification, and support fenced asynchronous completion.
+High-frequency heartbeat progress must not force one history event per heartbeat.
+
+2026-10-08: shared memory and PostgreSQL tests cover retained grants, copied
+progress, delayed retry, immediate rejection of released tokens, deadline expiry,
+conditional cancellation and atomic rollback. PostgreSQL retains retry timing,
+progress and deadlines after the connection pool is replaced. A receipt-insertion
+failure proves that already-written history, progress, cancellation and new tasks
+roll back together. Retrying the same request after that failure succeeds.
+
+Independent review found that a terminal transition could wait for another task
+lock after validating its source deadline, then accept an expired completion.
+The regression failed before the fix. Terminal transitions now lock every pending
+task before sampling database time. Both conditional cancellation and terminal
+closure reject a source whose deadline expires during that wait.
+
+After the review fix, make f, make l and go test ./... pass. Race tests pass for
+engine, durable runtime and memory, and the full PostgreSQL integration suite
+passes with the race detector. The reviewer confirmed the lock-order correction
+and reported no further findings in the fix. Process-kill recovery and the
+activity-policy layer remain unqualified.
