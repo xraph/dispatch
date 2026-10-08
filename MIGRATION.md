@@ -16,7 +16,8 @@ checks against fixtures and a real SQLite engine.
 | Contract foundation | Committed in `10f4f90` | Request bounds, actor propagation, wire primitives and error mapping pass; build/unit/lint pass; reviewed |
 | Job contract and contributor | Committed through `134460b` | Five job intents, runtime discovery and HTTP invalidations pass; job read identity tests pass on all five backends under race; full build/unit/lint and final review pass |
 | Dead-letter contract | Committed through `edb7da1` | Reads/actions pass on all five backends under race; HTTP invalidations verified; review's partial purge and audit gaps reproduced and fixed; full build/unit/lint pass |
-| Remaining contract domains | Pending | Cron, workflows, workers, queues, handlers, artifacts, overview and config are not registered yet |
+| Cron contract | Committed through `7e49bb1` | Memory/SQLite state and DST preview tests, HTTP controls and invalidations pass under race; full build/unit/lint pass; final review approved |
+| Remaining contract domains | Pending | Workflows, workers, queues, handlers, artifacts, overview and config are not registered yet |
 | React plugin, ten navigation entries | Pending | No browser evidence |
 | Stateful fixtures and host wiring | Pending | No browser evidence |
 | Real SQLite browser flows | Pending | Not tested |
