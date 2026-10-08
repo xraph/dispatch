@@ -761,6 +761,102 @@ func init() {
 				return nil
 			},
 		},
+
+		// ClaimReplay records which job a replay or retry created next to
+		// replayed_at, so an operator can follow a replayed entry to its
+		// new job and a failed enqueue can release only its own claim.
+		// Retrying a failed job finds its entry with GetDLQByJobID, a
+		// lookup by job_id that no index covered. (job_id, id) answers
+		// it, newest entry first, by walking the index backwards.
+		&migrate.Migration{
+			Name:    "dlq_replayed_job_id",
+			Version: "20261009120000",
+			Up: func(ctx context.Context, exec migrate.Executor) error {
+				// Under the lock timeout for the reason given on
+				// job_resource_columns. A nullable column with no default
+				// is a catalog update, not a table rewrite.
+				if err := withLockTimeout(ctx, exec, `
+					ALTER TABLE dispatch_dlq
+						ADD COLUMN IF NOT EXISTS replayed_job_id TEXT`); err != nil {
+					return err
+				}
+
+				// CONCURRENTLY, with an invalid leftover dropped first,
+				// as on list_order_indexes: a plain CREATE INDEX would
+				// block every dead letter write for the whole build.
+				if err := dropIfInvalid(ctx, exec, "idx_dispatch_dlq_job"); err != nil {
+					return err
+				}
+
+				_, err := exec.Exec(ctx, `
+					CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_dispatch_dlq_job
+						ON dispatch_dlq (job_id, id)`)
+
+				return err
+			},
+			Down: func(ctx context.Context, exec migrate.Executor) error {
+				if _, err := exec.Exec(ctx,
+					`DROP INDEX CONCURRENTLY IF EXISTS idx_dispatch_dlq_job`); err != nil {
+					return err
+				}
+
+				return withLockTimeout(ctx, exec, `
+					ALTER TABLE dispatch_dlq
+						DROP COLUMN IF EXISTS replayed_job_id`)
+			},
+		},
+
+		// workflow.Run.ParentRunID and Version had no columns. A child run
+		// read back as top-level, ListChildRuns failed on a column that did
+		// not exist, and every run read back as version 0, which the
+		// registry resolves to the newest definition. The runner resumes
+		// and replays a run on its stamped version, so a run started on
+		// version 1 would have resumed on whatever was newest.
+		&migrate.Migration{
+			Name:    "workflow_run_version_parent",
+			Version: "20261009130000",
+			Up: func(ctx context.Context, exec migrate.Executor) error {
+				// Under the lock timeout for the reason given on
+				// job_resource_columns. The parent link is nullable and the
+				// version default is a constant, so both are catalog
+				// updates rather than a table rewrite. Runs written before
+				// this read back as version 0, which is what they were
+				// already reading back as.
+				if err := withLockTimeout(ctx, exec, `
+					ALTER TABLE dispatch_workflow_runs
+						ADD COLUMN IF NOT EXISTS version       INT NOT NULL DEFAULT 0,
+						ADD COLUMN IF NOT EXISTS parent_run_id TEXT`); err != nil {
+					return err
+				}
+
+				// ListChildRuns filters on parent_run_id. Partial, because
+				// most runs have no parent and a NULL entry for each would
+				// only make the index bigger. CONCURRENTLY, with an invalid
+				// leftover dropped first, as on list_order_indexes: every
+				// workflow step writes this table.
+				if err := dropIfInvalid(ctx, exec, "idx_dispatch_workflow_runs_parent"); err != nil {
+					return err
+				}
+
+				_, err := exec.Exec(ctx, `
+					CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_dispatch_workflow_runs_parent
+						ON dispatch_workflow_runs (parent_run_id, id)
+						WHERE parent_run_id IS NOT NULL`)
+
+				return err
+			},
+			Down: func(ctx context.Context, exec migrate.Executor) error {
+				if _, err := exec.Exec(ctx,
+					`DROP INDEX CONCURRENTLY IF EXISTS idx_dispatch_workflow_runs_parent`); err != nil {
+					return err
+				}
+
+				return withLockTimeout(ctx, exec, `
+					ALTER TABLE dispatch_workflow_runs
+						DROP COLUMN IF EXISTS version,
+						DROP COLUMN IF EXISTS parent_run_id`)
+			},
+		},
 	)
 }
 

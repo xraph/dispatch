@@ -193,9 +193,17 @@ type workflowRunModel struct {
 	CompletedAt *time.Time `grove:"completed_at"`
 	CreatedAt   time.Time  `grove:"created_at,notnull,default:current_timestamp"`
 	UpdatedAt   time.Time  `grove:"updated_at,notnull,default:current_timestamp"`
+	ParentRunID *string    `grove:"parent_run_id"`
+	Version     int        `grove:"version,notnull,default:0"`
 }
 
 func toRunModel(r *workflow.Run) *workflowRunModel {
+	var parentRunID *string
+	if r.ParentRunID != nil {
+		raw := r.ParentRunID.String()
+		parentRunID = &raw
+	}
+
 	return &workflowRunModel{
 		ID:          r.ID.String(),
 		Name:        r.Name,
@@ -209,6 +217,8 @@ func toRunModel(r *workflow.Run) *workflowRunModel {
 		CompletedAt: r.CompletedAt,
 		CreatedAt:   r.CreatedAt,
 		UpdatedAt:   r.UpdatedAt,
+		ParentRunID: parentRunID,
+		Version:     r.Version,
 	}
 }
 
@@ -216,6 +226,15 @@ func fromRunModel(m *workflowRunModel) (*workflow.Run, error) {
 	parsedID, err := id.ParseRunID(m.ID)
 	if err != nil {
 		return nil, fmt.Errorf(errPrefix+"parse run id %q: %w", m.ID, err)
+	}
+
+	var parentRunID *id.RunID
+	if m.ParentRunID != nil {
+		parsed, parseErr := id.ParseRunID(*m.ParentRunID)
+		if parseErr != nil {
+			return nil, fmt.Errorf(errPrefix+"parse parent run id %q: %w", *m.ParentRunID, parseErr)
+		}
+		parentRunID = &parsed
 	}
 
 	return &workflow.Run{
@@ -233,6 +252,8 @@ func fromRunModel(m *workflowRunModel) (*workflow.Run, error) {
 		ScopeOrgID:  m.ScopeOrgID,
 		StartedAt:   m.StartedAt,
 		CompletedAt: m.CompletedAt,
+		Version:     m.Version,
+		ParentRunID: parentRunID,
 	}, nil
 }
 
@@ -362,6 +383,11 @@ type dlqEntryModel struct {
 	ReplayedAt *time.Time `grove:"replayed_at"`
 	CreatedAt  time.Time  `grove:"created_at,notnull,default:current_timestamp"`
 
+	// ReplayedJobID is the job ClaimReplay recorded with replayed_at. It
+	// is NULL while the entry is unreplayed, and on rows the older
+	// ReplayDLQ marked, which set replayed_at alone.
+	ReplayedJobID *string `grove:"replayed_job_id"`
+
 	// Carried so Replay can rebuild a job that behaves like the failed
 	// one; see the dlq.Entry doc. The two resource sets are stored with
 	// the same jsonb codec jobModel uses rather than as scalar columns:
@@ -388,6 +414,12 @@ func toDLQModel(e *dlq.Entry) (*dlqEntryModel, error) {
 		return nil, fmt.Errorf(errPrefix+"encode dlq resource limits: %w", err)
 	}
 
+	var replayedJobID *string
+	if e.ReplayedJobID != nil {
+		raw := e.ReplayedJobID.String()
+		replayedJobID = &raw
+	}
+
 	return &dlqEntryModel{
 		ID:         e.ID.String(),
 		JobID:      e.JobID.String(),
@@ -402,6 +434,8 @@ func toDLQModel(e *dlq.Entry) (*dlqEntryModel, error) {
 		FailedAt:   e.FailedAt,
 		ReplayedAt: e.ReplayedAt,
 		CreatedAt:  e.CreatedAt,
+
+		ReplayedJobID: replayedJobID,
 
 		Priority:         e.Priority,
 		Timeout:          int64(e.Timeout),
@@ -435,6 +469,15 @@ func fromDLQModel(m *dlqEntryModel) (*dlq.Entry, error) {
 		return nil, fmt.Errorf(errPrefix+"decode dlq resource limits: %w", err)
 	}
 
+	var replayedJobID *id.JobID
+	if m.ReplayedJobID != nil {
+		parsed, parseErr := id.ParseJobID(*m.ReplayedJobID)
+		if parseErr != nil {
+			return nil, fmt.Errorf(errPrefix+"parse replayed job id %q: %w", *m.ReplayedJobID, parseErr)
+		}
+		replayedJobID = &parsed
+	}
+
 	return &dlq.Entry{
 		ID:         parsedID,
 		JobID:      parsedJobID,
@@ -449,6 +492,8 @@ func fromDLQModel(m *dlqEntryModel) (*dlq.Entry, error) {
 		FailedAt:   m.FailedAt,
 		ReplayedAt: m.ReplayedAt,
 		CreatedAt:  m.CreatedAt,
+
+		ReplayedJobID: replayedJobID,
 
 		Priority:         m.Priority,
 		Timeout:          time.Duration(m.Timeout),
