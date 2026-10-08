@@ -21,22 +21,24 @@ checks against fixtures and a real SQLite engine.
 | Workflow contract | Implemented and reviewed | Four intents and HTTP invalidations pass; run identity and detail tests pass on all five backends under race; stale confirmations refuse without mutation; review's Redis identity gap reproduced and fixed; full build/unit/lint pass |
 | Operational read prerequisites | Committed through `1c4e319` | Redis counts, worker/leader and cron reads reject outages and corrupt identity; 36 affected tests/subtests pass under race with no skips; engine reports its existing worker heartbeat/stale timing; full build/unit/lint and final review pass |
 | Operational contract | Committed through `982899e` | Eight queries pass through HTTP; workers, queues and overview pass on all five stores under race with no skips; settings and local/remote boundaries verified; final review's SQLite claim race reproduced and fixed; full build/unit and engine/extension/SQLite race checks pass |
-| Artifact contract | Pending | Artifact reads and short-lived download URLs are not registered yet |
+| Artifact contract | Implemented and reviewed | Four queries, deleted metadata, cursor coverage and fresh no-store downloads verified; all five stores pass under race; review's Trove routing mismatch reproduced and fixed |
 | React plugin, ten navigation entries | Pending | No browser evidence |
 | Stateful fixtures and host wiring | Pending | No browser evidence |
 | Real SQLite browser flows | Pending | Not tested |
 | Templ retirement | Pending | Sources retained |
 
-Integration-tag lint currently reports a pre-existing `err` shadow in
-`store/redis/store_test.go:54`. The first combined backend run had one Redis
-container startup failure and one PostgreSQL container startup skip. All 204 Redis
-tests and the omitted PostgreSQL case passed when rerun serially.
+The Redis integration-test shadow is fixed. `make f`, `make l` and the affected
+integration-tag lint pass with zero issues. Lint commands now wait for another
+repository's linter to release its lock. The initial combined backend runs had
+container startup failures and skips; serial reruns passed the omitted cases.
 
-The job contract checks used the concurrent Forge/Grove dependency upgrade in the
-current checkout. Importing the runtime dashboard interface in its test added
-required indirect modules and checksums. Those module files remain with the
-concurrent dependency work; a clean committed dependency baseline is still part of
-the final verification.
+The committed dependency baseline now includes Trove v1.7.0 for per-artifact
+routing and the indirect modules required by the dashboard registration test.
+We checked those dependencies separately from the concurrent Forge/Grove/Relay
+upgrades: build, 45 test packages (2,080 tests/subtests), engine/extension/Trove
+race checks and `make l` pass. The existing unsupported Trove range-read case is
+the only test skip; two packages have no tests. The concurrent upgrade stays in
+the working tree.
 
 ## Page and supporting template inventory
 
@@ -110,6 +112,13 @@ the worker pool has started. Local resource leases and configured queue counters
 describe only the serving process. Unconfigured queues have no measured local
 active count. Queue discovery cannot enumerate historical queues with no current
 worker or local registration, but their names remain usable as job filters.
+
+Artifact inspection uses the configured artifact service's store. Custom stores
+without cursor or deleted-record inspection return unavailable. Downloads require
+a live record and signing support for its routed backend; availability is per
+record. Each request signs a fresh five-minute URL with `Cache-Control: no-store`.
+The React action must use an imperative query and never retain the URL in the
+shared query cache. Metadata inspection does not restore soft-deleted bytes.
 
 SQLite leader acquisition now uses a conditional database write after inspecting
 the recorded lease. A 24-contender regression has one successful claim and one
