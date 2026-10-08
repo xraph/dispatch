@@ -135,7 +135,7 @@ func (s *Store) ListCheckpoints(ctx context.Context, runID id.RunID) ([]*workflo
 	var models []checkpointModel
 	err := s.pgdb.NewSelect(&models).
 		Where("run_id = ?", runID.String()).
-		OrderExpr("created_at ASC").
+		OrderExpr("created_at ASC, id ASC").
 		Scan(ctx)
 	if err != nil {
 		return nil, fmt.Errorf(errPrefix+"list checkpoints: %w", err)
@@ -179,7 +179,7 @@ func (s *Store) ListChildRuns(ctx context.Context, parentRunID id.RunID) ([]*wor
 func (s *Store) DeleteCheckpointsAfter(ctx context.Context, runID id.RunID, afterStep string) error {
 	_, err := s.pgdb.NewDelete(&checkpointModel{}).
 		Where("run_id = ?", runID.String()).
-		Where("created_at > (SELECT created_at FROM dispatch_checkpoints WHERE run_id = ? AND step_name = ?)", runID.String(), afterStep).
+		Where("(created_at, id) > (SELECT created_at, id FROM dispatch_checkpoints WHERE run_id = ? AND step_name = ?)", runID.String(), afterStep).
 		Exec(ctx)
 	if err != nil {
 		return fmt.Errorf(errPrefix+"delete checkpoints after: %w", err)

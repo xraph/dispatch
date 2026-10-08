@@ -150,7 +150,7 @@ func (s *Store) GetCheckpoint(ctx context.Context, runID id.RunID, stepName stri
 func (s *Store) ListCheckpoints(ctx context.Context, runID id.RunID) ([]*workflow.Checkpoint, error) {
 	col := s.mdb.Collection(colCheckpoints)
 
-	findOpts := options.Find().SetSort(bson.D{{Key: "created_at", Value: 1}})
+	findOpts := options.Find().SetSort(bson.D{{Key: "created_at", Value: 1}, {Key: "_id", Value: 1}})
 	cursor, err := col.Find(ctx, bson.M{"run_id": runID.String()}, findOpts)
 	if err != nil {
 		return nil, fmt.Errorf("dispatch/mongo: list checkpoints: %w", err)
@@ -221,8 +221,9 @@ func (s *Store) DeleteCheckpointsAfter(ctx context.Context, runID id.RunID, afte
 	// Delete all checkpoints for this run created after the target.
 	_, err = col.DeleteMany(ctx, bson.M{
 		"run_id": runID.String(),
-		"created_at": bson.M{
-			"$gt": target.CreatedAt,
+		"$or": bson.A{
+			bson.M{"created_at": bson.M{"$gt": target.CreatedAt}},
+			bson.M{"created_at": target.CreatedAt, "_id": bson.M{"$gt": target.ID}},
 		},
 	})
 	if err != nil {

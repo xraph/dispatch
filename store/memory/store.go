@@ -485,7 +485,7 @@ func (m *Store) ListCheckpoints(_ context.Context, runID id.RunID) ([]*workflow.
 	}
 
 	sort.Slice(result, func(i, k int) bool {
-		return result[i].CreatedAt.Before(result[k].CreatedAt)
+		return workflow.CompareCheckpoints(result[i], result[k]) < 0
 	})
 
 	return result, nil
@@ -525,12 +525,10 @@ func (m *Store) DeleteCheckpointsAfter(_ context.Context, runID id.RunID, afterS
 		return nil // step not found; nothing to delete
 	}
 
-	// Delete all checkpoints for this run created at or after the target,
-	// except the target itself. Using !Before covers the case where
-	// multiple checkpoints share the exact same timestamp.
+	// Keep the target and earlier IDs when creation times tie.
 	for k, cp := range m.checkpoints {
 		if len(k) > len(prefix) && k[:len(prefix)] == prefix && k != targetKey {
-			if !cp.CreatedAt.Before(target.CreatedAt) {
+			if workflow.CompareCheckpoints(cp, target) > 0 {
 				delete(m.checkpoints, k)
 			}
 		}

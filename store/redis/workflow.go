@@ -3,6 +3,7 @@ package redis
 import (
 	"context"
 	"fmt"
+	"sort"
 	"time"
 
 	"github.com/xraph/dispatch"
@@ -247,6 +248,9 @@ func (s *Store) ListCheckpoints(ctx context.Context, runID id.RunID) ([]*workflo
 			CreatedAt: e.CreatedAt,
 		})
 	}
+	sort.Slice(checkpoints, func(i, j int) bool {
+		return workflow.CompareCheckpoints(checkpoints[i], checkpoints[j]) < 0
+	})
 	return checkpoints, nil
 }
 
@@ -293,7 +297,7 @@ func (s *Store) DeleteCheckpointsAfter(ctx context.Context, runID id.RunID, afte
 		if getErr := s.getEntity(ctx, key, &e); getErr != nil {
 			continue
 		}
-		if e.CreatedAt.After(target.CreatedAt) {
+		if e.CreatedAt.After(target.CreatedAt) || (e.CreatedAt.Equal(target.CreatedAt) && e.ID > target.ID) {
 			if delErr := s.rdb.Del(ctx, key).Err(); delErr != nil {
 				return fmt.Errorf("delete checkpoint %s: %w", key, delErr)
 			}
