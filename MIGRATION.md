@@ -10,7 +10,8 @@ checks against fixtures and a real SQLite engine.
 | Area | Implementation | Verification |
 |---|---|---|
 | Worker heartbeat and five-backend cursor reads | Committed in Slice 1 | Store conformance and heartbeat tests passed |
-| Operator actions and REST routes | Committed in Slice 2 through `271da77`; replay generation fix under review | Build, unit tests and focused race tests passed; final review found and reproduced a delayed replay claim race |
+| Operator actions and REST routes | Committed in Slice 2 through `c84a71e`, including replay generation fencing | Build, unit tests, focused race tests and ordinary lint passed; final review approved |
+| Engine inspection | Committed through `6de5530` | Read-only snapshot and version tests pass under race; full build/unit and ordinary lint pass; final review approved with one comment correction |
 | Five-backend operator persistence | Implemented | Memory, PostgreSQL, SQLite, MongoDB and Redis exercised under race; container startup failures required serial reruns |
 | Contract contributor | Pending | Not tested |
 | React plugin, ten navigation entries | Pending | No browser evidence |

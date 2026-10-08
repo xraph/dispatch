@@ -10,7 +10,7 @@ type Settings struct {
 	ScratchDir                               string
 }
 
-// Settings returns safe inspection fields. Core dumps are always disabled by the shim.
+// Settings returns safe inspection fields. The subprocess requests a zero core-dump limit.
 func (e *Executor) Settings() Settings {
 	limits := e.opts.rlimits
 	limits.Core = 0
