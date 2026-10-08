@@ -78,20 +78,15 @@ func (r *Runner) planReplay(ctx context.Context, runID id.RunID, fromStep string
 			dispatch.ErrInvalidState, run.Name, version, runID)
 	}
 
-	// Reruns is what DeleteCheckpointsAfter removes on the durable
-	// backends: every checkpoint created strictly after fromStep's, in
-	// creation order, with the ID breaking a tie as GetTimeline does.
+	// Preview the same creation-time/ID boundary every store prunes.
 	later := make([]*Checkpoint, 0, len(checkpoints))
 	for _, cp := range checkpoints {
-		if cp.CreatedAt.After(target.CreatedAt) {
+		if CompareCheckpoints(cp, target) > 0 {
 			later = append(later, cp)
 		}
 	}
 	sort.SliceStable(later, func(i, j int) bool {
-		if later[i].CreatedAt.Equal(later[j].CreatedAt) {
-			return later[i].ID.String() < later[j].ID.String()
-		}
-		return later[i].CreatedAt.Before(later[j].CreatedAt)
+		return CompareCheckpoints(later[i], later[j]) < 0
 	})
 	reruns := make([]string, len(later))
 	for i, cp := range later {

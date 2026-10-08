@@ -65,12 +65,8 @@ type stepCounts struct {
 	s1, s2, s3 atomic.Int32
 }
 
-// tick spaces checkpoints apart. Checkpoint order is creation time, and
-// a step this trivial can save in the same clock tick as the one before
-// it on a coarse clock. DeleteCheckpointsAfter cannot order a tie (the
-// memory store deletes it, the durable stores keep it), and real steps
-// are never this close, so the pause keeps the test about replay rather
-// than clock resolution.
+// tick spaces the lifecycle fixture's checkpoints apart. Deterministic
+// timestamp ties are covered by the checkpoint ordering suites.
 func tick() { time.Sleep(time.Millisecond) }
 
 // registerThreeSteps registers "replay-three" at version, with steps

@@ -42,13 +42,13 @@ type Store interface {
 	// Returns nil data if no checkpoint exists.
 	GetCheckpoint(ctx context.Context, runID id.RunID, stepName string) ([]byte, error)
 
-	// ListCheckpoints returns all checkpoints for a workflow run.
+	// ListCheckpoints returns checkpoints in ascending creation-time/ID order.
 	ListCheckpoints(ctx context.Context, runID id.RunID) ([]*Checkpoint, error)
 
 	// ListChildRuns returns all child workflow runs for a parent.
 	ListChildRuns(ctx context.Context, parentRunID id.RunID) ([]*Run, error)
 
-	// DeleteCheckpointsAfter removes all checkpoints created after the
-	// given step name (by creation order). Used for workflow replay.
+	// DeleteCheckpointsAfter removes checkpoints strictly after the named
+	// step in creation-time/ID order, preserving the target and earlier ties.
 	DeleteCheckpointsAfter(ctx context.Context, runID id.RunID, afterStep string) error
 }

@@ -30,10 +30,7 @@ func (r *Runner) GetTimeline(ctx context.Context, runID id.RunID) ([]TimelineEnt
 	// Sort by creation time, using checkpoint ID as tiebreaker when
 	// timestamps are identical (IDs are UUIDv7 K-sortable).
 	sort.SliceStable(checkpoints, func(i, j int) bool {
-		if checkpoints[i].CreatedAt.Equal(checkpoints[j].CreatedAt) {
-			return checkpoints[i].ID.String() < checkpoints[j].ID.String()
-		}
-		return checkpoints[i].CreatedAt.Before(checkpoints[j].CreatedAt)
+		return CompareCheckpoints(checkpoints[i], checkpoints[j]) < 0
 	})
 
 	entries := make([]TimelineEntry, len(checkpoints))
