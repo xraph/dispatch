@@ -23,16 +23,19 @@ import (
 
 type contractSigner struct {
 	*artifacttest.Backend
-	supported bool
-	calls     int
-	last      artifact.Ref
-	ttl       time.Duration
-	failure   error
-	rawURL    string
-	deadline  bool
+	supported      bool
+	calls          int
+	last           artifact.Ref
+	ttl            time.Duration
+	failure        error
+	rawURL         string
+	deadline       bool
+	unsupportedKey string
 }
 
-func (s *contractSigner) SupportsPresign() bool { return s.supported }
+func (s *contractSigner) SupportsPresign(ref artifact.Ref) bool {
+	return s.supported && ref.Key != s.unsupportedKey
+}
 func (s *contractSigner) PresignGet(ctx context.Context, ref artifact.Ref, ttl time.Duration) (string, error) {
 	s.calls++
 	s.last = ref
@@ -81,7 +84,7 @@ func runArtifactDomain(t *testing.T, s store.Store) {
 			t.Fatal("cursor loop")
 		}
 		page, err := artifactsListHandler(d)(ctx, ArtifactsListInput{Limit: 2, Cursor: cursor, IncludeDeleted: true}, p)
-		if err != nil || !page.Enabled || !page.PresignSupported || page.Items == nil || page.AsOf == "" {
+		if err != nil || !page.Enabled || page.Items == nil || page.AsOf == "" {
 			t.Fatalf("page=%+v, %v", page, err)
 		}
 		for _, a := range page.Items {
@@ -148,6 +151,38 @@ func runArtifactDomain(t *testing.T, s store.Store) {
 func TestArtifactDomainMemoryAndSQLite(t *testing.T) {
 	t.Run("memory", func(t *testing.T) { runArtifactDomain(t, memory.New()) })
 	t.Run("sqlite", func(t *testing.T) { runArtifactDomain(t, sqliteContractStore(t)) })
+}
+
+func TestArtifactDownloadCapabilityIsPerRecord(t *testing.T) {
+	ctx := context.Background()
+	s := memory.New()
+	signer := newContractSigner()
+	signer.unsupportedKey = "unsigned"
+	d := contractDeps(t, s, engine.WithArtifacts(artifact.NewService(s, signer), nil))
+	for _, key := range []string{"signed", "unsigned"} {
+		seedArtifact(t, s, key, artifact.Durable, "", "")
+	}
+	page, err := artifactsListHandler(d)(ctx, ArtifactsListInput{}, fc.Principal{})
+	if err != nil || len(page.Items) != 2 {
+		t.Fatalf("page = %+v, %v", page, err)
+	}
+	for _, row := range page.Items {
+		want := row.Key == "signed"
+		if row.DownloadAvailable != want {
+			t.Errorf("%s list availability = %t", row.Key, row.DownloadAvailable)
+		}
+		detail, readErr := artifactsGetHandler(d)(ctx, IDInput{ID: row.ID}, fc.Principal{})
+		if readErr != nil || detail.Artifact == nil || detail.Artifact.DownloadAvailable != want {
+			t.Fatalf("detail = %+v, %v", detail, readErr)
+		}
+		download, signErr := artifactsPresignHandler(d)(ctx, IDInput{ID: row.ID}, fc.Principal{})
+		if signErr != nil || download.Supported != want || (download.URL != nil) != want {
+			t.Errorf("download = %+v, %v", download, signErr)
+		}
+	}
+	if signer.calls != 1 {
+		t.Errorf("signed %d records, want 1", signer.calls)
+	}
 }
 func TestArtifactContractUsesConfiguredServiceStore(t *testing.T) {
 	engineStore, artifactStore := memory.New(), memory.New()
@@ -239,7 +274,7 @@ func TestArtifactDisabledAndMissingInspectionCapabilities(t *testing.T) {
 	d := contractDeps(t, memory.New())
 	input := IDInput{ID: id.NewArtifactID().String()}
 	page, err := artifactsListHandler(d)(ctx, ArtifactsListInput{}, p)
-	if err != nil || page.Enabled || page.Items == nil || page.PresignSupported {
+	if err != nil || page.Enabled || page.Items == nil {
 		t.Fatalf("disabled list=%+v, %v", page, err)
 	}
 	detail, err := artifactsGetHandler(d)(ctx, input, p)

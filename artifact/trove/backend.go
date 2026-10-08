@@ -57,10 +57,21 @@ func New(t *trovelib.Trove, opts ...Option) *Backend {
 // Name identifies this backend.
 func (b *Backend) Name() string { return b.name }
 
-// SupportsPresign reports the current underlying driver's signing capability.
-func (b *Backend) SupportsPresign() bool {
-	_, ok := b.trove.Driver().(trovedriver.PresignDriver)
+// SupportsPresign reports the signing capability of the artifact's routed driver.
+func (b *Backend) SupportsPresign(ref artifact.Ref) bool {
+	ref = b.resolvedRef(ref)
+	if ref.Bucket == "" || ref.Key == "" {
+		return false
+	}
+	_, ok := b.trove.DriverFor(ref.Bucket, ref.Key).(trovedriver.PresignDriver)
 	return ok
+}
+
+func (b *Backend) resolvedRef(ref artifact.Ref) artifact.Ref {
+	if ref.Bucket == "" {
+		ref.Bucket = b.trove.Config().DefaultBucket
+	}
+	return ref
 }
 
 // translate maps Trove's permanent failures onto the artifact plane's.
@@ -168,9 +179,17 @@ func (b *Backend) Delete(ctx context.Context, ref artifact.Ref) error {
 // PresignGet returns a time-limited read URL when the underlying driver
 // supports pre-signing, and ErrNotFound-free failure otherwise.
 func (b *Backend) PresignGet(ctx context.Context, ref artifact.Ref, ttl time.Duration) (string, error) {
-	p, ok := b.trove.Driver().(trovedriver.PresignDriver)
+	ref = b.resolvedRef(ref)
+	if ref.Bucket == "" {
+		return "", trovelib.ErrBucketEmpty
+	}
+	if ref.Key == "" {
+		return "", trovelib.ErrKeyEmpty
+	}
+	driver := b.trove.DriverFor(ref.Bucket, ref.Key)
+	p, ok := driver.(trovedriver.PresignDriver)
 	if !ok {
-		return "", fmt.Errorf("trove: driver %T does not support pre-signed URLs", b.trove.Driver())
+		return "", fmt.Errorf("trove: driver %T does not support pre-signed URLs", driver)
 	}
 
 	url, err := p.PresignGet(ctx, ref.Bucket, ref.Key, ttl)

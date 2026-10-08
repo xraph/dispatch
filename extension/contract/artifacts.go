@@ -41,8 +41,7 @@ type ArtifactRow struct {
 }
 type ArtifactsPage struct {
 	Page[ArtifactRow]
-	Enabled          bool `json:"enabled"`
-	PresignSupported bool `json:"presignSupported"`
+	Enabled bool `json:"enabled"`
 }
 type ArtifactDetail struct {
 	Enabled  bool         `json:"enabled"`
@@ -65,7 +64,7 @@ type ArtifactDownload struct {
 func projectArtifact(a *artifact.Artifact, service *artifact.Service) ArtifactRow {
 	return ArtifactRow{ID: a.ID.String(), Backend: a.Backend, Bucket: a.Bucket, Key: a.Key, Size: a.Size, ContentHash: nullable(a.ContentHash), ContentType: nullable(a.ContentType),
 		Lifecycle: a.Lifecycle, ScopeAppID: nullable(a.ScopeAppID), ScopeOrgID: nullable(a.ScopeOrgID), ExpiresAt: timestampPtr(a.ExpiresAt), CreatedAt: timestamp(a.CreatedAt), DeletedAt: timestampPtr(a.DeletedAt),
-		DownloadAvailable: service.Enabled() && !a.IsDeleted() && a.Backend == service.Backend().Name() && artifact.SupportsPresign(service.Backend())}
+		DownloadAvailable: service.Enabled() && !a.IsDeleted() && a.Backend == service.Backend().Name() && artifact.SupportsPresign(service.Backend(), a.Ref())}
 }
 func parseArtifactID(raw string) (id.ArtifactID, error) {
 	parsed, err := id.ParseArtifactID(raw)
@@ -104,7 +103,6 @@ func artifactsListHandler(deps Deps) func(context.Context, ArtifactsListInput, f
 			rows = append(rows, projectArtifact(a, service))
 		}
 		out.Page = newPage(rows, page.NextCursor, page.Complete, time.Now())
-		out.PresignSupported = artifact.SupportsPresign(service.Backend())
 		return out, nil
 	})
 }
@@ -168,7 +166,7 @@ func artifactsPresignHandler(deps Deps) func(context.Context, IDInput, fc.Princi
 			return ArtifactDownload{}, err
 		}
 		presigner, canSign := service.Backend().(artifact.Presigner)
-		out.Supported = canSign && a.Backend == service.Backend().Name() && artifact.SupportsPresign(service.Backend())
+		out.Supported = canSign && a.Backend == service.Backend().Name() && artifact.SupportsPresign(service.Backend(), a.Ref())
 		if !out.Supported {
 			return out, nil
 		}

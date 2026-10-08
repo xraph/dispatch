@@ -8,11 +8,11 @@ import (
 
 func TestTroveReportsCurrentPresignCapability(t *testing.T) {
 	backend := newBackend(t)
-	support, ok := backend.(interface{ SupportsPresign() bool })
+	support, ok := backend.(artifact.PresignSupport)
 	if !ok {
 		t.Fatal("adapter does not expose the driver's signing capability")
 	}
-	if support.SupportsPresign() {
+	if support.SupportsPresign(artifact.Ref{Bucket: testBucket, Key: "test.bin"}) {
 		t.Fatal("memory driver cannot sign URLs")
 	}
 	if _, ok := backend.(artifact.Presigner); !ok {
