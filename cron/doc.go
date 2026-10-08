@@ -27,10 +27,17 @@
 //
 // Cron entries can be enabled or disabled at runtime via the admin API
 // (POST /v1/crons/:cronId/enable and POST /v1/crons/:cronId/disable).
+// Operator code goes through the engine's EnableCron, DisableCron,
+// DeleteCron and TriggerCron. Enabling computes the next fire time from
+// now, so an entry that was off past its old one does not fire a catch-up.
+// [NextFires] previews a schedule's next fire times.
 //
 // # Scheduler
 //
 // The [Scheduler] evaluates due entries on every tick, acquires a distributed
-// lock on each entry, enqueues the corresponding job, and updates LastRunAt
-// and NextRunAt. The [ext.CronFired] extension hook fires after each enqueue.
+// lock on each entry, re-reads it, and fires only if the store still has it
+// enabled and due. It enqueues the corresponding job and records LastRunAt
+// and NextRunAt with targeted writes that never touch Enabled, so a fire
+// cannot undo an operator's disable. The [ext.CronFired] extension hook
+// fires after each enqueue.
 package cron
