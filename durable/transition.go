@@ -60,7 +60,7 @@ func ValidateLease(ttl time.Duration) error {
 
 // Validate checks a task token's shape; the store checks its ownership.
 func (t TaskToken) Validate() error {
-	if !identifier(t.TaskID) || !identifier(t.Owner) || t.Epoch <= 0 || (t.LeaseKind != "" && t.LeaseKind != LeaseTimeout) {
+	if !identifier(t.TaskID) || !identifier(t.Owner) || t.Epoch <= 0 || (t.LeaseKind != "" && t.LeaseKind != LeaseTimeout && t.LeaseKind != LeaseAsync) {
 		return fmt.Errorf("%w: task ID, owner and positive epoch are required", ErrInvalid)
 	}
 	return nil
@@ -72,6 +72,9 @@ func (r CommitRequest) Validate() error {
 		return err
 	}
 	if err := r.Token.Validate(); err != nil {
+		return err
+	}
+	if err := validateAsyncSecret(r.Token, r.AsyncSecret); err != nil {
 		return err
 	}
 	if !identifier(r.RequestID) || r.ExpectedRevision < 1 || len(r.Events) == 0 || len(r.Events) > 1000 || len(r.Tasks) > 1000 {
@@ -130,7 +133,8 @@ func Fingerprint(operation string, request any) (string, error) {
 // Timestamp normalizes persisted time to PostgreSQL's microsecond precision.
 func Timestamp(t time.Time) time.Time { return t.UTC().Truncate(time.Microsecond) }
 
-// CheckLease verifies ownership and expiry using the store's current time.
+// CheckLease verifies grant identity and expiry using the store's current time.
+// Advance and ApplyHeartbeat additionally verify an asynchronous grant's secret.
 func CheckLease(task Task, token TaskToken, now time.Time) error {
 	if task.Done || task.ID != token.TaskID || task.Owner != token.Owner || task.Epoch != token.Epoch || task.LeaseKind != token.LeaseKind {
 		return ErrLeaseLost
@@ -140,6 +144,12 @@ func CheckLease(task Task, token TaskToken, now time.Time) error {
 	}
 	if task.LeaseKind != LeaseTimeout && !task.DeadlineAt.IsZero() && !task.DeadlineAt.After(now) {
 		return ErrTaskDeadline
+	}
+	if task.LeaseKind == LeaseAsync {
+		if task.DeadlineAt.IsZero() {
+			return ErrTaskConflict
+		}
+		return nil
 	}
 	if !task.LeaseUntil.After(now) {
 		return ErrLeaseLost
@@ -155,6 +165,9 @@ func Advance(current Execution, task Task, r CommitRequest, now time.Time) (Exec
 		return Execution{}, Receipt{}, ErrClosed
 	}
 	if err := CheckLease(task, r.Token, now); err != nil {
+		return Execution{}, Receipt{}, err
+	}
+	if err := checkAsyncSecret(task, r.AsyncSecret); err != nil {
 		return Execution{}, Receipt{}, err
 	}
 	if current.Revision != r.ExpectedRevision {

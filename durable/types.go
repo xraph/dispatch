@@ -100,13 +100,18 @@ type Task struct {
 	HeartbeatLimit    time.Time     `json:"heartbeat_limit,omitempty"`
 	HeartbeatSequence int64         `json:"heartbeat_sequence,omitempty"`
 	HeartbeatEpoch    int64         `json:"heartbeat_epoch,omitempty"`
+	// AsyncKeyHash verifies callback secrets without exposing them in task JSON.
+	AsyncKeyHash string `json:"-"`
 }
 
-// TaskLeaseKind distinguishes execution grants from timeout processing grants.
+// TaskLeaseKind distinguishes worker, asynchronous and timeout grants.
 // The zero value is execution, preserving older task-token serialization.
 type TaskLeaseKind string
 
 const LeaseTimeout TaskLeaseKind = "timeout"
+
+// LeaseAsync waits for an external result under the activity deadline.
+const LeaseAsync TaskLeaseKind = "async"
 
 // TaskToken identifies a particular ownership grant, not just a worker.
 type TaskToken struct {
@@ -116,7 +121,7 @@ type TaskToken struct {
 	LeaseKind TaskLeaseKind `json:"lease_kind,omitempty"`
 }
 
-// Token returns the ownership grant required for renewal and completion.
+// Token returns a grant's identity. An asynchronous mutation also needs its secret.
 func (t Task) Token() TaskToken {
 	return TaskToken{TaskID: t.ID, Owner: t.Owner, Epoch: t.Epoch, LeaseKind: t.LeaseKind}
 }
@@ -168,6 +173,9 @@ type CommitRequest struct {
 	TaskUpdate       *TaskUpdate     `json:"task_update,omitempty"`
 	Conditions       []TaskCondition `json:"conditions,omitempty"`
 	CancelTasks      []string        `json:"cancel_tasks,omitempty"`
+	// AsyncSecret is required only for an asynchronous grant. Receipts store its
+	// request fingerprint, never this secret. Do not log callback requests.
+	AsyncSecret string `json:"async_secret,omitempty"`
 }
 
 // Receipt records the original result of an accepted request.
@@ -185,6 +193,7 @@ const (
 	TaskComplete TaskAction = "complete"
 	TaskKeep     TaskAction = "keep"
 	TaskRetry    TaskAction = "retry"
+	TaskAwait    TaskAction = "await"
 )
 
 // TaskUpdate modifies the source task atomically with its execution history.
@@ -204,6 +213,9 @@ type TaskUpdate struct {
 	LeaseDuration time.Duration `json:"lease_duration,omitempty"`
 	// Heartbeat enables progress recording for this retained activity grant.
 	Heartbeat *HeartbeatConfig `json:"heartbeat,omitempty"`
+	// AsyncKeyHash transfers a live activity grant to asynchronous ownership.
+	// Only TaskAwait accepts it; all other update fields must be absent.
+	AsyncKeyHash string `json:"async_key_hash,omitempty"`
 }
 
 // TaskCondition protects an observation of an unfinished task in the same run.

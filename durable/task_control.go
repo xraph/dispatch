@@ -48,6 +48,9 @@ func validateTaskControl(r CommitRequest) error {
 	if u == nil {
 		return nil
 	}
+	if (u.AsyncKeyHash != "" && u.Action != TaskAwait) || (r.Token.LeaseKind == LeaseAsync && u.Action == TaskKeep) {
+		return fmt.Errorf("%w: invalid asynchronous task update", ErrInvalid)
+	}
 	if u.Heartbeat != nil && (u.Action != TaskKeep || u.Heartbeat.Timeout < 0 || u.DeadlineAfter == nil || r.Token.LeaseKind != "") {
 		return fmt.Errorf("%w: heartbeat activation needs a retained execution grant and explicit deadline", ErrInvalid)
 	}
@@ -59,6 +62,11 @@ func validateTaskControl(r CommitRequest) error {
 		return fmt.Errorf("%w: task update conflicts with execution state or duration", ErrInvalid)
 	}
 	switch u.Action {
+	case TaskAwait:
+		if r.Token.LeaseKind != "" || !validAsyncHex(u.AsyncKeyHash) || u.DeadlineAfter != nil || u.DeadlineLimit != nil ||
+			u.LeaseDuration != 0 || u.Progress != nil || !u.RetryAt.IsZero() || u.RetryAfter != 0 || u.Heartbeat != nil {
+			return fmt.Errorf("%w: asynchronous handoff requires only a secret digest on an execution grant", ErrInvalid)
+		}
 	case TaskComplete:
 		if u.DeadlineAfter != nil || u.DeadlineLimit != nil || u.LeaseDuration != 0 || u.Progress != nil || !u.RetryAt.IsZero() || u.RetryAfter != 0 {
 			return fmt.Errorf("%w: completed task cannot be updated", ErrInvalid)
@@ -164,6 +172,16 @@ func UpdateTask(task Task, update *TaskUpdate, now time.Time) (Task, error) {
 		task.Done = true
 		return task, nil
 	}
+	if update.Action == TaskAwait {
+		if task.Kind != TaskActivity || task.LeaseKind != "" || task.HeartbeatEpoch != task.Epoch || task.HeartbeatEpoch < 1 ||
+			task.HeartbeatAt.IsZero() || !task.DeadlineAt.After(now) || !validAsyncHex(update.AsyncKeyHash) {
+			return Task{}, fmt.Errorf("%w: asynchronous handoff requires an active activity with a deadline", ErrInvalid)
+		}
+		// Older pollers do not inspect LeaseKind. Keep their eligibility test
+		// fenced through the activity deadline without requiring worker renewal.
+		task.LeaseKind, task.LeaseUntil, task.AsyncKeyHash = LeaseAsync, task.DeadlineAt, update.AsyncKeyHash
+		return task, nil
+	}
 	if update.Action == TaskKeep && task.HeartbeatEpoch == task.Epoch && task.HeartbeatEpoch > 0 &&
 		(update.Heartbeat != nil || update.DeadlineAfter != nil || update.DeadlineLimit != nil || update.Progress != nil) {
 		return Task{}, fmt.Errorf("%w: heartbeat grant configuration is immutable; use RecordHeartbeat for progress", ErrTaskConflict)
@@ -178,6 +196,7 @@ func UpdateTask(task Task, update *TaskUpdate, now time.Time) (Task, error) {
 			}
 		}
 		task.AvailableAt, task.Owner, task.LeaseUntil, task.LeaseKind = available, "", time.Time{}, ""
+		task.AsyncKeyHash = ""
 		task.HeartbeatAt, task.HeartbeatLimit = time.Time{}, time.Time{}
 		task.HeartbeatTimeout, task.HeartbeatSequence, task.HeartbeatEpoch = 0, 0, 0
 	}

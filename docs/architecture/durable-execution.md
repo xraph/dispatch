@@ -488,3 +488,55 @@ memory race tests pass. The runtime race suite completes in 3.477 seconds and th
 full durable PostgreSQL race suite in 36.246 seconds. These checks close the
 scoped heartbeat implementation review. Asynchronous completion, receipt
 retention, Dashboard flows and process-kill/failover/load qualification remain open.
+
+## Asynchronous activity ownership contract
+
+An activity can transfer its active attempt to an asynchronous grant in the same
+transaction that records the handoff event. The transfer preserves the attempt's
+epoch, progress and existing deadlines, increments its observation version, and
+immediately fences the worker's execution token. Pollers must not reclaim an
+asynchronous grant. It needs no worker renewal; its persisted activity deadline
+determines when a timeout coordinator can take ownership. The lease timestamp
+mirrors that deadline as a compatibility fence for the previous poller, which
+does not inspect grant kind. Asynchronous heartbeats update both timestamps.
+
+The coordinator creates a random 256-bit secret for each handoff. The task stores
+only its SHA-256 digest, which is omitted from task JSON. Callback requests carry
+the secret with the namespace, run and exact task grant. The store checks the
+secret under the same locks as ownership, expiry and the mutation. Request
+receipts contain only a fingerprint and result, never the raw secret. An identical
+retry can recover its receipt after completion, retry release or timeout fencing.
+Changing either the request content or its secret cannot reuse that receipt.
+
+The handoff requires an active heartbeat-capable activity attempt and a finite
+persisted activity deadline. Heartbeat-only deadlines are allowed. Asynchronous
+heartbeats preserve consecutive request sequencing and can move the progress
+deadline within the saved hard limit, without depending on a worker lease. Retry
+release clears the asynchronous credential and preserves progress. Timeout
+claims fence callbacks before publishing a timeout or scheduling another attempt.
+
+These are trusted store primitives. The runtime must still provide token
+generation and a serializable completion handle, coordinate handoff with worker
+renewal and heartbeat calls, record and replay the handoff, and expose idempotent
+completion/failure and heartbeat calls. The callback API needs namespace
+authorization before it can be exposed remotely. Store conformance alone does
+not qualify those runtime or transport behaviors.
+
+2026-10-08: memory and PostgreSQL pass shared asynchronous-grant conformance for
+handoff/result races, old worker fencing, proof and namespace rejection,
+concurrent completion, heartbeat deadline caps, retry progress and credential
+cleanup, and receipt recovery after closure, retry and timeout fencing.
+
+PostgreSQL tests replace the connection pool and retry the migration with an
+asynchronous grant already saved. Lost handoff, heartbeat and completion responses
+recover their original receipts. A receipt-insertion failure rolls back the
+handoff, history and new task together. Handoff, heartbeat and completion attempts
+that wait on a task lock past the activity deadline are rejected without partial
+state. The previous poller's SQL could reclaim a grant with an empty lease
+timestamp; the regression passes with the activity-deadline compatibility fence.
+
+The store implementation passes make f, make l (zero issues), go test ./...,
+engine/durable/memory race tests and the full durable PostgreSQL race suite
+(46.584 seconds). The focused PostgreSQL conformance and asynchronous recovery
+suite passes in 15.125 seconds. Runtime handoff/replay and callback APIs remain
+required before asynchronous activity completion is usable through the SDK.

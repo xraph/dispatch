@@ -73,7 +73,7 @@ func (s *Store) ReadHistory(ctx context.Context, key durable.Key, after int64, l
 
 const taskColumns = `t.namespace, t.workflow_id, t.run_id, t.task_id, t.kind, t.queue,
     t.payload, t.available_at, t.owner, t.epoch, t.attempt, t.lease_until, t.version, t.deadline_at, t.progress, t.done, t.lease_kind,
-    t.heartbeat_timeout_ns, t.heartbeat_limit, t.heartbeat_at, t.heartbeat_sequence, t.heartbeat_epoch`
+    t.heartbeat_timeout_ns, t.heartbeat_limit, t.heartbeat_at, t.heartbeat_sequence, t.heartbeat_epoch, t.async_key_hash`
 
 func scanTask(row driver.Row) (*durable.Task, error) {
 	var task durable.Task
@@ -82,7 +82,7 @@ func scanTask(row driver.Row) (*durable.Task, error) {
 	err := row.Scan(&task.Namespace, &task.WorkflowID, &task.RunID, &task.ID, &task.Kind,
 		&task.Queue, &task.Payload, &task.AvailableAt, &task.Owner, &task.Epoch, &task.Attempt, &until,
 		&task.Version, &deadline, &task.Progress, &task.Done, &task.LeaseKind,
-		&heartbeatTimeout, &heartbeatLimit, &heartbeatAt, &task.HeartbeatSequence, &task.HeartbeatEpoch)
+		&heartbeatTimeout, &heartbeatLimit, &heartbeatAt, &task.HeartbeatSequence, &task.HeartbeatEpoch, &task.AsyncKeyHash)
 	if err != nil {
 		return nil, err
 	}
@@ -102,7 +102,7 @@ func (s *Store) ClaimTask(ctx context.Context, r durable.ClaimRequest) (*durable
           USING (namespace, workflow_id, run_id)
         WHERE t.namespace=$1 AND t.queue=$2 AND t.kind=$3 AND NOT t.done
           AND e.state='running' AND ($6='' OR e.build_id=$6) AND t.available_at <= clock_timestamp()
-          AND (t.lease_until IS NULL OR t.lease_until <= clock_timestamp())
+          AND t.lease_kind <> 'async' AND (t.lease_until IS NULL OR t.lease_until <= clock_timestamp())
           AND (t.deadline_at IS NULL OR t.deadline_at > clock_timestamp())
         ORDER BY t.available_at, t.workflow_id, t.run_id, t.task_id
         FOR UPDATE OF t SKIP LOCKED LIMIT 1
@@ -128,6 +128,9 @@ func (s *Store) RenewTask(ctx context.Context, key durable.Key, token durable.Ta
 	}
 	if err := token.Validate(); err != nil {
 		return time.Time{}, err
+	}
+	if token.LeaseKind == durable.LeaseAsync {
+		return time.Time{}, durable.ErrInvalid
 	}
 	if err := durable.ValidateLease(ttl); err != nil {
 		return time.Time{}, err

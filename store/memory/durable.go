@@ -138,7 +138,7 @@ func (m *Store) ClaimTask(ctx context.Context, r durable.ClaimRequest) (*durable
 			continue
 		}
 		for _, task := range record.tasks {
-			if task.Done || task.Queue != r.Queue || task.Kind != r.Kind || task.AvailableAt.After(now) || task.LeaseUntil.After(now) ||
+			if task.Done || task.LeaseKind == durable.LeaseAsync || task.Queue != r.Queue || task.Kind != r.Kind || task.AvailableAt.After(now) || task.LeaseUntil.After(now) ||
 				(!task.DeadlineAt.IsZero() && !task.DeadlineAt.After(now)) {
 				continue
 			}
@@ -211,6 +211,9 @@ func (m *Store) RenewTask(ctx context.Context, key durable.Key, token durable.Ta
 	}
 	if err := token.Validate(); err != nil {
 		return time.Time{}, err
+	}
+	if token.LeaseKind == durable.LeaseAsync {
+		return time.Time{}, durable.ErrInvalid
 	}
 	if err := durable.ValidateLease(ttl); err != nil {
 		return time.Time{}, err
