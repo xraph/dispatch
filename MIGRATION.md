@@ -17,6 +17,7 @@ checks against fixtures and a real SQLite engine.
 | Job contract and contributor | Committed through `134460b` | Five job intents, runtime discovery and HTTP invalidations pass; job read identity tests pass on all five backends under race; full build/unit/lint and final review pass |
 | Dead-letter contract | Committed through `edb7da1` | Reads/actions pass on all five backends under race; HTTP invalidations verified; review's partial purge and audit gaps reproduced and fixed; full build/unit/lint pass |
 | Cron contract | Committed through `7e49bb1` | Memory/SQLite state and DST preview tests, HTTP controls and invalidations pass under race; full build/unit/lint pass; final review approved |
+| Workflow checkpoint order | Committed through `5011ffe` | Preview, timeline and pruning share the timestamp/ID boundary; exact persisted ties pass on all five stores under race with no skips; full build/unit/lint pass; final review approved |
 | Remaining contract domains | Pending | Workflows, workers, queues, handlers, artifacts, overview and config are not registered yet |
 | React plugin, ten navigation entries | Pending | No browser evidence |
 | Stateful fixtures and host wiring | Pending | No browser evidence |
@@ -111,6 +112,11 @@ to generation zero. MongoDB documents and Redis records without the field use ze
 Every node serving replay actions must run this version; an older binary has no
 generation check. Custom workflow stores must implement the new `ReopenRun`
 argument and preserve the generation on reads and conditional updates.
+
+Checkpoint order is creation time, then checkpoint ID. The replay preview and all
+five stores use that same boundary, including when MongoDB timestamp precision
+puts several checkpoints at the same time. Replay retains the target and earlier
+ties, and removes later ties.
 
 Cron and cron-fired jobs do not acquire tenant scope. Empty scope filters mean
 every scope. The dashboard is an operator tool, so these boundaries must remain
