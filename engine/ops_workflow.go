@@ -31,10 +31,23 @@ func (eng *Engine) ReplayWorkflowFrom(ctx context.Context, runID id.RunID, fromS
 		return nil, err
 	}
 
-	eng.extensions.EmitOperatorAction(ctx, ext.Action{
-		Kind:  ext.ActionWorkflowReplayed,
-		RunID: runID,
-		Step:  fromStep,
-	})
+	eng.emitWorkflowReplay(ctx, runID, fromStep)
 	return plan, nil
+}
+
+// ReplayWorkflowFromGeneration starts replay only if the reviewed generation
+// still matches. It emits an operator action only after a successful launch.
+func (eng *Engine) ReplayWorkflowFromGeneration(ctx context.Context, runID id.RunID, fromStep string, generation int64) (*workflow.ReplayPlan, error) {
+	plan, err := eng.wfRunner.ReplayFromGeneration(ctx, runID, fromStep, generation)
+	if err != nil {
+		return nil, err
+	}
+	eng.emitWorkflowReplay(ctx, runID, fromStep)
+	return plan, nil
+}
+
+func (eng *Engine) emitWorkflowReplay(ctx context.Context, runID id.RunID, fromStep string) {
+	eng.extensions.EmitOperatorAction(ctx, ext.Action{
+		Kind: ext.ActionWorkflowReplayed, RunID: runID, Step: fromStep,
+	})
 }

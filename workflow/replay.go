@@ -126,9 +126,22 @@ func stampedVersion(run *Run) int {
 // returns the plan as soon as it has started. The run keeps the values
 // of ctx but not its cancellation: Shutdown cancels it instead.
 func (r *Runner) ReplayFrom(ctx context.Context, runID id.RunID, fromStep string) (*ReplayPlan, error) {
+	return r.replayFrom(ctx, runID, fromStep, nil)
+}
+
+// ReplayFromGeneration requires the generation returned by PlanReplay.
+// A stale confirmation is refused before claiming or pruning the run.
+func (r *Runner) ReplayFromGeneration(ctx context.Context, runID id.RunID, fromStep string, generation int64) (*ReplayPlan, error) {
+	return r.replayFrom(ctx, runID, fromStep, &generation)
+}
+
+func (r *Runner) replayFrom(ctx context.Context, runID id.RunID, fromStep string, generation *int64) (*ReplayPlan, error) {
 	plan, runner, err := r.planReplay(ctx, runID, fromStep)
 	if err != nil {
 		return nil, err
+	}
+	if generation != nil && (*generation < 0 || *generation != plan.Generation) {
+		return nil, fmt.Errorf("%w: run %s replay generation changed", dispatch.ErrInvalidState, runID)
 	}
 	if plan.State == RunStateRunning {
 		return nil, fmt.Errorf("%w: run %s is %s", dispatch.ErrInvalidState, runID, plan.State)
