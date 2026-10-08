@@ -407,3 +407,15 @@ treated as load qualification.
 The heartbeat store changes pass make f, make l (zero issues), go test ./...
 and engine/runtime/memory race tests. Runtime heartbeat APIs and timeout-history
 validation remain required before activity heartbeat behavior is complete.
+
+The independent review of 9ca2865 through 910601a found no actionable issues in
+heartbeat storage. Its reviewer independently passed durable/runtime/memory race
+tests, PostgreSQL heartbeat recovery and lock-expiry tests (4.665 seconds), and
+shared PostgreSQL heartbeat conformance with migration retry (4.618 seconds).
+
+The review does not close runtime heartbeat APIs, request serialization and
+in-flight callback draining, progress delivery, final checkpoint replay or
+heartbeat timeout classification. Asynchronous completion, receipt retention,
+process-kill/failover/load qualification and Dashboard integration remain open.
+One immutable receipt per acknowledged heartbeat is an explicit storage cost,
+even though heartbeats do not append workflow events.
