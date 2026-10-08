@@ -254,3 +254,7 @@ connection and worker replacement checks; process-kill qualification remains ope
 
 The activity retry change passes make f, make l, go test ./..., engine/runtime/
 memory race tests and the PostgreSQL durable integration suite with race detection.
+Independent review of 070eead through 6ac3bf4 found no actionable correctness
+issues in the retry layer and independently reran the runtime race tests. The
+review did not qualify timeout processing, heartbeat progress, asynchronous
+completion, dashboard flows, bounded history, process kills, failover or load.
