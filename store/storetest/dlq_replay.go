@@ -124,6 +124,8 @@ func RunDLQReplaySuite(t *testing.T, newStore func(t *testing.T) DLQReplayStore)
 		{"ReleaseReplayOnlyReleasesItsOwnClaim", testReleaseReplayOnlyOwnClaim},
 		{"ReleaseReplayOnUnclaimedEntryIsNoop", testReleaseReplayUnclaimed},
 		{"ReleaseReplayUnknownEntry", testReleaseReplayUnknownEntry},
+		{"ClaimReplayRefusesEntryMarkedByLegacyReplay", testClaimReplayLegacyMarked},
+		{"ReleaseReplayLeavesLegacyMarkAlone", testReleaseReplayLegacyMarked},
 		{"GetDLQByJobIDReturnsNewestByID", testGetDLQByJobIDNewest},
 		{"GetDLQByJobIDUnknownJob", testGetDLQByJobIDUnknown},
 		{"DeleteDLQRemovesOnlyThatEntry", testDeleteDLQ},
@@ -306,7 +308,7 @@ func testReplayedJobIDReadsBack(t *testing.T, s DLQReplayStore) {
 	// DLQReplayStore does not, so reach it through the capability.
 	pager, ok := s.(dlq.PageLister)
 	if !ok {
-		return
+		t.Fatalf("%T does not implement dlq.PageLister, which every backend has since slice 1", s)
 	}
 	replayed := true
 	page, err := pager.ListDLQPage(ctx, dlq.PageOpts{Queue: queue, Replayed: &replayed})
@@ -347,6 +349,66 @@ func testReleaseReplayOnlyOwnClaim(t *testing.T, s DLQReplayStore) {
 		t.Fatalf("ClaimReplay after release: %v", err)
 	}
 	assertClaimedBy(t, "after reclaim", mustGetDLQ(t, s, e.ID), next)
+}
+
+// legacyMarkedEntry pushes an entry and marks it with the older ReplayDLQ,
+// which sets replayed_at and leaves replayed_job_id nil. The claim's
+// discriminator is replayed_at, so these entries must stay unclaimable. A
+// check on replayed_job_id alone would let every historically replayed
+// entry replay again.
+func legacyMarkedEntry(t *testing.T, s DLQReplayStore) *dlq.Entry {
+	t.Helper()
+
+	e := pushReplayEntry(t, s)
+	if err := s.ReplayDLQ(context.Background(), e.ID); err != nil {
+		t.Fatalf("ReplayDLQ: %v", err)
+	}
+
+	got := mustGetDLQ(t, s, e.ID)
+	if got.ReplayedAt == nil {
+		t.Fatal("ReplayedAt = nil after ReplayDLQ, want set")
+	}
+	if got.ReplayedJobID != nil {
+		t.Fatalf("ReplayedJobID = %s after ReplayDLQ, want nil", *got.ReplayedJobID)
+	}
+
+	return e
+}
+
+func testClaimReplayLegacyMarked(t *testing.T, s DLQReplayStore) {
+	e := legacyMarkedEntry(t, s)
+	marked := mustGetDLQ(t, s, e.ID)
+
+	err := s.ClaimReplay(context.Background(), e.ID, id.NewJobID())
+	if !errors.Is(err, dispatch.ErrDLQAlreadyReplayed) {
+		t.Fatalf("ClaimReplay(entry marked by ReplayDLQ) error = %v, want ErrDLQAlreadyReplayed", err)
+	}
+
+	after := mustGetDLQ(t, s, e.ID)
+	if after.ReplayedJobID != nil {
+		t.Errorf("ReplayedJobID = %s after a refused claim, want nil", *after.ReplayedJobID)
+	}
+	if after.ReplayedAt == nil || !after.ReplayedAt.Equal(*marked.ReplayedAt) {
+		t.Errorf("ReplayedAt = %v after a refused claim, want it left at %v", after.ReplayedAt, *marked.ReplayedAt)
+	}
+}
+
+func testReleaseReplayLegacyMarked(t *testing.T, s DLQReplayStore) {
+	e := legacyMarkedEntry(t, s)
+	marked := mustGetDLQ(t, s, e.ID)
+
+	// No job holds this mark, so no job's release may clear it.
+	if err := s.ReleaseReplay(context.Background(), e.ID, id.NewJobID()); err != nil {
+		t.Fatalf("ReleaseReplay(entry marked by ReplayDLQ): %v", err)
+	}
+
+	after := mustGetDLQ(t, s, e.ID)
+	if after.ReplayedAt == nil || !after.ReplayedAt.Equal(*marked.ReplayedAt) {
+		t.Errorf("ReplayedAt = %v after release, want it left at %v", after.ReplayedAt, *marked.ReplayedAt)
+	}
+	if after.ReplayedJobID != nil {
+		t.Errorf("ReplayedJobID = %s after release, want nil", *after.ReplayedJobID)
+	}
 }
 
 func testReleaseReplayUnclaimed(t *testing.T, s DLQReplayStore) {
@@ -444,5 +506,26 @@ func testPushDLQDuplicate(t *testing.T, s DLQReplayStore) {
 	if got.Error != e.Error || got.Queue != e.Queue {
 		t.Errorf("after refused push: {error %q, queue %q}, want the original {%q, %q}",
 			got.Error, got.Queue, e.Error, e.Queue)
+	}
+
+	// A push over a claimed entry must not drop the claim. That is the
+	// case that matters: an overwrite would make the failure replayable
+	// a second time.
+	claimed := pushReplayEntry(t, s)
+	owner := id.NewJobID()
+	if err := s.ClaimReplay(ctx, claimed.ID, owner); err != nil {
+		t.Fatalf("ClaimReplay: %v", err)
+	}
+
+	again := *claimed
+	again.Error = "overwritten"
+	if err := s.PushDLQ(ctx, &again); !errors.Is(err, dispatch.ErrDLQAlreadyExists) {
+		t.Fatalf("PushDLQ(duplicate of a claimed entry) error = %v, want ErrDLQAlreadyExists", err)
+	}
+
+	after := mustGetDLQ(t, s, claimed.ID)
+	assertClaimedBy(t, "after refused push over a claim", after, owner)
+	if after.Error != claimed.Error {
+		t.Errorf("Error = %q after a refused push, want the original %q", after.Error, claimed.Error)
 	}
 }

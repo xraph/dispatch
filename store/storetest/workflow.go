@@ -60,17 +60,34 @@ func RunWorkflowSuite(t *testing.T, newStore func(t *testing.T) WorkflowStore) {
 func createSuiteRun(t *testing.T, s WorkflowStore, state workflow.RunState) *workflow.Run {
 	t.Helper()
 
+	return createSuiteRunUnder(t, s, state, nil)
+}
+
+// createChildSuiteRun stores a run in the given state under a freshly
+// created parent, so a reopen is also held to leave ParentRunID alone.
+func createChildSuiteRun(t *testing.T, s WorkflowStore, state workflow.RunState) *workflow.Run {
+	t.Helper()
+
+	parentID := createSuiteRun(t, s, workflow.RunStateRunning).ID
+
+	return createSuiteRunUnder(t, s, state, &parentID)
+}
+
+func createSuiteRunUnder(t *testing.T, s WorkflowStore, state workflow.RunState, parentID *id.RunID) *workflow.Run {
+	t.Helper()
+
 	now := time.Now().UTC().Truncate(time.Millisecond)
 	r := &workflow.Run{
-		Entity:     dispatch.NewEntity(),
-		ID:         id.NewRunID(),
-		Name:       "workflow-suite",
-		State:      state,
-		Input:      []byte(`{"order":7}`),
-		ScopeAppID: "app_wf",
-		ScopeOrgID: "org_wf",
-		StartedAt:  now.Add(-time.Minute),
-		Version:    3,
+		Entity:      dispatch.NewEntity(),
+		ID:          id.NewRunID(),
+		Name:        "workflow-suite",
+		State:       state,
+		Input:       []byte(`{"order":7}`),
+		ScopeAppID:  "app_wf",
+		ScopeOrgID:  "org_wf",
+		StartedAt:   now.Add(-time.Minute),
+		Version:     3,
+		ParentRunID: parentID,
 	}
 	if state != workflow.RunStateRunning {
 		completed := now
@@ -134,13 +151,21 @@ func assertReopened(t *testing.T, before, after *workflow.Run) {
 	if after.Version != before.Version {
 		t.Errorf("Version = %d, want %d", after.Version, before.Version)
 	}
+	switch {
+	case before.ParentRunID == nil:
+		t.Errorf("test setup: run under reopen has no ParentRunID, so the parent link is not covered")
+	case after.ParentRunID == nil:
+		t.Errorf("ParentRunID = nil, want %s", *before.ParentRunID)
+	case *after.ParentRunID != *before.ParentRunID:
+		t.Errorf("ParentRunID = %s, want %s", *after.ParentRunID, *before.ParentRunID)
+	}
 	if !after.CreatedAt.Equal(before.CreatedAt) {
 		t.Errorf("CreatedAt = %v, want %v", after.CreatedAt, before.CreatedAt)
 	}
 }
 
 func testReopenFailedRun(t *testing.T, s WorkflowStore) {
-	before := createSuiteRun(t, s, workflow.RunStateFailed)
+	before := createChildSuiteRun(t, s, workflow.RunStateFailed)
 
 	if err := s.ReopenRun(context.Background(), before.ID); err != nil {
 		t.Fatalf("ReopenRun(failed): %v", err)
@@ -150,7 +175,7 @@ func testReopenFailedRun(t *testing.T, s WorkflowStore) {
 }
 
 func testReopenCompletedRun(t *testing.T, s WorkflowStore) {
-	before := createSuiteRun(t, s, workflow.RunStateCompleted)
+	before := createChildSuiteRun(t, s, workflow.RunStateCompleted)
 
 	if err := s.ReopenRun(context.Background(), before.ID); err != nil {
 		t.Fatalf("ReopenRun(completed): %v", err)
