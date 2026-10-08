@@ -38,8 +38,8 @@ Store tests alone do not qualify a workflow runtime or a deployment.
 
 | Requirement | Implementation status | Evidence required |
 | --- | --- | --- |
-| Atomic history, state, tasks, and durable receipts | In progress | Shared memory/PostgreSQL conformance, rollback, concurrent writers, ambiguous-response retry |
-| Fenced task claims and durable timer deadlines | In progress | Expiry, same-owner reclaim, concurrent claims, restart recovery |
+| Atomic history, state, tasks, and durable receipts | Memory and PostgreSQL stores implemented; runtime integration open | Shared memory/PostgreSQL conformance, rollback, concurrent writers, ambiguous-response retry |
+| Fenced task claims and durable timer deadlines | Store contract implemented; worker recovery open | Expiry, same-owner reclaim, concurrent claims, restart recovery |
 | Deterministic Go workflow runtime | Open | Recorded-history replay with no repeated external effects, changed-command rejection |
 | Activity retries and timeout classes | Open | Queue, attempt, overall and heartbeat deadlines; heartbeat progress; asynchronous completion |
 | Signals, queries, updates and signal-with-start | Open | Namespace isolation, deduplication, atomic acceptance, update results, read-only queries |
@@ -94,3 +94,17 @@ Store tests alone do not qualify a workflow runtime or a deployment.
 2026-10-08: implementation started from Dispatch main at 6dfa43e. Docker is
 available for PostgreSQL integration tests. No runtime, dashboard, load or
 disaster-recovery qualification is claimed by this initial record.
+
+2026-10-08: memory and PostgreSQL pass the shared execution-store suite, including
+concurrent claims and completion, same-owner fencing, changed-request rejection,
+namespace isolation and rollback after a late task collision. A PostgreSQL test
+closes and replaces the connection pool before reading persisted history, receipts
+and timer work. The full PostgreSQL integration suite and repository tests pass.
+
+Independent review found a lease renewal that could outlive its grant while
+waiting for a database row lock. A regression reproduced the error; renewal now
+locks the execution and task before reading database time and checking expiry.
+A separate regression proved migration retries failed after schema creation; the
+migration now tolerates that retry without deleting existing execution data.
+These are store-level checks. Process crash recovery, deterministic execution,
+dashboard flows, failover and load qualification remain open.
