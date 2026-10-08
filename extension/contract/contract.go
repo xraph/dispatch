@@ -35,6 +35,10 @@ func command[I, O any](intent string, fn func(context.Context, I, fc.Principal) 
 
 func bindings(deps Deps) []binding {
 	return []binding{
+		query("workflows.list", workflowsListHandler(deps)),
+		query("workflows.get", workflowsGetHandler(deps)),
+		query("workflows.replayPreview", workflowsReplayPreviewHandler(deps)),
+		command("workflows.replayFrom", workflowsReplayFromHandler(deps)),
 		query("crons.list", cronsListHandler(deps)),
 		query("crons.get", cronsGetHandler(deps)),
 		command("crons.enable", cronToggleHandler(deps, true)),
