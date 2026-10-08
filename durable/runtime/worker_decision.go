@@ -58,7 +58,7 @@ func decisionRequest(task durable.Task, execution durable.Execution, decision De
 				queue = task.Queue
 			}
 			request.Tasks = append(request.Tasks, durable.TaskSpec{ID: fmt.Sprintf("command:%d", command.Index),
-				Kind: command.Kind, Queue: queue, Payload: payload, AvailableAt: command.Deadline})
+				Kind: command.Kind, Queue: queue, Payload: payload, AvailableAt: command.Deadline, DeadlineAfter: firstActivityTimeout(command.ActivityOptions)})
 		}
 	}
 	request.State, request.Output = decision.State, decision.Output

@@ -18,12 +18,13 @@ type recordedOutcome struct {
 }
 
 type replayHistory struct {
-	commands []Command
-	outcomes map[string]recordedOutcome
-	attempts map[string]recordedAttempt
-	terminal durable.State
-	output   []byte
-	failure  *ApplicationError
+	commands  []Command
+	outcomes  map[string]recordedOutcome
+	attempts  map[string]recordedAttempt
+	scheduled map[string]time.Time
+	terminal  durable.State
+	output    []byte
+	failure   *ApplicationError
 }
 
 // Evaluate replays a complete history snapshot through LastSequence. It produces
@@ -89,7 +90,7 @@ func invoke(w *Workflow, handler WorkflowFunc, input []byte) (output []byte, err
 }
 
 func parseHistory(execution durable.Execution, events []durable.Event) (replayHistory, error) {
-	result := replayHistory{outcomes: make(map[string]recordedOutcome), attempts: make(map[string]recordedAttempt)}
+	result := replayHistory{outcomes: make(map[string]recordedOutcome), attempts: make(map[string]recordedAttempt), scheduled: make(map[string]time.Time)}
 	if len(events) == 0 || len(events) > 100000 || execution.LastSequence != int64(len(events)) ||
 		execution.CreatedAt.IsZero() || events[0].Type != EventStarted ||
 		!events[0].Time.Equal(execution.CreatedAt) || !bytes.Equal(events[0].Payload, execution.Input) {
@@ -115,6 +116,7 @@ func parseHistory(execution durable.Execution, events []durable.Event) (replayHi
 				return result, fmt.Errorf("%w: invalid command at event %d", ErrHistory, event.Sequence)
 			}
 			commands[command.ID] = command
+			result.scheduled[command.ID] = event.Time
 			result.commands = append(result.commands, command)
 		case EventActivityAttemptStarted, EventActivityAttemptFailed:
 			if err := parseActivityAttempt(&result, commands, event); err != nil {
@@ -166,7 +168,7 @@ func parseOutcome(history *replayHistory, commands map[string]Command, event dur
 		return fmt.Errorf("%w: invalid outcome at event %d", ErrHistory, event.Sequence)
 	}
 	if (event.Type == EventActivityCompleted && command.Kind != durable.TaskActivity) ||
-		(event.Type == EventTimerFired && (command.Kind != durable.TaskTimer || outcome.Version != 1 || outcome.Attempt != 0 || len(outcome.Output) != 0 || outcome.Failure != nil || event.Time.Before(command.Deadline))) {
+		(event.Type == EventTimerFired && (command.Kind != durable.TaskTimer || outcome.Version != 1 || outcome.Attempt != 0 || outcome.Timeout != "" || len(outcome.Output) != 0 || outcome.Failure != nil || event.Time.Before(command.Deadline))) {
 		return fmt.Errorf("%w: outcome does not match scheduled command", ErrHistory)
 	}
 	if command.Kind == durable.TaskActivity {

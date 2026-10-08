@@ -46,13 +46,27 @@ func (w *Worker) processActivity(ctx context.Context, task durable.Task, payload
 		request := taskRequest(task, execution.Revision)
 		request.Events = []durable.EventInput{{Type: EventActivityAttemptStarted, Payload: data}}
 		request.TaskUpdate = &durable.TaskUpdate{Action: durable.TaskKeep}
+		if hasActivityTimeout(command.ActivityOptions) {
+			limit, limitErr := activityOverallLimit(command, history.scheduled[command.ID])
+			if limitErr != nil {
+				return limitErr
+			}
+			deadline := command.ActivityOptions.StartToCloseTimeout
+			request.TaskUpdate.DeadlineAfter, request.TaskUpdate.DeadlineLimit, request.TaskUpdate.LeaseDuration = &deadline, limit, w.options.LeaseDuration
+		}
+		// Start the cooperative timer before persistence so acknowledgement
+		// latency cannot extend it. Store deadlines remain authoritative.
+		attemptCtx, cancelAttempt := activityAttemptContext(ctx, command.ActivityOptions.StartToCloseTimeout)
 		if err = w.persist(ctx, request); errors.Is(err, durable.ErrRevisionConflict) {
+			cancelAttempt()
 			continue
 		}
 		if err != nil {
+			cancelAttempt()
 			return err
 		}
-		outcome, callErr := callActivity(ctx, handler, ActivityInfo{Key: task.Key, CommandID: command.ID, BuildID: execution.BuildID, Attempt: attempt.Attempt}, command.Input)
+		outcome, callErr := callActivity(attemptCtx, handler, ActivityInfo{Key: task.Key, CommandID: command.ID, BuildID: execution.BuildID, Attempt: attempt.Attempt}, command.Input)
+		cancelAttempt()
 		if callErr != nil {
 			return callErr
 		}
@@ -76,7 +90,7 @@ func (w *Worker) finishActivity(ctx context.Context, task durable.Task, payload 
 		}
 		request := taskRequest(task, execution.Revision)
 		if outcome.Failure != nil {
-			failed := ActivityAttempt{Version: 1, CommandID: command.ID, Attempt: outcome.Attempt, Epoch: epoch, Failure: outcome.Failure, RetryAfter: delay}
+			failed := ActivityAttempt{Version: 1, CommandID: command.ID, Attempt: outcome.Attempt, Epoch: epoch, Failure: outcome.Failure, RetryAfter: delay, Timeout: outcome.Timeout}
 			data, marshalErr := json.Marshal(failed)
 			if marshalErr != nil {
 				return marshalErr
@@ -85,6 +99,14 @@ func (w *Worker) finishActivity(ctx context.Context, task durable.Task, payload 
 		}
 		if delay > 0 {
 			request.TaskUpdate = &durable.TaskUpdate{Action: durable.TaskRetry, RetryAfter: delay}
+			if hasActivityTimeout(command.ActivityOptions) {
+				limit, limitErr := activityOverallLimit(command, history.scheduled[command.ID])
+				if limitErr != nil {
+					return limitErr
+				}
+				queueDeadline := command.ActivityOptions.ScheduleToStartTimeout
+				request.TaskUpdate.DeadlineAfter, request.TaskUpdate.DeadlineLimit = &queueDeadline, limit
+			}
 		} else {
 			data, marshalErr := json.Marshal(outcome)
 			if marshalErr != nil {

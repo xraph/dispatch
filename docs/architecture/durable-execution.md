@@ -41,7 +41,7 @@ Store tests alone do not qualify a workflow runtime or a deployment.
 | Atomic history, state, tasks, and durable receipts | Memory and PostgreSQL stores integrated with initial Go runtime | Shared memory/PostgreSQL conformance, rollback, concurrent writers, ambiguous-response retry |
 | Fenced task claims and durable timer deadlines | Store contract and renewable workers implemented; process-kill qualification open | Expiry, same-owner reclaim, concurrent claims, restart recovery |
 | Deterministic Go workflow runtime | Activity, timer and future replay implemented; SDK expansion open | Recorded-history replay with no repeated external effects, changed-command rejection |
-| Activity retries and timeout classes | Persisted attempts, retry policies and interrupted-attempt recovery implemented; timeout processors, heartbeats and asynchronous completion open | Queue, attempt, overall and heartbeat deadlines; heartbeat progress; asynchronous completion |
+| Activity retries and timeout classes | Queue, attempt and overall deadlines, retry policies and interrupted-attempt recovery implemented; heartbeats and asynchronous completion open | Queue, attempt, overall and heartbeat deadlines; heartbeat progress; asynchronous completion |
 | Signals, queries, updates and signal-with-start | Open | Namespace isolation, deduplication, atomic acceptance, update results, read-only queries |
 | Child workflows and cancellation | Open | Stable child identity, duplicate creation prevention, parent-close policies, cancellation propagation |
 | Compensation, pause, termination and reset | Open | Resumable compensation attempts, audited controls, immutable reset lineage |
@@ -153,7 +153,7 @@ An independent review of 48c6a0b through ebcb3e7 found no actionable correctness
 issues in this scoped runtime. Its reviewer reran focused runtime and engine race
 tests; the PostgreSQL and full-suite evidence came from the implementation checks.
 
-Next: implement activity timeout classes, heartbeat progress and asynchronous
+Next: implement heartbeat progress and asynchronous
 completion. Durable execution visibility also needs store-level ordered
 list/task reads and real Go dashboard contracts before the React plugin can show
 these runs. Current dashboard workflow reads describe checkpoint runs only. Add
@@ -234,7 +234,7 @@ again. A claim lost before an attempt starts does not consume an activity attemp
 The idempotency key remains stable across attempts; an interrupted operation may
 already have affected an external service.
 
-This layer still needs timeout processors, heartbeat progress and asynchronous
+This layer still needs heartbeat progress and asynchronous
 completion. Unlimited retries also require the planned bounded-history and
 continue-as-new work for sustained operation. No broad runtime qualification is
 claimed by the activity retry implementation alone.
@@ -261,7 +261,7 @@ completion, dashboard flows, bounded history, process kills, failover or load.
 
 ## Activity timeout processing
 
-The next layer separates timeout ownership from execution ownership. An expired
+Timeout ownership is separate from execution ownership. An expired
 activity can be claimed for timeout processing within its namespace and pinned
 build, regardless of its activity queue. This grant fences earlier workers and
 has its own lease. Normal workers cannot publish late success before the timeout
@@ -280,8 +280,8 @@ policy. Timeout processing does not need an activity handler. It records the
 outcome and next work in one transaction. Handler cancellation remains
 cooperative, while store fencing rejects all results from expired grants.
 
-The coordinator will classify timeouts from recorded schedule, start and retry
-history. Replay must reject early timeouts, incorrect timeout classes and results
+The coordinator classifies timeouts from recorded schedule, start and retry
+history. Replay rejects early timeouts, incorrect timeout classes and results
 that do not match the attempt. Zero-valued options preserve existing histories.
 Heartbeat timeouts and asynchronous completion remain subsequent required work.
 
@@ -295,6 +295,38 @@ unchanged. Regressions also verify that renewal cannot shorten a grant and that 
 timeout grant cannot commit against a future deadline after clock rollback.
 
 Store-layer checks pass make f, make l, go test ./..., engine/runtime/memory race
-tests and the PostgreSQL durable integration race suite. Runtime timeout options,
-classification, polling and recorded timeout outcomes are the next implementation
-step; these store tests do not establish that runtime behavior.
+tests and the PostgreSQL durable integration race suite. These checks cover the
+store contract. Runtime behavior has separate evidence below.
+
+`ActivityOptions.ScheduleToStartTimeout` bounds each queued attempt,
+`StartToCloseTimeout` bounds one durable attempt, and `ScheduleToCloseTimeout`
+bounds the entire activity, including queue waits and retry backoff. Zero disables
+an individual timeout and preserves older version 2 commands. Set an attempt or
+overall timeout for new workflows. All options are recorded and replay checked.
+
+`Worker.Run` polls timeout work alongside workflow, activity and timer tasks.
+`RunOnce` accepts `runtime.TaskTimeout` for controlled processing. A coordinator
+needs the namespace and pinned build, but no activity handler or matching activity
+queue. The activity's saved workflow queue receives its final wakeup. An overall
+deadline wins when it equals another deadline. Attempt retries retain the same
+operation identity and receive a fresh deadline at their next start.
+
+Handler cancellation is cooperative. The local attempt timer starts before the
+attempt-start write, so a slow acknowledgement can conservatively cancel a call.
+Renewal polling also observes store deadline expiry. A handler that ignores
+cancellation may keep affecting external services, but its late result cannot
+advance the run. External idempotency remains required.
+
+2026-10-08: runtime tests cover an offline activity queue, automatic timeout
+polling, attempt timeout retries, rejection of late handler success, overall
+expiry during execution and backoff, competing coordinators, and replacing a
+queue deadline when an attempt starts. Replay rejects changed timeout options,
+early or incorrect timeout records, and starts, successes or ordinary failures
+after their allowed deadline. PostgreSQL repeats queue, attempt and overall
+recovery after replacing the connection pool, using a separate coordinator queue
+with no activity handlers. Attempt recovery completes on the next logical attempt.
+
+The combined timeout implementation passes make f, make l, go test ./...,
+engine/runtime/memory race tests and the PostgreSQL durable integration race suite.
+These checks do not qualify process kills, database failover or sustained load.
+Heartbeat progress, asynchronous completion and the rest of the roadmap remain open.

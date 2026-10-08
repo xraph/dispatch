@@ -120,7 +120,7 @@ func (w *Worker) Run(ctx context.Context) error {
 	defer cancel()
 	failures := make(chan error, 1)
 	var group sync.WaitGroup
-	for _, kind := range []durable.TaskKind{durable.TaskWorkflow, durable.TaskActivity, durable.TaskTimer} {
+	for _, kind := range []durable.TaskKind{durable.TaskWorkflow, durable.TaskActivity, durable.TaskTimer, TaskTimeout} {
 		for range w.options.Concurrency {
 			group.Go(func() {
 				for workCtx.Err() == nil {
@@ -155,6 +155,9 @@ func (w *Worker) Run(ctx context.Context) error {
 // including when processing fails. It is safe to call concurrently.
 func (w *Worker) RunOnce(ctx context.Context, kind durable.TaskKind) (worked bool, err error) {
 	task, err := storeCall(ctx, w, func(callCtx context.Context) (*durable.Task, error) {
+		if kind == TaskTimeout {
+			return w.store.ClaimTimeoutTask(callCtx, durable.TimeoutClaimRequest{Namespace: w.options.Namespace, BuildID: w.options.BuildID, Owner: w.options.Owner, LeaseDuration: w.options.LeaseDuration})
+		}
 		return w.store.ClaimTask(callCtx, durable.ClaimRequest{Namespace: w.options.Namespace,
 			Queue: w.options.Queue, BuildID: w.options.BuildID, Kind: kind, Owner: w.options.Owner,
 			LeaseDuration: w.options.LeaseDuration})
@@ -166,7 +169,8 @@ func (w *Worker) RunOnce(ctx context.Context, kind durable.TaskKind) (worked boo
 	renewed := make(chan struct{})
 	go func() {
 		defer close(renewed)
-		for wait(taskCtx, w.options.LeaseDuration/3) == nil {
+		interval := w.renewInterval(*task)
+		for wait(taskCtx, interval) == nil {
 			_, renewErr := storeCall(taskCtx, w, func(callCtx context.Context) (time.Time, error) {
 				return w.store.RenewTask(callCtx, task.Key, task.Token(), w.options.LeaseDuration)
 			})

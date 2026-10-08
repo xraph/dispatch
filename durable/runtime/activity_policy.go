@@ -10,9 +10,12 @@ import (
 )
 
 // ActivityOptions are captured in command history before any attempt starts.
-// Future timeout and heartbeat settings belong here, not in worker defaults.
+// Zero timeouts are disabled. Deadlines use store time and do not follow lease renewal.
 type ActivityOptions struct {
-	RetryPolicy *RetryPolicy `json:"retry_policy"`
+	RetryPolicy            *RetryPolicy  `json:"retry_policy"`
+	ScheduleToStartTimeout time.Duration `json:"schedule_to_start_timeout,omitempty"`
+	StartToCloseTimeout    time.Duration `json:"start_to_close_timeout,omitempty"`
+	ScheduleToCloseTimeout time.Duration `json:"schedule_to_close_timeout,omitempty"`
 }
 
 // RetryPolicy governs failures across durable activity attempts. Zero fields use
@@ -27,6 +30,9 @@ type RetryPolicy struct {
 }
 
 func normalizeActivityOptions(options ActivityOptions) (ActivityOptions, error) {
+	if options.ScheduleToStartTimeout < 0 || options.StartToCloseTimeout < 0 || options.ScheduleToCloseTimeout < 0 {
+		return ActivityOptions{}, fmt.Errorf("%w: negative activity timeout", durable.ErrInvalid)
+	}
 	policy := RetryPolicy{}
 	if options.RetryPolicy != nil {
 		policy = *options.RetryPolicy
@@ -54,12 +60,16 @@ func normalizeActivityOptions(options ActivityOptions) (ActivityOptions, error) 
 	}
 	slices.Sort(policy.NonRetryableTypes)
 	policy.NonRetryableTypes = slices.Compact(policy.NonRetryableTypes)
-	return ActivityOptions{RetryPolicy: &policy}, nil
+	options.RetryPolicy = &policy
+	return options, nil
 }
 
 func sameActivityOptions(a, b *ActivityOptions) bool {
 	if a == nil || b == nil {
 		return a == b
+	}
+	if a.ScheduleToStartTimeout != b.ScheduleToStartTimeout || a.StartToCloseTimeout != b.StartToCloseTimeout || a.ScheduleToCloseTimeout != b.ScheduleToCloseTimeout {
+		return false
 	}
 	if a.RetryPolicy == nil || b.RetryPolicy == nil {
 		return a.RetryPolicy == b.RetryPolicy
