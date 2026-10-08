@@ -19,3 +19,9 @@ intents:
   - { name: dlq.replayAll, kind: command, version: 1, capability: write, invalidates: [dlq.list, dlq.get, dlq.counts, jobs.list, jobs.counts, queues.list, queues.get, overview.summary] }
   - { name: dlq.delete, kind: command, version: 1, capability: write, invalidates: [dlq.list, dlq.get, dlq.counts, dlq.purgePreview, overview.summary] }
   - { name: dlq.purge, kind: command, version: 1, capability: write, invalidates: [dlq.list, dlq.get, dlq.counts, dlq.purgePreview, overview.summary] }
+  - { name: crons.list, kind: query, version: 1, capability: read }
+  - { name: crons.get, kind: query, version: 1, capability: read }
+  - { name: crons.enable, kind: command, version: 1, capability: write, invalidates: [crons.list, crons.get, overview.summary] }
+  - { name: crons.disable, kind: command, version: 1, capability: write, invalidates: [crons.list, crons.get, overview.summary] }
+  - { name: crons.delete, kind: command, version: 1, capability: write, invalidates: [crons.list, crons.get, overview.summary] }
+  - { name: crons.runNow, kind: command, version: 1, capability: write, invalidates: [crons.get, jobs.list, jobs.counts, queues.list, queues.get, overview.summary] }

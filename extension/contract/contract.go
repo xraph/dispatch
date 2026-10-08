@@ -35,6 +35,12 @@ func command[I, O any](intent string, fn func(context.Context, I, fc.Principal) 
 
 func bindings(deps Deps) []binding {
 	return []binding{
+		query("crons.list", cronsListHandler(deps)),
+		query("crons.get", cronsGetHandler(deps)),
+		command("crons.enable", cronToggleHandler(deps, true)),
+		command("crons.disable", cronToggleHandler(deps, false)),
+		command("crons.delete", cronsDeleteHandler(deps)),
+		command("crons.runNow", cronsRunNowHandler(deps)),
 		query("dlq.list", dlqListHandler(deps)),
 		query("dlq.get", dlqGetHandler(deps)),
 		query("dlq.counts", dlqCountsHandler(deps)),

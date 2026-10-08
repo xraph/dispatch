@@ -56,6 +56,10 @@ func TestEveryDeclaredIntentIsBound(t *testing.T) {
 
 func TestManifestCommandInvalidations(t *testing.T) {
 	want := map[string][]string{
+		"crons.enable":  {"crons.list", "crons.get", "overview.summary"},
+		"crons.disable": {"crons.list", "crons.get", "overview.summary"},
+		"crons.delete":  {"crons.list", "crons.get", "overview.summary"},
+		"crons.runNow":  {"crons.get", "jobs.list", "jobs.counts", "queues.list", "queues.get", "overview.summary"},
 		"dlq.replay":    {"dlq.list", "dlq.get", "dlq.counts", "jobs.list", "jobs.counts", "queues.list", "queues.get", "overview.summary"},
 		"dlq.replayAll": {"dlq.list", "dlq.get", "dlq.counts", "jobs.list", "jobs.counts", "queues.list", "queues.get", "overview.summary"},
 		"dlq.delete":    {"dlq.list", "dlq.get", "dlq.counts", "dlq.purgePreview", "overview.summary"},
