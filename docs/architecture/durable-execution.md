@@ -41,7 +41,7 @@ Store tests alone do not qualify a workflow runtime or a deployment.
 | Atomic history, state, tasks, and durable receipts | Memory and PostgreSQL stores integrated with initial Go runtime | Shared memory/PostgreSQL conformance, rollback, concurrent writers, ambiguous-response retry |
 | Fenced task claims and durable timer deadlines | Store contract and renewable workers implemented; process-kill qualification open | Expiry, same-owner reclaim, concurrent claims, restart recovery |
 | Deterministic Go workflow runtime | Activity, timer and future replay implemented; SDK expansion open | Recorded-history replay with no repeated external effects, changed-command rejection |
-| Activity retries and timeout classes | Queue, attempt and overall deadlines, retry policies and interrupted-attempt recovery implemented; heartbeats and asynchronous completion open | Queue, attempt, overall and heartbeat deadlines; heartbeat progress; asynchronous completion |
+| Activity retries and timeout classes | Queue, attempt, overall and heartbeat deadlines, progress recovery and retry policies implemented; asynchronous completion open | Queue, attempt, overall and heartbeat deadlines; heartbeat progress; asynchronous completion |
 | Signals, queries, updates and signal-with-start | Open | Namespace isolation, deduplication, atomic acceptance, update results, read-only queries |
 | Child workflows and cancellation | Open | Stable child identity, duplicate creation prevention, parent-close policies, cancellation propagation |
 | Compensation, pause, termination and reset | Open | Resumable compensation attempts, audited controls, immutable reset lineage |
@@ -153,8 +153,7 @@ An independent review of 48c6a0b through ebcb3e7 found no actionable correctness
 issues in this scoped runtime. Its reviewer reran focused runtime and engine race
 tests; the PostgreSQL and full-suite evidence came from the implementation checks.
 
-Next: implement heartbeat progress and asynchronous
-completion. Durable execution visibility also needs store-level ordered
+Next: implement asynchronous completion. Durable execution visibility also needs store-level ordered
 list/task reads and real Go dashboard contracts before the React plugin can show
 these runs. Current dashboard workflow reads describe checkpoint runs only. Add
 an execution list and detail view with ordered history, pending work and lease
@@ -419,3 +418,53 @@ heartbeat timeout classification. Asynchronous completion, receipt retention,
 process-kill/failover/load qualification and Dashboard integration remain open.
 One immutable receipt per acknowledged heartbeat is an explicit storage cost,
 even though heartbeats do not append workflow events.
+
+## Activity heartbeat runtime contract
+
+Version 2 activities expose ActivityInfo.Heartbeat(ctx, details) and
+HeartbeatDetails(). Details are copied. Heartbeat is synchronous and confirms
+persisted progress; it does not silently buffer or throttle calls. An unknown
+outcome retains the exact request until its receipt is resolved. Calls serialize
+within the attempt. The callback is bound to the activity context and cannot keep
+writing after the handler has returned. Result publication drains in-flight calls
+before reading the final persisted checkpoint. A receipt retry confirms the
+original write; it does not extend that write's deadline again.
+
+HeartbeatTimeout is recorded in ActivityOptions. Zero permits progress recording
+without a progress timeout. A missed heartbeat follows the activity retry policy.
+Automatic worker lease renewal cannot postpone it. The attempt and overall limits
+still cap the progress deadline, with overall then attempt expiry winning ties.
+The initial heartbeat clock begins at the durable attempt start.
+
+New attempt-start events record that heartbeats were enabled and the copied
+starting progress. Results and failed-attempt events record a final checkpoint
+containing the store timestamp, ownership epoch, heartbeat sequence and details.
+Old histories without heartbeat activation retain their existing interpretation. Replay checks
+checkpoint presence, timing, shape, inherited progress, matching final failure
+metadata and timeout classification. Heartbeats themselves do not add events.
+A workflow can inspect a copied checkpoint through ActivityError while errors.As
+still exposes its underlying ApplicationError.
+
+The next attempt receives the last persisted progress after failure, timeout or
+worker loss. Timeout coordinators need neither the activity handler nor its queue.
+PostgreSQL pool replacement must preserve recovery behavior. This contract does
+not qualify process kills, failover, sustained load or asynchronous completion.
+
+2026-10-08: runtime tests pass for concurrent calls, lost acknowledgements,
+caller cancellation before submission, callback expiry and result publication
+while a heartbeat write is in flight. A failed write with an unknown outcome
+keeps its request identity until resolution. A call cancelled before submission
+cannot leave progress queued for a later call.
+
+Heartbeat expiry retries while the worker still renews its lease. Periodic
+heartbeats cannot postpone attempt or overall expiry. Replay rejects changed
+heartbeat policy, invalid checkpoint times or ownership epochs, mismatched
+inherited progress and contradictory final failure metadata. Older histories
+without heartbeat metadata still pass the runtime suite.
+
+PostgreSQL recovery tests replace the connection pool after ordinary failure,
+heartbeat timeout and worker loss. The next attempt receives saved progress and
+keeps its external idempotency key. A coordinator with no activity handlers can
+publish the heartbeat timeout. The durable PostgreSQL race suite passes in
+35.587 seconds. Repository tests, make f, make l (zero issues), and races across
+engine (18.549 seconds), runtime (3.342 seconds) and memory (2.782 seconds) pass.

@@ -58,12 +58,13 @@ func (f *ApplicationError) Error() string { return f.Message }
 // Outcome binds an activity result or timer firing to its scheduled command.
 // Output and Failure are mutually exclusive.
 type Outcome struct {
-	Version   int                 `json:"version"`
-	CommandID string              `json:"command_id"`
-	Attempt   int64               `json:"attempt,omitempty"`
-	Timeout   ActivityTimeoutKind `json:"timeout,omitempty"`
-	Output    []byte              `json:"output,omitempty"`
-	Failure   *ApplicationError   `json:"failure,omitempty"`
+	Version   int                  `json:"version"`
+	CommandID string               `json:"command_id"`
+	Attempt   int64                `json:"attempt,omitempty"`
+	Timeout   ActivityTimeoutKind  `json:"timeout,omitempty"`
+	Output    []byte               `json:"output,omitempty"`
+	Failure   *ApplicationError    `json:"failure,omitempty"`
+	Heartbeat *HeartbeatCheckpoint `json:"heartbeat,omitempty"`
 }
 
 // Decision contains only new commands. Running means a future is unresolved.

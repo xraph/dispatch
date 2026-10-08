@@ -1,6 +1,7 @@
 package runtime
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -38,22 +39,20 @@ func (w *Worker) processActivity(ctx context.Context, task durable.Task, payload
 		if prior.failed && !task.AvailableAt.Equal(prior.retryAt) {
 			return w.effectConflict(ctx, task, "activity retry availability differs from history")
 		}
-		attempt := ActivityAttempt{Version: 1, CommandID: command.ID, Attempt: prior.value.Attempt + 1, Epoch: task.Epoch}
+		attempt := ActivityAttempt{Version: 1, CommandID: command.ID, Attempt: prior.value.Attempt + 1, Epoch: task.Epoch, HeartbeatEnabled: true, Progress: bytes.Clone(task.Progress)}
 		data, err := json.Marshal(attempt)
 		if err != nil {
 			return err
 		}
 		request := taskRequest(task, execution.Revision)
 		request.Events = []durable.EventInput{{Type: EventActivityAttemptStarted, Payload: data}}
-		request.TaskUpdate = &durable.TaskUpdate{Action: durable.TaskKeep}
-		if hasActivityTimeout(command.ActivityOptions) {
-			limit, limitErr := activityOverallLimit(command, history.scheduled[command.ID])
-			if limitErr != nil {
-				return limitErr
-			}
-			deadline := command.ActivityOptions.StartToCloseTimeout
-			request.TaskUpdate.DeadlineAfter, request.TaskUpdate.DeadlineLimit, request.TaskUpdate.LeaseDuration = &deadline, limit, w.options.LeaseDuration
+		limit, limitErr := activityOverallLimit(command, history.scheduled[command.ID])
+		if limitErr != nil {
+			return limitErr
 		}
+		deadline := command.ActivityOptions.StartToCloseTimeout
+		request.TaskUpdate = &durable.TaskUpdate{Action: durable.TaskKeep, DeadlineAfter: &deadline, DeadlineLimit: limit,
+			LeaseDuration: w.options.LeaseDuration, Heartbeat: &durable.HeartbeatConfig{Timeout: command.ActivityOptions.HeartbeatTimeout}}
 		// Start the cooperative timer before persistence so acknowledgement
 		// latency cannot extend it. Store deadlines remain authoritative.
 		attemptCtx, cancelAttempt := activityAttemptContext(ctx, command.ActivityOptions.StartToCloseTimeout)
@@ -65,8 +64,11 @@ func (w *Worker) processActivity(ctx context.Context, task durable.Task, payload
 			cancelAttempt()
 			return err
 		}
-		outcome, callErr := callActivity(attemptCtx, handler, ActivityInfo{Key: task.Key, CommandID: command.ID, BuildID: execution.BuildID, Attempt: attempt.Attempt}, command.Input)
+		heartbeats := newHeartbeatSession(attemptCtx, w, task)
+		outcome, callErr := callActivity(heartbeats.ctx, handler, ActivityInfo{Key: task.Key, CommandID: command.ID, BuildID: execution.BuildID, Attempt: attempt.Attempt,
+			heartbeat: heartbeats.record, heartbeatDetails: bytes.Clone(task.Progress)}, command.Input)
 		cancelAttempt()
+		heartbeats.close()
 		if callErr != nil {
 			return callErr
 		}
@@ -88,9 +90,15 @@ func (w *Worker) finishActivity(ctx context.Context, task durable.Task, payload 
 		if prior.failed || prior.value.Attempt != outcome.Attempt || prior.value.Epoch != epoch {
 			return w.effectConflict(ctx, task, "activity result does not match active attempt")
 		}
+		checkpoint, checkpointErr := w.activityCheckpoint(ctx, task, prior)
+		if checkpointErr != nil {
+			return checkpointErr
+		}
+		outcome.Heartbeat = checkpoint
 		request := taskRequest(task, execution.Revision)
 		if outcome.Failure != nil {
-			failed := ActivityAttempt{Version: 1, CommandID: command.ID, Attempt: outcome.Attempt, Epoch: epoch, Failure: outcome.Failure, RetryAfter: delay, Timeout: outcome.Timeout}
+			failed := ActivityAttempt{Version: 1, CommandID: command.ID, Attempt: outcome.Attempt, Epoch: epoch, Failure: outcome.Failure, RetryAfter: delay, Timeout: outcome.Timeout,
+				HeartbeatEnabled: prior.value.HeartbeatEnabled, Heartbeat: checkpoint}
 			data, marshalErr := json.Marshal(failed)
 			if marshalErr != nil {
 				return marshalErr

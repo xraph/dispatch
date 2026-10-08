@@ -27,7 +27,9 @@ type ActivityInfo struct {
 	BuildID   string
 	// Attempt counts durable starts for version 2 activities. Legacy activities
 	// expose the task claim count, which can include claims lost before execution.
-	Attempt int64
+	Attempt          int64
+	heartbeat        func(context.Context, []byte) error
+	heartbeatDetails []byte
 }
 
 // IdempotencyKey is stable across attempts, and distinct across runs/namespaces.

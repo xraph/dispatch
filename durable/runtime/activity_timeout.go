@@ -14,10 +14,11 @@ const (
 	TimeoutScheduleToStart ActivityTimeoutKind = "schedule_to_start"
 	TimeoutStartToClose    ActivityTimeoutKind = "start_to_close"
 	TimeoutScheduleToClose ActivityTimeoutKind = "schedule_to_close"
+	TimeoutHeartbeat       ActivityTimeoutKind = "heartbeat"
 )
 
 func hasActivityTimeout(options *ActivityOptions) bool {
-	return options != nil && (options.ScheduleToStartTimeout > 0 || options.StartToCloseTimeout > 0 || options.ScheduleToCloseTimeout > 0)
+	return options != nil && (options.ScheduleToStartTimeout > 0 || options.StartToCloseTimeout > 0 || options.ScheduleToCloseTimeout > 0 || options.HeartbeatTimeout > 0)
 }
 
 func activityOverallLimit(command Command, scheduled time.Time) (*time.Time, error) {
@@ -69,11 +70,24 @@ func activityDeadline(command Command, scheduled time.Time, prior recordedAttemp
 			deadline, kind = candidate, phase
 		}
 	}
+	if prior.value.Attempt > 0 && !prior.failed && prior.value.HeartbeatEnabled && command.ActivityOptions.HeartbeatTimeout > 0 {
+		at := prior.at
+		if prior.value.Heartbeat != nil {
+			at = prior.value.Heartbeat.At
+		}
+		candidate, deadlineErr := durable.TaskTimeAfter(at, command.ActivityOptions.HeartbeatTimeout)
+		if deadlineErr != nil {
+			return time.Time{}, "", deadlineErr
+		}
+		if deadline.IsZero() || candidate.Before(deadline) {
+			deadline, kind = candidate, TimeoutHeartbeat
+		}
+	}
 	return deadline, kind, nil
 }
 
 func timeoutFailure(kind ActivityTimeoutKind) *ApplicationError {
-	return &ApplicationError{Type: "activity_" + string(kind) + "_timeout", Message: "activity exceeded its " + string(kind) + " deadline", NonRetryable: kind != TimeoutStartToClose}
+	return &ApplicationError{Type: "activity_" + string(kind) + "_timeout", Message: "activity exceeded its " + string(kind) + " deadline", NonRetryable: kind != TimeoutStartToClose && kind != TimeoutHeartbeat}
 }
 
 func validateBeforeActivityDeadline(history *replayHistory, command Command, prior recordedAttempt, at time.Time) error {
@@ -98,7 +112,7 @@ func validateTimeout(history *replayHistory, command Command, prior recordedAtte
 
 func validateQueuedTimeoutOutcome(history *replayHistory, command Command, outcome Outcome, at time.Time) error {
 	prior := history.attempts[command.ID]
-	if outcome.Version != 2 || outcome.Attempt != prior.value.Attempt || (prior.value.Attempt > 0 && (!prior.failed || prior.value.RetryAfter == 0)) || outcome.Timeout == TimeoutStartToClose {
+	if outcome.Version != 2 || outcome.Attempt != prior.value.Attempt || (prior.value.Attempt > 0 && (!prior.failed || prior.value.RetryAfter == 0)) || outcome.Timeout == TimeoutStartToClose || outcome.Timeout == TimeoutHeartbeat || !sameHeartbeat(outcome.Heartbeat, prior.value.Heartbeat) {
 		return fmt.Errorf("%w: invalid queued activity timeout", ErrHistory)
 	}
 	return validateTimeout(history, command, prior, outcome.Timeout, outcome.Failure, at)

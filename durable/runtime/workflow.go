@@ -115,6 +115,9 @@ func (f *Future) Get() ([]byte, error) {
 	}
 	if result.value.Failure != nil {
 		failure := *result.value.Failure
+		if result.value.Heartbeat != nil {
+			return nil, &ActivityError{Failure: &failure, Attempt: result.value.Attempt, Timeout: result.value.Timeout, Heartbeat: cloneHeartbeat(result.value.Heartbeat)}
+		}
 		return nil, &failure
 	}
 	return bytes.Clone(result.value.Output), nil

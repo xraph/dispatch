@@ -25,15 +25,22 @@ func (w *Worker) processActivityTimeout(ctx context.Context, task durable.Task, 
 			return err
 		}
 		prior := history.attempts[command.ID]
+		if prior.value.Attempt > 0 && !prior.failed {
+			checkpoint, checkpointErr := w.activityCheckpoint(ctx, task, prior)
+			if checkpointErr != nil {
+				return checkpointErr
+			}
+			prior.value.Heartbeat = checkpoint
+		}
 		deadline, kind, deadlineErr := activityDeadline(command, history.scheduled[command.ID], prior)
 		if deadlineErr != nil || deadline.IsZero() || !deadline.Equal(task.DeadlineAt) {
 			return w.effectConflict(ctx, task, "task deadline differs from activity history")
 		}
-		outcome := Outcome{Version: 2, CommandID: command.ID, Attempt: prior.value.Attempt, Timeout: kind, Failure: timeoutFailure(kind)}
+		outcome := Outcome{Version: 2, CommandID: command.ID, Attempt: prior.value.Attempt, Timeout: kind, Failure: timeoutFailure(kind), Heartbeat: cloneHeartbeat(prior.value.Heartbeat)}
 		if prior.value.Attempt > 0 && !prior.failed {
 			return w.finishActivity(ctx, task, payload, prior.value.Epoch, outcome)
 		}
-		if kind == TimeoutStartToClose {
+		if kind == TimeoutStartToClose || kind == TimeoutHeartbeat {
 			return w.effectConflict(ctx, task, "attempt timeout without an active attempt")
 		}
 		data, marshalErr := json.Marshal(outcome)
@@ -67,7 +74,7 @@ func (w *Worker) renewInterval(task durable.Task) time.Duration {
 		return interval
 	}
 	options := payload.Command.ActivityOptions
-	for _, deadline := range []time.Duration{options.StartToCloseTimeout, options.ScheduleToCloseTimeout} {
+	for _, deadline := range []time.Duration{options.StartToCloseTimeout, options.ScheduleToCloseTimeout, options.HeartbeatTimeout} {
 		if deadline > 0 {
 			interval = min(interval, max(time.Microsecond, deadline/3))
 		}

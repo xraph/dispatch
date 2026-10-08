@@ -168,7 +168,7 @@ func parseOutcome(history *replayHistory, commands map[string]Command, event dur
 		return fmt.Errorf("%w: invalid outcome at event %d", ErrHistory, event.Sequence)
 	}
 	if (event.Type == EventActivityCompleted && command.Kind != durable.TaskActivity) ||
-		(event.Type == EventTimerFired && (command.Kind != durable.TaskTimer || outcome.Version != 1 || outcome.Attempt != 0 || outcome.Timeout != "" || len(outcome.Output) != 0 || outcome.Failure != nil || event.Time.Before(command.Deadline))) {
+		(event.Type == EventTimerFired && (command.Kind != durable.TaskTimer || outcome.Version != 1 || outcome.Attempt != 0 || outcome.Timeout != "" || outcome.Heartbeat != nil || len(outcome.Output) != 0 || outcome.Failure != nil || event.Time.Before(command.Deadline))) {
 		return fmt.Errorf("%w: outcome does not match scheduled command", ErrHistory)
 	}
 	if command.Kind == durable.TaskActivity {

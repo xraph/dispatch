@@ -16,6 +16,7 @@ type ActivityOptions struct {
 	ScheduleToStartTimeout time.Duration `json:"schedule_to_start_timeout,omitempty"`
 	StartToCloseTimeout    time.Duration `json:"start_to_close_timeout,omitempty"`
 	ScheduleToCloseTimeout time.Duration `json:"schedule_to_close_timeout,omitempty"`
+	HeartbeatTimeout       time.Duration `json:"heartbeat_timeout,omitempty"`
 }
 
 // RetryPolicy governs failures across durable activity attempts. Zero fields use
@@ -30,7 +31,7 @@ type RetryPolicy struct {
 }
 
 func normalizeActivityOptions(options ActivityOptions) (ActivityOptions, error) {
-	if options.ScheduleToStartTimeout < 0 || options.StartToCloseTimeout < 0 || options.ScheduleToCloseTimeout < 0 {
+	if options.ScheduleToStartTimeout < 0 || options.StartToCloseTimeout < 0 || options.ScheduleToCloseTimeout < 0 || options.HeartbeatTimeout < 0 {
 		return ActivityOptions{}, fmt.Errorf("%w: negative activity timeout", durable.ErrInvalid)
 	}
 	policy := RetryPolicy{}
@@ -68,7 +69,7 @@ func sameActivityOptions(a, b *ActivityOptions) bool {
 	if a == nil || b == nil {
 		return a == b
 	}
-	if a.ScheduleToStartTimeout != b.ScheduleToStartTimeout || a.StartToCloseTimeout != b.StartToCloseTimeout || a.ScheduleToCloseTimeout != b.ScheduleToCloseTimeout {
+	if a.ScheduleToStartTimeout != b.ScheduleToStartTimeout || a.StartToCloseTimeout != b.StartToCloseTimeout || a.ScheduleToCloseTimeout != b.ScheduleToCloseTimeout || a.HeartbeatTimeout != b.HeartbeatTimeout {
 		return false
 	}
 	if a.RetryPolicy == nil || b.RetryPolicy == nil {
