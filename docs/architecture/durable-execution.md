@@ -144,3 +144,18 @@ renewal and loss, verify cross-queue wakeups, and stop without closing unfinishe
 runs. PostgreSQL repeats build-isolation and runtime recovery checks with a new
 connection pool and worker. These checks do not qualify database failover,
 process-kill recovery, activity timeout/retry policies or the remaining SDK APIs.
+
+2026-10-08: engine integration at ebcb3e7 passes make f, make l, go test ./...,
+and race tests across engine, durable runtime and memory. The PostgreSQL durable
+suite passed with the race detector after build routing and runtime integration.
+An independent review of 48c6a0b through ebcb3e7 found no actionable correctness
+issues in this scoped runtime. Its reviewer reran focused runtime and engine race
+tests; the PostgreSQL and full-suite evidence came from the implementation checks.
+
+Next: implement persisted activity attempts, retry policies, timeout classes and
+heartbeat progress. Durable execution visibility also needs store-level ordered
+list/task reads and real Go dashboard contracts before the React plugin can show
+these runs. Current dashboard workflow reads describe checkpoint runs only. Add
+an execution list and detail view with ordered history, pending work and lease
+state, explicit namespace filters, and distinct unsupported/error/empty states.
+The rest of the requirements table remains authoritative and open.
