@@ -45,6 +45,7 @@ func RunWorkflowSuite(t *testing.T, newStore func(t *testing.T) WorkflowStore) {
 		{"ReopenRunUnknown", testReopenUnknownRun},
 		{"ReopenRunConcurrentExactlyOneWinner", testReopenRunConcurrent},
 		{"ParentRunIDRoundTripsAndListChildRuns", testParentRunIDAndChildren},
+		{"VersionRoundTripsAsWritten", testVersionRoundTrips},
 	}
 
 	for _, tc := range cases {
@@ -269,5 +270,25 @@ func testParentRunIDAndChildren(t *testing.T, s WorkflowStore) {
 	}
 	if len(grandchildren) != 0 {
 		t.Errorf("ListChildRuns(child) = %d runs, want none", len(grandchildren))
+	}
+}
+
+// testVersionRoundTrips checks Version against the value written, not
+// against another read. Every other case compares one store read with a
+// later one, which a backend that drops Version passes trivially: both
+// reads say zero. Three backends did exactly that, and a zero Version
+// resolves to the latest registered definition, so a resumed or replayed
+// run silently switched to code it was never started on.
+func testVersionRoundTrips(t *testing.T, s WorkflowStore) {
+	got := createSuiteRun(t, s, workflow.RunStateFailed)
+	if got.Version != 3 {
+		t.Fatalf("Version = %d after CreateRun, want 3: the store dropped it", got.Version)
+	}
+
+	if err := s.ReopenRun(context.Background(), got.ID); err != nil {
+		t.Fatalf("ReopenRun: %v", err)
+	}
+	if after := mustGetRun(t, s, got.ID); after.Version != 3 {
+		t.Fatalf("Version = %d after ReopenRun, want 3", after.Version)
 	}
 }

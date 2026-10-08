@@ -18,6 +18,8 @@ type ListOpts struct {
 
 // Store defines the persistence contract for workflows.
 type Store interface {
+	Reopener
+
 	// CreateRun persists a new workflow run.
 	CreateRun(ctx context.Context, run *Run) error
 
