@@ -42,4 +42,9 @@ type Store interface {
 	// RecordHeartbeat changes task progress without appending workflow history.
 	RecordHeartbeat(context.Context, HeartbeatRequest) (Receipt, error)
 	CommitTransition(context.Context, CommitRequest) (Receipt, error)
+	// LookupReceipt recovers a matching client intent without checking current
+	// ownership or lifecycle. A missing receipt is false,nil; a missing run is
+	// ErrNotFound. Errors return false and a zero receipt. A miss cannot rule out
+	// an in-flight commit. Legacy receipts reject lookup with ErrRequestConflict.
+	LookupReceipt(context.Context, ReceiptRequest) (Receipt, bool, error)
 }

@@ -176,6 +176,10 @@ type CommitRequest struct {
 	// AsyncSecret is required only for an asynchronous grant. Receipts store its
 	// request fingerprint, never this secret. Do not log callback requests.
 	AsyncSecret string `json:"async_secret,omitempty"`
+	// IntentDigest binds the complete client request, independently of derived
+	// revision/task observations. Only the trusted coordinator may construct it.
+	// Keep it private; LookupReceipt uses it as a recovery proof.
+	IntentDigest string `json:"intent_digest,omitempty"`
 }
 
 // Receipt records the original result of an accepted request.

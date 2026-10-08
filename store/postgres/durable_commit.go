@@ -29,11 +29,11 @@ func readExecutionReceipt(ctx context.Context, tx driver.Tx, key durable.Key, re
 	return receipt, true, nil
 }
 
-func saveExecutionReceipt(ctx context.Context, tx driver.Tx, key durable.Key, requestID, digest string, receipt durable.Receipt) error {
+func saveExecutionReceipt(ctx context.Context, tx driver.Tx, key durable.Key, requestID, digest, intent string, receipt durable.Receipt) error {
 	_, err := tx.Exec(ctx, `INSERT INTO dispatch_execution_receipts
-        (namespace, workflow_id, run_id, request_id, digest, revision, first_sequence, last_sequence)
-        VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`, key.Namespace, key.WorkflowID, key.RunID, requestID, digest,
-		receipt.Revision, receipt.FirstSequence, receipt.LastSequence)
+        (namespace, workflow_id, run_id, request_id, digest, revision, first_sequence, last_sequence, intent_digest)
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`, key.Namespace, key.WorkflowID, key.RunID, requestID, digest,
+		receipt.Revision, receipt.FirstSequence, receipt.LastSequence, intent)
 	return err
 }
 
@@ -105,7 +105,7 @@ func (s *Store) StartExecution(ctx context.Context, r durable.StartRequest) (dur
 		return durable.Receipt{}, taskErr
 	}
 	receipt := durable.Receipt{Revision: 1, FirstSequence: 1, LastSequence: 1}
-	if receiptErr := saveExecutionReceipt(ctx, tx, r.Key, r.RequestID, digest, receipt); receiptErr != nil {
+	if receiptErr := saveExecutionReceipt(ctx, tx, r.Key, r.RequestID, digest, "", receipt); receiptErr != nil {
 		return durable.Receipt{}, receiptErr
 	}
 	if err = tx.Commit(); err != nil {
@@ -221,7 +221,7 @@ func (s *Store) CommitTransition(ctx context.Context, r durable.CommitRequest) (
 			return durable.Receipt{}, err
 		}
 	}
-	if receiptErr := saveExecutionReceipt(ctx, tx, r.Key, r.RequestID, digest, receipt); receiptErr != nil {
+	if receiptErr := saveExecutionReceipt(ctx, tx, r.Key, r.RequestID, digest, r.IntentDigest, receipt); receiptErr != nil {
 		return durable.Receipt{}, receiptErr
 	}
 	if err = tx.Commit(); err != nil {

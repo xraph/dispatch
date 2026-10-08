@@ -23,6 +23,7 @@ type durableTask struct {
 
 type durableReceipt struct {
 	digest string
+	intent string
 	value  durable.Receipt
 }
 
@@ -326,7 +327,7 @@ func (m *Store) CommitTransition(ctx context.Context, r durable.CommitRequest) (
 		record.tasks[taskID] = &durableTask{Task: change}
 	}
 	record.execution = next
-	record.receipts[r.RequestID] = durableReceipt{digest: digest, value: receipt}
+	record.receipts[r.RequestID] = durableReceipt{digest: digest, intent: r.IntentDigest, value: receipt}
 	return receipt, nil
 }
 

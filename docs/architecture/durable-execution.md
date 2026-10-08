@@ -548,3 +548,59 @@ tests and PostgreSQL shared conformance plus asynchronous recovery tests
 callback APIs and remote namespace authorization remain outside this store
 qualification and required by the full implementation plan. The review does not
 establish asynchronous feature readiness or Temporal parity.
+
+## Stable callback intent receipts
+
+A trusted coordinator may attach an intent digest to a transition receipt. The
+digest binds the client's complete request, including its operation, namespace,
+run, activity grant, callback secret and result or failure. It excludes the
+execution revision and task observation that the coordinator derives while
+preparing a transaction. The coordinator must compute this digest itself; a
+remote caller cannot supply an authoritative digest.
+
+LookupReceipt accepts the run identity, request ID and exact intent digest. It
+returns the original receipt after state advances, closure or ownership changes.
+A missing receipt returns found=false; a missing run returns ErrNotFound. A
+different digest, or a receipt without an intent digest, returns
+ErrRequestConflict. Lookup is read-only and does not validate current ownership
+or extend a deadline. A missing receipt cannot prove that an in-flight request
+will not commit, so callers must still resolve a concurrent request conflict.
+
+CommitTransition keeps its exact-request fingerprint check. Rebuilding a
+transaction under the same client intent never weakens that check: the runtime
+uses LookupReceipt to resolve the accepted intent. The intent and receipt are
+saved atomically with history, state and task changes. Existing requests omit
+the new field and keep their original fingerprints. Older receipts remain
+available through exact-request replay only. Intent digests are internal
+recovery proofs and must not appear in public projections or logs.
+
+The memory and PostgreSQL stores must exercise state advancement, closure,
+namespace/run isolation, changed intents, concurrent requests, failed
+transactions and connection replacement. The callback runtime still needs to
+construct and resolve intents correctly; this primitive alone does not qualify
+the SDK or remote authorization.
+
+Custom durable.Store implementations must implement LookupReceipt. PostgreSQL
+adds an intent column that rejects nulls and defaults to empty for older writers.
+Downgrade locks the receipt table while checking for saved intents and refuses
+to discard any retained proof. Removing those receipts needs an explicit
+retention or migration policy.
+
+2026-10-08: shared conformance covers recovery after closure, retry reclamation
+and timeout fencing; identity and changed-intent rejection; concurrent requests;
+and unchanged exact-request replay. PostgreSQL additionally verifies lost
+completion responses across pool replacement, migration retry, legacy receipt
+replay, rollback and downgrade protection. Lookup during a blocked completion
+does not reveal uncommitted state. It observes the receipt after commit and no
+receipt after rollback.
+
+The repository test run exposed an existing heartbeat fixture that expected to
+claim a retry scheduled one microsecond in the future immediately. A repeated
+test reproduced it, as did the new receipt-retention fixture. Both now use an
+already elapsed retry time; production scheduling is unchanged. The corrected
+heartbeat case passes 200 runs and the receipt case passes 500 runs.
+
+After that correction, make f, make l (zero issues), go test ./..., and engine,
+durable, runtime and memory race tests pass. The full durable PostgreSQL race
+suite passes in 52.569 seconds. Callback intent construction and runtime retry
+resolution remain required before the SDK can recover callbacks through this API.

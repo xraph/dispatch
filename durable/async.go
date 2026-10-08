@@ -10,7 +10,7 @@ import (
 // HashAsyncSecret hashes a canonical hexadecimal encoding of a 32-byte secret.
 // Generate the secret with a cryptographic random source before handing it off.
 func HashAsyncSecret(secret string) (string, error) {
-	if !validAsyncHex(secret) {
+	if !validHex256(secret) {
 		return "", fmt.Errorf("%w: asynchronous secret must encode 32 bytes as lowercase hex", ErrInvalid)
 	}
 	decoded, err := hex.DecodeString(secret)
@@ -21,7 +21,7 @@ func HashAsyncSecret(secret string) (string, error) {
 	return hex.EncodeToString(digest[:]), nil
 }
 
-func validAsyncHex(value string) bool {
+func validHex256(value string) bool {
 	if len(value) != 64 {
 		return false
 	}
@@ -35,7 +35,7 @@ func validAsyncHex(value string) bool {
 
 func validateAsyncSecret(token TaskToken, secret string) error {
 	if token.LeaseKind == LeaseAsync {
-		if !validAsyncHex(secret) {
+		if !validHex256(secret) {
 			return fmt.Errorf("%w: asynchronous grant requires a secret", ErrInvalid)
 		}
 	} else if secret != "" {

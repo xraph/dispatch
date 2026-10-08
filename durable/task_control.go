@@ -63,7 +63,7 @@ func validateTaskControl(r CommitRequest) error {
 	}
 	switch u.Action {
 	case TaskAwait:
-		if r.Token.LeaseKind != "" || !validAsyncHex(u.AsyncKeyHash) || u.DeadlineAfter != nil || u.DeadlineLimit != nil ||
+		if r.Token.LeaseKind != "" || !validHex256(u.AsyncKeyHash) || u.DeadlineAfter != nil || u.DeadlineLimit != nil ||
 			u.LeaseDuration != 0 || u.Progress != nil || !u.RetryAt.IsZero() || u.RetryAfter != 0 || u.Heartbeat != nil {
 			return fmt.Errorf("%w: asynchronous handoff requires only a secret digest on an execution grant", ErrInvalid)
 		}
@@ -174,7 +174,7 @@ func UpdateTask(task Task, update *TaskUpdate, now time.Time) (Task, error) {
 	}
 	if update.Action == TaskAwait {
 		if task.Kind != TaskActivity || task.LeaseKind != "" || task.HeartbeatEpoch != task.Epoch || task.HeartbeatEpoch < 1 ||
-			task.HeartbeatAt.IsZero() || !task.DeadlineAt.After(now) || !validAsyncHex(update.AsyncKeyHash) {
+			task.HeartbeatAt.IsZero() || !task.DeadlineAt.After(now) || !validHex256(update.AsyncKeyHash) {
 			return Task{}, fmt.Errorf("%w: asynchronous handoff requires an active activity with a deadline", ErrInvalid)
 		}
 		// Older pollers do not inspect LeaseKind. Keep their eligibility test

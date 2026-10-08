@@ -77,6 +77,9 @@ func (r CommitRequest) Validate() error {
 	if err := validateAsyncSecret(r.Token, r.AsyncSecret); err != nil {
 		return err
 	}
+	if r.IntentDigest != "" && !validHex256(r.IntentDigest) {
+		return fmt.Errorf("%w: intent digest must encode 32 bytes as lowercase hex", ErrInvalid)
+	}
 	if !identifier(r.RequestID) || r.ExpectedRevision < 1 || len(r.Events) == 0 || len(r.Events) > 1000 || len(r.Tasks) > 1000 {
 		return fmt.Errorf("%w: request ID, revision and 1..1000 events are required; at most 1000 tasks", ErrInvalid)
 	}
