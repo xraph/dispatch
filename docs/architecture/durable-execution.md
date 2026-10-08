@@ -540,3 +540,11 @@ engine/durable/memory race tests and the full durable PostgreSQL race suite
 (46.584 seconds). The focused PostgreSQL conformance and asynchronous recovery
 suite passes in 15.125 seconds. Runtime handoff/replay and callback APIs remain
 required before asynchronous activity completion is usable through the SDK.
+
+Independent review of 7b887b7 through 1e0278d found no actionable issues in the
+store contract. The reviewer independently passed durable/runtime/memory race
+tests and PostgreSQL shared conformance plus asynchronous recovery tests
+(15.188 seconds). Secret generation, completion handles, runtime handoff replay,
+callback APIs and remote namespace authorization remain outside this store
+qualification and required by the full implementation plan. The review does not
+establish asynchronous feature readiness or Temporal parity.
