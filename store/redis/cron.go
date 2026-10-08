@@ -116,6 +116,9 @@ func (s *Store) GetCron(ctx context.Context, entryID id.CronID) (*cron.Entry, er
 		}
 		return nil, fmt.Errorf("dispatch/redis: get cron: %w", err)
 	}
+	if e.ID != entryID.String() {
+		return nil, fmt.Errorf("dispatch/redis: cron identity mismatch for key %s", entryID)
+	}
 	return fromCronEntity(&e)
 }
 
@@ -128,13 +131,16 @@ func (s *Store) ListCrons(ctx context.Context) ([]*cron.Entry, error) {
 
 	entries := make([]*cron.Entry, 0, len(ids))
 	for _, eID := range ids {
-		var e cronEntity
-		if getErr := s.getEntity(ctx, s.keys.cron(eID), &e); getErr != nil {
+		entryID, parseErr := id.ParseCronID(eID)
+		if parseErr != nil {
+			return nil, fmt.Errorf("dispatch/redis: parse cron index ID: %w", parseErr)
+		}
+		entry, readErr := s.GetCron(ctx, entryID)
+		if errors.Is(readErr, dispatch.ErrCronNotFound) {
 			continue
 		}
-		entry, convErr := fromCronEntity(&e)
-		if convErr != nil {
-			continue
+		if readErr != nil {
+			return nil, readErr
 		}
 		entries = append(entries, entry)
 	}

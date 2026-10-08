@@ -422,15 +422,23 @@ func (s *Store) CountJobs(ctx context.Context, opts job.CountOpts) (int64, error
 	for _, jID := range ids {
 		raw, getErr := s.kv.GetRaw(ctx, s.keys.job(jID))
 		if getErr != nil {
-			continue
+			if isNotFound(getErr) {
+				continue
+			}
+			return 0, fmt.Errorf("dispatch/redis: count job read: %w", getErr)
 		}
-		// Quick check state/queue from JSON without full decode.
+		// Counts need identity and filter fields, without decoding payloads.
 		var partial struct {
+			ID    string `json:"id"`
 			State string `json:"state"`
 			Queue string `json:"queue"`
 		}
-		if json.Unmarshal(raw, &partial) != nil {
-			continue
+		if decodeErr := json.Unmarshal(raw, &partial); decodeErr != nil {
+			return 0, fmt.Errorf("dispatch/redis: count job decode: %w", decodeErr)
+		}
+		parsed, parseErr := id.ParseJobID(partial.ID)
+		if parseErr != nil || parsed.IsNil() || parsed.String() != jID {
+			return 0, fmt.Errorf("dispatch/redis: count job identity mismatch for key %s", jID)
 		}
 		if opts.State != "" && job.State(partial.State) != opts.State {
 			continue

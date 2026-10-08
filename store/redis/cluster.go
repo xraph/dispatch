@@ -2,6 +2,7 @@ package redis
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
@@ -147,6 +148,9 @@ func (s *Store) GetWorker(ctx context.Context, workerID id.WorkerID) (*cluster.W
 		}
 		return nil, fmt.Errorf("dispatch/redis: get worker: %w", err)
 	}
+	if e.ID != workerID.String() {
+		return nil, fmt.Errorf("dispatch/redis: worker identity mismatch for key %s", workerID)
+	}
 	return fromWorkerEntity(&e)
 }
 
@@ -159,13 +163,16 @@ func (s *Store) ListWorkers(ctx context.Context) ([]*cluster.Worker, error) {
 
 	workers := make([]*cluster.Worker, 0, len(ids))
 	for _, wID := range ids {
-		var e workerEntity
-		if getErr := s.getEntity(ctx, s.keys.worker(wID), &e); getErr != nil {
+		workerID, parseErr := id.ParseWorkerID(wID)
+		if parseErr != nil {
+			return nil, fmt.Errorf("dispatch/redis: parse worker index ID: %w", parseErr)
+		}
+		w, readErr := s.GetWorker(ctx, workerID)
+		if errors.Is(readErr, dispatch.ErrWorkerNotFound) {
 			continue
 		}
-		w, convErr := fromWorkerEntity(&e)
-		if convErr != nil {
-			continue
+		if readErr != nil {
+			return nil, readErr
 		}
 		workers = append(workers, w)
 	}
@@ -320,9 +327,13 @@ func (s *Store) GetLeader(ctx context.Context) (*cluster.Worker, error) {
 		return nil, fmt.Errorf("dispatch/redis: get leader: %w", err)
 	}
 
-	var e workerEntity
-	if getErr := s.getEntity(ctx, s.keys.worker(wID), &e); getErr != nil {
-		return nil, nil // leader key exists but worker gone
+	workerID, parseErr := id.ParseWorkerID(wID)
+	if parseErr != nil {
+		return nil, fmt.Errorf("dispatch/redis: parse leader ID: %w", parseErr)
 	}
-	return fromWorkerEntity(&e)
+	worker, readErr := s.GetWorker(ctx, workerID)
+	if errors.Is(readErr, dispatch.ErrWorkerNotFound) {
+		return nil, nil
+	}
+	return worker, readErr
 }
