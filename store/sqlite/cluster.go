@@ -141,8 +141,17 @@ func (s *Store) ReapDeadWorkers(ctx context.Context, threshold time.Duration) ([
 }
 
 // AcquireLeadership attempts to become the cluster leader.
-// The unique leader index protects the claim after the expiry check.
 func (s *Store) AcquireLeadership(ctx context.Context, workerID id.WorkerID, ttl time.Duration) (bool, error) {
+	var acquired bool
+	err := withBusyRetry(ctx, func() error {
+		var claimErr error
+		acquired, claimErr = s.acquireLeadership(ctx, workerID, ttl)
+		return claimErr
+	})
+	return acquired, err
+}
+
+func (s *Store) acquireLeadership(ctx context.Context, workerID id.WorkerID, ttl time.Duration) (bool, error) {
 	wID := workerID.String()
 	now := time.Now().UTC()
 	until := now.Add(ttl)
@@ -182,12 +191,14 @@ func (s *Store) AcquireLeadership(ctx context.Context, workerID id.WorkerID, ttl
 		}
 	}
 
-	// Claim or re-claim leadership.
+	// SQLite serializes this conditional write, so competing contenders cannot
+	// both claim after observing an empty registry. The partial index is not unique.
 	untilStr := until.UTC().Format(time.RFC3339Nano)
 	res, claimErr := s.sdb.NewUpdate((*workerModel)(nil)).
 		Set("is_leader = ?", true).
 		Set("leader_until = ?", untilStr).
 		Where("id = ?", wID).
+		Where("NOT EXISTS (SELECT 1 FROM dispatch_workers AS other WHERE other.is_leader = ? AND other.id <> ?)", true, wID).
 		Exec(ctx)
 	if claimErr != nil {
 		return false, fmt.Errorf("dispatch/sqlite: claim leadership: %w", claimErr)
@@ -230,10 +241,10 @@ func (s *Store) GetLeader(ctx context.Context) (*cluster.Worker, error) {
 }
 
 func (s *Store) readLeader(ctx context.Context) (*cluster.Worker, error) {
-	m := new(workerModel)
-	err := s.sdb.NewSelect(m).
+	var models []workerModel
+	err := s.sdb.NewSelect(&models).
 		Where("is_leader = ?", true).
-		Limit(1).
+		Limit(2).
 		Scan(ctx)
 	if err != nil {
 		if isNoRows(err) {
@@ -241,6 +252,13 @@ func (s *Store) readLeader(ctx context.Context) (*cluster.Worker, error) {
 		}
 		return nil, fmt.Errorf("dispatch/sqlite: get leader: %w", err)
 	}
+	if len(models) == 0 {
+		return nil, nil
+	}
+	if len(models) > 1 {
+		return nil, fmt.Errorf("dispatch/sqlite: multiple leader rows require repair")
+	}
+	m := &models[0]
 	if m.LeaderUntil != nil {
 		if _, parseErr := time.Parse(time.RFC3339Nano, *m.LeaderUntil); parseErr != nil {
 			return nil, fmt.Errorf("dispatch/sqlite: parse leader expiry: %w", parseErr)
