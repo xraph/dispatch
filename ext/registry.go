@@ -44,6 +44,11 @@ type jobDLQEntry struct {
 	hook JobDLQ
 }
 
+type jobCancelledEntry struct {
+	name string
+	hook JobCancelled
+}
+
 type workflowStartedEntry struct {
 	name string
 	hook WorkflowStarted
@@ -79,6 +84,11 @@ type shutdownEntry struct {
 	hook Shutdown
 }
 
+type operatorActionEntry struct {
+	name string
+	hook OperatorActionObserver
+}
+
 // Registry holds registered extensions and dispatches lifecycle events
 // to them. It type-caches extensions at registration time so emit calls
 // iterate only over extensions that implement the relevant hook.
@@ -93,6 +103,7 @@ type Registry struct {
 	jobFailed             []jobFailedEntry
 	jobRetrying           []jobRetryingEntry
 	jobDLQ                []jobDLQEntry
+	jobCancelled          []jobCancelledEntry
 	workflowStarted       []workflowStartedEntry
 	workflowStepCompleted []workflowStepCompletedEntry
 	workflowStepFailed    []workflowStepFailedEntry
@@ -100,6 +111,7 @@ type Registry struct {
 	workflowFailed        []workflowFailedEntry
 	cronFired             []cronFiredEntry
 	shutdown              []shutdownEntry
+	operatorAction        []operatorActionEntry
 }
 
 // NewRegistry creates an extension registry with the given logger.
@@ -131,6 +143,9 @@ func (r *Registry) Register(e Extension) {
 	if h, ok := e.(JobDLQ); ok {
 		r.jobDLQ = append(r.jobDLQ, jobDLQEntry{name, h})
 	}
+	if h, ok := e.(JobCancelled); ok {
+		r.jobCancelled = append(r.jobCancelled, jobCancelledEntry{name, h})
+	}
 	if h, ok := e.(WorkflowStarted); ok {
 		r.workflowStarted = append(r.workflowStarted, workflowStartedEntry{name, h})
 	}
@@ -151,6 +166,9 @@ func (r *Registry) Register(e Extension) {
 	}
 	if h, ok := e.(Shutdown); ok {
 		r.shutdown = append(r.shutdown, shutdownEntry{name, h})
+	}
+	if h, ok := e.(OperatorActionObserver); ok {
+		r.operatorAction = append(r.operatorAction, operatorActionEntry{name, h})
 	}
 }
 
@@ -211,6 +229,15 @@ func (r *Registry) EmitJobDLQ(ctx context.Context, j *job.Job, jobErr error) {
 	for _, e := range r.jobDLQ {
 		if err := e.hook.OnJobDLQ(ctx, j, jobErr); err != nil {
 			r.logHookError("OnJobDLQ", e.name, err)
+		}
+	}
+}
+
+// EmitJobCancelled notifies all extensions that implement JobCancelled.
+func (r *Registry) EmitJobCancelled(ctx context.Context, j *job.Job) {
+	for _, e := range r.jobCancelled {
+		if err := e.hook.OnJobCancelled(ctx, j); err != nil {
+			r.logHookError("OnJobCancelled", e.name, err)
 		}
 	}
 }
@@ -282,6 +309,28 @@ func (r *Registry) EmitShutdown(ctx context.Context) {
 	for _, e := range r.shutdown {
 		if err := e.hook.OnShutdown(ctx); err != nil {
 			r.logHookError("OnShutdown", e.name, err)
+		}
+	}
+}
+
+// ──────────────────────────────────────────────────
+// Operator action emitter
+// ──────────────────────────────────────────────────
+
+// EmitOperatorAction notifies all extensions that implement
+// OperatorActionObserver. An empty Actor is filled from ActorFrom(ctx)
+// and a zero At with the current time in UTC, so callers only set what
+// they know.
+func (r *Registry) EmitOperatorAction(ctx context.Context, a Action) {
+	if a.Actor == "" {
+		a.Actor = ActorFrom(ctx)
+	}
+	if a.At.IsZero() {
+		a.At = time.Now().UTC()
+	}
+	for _, e := range r.operatorAction {
+		if err := e.hook.OnOperatorAction(ctx, a); err != nil {
+			r.logHookError("OnOperatorAction", e.name, err)
 		}
 	}
 }

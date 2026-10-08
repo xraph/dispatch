@@ -25,6 +25,7 @@
 //   - [JobFailed] — job failed with no retries remaining
 //   - [JobRetrying] — job failed but will be retried
 //   - [JobDLQ] — job was moved to the dead letter queue
+//   - [JobCancelled]: job reached cancelled
 //
 // # Workflow Lifecycle Hooks
 //
@@ -38,6 +39,12 @@
 //
 //   - [CronFired] — a cron entry was triggered and a job was enqueued
 //   - [Shutdown] — the dispatcher is shutting down gracefully
+//
+// # Operator Actions
+//
+//   - [OperatorActionObserver]: an operator cancelled, retried, replayed,
+//     deleted, purged, toggled or triggered something through the engine.
+//     The [Action] carries the subject from [WithActor] as its Actor.
 //
 // The [Registry] fans out each event to all registered extensions that
 // implement the corresponding hook interface.

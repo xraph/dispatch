@@ -24,6 +24,7 @@ var (
 	_ ext.JobFailed             = (*Broker)(nil)
 	_ ext.JobRetrying           = (*Broker)(nil)
 	_ ext.JobDLQ                = (*Broker)(nil)
+	_ ext.JobCancelled          = (*Broker)(nil)
 	_ ext.WorkflowStarted       = (*Broker)(nil)
 	_ ext.WorkflowStepCompleted = (*Broker)(nil)
 	_ ext.WorkflowStepFailed    = (*Broker)(nil)
@@ -274,6 +275,24 @@ func (b *Broker) OnJobDLQ(_ context.Context, j *job.Job, jobErr error) error {
 			ScopeAppID: j.ScopeAppID,
 			ScopeOrgID: j.ScopeOrgID,
 			Error:      jobErr.Error(),
+		}),
+	})
+	return nil
+}
+
+// OnJobCancelled implements ext.JobCancelled. It goes to the same topics
+// as job.failed: the job's own topic, jobs, and the firehose.
+func (b *Broker) OnJobCancelled(_ context.Context, j *job.Job) error {
+	b.publish(&Event{
+		Type:      EventJobCancelled,
+		Timestamp: time.Now().UTC(),
+		Topic:     JobTopic(j.ID.String()),
+		Data: mustMarshal(JobEventData{
+			JobID:      j.ID.String(),
+			JobName:    j.Name,
+			Queue:      j.Queue,
+			ScopeAppID: j.ScopeAppID,
+			ScopeOrgID: j.ScopeOrgID,
 		}),
 	})
 	return nil

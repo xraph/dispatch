@@ -6,7 +6,8 @@ import log "github.com/xraph/go-utils/log"
 type Option func(*Extension)
 
 // WithActions restricts the extension to emit only the listed actions.
-// By default all 12 actions are enabled. Unknown actions are silently ignored.
+// By default every action in AllActions is enabled. Unknown actions are
+// silently ignored.
 //
 // Example:
 //

@@ -9,8 +9,8 @@ type Option func(*Extension)
 type PayloadFunc func(args any) (any, error)
 
 // WithEvents restricts the extension to emit only the listed event types.
-// By default all 12 event types are enabled. Unknown types are silently
-// ignored.
+// By default every event type in AllDefinitions is enabled. Unknown types
+// are silently ignored.
 func WithEvents(events ...string) Option {
 	return func(h *Extension) {
 		h.enabled = make(map[string]bool, len(events))

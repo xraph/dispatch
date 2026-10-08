@@ -18,6 +18,7 @@ const (
 	EventJobFailed    EventType = "job.failed"
 	EventJobRetrying  EventType = "job.retrying"
 	EventJobDLQ       EventType = "job.dlq"
+	EventJobCancelled EventType = "job.cancelled"
 
 	// Workflow events.
 	EventWorkflowStarted       EventType = "workflow.started"

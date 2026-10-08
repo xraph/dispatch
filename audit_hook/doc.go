@@ -6,6 +6,11 @@
 // levels (info for normal operations, warning for retries, critical for
 // terminal failures) and rich metadata (job name, queue, elapsed time, errors).
 //
+// Operator actions taken through the engine (cancel, retry, DLQ replay,
+// delete and purge, cron enable, disable, delete and trigger, workflow
+// replay) are recorded under [CategoryOperator], with actions such as
+// [ActionOperatorJobCancelled]. The acting subject is in Metadata["actor"].
+//
 // # Usage with Chronicle
 //
 //	audithook.New(audithook.RecorderFunc(func(ctx context.Context, evt *audithook.AuditEvent) error {
