@@ -354,3 +354,56 @@ After the review fixes, make f, make l (zero issues), go test ./..., the
 engine/runtime/memory race suites and the PostgreSQL durable integration race
 suite pass. The PostgreSQL suite completed in 27.001 seconds. This closes the
 timeout implementation review; the qualification limits above still apply.
+
+## Heartbeat storage contract
+
+Heartbeats update the activity task's progress and progress deadline without
+appending a workflow history event or changing its execution revision. Each
+accepted request has an immutable receipt in the execution's existing receipt
+namespace. Identical retries return that receipt after later progress, reclaim or
+closure; changed content is rejected. Receipts still require retention for the
+run's lifetime. This avoids history growth per heartbeat, but does not yet bound
+receipt storage for a long-running activity.
+
+The attempt-start transition enables heartbeat recording for its execution grant.
+A zero heartbeat timeout permits progress recording without a progress deadline.
+A positive timeout starts at the transition's store timestamp. The saved hard
+limit is the earlier attempt/overall deadline from that same transition. Each
+heartbeat can move the progress deadline only up to that limit and renews its
+worker lease atomically, still capped by the effective deadline. Lease renewal
+alone cannot move the progress deadline.
+
+Heartbeat requests carry a positive consecutive sequence within their enabled
+grant, copied progress bytes (at most 1 MiB), a request ID and the fenced task
+token. The store validates ownership, expiry and ordering after acquiring locks.
+A timeout grant cannot heartbeat. Retry release clears heartbeat timing and
+sequence state while retaining the latest progress for the next attempt. A new
+claim must be enabled by its own attempt-start transition before it can heartbeat.
+Heartbeat mutations increment the task observation version.
+
+The store API is trusted coordinator infrastructure. The following runtime layer
+must bind heartbeat calls to the activity context, preserve unknown-outcome
+requests, provide progress to replacement attempts and record the final heartbeat
+checkpoint when classifying an activity result or heartbeat timeout. Store tests
+alone do not establish those runtime behaviors.
+
+2026-10-08: the memory and PostgreSQL implementations pass shared checks for
+progress copying, consecutive and concurrent sequence handling, request conflict
+rejection, receipt replay after reclaim and closure, unchanged workflow history,
+task observation invalidation and heartbeat configuration immutability. Retry
+retains progress and requires the replacement grant to enable heartbeat recording.
+Tests also cover hard deadline caps, rejection after expiry and timeout grants,
+clock reversal and sequence exhaustion.
+
+PostgreSQL tests preserve progress and receipts across pool replacement and schema
+migration retry. A lost acknowledgement returns the saved receipt without applying
+progress twice. A heartbeat waiting on a task row lock past its deadline is
+rejected without partial state. The full durable PostgreSQL race suite passes in
+29.647 seconds. An earlier concurrent check run timed out in both existing activity
+retry recovery cases, whose store calls have a 50 ms budget; those cases pass
+unchanged in isolation. This timing sensitivity remains visible rather than being
+treated as load qualification.
+
+The heartbeat store changes pass make f, make l (zero issues), go test ./...
+and engine/runtime/memory race tests. Runtime heartbeat APIs and timeout-history
+validation remain required before activity heartbeat behavior is complete.

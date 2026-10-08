@@ -48,6 +48,9 @@ func validateTaskControl(r CommitRequest) error {
 	if u == nil {
 		return nil
 	}
+	if u.Heartbeat != nil && (u.Action != TaskKeep || u.Heartbeat.Timeout < 0 || u.DeadlineAfter == nil || r.Token.LeaseKind != "") {
+		return fmt.Errorf("%w: heartbeat activation needs a retained execution grant and explicit deadline", ErrInvalid)
+	}
 	if !validDeadlineLimit(u.DeadlineLimit) || (u.LeaseDuration != 0 && (u.Action != TaskKeep || ValidateLease(u.LeaseDuration) != nil)) || (r.Token.LeaseKind == LeaseTimeout && u.Action == TaskKeep) {
 		return fmt.Errorf("%w: invalid deadline limit or retained grant renewal", ErrInvalid)
 	}
@@ -161,6 +164,10 @@ func UpdateTask(task Task, update *TaskUpdate, now time.Time) (Task, error) {
 		task.Done = true
 		return task, nil
 	}
+	if update.Action == TaskKeep && task.HeartbeatEpoch == task.Epoch && task.HeartbeatEpoch > 0 &&
+		(update.Heartbeat != nil || update.DeadlineAfter != nil || update.DeadlineLimit != nil || update.Progress != nil) {
+		return Task{}, fmt.Errorf("%w: heartbeat grant configuration is immutable; use RecordHeartbeat for progress", ErrTaskConflict)
+	}
 	if update.Action == TaskRetry {
 		available := Timestamp(update.RetryAt)
 		if update.RetryAt.IsZero() {
@@ -171,6 +178,8 @@ func UpdateTask(task Task, update *TaskUpdate, now time.Time) (Task, error) {
 			}
 		}
 		task.AvailableAt, task.Owner, task.LeaseUntil, task.LeaseKind = available, "", time.Time{}, ""
+		task.HeartbeatAt, task.HeartbeatLimit = time.Time{}, time.Time{}
+		task.HeartbeatTimeout, task.HeartbeatSequence, task.HeartbeatEpoch = 0, 0, 0
 	}
 	if update.DeadlineAfter != nil {
 		task.DeadlineAt = time.Time{}
@@ -191,6 +200,18 @@ func UpdateTask(task Task, update *TaskUpdate, now time.Time) (Task, error) {
 		return Task{}, err
 	}
 	task.DeadlineAt = deadline
+	if update.Heartbeat != nil {
+		if task.Kind != TaskActivity || task.LeaseKind != "" {
+			return Task{}, fmt.Errorf("%w: heartbeat activation requires an activity execution grant", ErrInvalid)
+		}
+		task.HeartbeatTimeout, task.HeartbeatAt, task.HeartbeatEpoch = update.Heartbeat.Timeout, now, task.Epoch
+		task.HeartbeatSequence, task.HeartbeatLimit = 0, task.DeadlineAt
+		deadline, err = heartbeatDeadline(task, now)
+		if err != nil {
+			return Task{}, err
+		}
+		task.DeadlineAt = deadline
+	}
 	if update.LeaseDuration > 0 {
 		if until := Timestamp(now.Add(update.LeaseDuration)); until.After(task.LeaseUntil) {
 			task.LeaseUntil = until

@@ -94,6 +94,12 @@ type Task struct {
 	Progress   []byte        `json:"progress,omitempty"`
 	Done       bool          `json:"done"`
 	LeaseKind  TaskLeaseKind `json:"lease_kind,omitempty"`
+	// HeartbeatAt starts at attempt activation and advances on accepted progress.
+	HeartbeatAt       time.Time     `json:"heartbeat_at,omitempty"`
+	HeartbeatTimeout  time.Duration `json:"heartbeat_timeout,omitempty"`
+	HeartbeatLimit    time.Time     `json:"heartbeat_limit,omitempty"`
+	HeartbeatSequence int64         `json:"heartbeat_sequence,omitempty"`
+	HeartbeatEpoch    int64         `json:"heartbeat_epoch,omitempty"`
 }
 
 // TaskLeaseKind distinguishes execution grants from timeout processing grants.
@@ -196,6 +202,8 @@ type TaskUpdate struct {
 	DeadlineLimit *time.Time `json:"deadline_limit,omitempty"`
 	// LeaseDuration renews a retained execution grant in the same transaction.
 	LeaseDuration time.Duration `json:"lease_duration,omitempty"`
+	// Heartbeat enables progress recording for this retained activity grant.
+	Heartbeat *HeartbeatConfig `json:"heartbeat,omitempty"`
 }
 
 // TaskCondition protects an observation of an unfinished task in the same run.

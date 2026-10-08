@@ -72,18 +72,22 @@ func (s *Store) ReadHistory(ctx context.Context, key durable.Key, after int64, l
 }
 
 const taskColumns = `t.namespace, t.workflow_id, t.run_id, t.task_id, t.kind, t.queue,
-    t.payload, t.available_at, t.owner, t.epoch, t.attempt, t.lease_until, t.version, t.deadline_at, t.progress, t.done, t.lease_kind`
+    t.payload, t.available_at, t.owner, t.epoch, t.attempt, t.lease_until, t.version, t.deadline_at, t.progress, t.done, t.lease_kind,
+    t.heartbeat_timeout_ns, t.heartbeat_limit, t.heartbeat_at, t.heartbeat_sequence, t.heartbeat_epoch`
 
 func scanTask(row driver.Row) (*durable.Task, error) {
 	var task durable.Task
-	var until, deadline sql.NullTime
+	var until, deadline, heartbeatLimit, heartbeatAt sql.NullTime
+	var heartbeatTimeout int64
 	err := row.Scan(&task.Namespace, &task.WorkflowID, &task.RunID, &task.ID, &task.Kind,
 		&task.Queue, &task.Payload, &task.AvailableAt, &task.Owner, &task.Epoch, &task.Attempt, &until,
-		&task.Version, &deadline, &task.Progress, &task.Done, &task.LeaseKind)
+		&task.Version, &deadline, &task.Progress, &task.Done, &task.LeaseKind,
+		&heartbeatTimeout, &heartbeatLimit, &heartbeatAt, &task.HeartbeatSequence, &task.HeartbeatEpoch)
 	if err != nil {
 		return nil, err
 	}
 	task.LeaseUntil, task.DeadlineAt = until.Time, deadline.Time
+	task.HeartbeatTimeout, task.HeartbeatLimit, task.HeartbeatAt = time.Duration(heartbeatTimeout), heartbeatLimit.Time, heartbeatAt.Time
 	return &task, nil
 }
 
