@@ -14,7 +14,9 @@ import (
 	"github.com/xraph/dispatch/job"
 )
 
-func (a *API) listDLQ(ctx forge.Context, req *ListDLQRequest) ([]*dlq.Entry, error) {
+// listDLQ answers a page of entries, oldest failure first, as a bare JSON
+// array.
+func (a *API) listDLQ(ctx forge.Context, req *ListDLQRequest) (*ListDLQResponse, error) {
 	entries, err := a.eng.DLQService().DLQStore().ListDLQ(ctx.Context(), dlq.ListOpts{
 		Limit:  defaultLimit(req.Limit),
 		Offset: req.Offset,
@@ -24,7 +26,7 @@ func (a *API) listDLQ(ctx forge.Context, req *ListDLQRequest) ([]*dlq.Entry, err
 		return nil, fmt.Errorf("list dlq: %w", err)
 	}
 
-	return entries, ctx.JSON(http.StatusOK, entries)
+	return &ListDLQResponse{Entries: nonNil(entries)}, nil
 }
 
 func (a *API) getDLQ(ctx forge.Context, _ *GetDLQRequest) (*dlq.Entry, error) {

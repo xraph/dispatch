@@ -12,7 +12,8 @@ import (
 	"github.com/xraph/dispatch/job"
 )
 
-func (a *API) listCrons(ctx forge.Context, req *ListCronsRequest) ([]*cron.Entry, error) {
+// listCrons answers a page of entries, oldest first, as a bare JSON array.
+func (a *API) listCrons(ctx forge.Context, req *ListCronsRequest) (*ListCronsResponse, error) {
 	cs, ok := a.eng.Dispatcher().Store().(cron.Store)
 	if !ok {
 		return nil, fmt.Errorf("store does not implement cron.Store")
@@ -25,17 +26,10 @@ func (a *API) listCrons(ctx forge.Context, req *ListCronsRequest) ([]*cron.Entry
 
 	// Apply basic pagination.
 	limit := defaultLimit(req.Limit)
-	offset := req.Offset
-	if offset > len(entries) {
-		offset = len(entries)
-	}
-	end := offset + limit
-	if end > len(entries) {
-		end = len(entries)
-	}
-	page := entries[offset:end]
+	offset := min(max(req.Offset, 0), len(entries))
+	end := min(offset+limit, len(entries))
 
-	return page, ctx.JSON(http.StatusOK, page)
+	return &ListCronsResponse{Entries: nonNil(entries[offset:end])}, nil
 }
 
 func (a *API) getCron(ctx forge.Context, _ *GetCronRequest) (*cron.Entry, error) {

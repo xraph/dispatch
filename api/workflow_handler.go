@@ -16,7 +16,9 @@ func (a *API) listWorkflowNames(ctx forge.Context) error {
 	return ctx.JSON(http.StatusOK, ListWorkflowNamesResponse{Names: names})
 }
 
-func (a *API) listWorkflowRuns(ctx forge.Context, req *ListWorkflowRunsRequest) ([]*workflow.Run, error) {
+// listWorkflowRuns answers a page of runs, oldest first, as a bare JSON
+// array.
+func (a *API) listWorkflowRuns(ctx forge.Context, req *ListWorkflowRunsRequest) (*ListWorkflowRunsResponse, error) {
 	var state workflow.RunState
 	if req.State != "" {
 		state = workflow.RunState(req.State)
@@ -36,7 +38,7 @@ func (a *API) listWorkflowRuns(ctx forge.Context, req *ListWorkflowRunsRequest) 
 		return nil, fmt.Errorf("list workflow runs: %w", err)
 	}
 
-	return runs, ctx.JSON(http.StatusOK, runs)
+	return &ListWorkflowRunsResponse{Runs: nonNil(runs)}, nil
 }
 
 func (a *API) getWorkflowRun(ctx forge.Context, _ *GetWorkflowRunRequest) (*workflow.Run, error) {

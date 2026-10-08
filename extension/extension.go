@@ -276,7 +276,9 @@ func (e *Extension) init(fapp forge.App) error {
 		if basePath == "" {
 			basePath = "/dispatch"
 		}
-		e.apiHandler.RegisterRoutes(fapp.Router().Group(basePath))
+		if routeErr := e.apiHandler.RegisterRoutes(fapp.Router().Group(basePath)); routeErr != nil {
+			return fmt.Errorf("dispatch: register routes: %w", routeErr)
+		}
 	}
 
 	// Create DWP server if stream broker is available.
@@ -450,10 +452,13 @@ func (e *Extension) Handler() http.Handler {
 }
 
 // RegisterRoutes registers all dispatch API routes into a Forge router.
-func (e *Extension) RegisterRoutes(router forge.Router) {
-	if e.apiHandler != nil {
-		e.apiHandler.RegisterRoutes(router)
+// It returns every route forge refused; see api.API.RegisterRoutes.
+func (e *Extension) RegisterRoutes(router forge.Router) error {
+	if e.apiHandler == nil {
+		return nil
 	}
+
+	return e.apiHandler.RegisterRoutes(router)
 }
 
 // --- Config Loading (mirrors grove/shield extension pattern) ---

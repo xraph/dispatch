@@ -4,19 +4,29 @@ package api
 import (
 	"time"
 
+	"github.com/xraph/dispatch/cron"
+	"github.com/xraph/dispatch/dlq"
 	"github.com/xraph/dispatch/job"
+	"github.com/xraph/dispatch/workflow"
 )
 
 // ──────────────────────────────────────────────────
 // Job request/response DTOs
 // ──────────────────────────────────────────────────
 
-// ListJobsRequest is the request for listing jobs by state.
+// ListJobsRequest is the request for listing jobs. Every field is an
+// optional query parameter.
 type ListJobsRequest struct {
-	State  string `query:"state" description:"Filter by job state (pending, running, completed, failed, retrying, cancelled)"`
-	Queue  string `query:"queue" description:"Filter by queue name"`
-	Limit  int    `query:"limit" description:"Maximum number of results (default: 50)"`
-	Offset int    `query:"offset" description:"Number of results to skip"`
+	State  string `query:"state" optional:"true" description:"Filter by job state (pending, running, completed, failed, retrying, cancelled; default: every state)"`
+	Queue  string `query:"queue" optional:"true" description:"Filter by queue name"`
+	Limit  int    `query:"limit" optional:"true" description:"Maximum number of results (default: 50, max: 1000)"`
+	Offset int    `query:"offset" optional:"true" description:"Number of results to skip"`
+}
+
+// ListJobsResponse is a page of jobs, oldest first. The body:"" tag has
+// the router write Jobs as the whole body, a bare JSON array.
+type ListJobsResponse struct {
+	Jobs []*job.Job `body:""`
 }
 
 // GetJobRequest is the request for fetching a single job.
@@ -48,11 +58,18 @@ type JobCountsResponse struct {
 // Workflow request/response DTOs
 // ──────────────────────────────────────────────────
 
-// ListWorkflowRunsRequest is the request for listing workflow runs.
+// ListWorkflowRunsRequest is the request for listing workflow runs. Every
+// field is an optional query parameter.
 type ListWorkflowRunsRequest struct {
-	State  string `query:"state" description:"Filter by run state (running, completed, failed)"`
-	Limit  int    `query:"limit" description:"Maximum number of results (default: 50)"`
-	Offset int    `query:"offset" description:"Number of results to skip"`
+	State  string `query:"state" optional:"true" description:"Filter by run state (running, completed, failed; default: every state)"`
+	Limit  int    `query:"limit" optional:"true" description:"Maximum number of results (default: 50, max: 1000)"`
+	Offset int    `query:"offset" optional:"true" description:"Number of results to skip"`
+}
+
+// ListWorkflowRunsResponse is a page of runs, oldest first, written as a
+// bare JSON array.
+type ListWorkflowRunsResponse struct {
+	Runs []*workflow.Run `body:""`
 }
 
 // GetWorkflowRunRequest is the request for fetching a single workflow run.
@@ -81,11 +98,18 @@ type ListWorkflowNamesResponse struct {
 // DLQ request/response DTOs
 // ──────────────────────────────────────────────────
 
-// ListDLQRequest is the request for listing DLQ entries.
+// ListDLQRequest is the request for listing DLQ entries. Every field is
+// an optional query parameter.
 type ListDLQRequest struct {
-	Queue  string `query:"queue" description:"Filter by queue name"`
-	Limit  int    `query:"limit" description:"Maximum number of results (default: 50)"`
-	Offset int    `query:"offset" description:"Number of results to skip"`
+	Queue  string `query:"queue" optional:"true" description:"Filter by queue name"`
+	Limit  int    `query:"limit" optional:"true" description:"Maximum number of results (default: 50, max: 1000)"`
+	Offset int    `query:"offset" optional:"true" description:"Number of results to skip"`
+}
+
+// ListDLQResponse is a page of DLQ entries, oldest failure first, written
+// as a bare JSON array.
+type ListDLQResponse struct {
+	Entries []*dlq.Entry `body:""`
 }
 
 // GetDLQRequest is the request for fetching a single DLQ entry.
@@ -146,10 +170,17 @@ type DLQCountResponse struct {
 // Cron request/response DTOs
 // ──────────────────────────────────────────────────
 
-// ListCronsRequest is the request for listing cron entries.
+// ListCronsRequest is the request for listing cron entries. Both fields
+// are optional query parameters.
 type ListCronsRequest struct {
-	Limit  int `query:"limit" description:"Maximum number of results (default: 50)"`
-	Offset int `query:"offset" description:"Number of results to skip"`
+	Limit  int `query:"limit" optional:"true" description:"Maximum number of results (default: 50, max: 1000)"`
+	Offset int `query:"offset" optional:"true" description:"Number of results to skip"`
+}
+
+// ListCronsResponse is a page of cron entries, oldest first, written as a
+// bare JSON array.
+type ListCronsResponse struct {
+	Entries []*cron.Entry `body:""`
 }
 
 // GetCronRequest is the request for fetching a single cron entry.
@@ -227,6 +258,15 @@ func jobStateFromString(s string) job.State {
 	default:
 		return ""
 	}
+}
+
+// nonNil returns s, or an empty slice when s is nil, so a list route
+// answers [] rather than null.
+func nonNil[T any](s []T) []T {
+	if s == nil {
+		return []T{}
+	}
+	return s
 }
 
 func defaultLimit(limit int) int {

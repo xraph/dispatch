@@ -2,9 +2,11 @@
 package api
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"net/http"
+	"sort"
 
 	"github.com/xraph/forge"
 
@@ -15,24 +17,75 @@ import (
 	"github.com/xraph/dispatch/workflow"
 )
 
-func (a *API) listJobs(ctx forge.Context, req *ListJobsRequest) ([]*job.Job, error) {
-	state := jobStateFromString(req.State)
+// allJobStates is every job state, for a list with no state filter.
+var allJobStates = []job.State{
+	job.StatePending,
+	job.StateRunning,
+	job.StateCompleted,
+	job.StateFailed,
+	job.StateRetrying,
+	job.StateCancelled,
+}
+
+// listJobs answers a page of jobs, oldest first, as a bare JSON array. With
+// no state it lists every state; an unknown state is a 400.
+func (a *API) listJobs(ctx forge.Context, req *ListJobsRequest) (*ListJobsResponse, error) {
+	states := allJobStates
+	if req.State != "" {
+		state := jobStateFromString(req.State)
+		if state == "" {
+			return nil, forge.BadRequest(fmt.Sprintf("unknown job state %q", req.State))
+		}
+		states = []job.State{state}
+	}
 
 	js, ok := a.eng.Dispatcher().Store().(job.Store)
 	if !ok {
 		return nil, fmt.Errorf("store does not implement job.Store")
 	}
 
-	jobs, err := js.ListJobsByState(ctx.Context(), state, job.ListOpts{
-		Limit:  defaultLimit(req.Limit),
-		Offset: req.Offset,
-		Queue:  req.Queue,
-	})
+	jobs, err := listJobsInStates(ctx.Context(), js, states, req.Queue, defaultLimit(req.Limit), max(req.Offset, 0))
 	if err != nil {
 		return nil, fmt.Errorf("list jobs: %w", err)
 	}
 
-	return jobs, ctx.JSON(http.StatusOK, jobs)
+	return &ListJobsResponse{Jobs: nonNil(jobs)}, nil
+}
+
+// listJobsInStates pages through the jobs in states, oldest first. The
+// store lists one state at a time, so for several it takes the first
+// offset+limit of each, merges them in the store's order (created_at, then
+// ID), and cuts the page from the merge.
+func listJobsInStates(ctx context.Context, js job.Store, states []job.State, queue string, limit, offset int) ([]*job.Job, error) {
+	if len(states) == 1 {
+		return js.ListJobsByState(ctx, states[0], job.ListOpts{Limit: limit, Offset: offset, Queue: queue})
+	}
+
+	var merged []*job.Job
+	for _, state := range states {
+		part, err := js.ListJobsByState(ctx, state, job.ListOpts{Limit: offset + limit, Queue: queue})
+		if err != nil {
+			return nil, err
+		}
+		merged = append(merged, part...)
+	}
+
+	sort.Slice(merged, func(i, k int) bool {
+		if !merged[i].CreatedAt.Equal(merged[k].CreatedAt) {
+			return merged[i].CreatedAt.Before(merged[k].CreatedAt)
+		}
+		return merged[i].ID.String() < merged[k].ID.String()
+	})
+
+	if offset >= len(merged) {
+		return nil, nil
+	}
+	merged = merged[offset:]
+	if len(merged) > limit {
+		merged = merged[:limit]
+	}
+
+	return merged, nil
 }
 
 func (a *API) getJob(ctx forge.Context, _ *GetJobRequest) (*job.Job, error) {

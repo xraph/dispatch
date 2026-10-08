@@ -13,16 +13,21 @@ import (
     "github.com/xraph/dispatch/engine"
 )
 
-// With Forge router:
+// With Forge router. RegisterRoutes returns an error naming every route
+// forge refused, so check it at startup:
 a := api.New(eng, forgeRouter)
-a.RegisterRoutes(forgeRouter)
+if err := a.RegisterRoutes(forgeRouter); err != nil {
+    return err
+}
 
-// Standalone (net/http):
-mux := http.NewServeMux()
-api.RegisterRoutes(mux, eng)  // convenience wrapper
+// Standalone (net/http). Handler registers the routes on a fresh Forge
+// router the first time it is called, and panics if forge refuses one:
+http.Handle("/", api.New(eng, nil).Handler())
 ```
 
-Using the Forge extension auto-registers routes unless `WithDisableRoutes(true)` is set.
+Using the Forge extension auto-registers routes unless `WithDisableRoutes(true)` is set. `Register` fails if forge refuses a route.
+
+The four list routes (`GET /v1/jobs`, `/v1/workflows/runs`, `/v1/dlq`, `/v1/crons`) answer a bare JSON array, `[]` when nothing matches. Every query parameter on them is optional, and they list oldest first.
 
 ---
 
@@ -38,7 +43,7 @@ Query parameters:
 
 | Parameter | Type | Description |
 |-----------|------|-------------|
-| `state` | string | Filter: `pending`, `running`, `completed`, `failed`, `retrying`, `cancelled` |
+| `state` | string | Filter: `pending`, `running`, `completed`, `failed`, `retrying`, `cancelled` (default: every state; anything else is a `400`) |
 | `queue` | string | Filter by queue name |
 | `limit` | int | Max results (default: 50, max: 1000) |
 | `offset` | int | Pagination offset |
@@ -146,8 +151,8 @@ Query parameters:
 
 | Parameter | Type | Description |
 |-----------|------|-------------|
-| `state` | string | Filter: `running`, `completed`, `failed` |
-| `limit` | int | Max results (default: 50) |
+| `state` | string | Filter: `running`, `completed`, `failed` (default: every state) |
+| `limit` | int | Max results (default: 50, max: 1000) |
 | `offset` | int | Pagination offset |
 
 **Response `200 OK`:**
@@ -229,7 +234,7 @@ Query parameters:
 | Parameter | Type | Description |
 |-----------|------|-------------|
 | `queue` | string | Filter by originating queue name |
-| `limit` | int | Max results (default: 50) |
+| `limit` | int | Max results (default: 50, max: 1000) |
 | `offset` | int | Pagination offset |
 
 **Response `200 OK`:**
@@ -355,6 +360,13 @@ GET /v1/dlq/count
 ```http
 GET /v1/crons?limit=50&offset=0
 ```
+
+Query parameters:
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `limit` | int | Max results (default: 50, max: 1000) |
+| `offset` | int | Pagination offset |
 
 **Response `200 OK`:**
 ```json
