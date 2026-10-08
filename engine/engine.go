@@ -886,9 +886,15 @@ func RegisterCron[T any](ctx context.Context, eng *Engine, def *cron.Definition[
 		return fmt.Errorf("marshal cron payload: %w", err)
 	}
 
-	// Compute the initial NextRunAt.
+	// Compute the initial NextRunAt. A schedule the parser accepts can
+	// still never fire (30 February), and Next says so with the zero
+	// time. Stored, that zero is due on every tick, so refuse it here.
 	now := time.Now().UTC()
 	next := sched.Next(now)
+	if next.IsZero() {
+		return fmt.Errorf("%w: cron %q schedule %q never fires",
+			dispatch.ErrInvalidState, def.Name, def.Schedule)
+	}
 
 	entry := &cron.Entry{
 		Entity:    dispatch.NewEntity(),
