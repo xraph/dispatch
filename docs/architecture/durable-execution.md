@@ -1169,3 +1169,73 @@ cooperative completion, and these trusted Go APIs require caller authorization
 before remote exposure. Arbitrary Go effects, blocking and deferred workflow cleanup
 remain prohibited. Worker and connection-pool replacement tests do not qualify
 process kills, database failover, fleet scale or disaster recovery.
+
+## Durable child workflow contract
+
+A child is a separate execution in its parent's namespace, with its own history,
+build pin, queue and run identity. Child creation must atomically commit the parent
+command, a child-started event, the immutable parent/child relationship, the child's
+initial history/task/receipt and the parent decision receipt. Existing executions
+cannot be adopted as children. A conflicting workflow ID rejects the whole decision.
+Exact retries recover the original children, including after either execution closes.
+
+A child relationship records the parent run and command ID, the full child start
+request, the parent's decision queue and one explicit parent-close policy: terminate,
+request_cancel or abandon. The default runtime policy is terminate. The child run ID
+is derived deterministically from the parent run and command ID; an optional child
+workflow ID lets you choose business identity without allowing an existing run to be
+silently reused. Child inputs are limited to 1 MiB. Store identifiers remain bounded
+at 512 bytes; the Go command API keeps its existing 200-byte limits.
+
+You must await the child's started acknowledgment before allowing an abandoned child
+to outlive its parent. A child command first issued in a terminal decision does not
+create an execution. Waiting for a child result yields until a recorded child terminal
+outcome arrives. Successful output, application failure, cancellation, termination
+and timeout remain distinct outcomes. Selectors can wait on child results. Queries
+replay started acknowledgments and results without creating or controlling children.
+
+Child terminal results and parent-close actions use durable delivery records. Record
+them in the same transaction as source closure; claim them independently of source
+execution state. A delivery lease has a monotonically increasing epoch, store-clock
+expiry, retry receipts and namespace/build routing. Applying a delivery changes only
+its target execution and the delivery record, so a closed child can notify an open
+parent without requiring recursive execution locks. A closed parent is recorded as
+an ignored result delivery, not reopened. No accepted lifecycle message is lost when
+a worker crashes between source commit and target delivery.
+
+Parent closure enqueues the recorded close policy for each still-open child. Abandon
+leaves the child running. Request_cancel accepts the child's normal cleanup request.
+Terminate records a terminal event, fences pending work and enqueues that child's own
+result and descendant close actions. Cascade delivery is durable and bounded per
+transaction; it must not recursively lock or execute a workflow tree. Whole-workflow
+cancellation fencing requests cancellation of existing children before cleanup can
+create new children. Cleanup may wait for their actual terminal results. A separate
+CancelChild command acknowledges durable acceptance at the child and preserves any
+winning completion; it does not claim physical interruption.
+
+Relationship reads expose parent identity, child identity, build pins, queues, close
+policy and current child state. History exposes creation, cancellation acknowledgments
+and outcomes. Operator pages must eventually use those contracts with scoped access
+and visible delivery state; the existing Operations and Forge Dashboard requirement
+remains open until backend transport and React flows are implemented and verified.
+
+Qualification requires memory/PostgreSQL conformance for atomic multi-child creation,
+exact and conflicting retries, same child identity races, namespace/build isolation,
+source-grant expiry while waiting for child identity locks, receipt/link insertion
+rollback, migration retry and protected downgrade. Delivery qualification must include
+expired/reclaimed workers, source/target closure races, lost responses, queue and build
+routing, result-versus-cancel races, cascading parent policies and pool replacement.
+Runtime qualification must cover deterministic IDs, changed replay, early parent close,
+started acknowledgment, failures and every terminal state, cancellation during normal
+execution and cleanup, selectors, read-only queries, and actual replacement-worker
+recovery. Store creation alone does not qualify the child runtime or lifecycle delivery.
+
+Child creation and relationship storage are implemented in memory and PostgreSQL.
+Shared tests cover batch atomicity, existing-identity rejection, original receipts,
+parent and reverse lookup, pagination, namespace/build isolation, source grant and
+queue checks, input copies and concurrent creators. PostgreSQL tests cover pool/run
+replacement, relationship and final receipt rollback, migration retry/protected
+downgrade, source expiry after identity-lock waits, and receipt recovery while child
+identity locks are held. Lifecycle deliveries, parent-close actions and Go child
+futures remain the next required tasks; this storage layer alone is not a usable
+child workflow runtime.

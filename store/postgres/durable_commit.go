@@ -75,43 +75,28 @@ func (s *Store) StartExecution(ctx context.Context, r durable.StartRequest) (dur
 		return durable.Receipt{}, err
 	}
 	defer s.rollbackExecution(tx)
+	if lockErr := lockSignalWorkflow(ctx, tx, r.Namespace, r.WorkflowID); lockErr != nil {
+		return durable.Receipt{}, lockErr
+	}
 	now, err := executionTime(ctx, tx)
 	if err != nil {
 		return durable.Receipt{}, err
 	}
-	result, err := tx.Exec(ctx, `INSERT INTO dispatch_executions (`+executionColumns+`)
-        VALUES ($1,$2,$3,$4,$5,'running',1,1,$6,$7,$8,$8) ON CONFLICT DO NOTHING`,
-		r.Namespace, r.WorkflowID, r.RunID, r.WorkflowType, r.BuildID, executionBytes(r.Input), []byte{}, now)
-	if err != nil {
-		return durable.Receipt{}, fmt.Errorf(errPrefix+"start execution: %w", err)
-	}
-	count, err := result.RowsAffected()
+	created, err := insertStartedExecution(ctx, tx, r, digest, now)
 	if err != nil {
 		return durable.Receipt{}, err
 	}
-	if count == 0 {
+	if !created {
 		receipt, found, readErr := readExecutionReceipt(ctx, tx, r.Key, r.RequestID, digest)
 		if readErr != nil || found {
 			return receipt, readErr
 		}
 		return durable.Receipt{}, durable.ErrExists
 	}
-	if eventErr := insertExecutionEvent(ctx, tx, r.Key, durable.Event{
-		EventInput: durable.EventInput{Type: "execution.started", Payload: r.Input}, Sequence: 1, Time: now,
-	}); eventErr != nil {
-		return durable.Receipt{}, eventErr
-	}
-	if taskErr := insertExecutionTask(ctx, tx, r.Key, durable.TaskSpec{ID: "workflow:1", Kind: durable.TaskWorkflow, Queue: r.Queue}, now); taskErr != nil {
-		return durable.Receipt{}, taskErr
-	}
-	receipt := durable.Receipt{Revision: 1, FirstSequence: 1, LastSequence: 1}
-	if receiptErr := saveExecutionReceipt(ctx, tx, r.Key, r.RequestID, digest, "", receipt); receiptErr != nil {
-		return durable.Receipt{}, receiptErr
-	}
 	if err = tx.Commit(); err != nil {
 		return durable.Receipt{}, fmt.Errorf(errPrefix+"commit execution start: %w", err)
 	}
-	return receipt, nil
+	return durable.Receipt{Revision: 1, FirstSequence: 1, LastSequence: 1}, nil
 }
 
 // CommitTransition serializes a run's mutations and fences task completion.
@@ -128,6 +113,17 @@ func (s *Store) CommitTransition(ctx context.Context, r durable.CommitRequest) (
 		return durable.Receipt{}, err
 	}
 	defer s.rollbackExecution(tx)
+	// A committed child decision is independent of later ownership of its child
+	// identities. Recover it before waiting on those identities again.
+	if len(r.Children) != 0 {
+		accepted, exists, receiptErr := readExecutionReceipt(ctx, tx, r.Key, r.RequestID, digest)
+		if receiptErr != nil || exists {
+			return accepted, receiptErr
+		}
+	}
+	if lockErr := lockChildIdentities(ctx, tx, r.Children); lockErr != nil {
+		return durable.Receipt{}, lockErr
+	}
 	current, err := scanExecution(tx.QueryRow(ctx, `SELECT `+executionColumns+`
         FROM dispatch_executions WHERE namespace=$1 AND workflow_id=$2 AND run_id=$3 FOR UPDATE`,
 		r.Namespace, r.WorkflowID, r.RunID))
@@ -170,6 +166,9 @@ func (s *Store) CommitTransition(ctx context.Context, r durable.CommitRequest) (
 	if err != nil {
 		return durable.Receipt{}, err
 	}
+	if sourceErr := durable.ValidateChildSource(*task, r.Children); sourceErr != nil {
+		return durable.Receipt{}, sourceErr
+	}
 	next, receipt, err := durable.Advance(current, *task, r, now)
 	if err != nil {
 		return durable.Receipt{}, err
@@ -184,7 +183,15 @@ func (s *Store) CommitTransition(ctx context.Context, r durable.CommitRequest) (
 	if err != nil {
 		return durable.Receipt{}, err
 	}
-	for i, input := range r.Events {
+	if childErr := insertChildExecutions(ctx, tx, r.Key, r.Children, now); childErr != nil {
+		return durable.Receipt{}, childErr
+	}
+	childEvents, eventErr := durable.ChildStartEvents(r.Children)
+	if eventErr != nil {
+		return durable.Receipt{}, eventErr
+	}
+	events := append(append([]durable.EventInput(nil), r.Events...), childEvents...)
+	for i, input := range events {
 		if eventErr := insertExecutionEvent(ctx, tx, r.Key, durable.Event{
 			EventInput: input, Sequence: receipt.FirstSequence + int64(i), Time: now,
 		}); eventErr != nil {

@@ -104,6 +104,9 @@ func (r CommitRequest) Validate() error {
 		}
 		seen[task.ID] = struct{}{}
 	}
+	if err := validateChildren(r); err != nil {
+		return err
+	}
 	return validateTaskControl(r)
 }
 
@@ -176,12 +179,13 @@ func Advance(current Execution, task Task, r CommitRequest, now time.Time) (Exec
 	if current.Revision != r.ExpectedRevision {
 		return Execution{}, Receipt{}, ErrRevisionConflict
 	}
-	if current.Revision == math.MaxInt64 || current.LastSequence > math.MaxInt64-int64(len(r.Events)) {
+	eventCount := int64(len(r.Events) + len(r.Children))
+	if current.Revision == math.MaxInt64 || current.LastSequence > math.MaxInt64-eventCount {
 		return Execution{}, Receipt{}, fmt.Errorf("%w: execution sequence exhausted", ErrInvalid)
 	}
 	next := current
 	next.Revision++
-	next.LastSequence += int64(len(r.Events))
+	next.LastSequence += eventCount
 	next.UpdatedAt = Timestamp(now)
 	if r.State != "" {
 		next.State = r.State

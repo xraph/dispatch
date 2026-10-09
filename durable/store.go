@@ -35,6 +35,9 @@ type Store interface {
 	// RequestCancelExecution records acceptance and a wakeup, not terminal state.
 	RequestCancelExecution(context.Context, CancelExecutionRequest) (CancelExecutionReceipt, error)
 	GetExecution(context.Context, Key) (Execution, error)
+	GetChildExecution(context.Context, Key, string) (ChildExecution, error)
+	GetParentExecution(context.Context, Key) (ChildExecution, error)
+	ListChildExecutions(context.Context, Key, string, int) ([]ChildExecution, error)
 	// GetTask returns persisted state, including finished tasks, in one namespace.
 	GetTask(context.Context, Key, string) (Task, error)
 	// ReadHistory returns events after the exclusive cursor, in sequence order.

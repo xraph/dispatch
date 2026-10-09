@@ -15,6 +15,14 @@ import (
 // Run exercises a store with unique namespaces so cases can share a database.
 func Run(t *testing.T, s durable.Store) {
 	t.Helper()
+	t.Run("child_source_guards", func(t *testing.T) { childSourceGuards(t, s) })
+	t.Run("child_concurrent_parents", func(t *testing.T) { childConcurrentParents(t, s) })
+	t.Run("child_namespace_reads", func(t *testing.T) { childNamespaceAndReadValidation(t, s) })
+	t.Run("child_signal_start_race", func(t *testing.T) { childSignalStartRace(t, s) })
+	t.Run("child_duplicate_decision", func(t *testing.T) { childDuplicateDecision(t, s) })
+	t.Run("child_creation", func(t *testing.T) { childCreation(t, s) })
+	t.Run("child_atomic_conflict", func(t *testing.T) { childAtomicConflict(t, s) })
+	t.Run("child_concurrent_identity", func(t *testing.T) { childConcurrentIdentity(t, s) })
 	t.Run("cancellation_acceptance", func(t *testing.T) { cancellationAcceptance(t, s) })
 	t.Run("cancellation_isolation", func(t *testing.T) { cancellationIsolation(t, s) })
 	t.Run("cancellation_concurrent", func(t *testing.T) { cancellationConcurrent(t, s) })

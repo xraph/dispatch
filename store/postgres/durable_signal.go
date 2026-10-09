@@ -102,8 +102,8 @@ func (s *Store) SignalWithStart(ctx context.Context, r durable.SignalWithStartRe
 			receipt := durable.SignalReceipt{Key: r.Start.Key, Receipt: durable.Receipt{Revision: 1, FirstSequence: 1, LastSequence: 2}, Started: true}
 			return finishSignal(ctx, tx, r.Start.RequestID, digest, receipt)
 		}
-		// An ordinary start can win without taking the signal advisory lock.
 		// Recheck the open run before rejecting a closed proposed identity.
+		// All current execution creators share this workflow identity lock.
 		current, readErr = lockOpenSignalRun(ctx, tx, r.Start.Namespace, r.Start.WorkflowID)
 		if readErr == nil {
 			receipt, appendErr := appendSignal(ctx, tx, current, r.Start.BuildID, payload)

@@ -15,6 +15,7 @@ type executionRecord struct {
 	history   []durable.Event
 	tasks     map[string]*durableTask
 	receipts  map[string]durableReceipt
+	children  map[string]durable.Key
 }
 
 type durableTask struct {
@@ -68,6 +69,7 @@ func newExecutionRecord(r durable.StartRequest, now time.Time) *executionRecord 
 		tasks: map[string]*durableTask{"workflow:1": {Task: durable.Task{Key: r.Key, Version: 1,
 			TaskSpec: durable.TaskSpec{ID: "workflow:1", Kind: durable.TaskWorkflow, Queue: r.Queue, AvailableAt: now}}}},
 		receipts: make(map[string]durableReceipt),
+		children: make(map[string]durable.Key),
 	}
 }
 
@@ -291,6 +293,17 @@ func (m *Store) CommitTransition(ctx context.Context, r durable.CommitRequest) (
 			return durable.Receipt{}, durable.ErrTaskConflict
 		}
 	}
+	if sourceErr := durable.ValidateChildSource(task.Task, r.Children); sourceErr != nil {
+		return durable.Receipt{}, sourceErr
+	}
+	children, childErr := m.prepareChildren(record, r, now)
+	if childErr != nil {
+		return durable.Receipt{}, childErr
+	}
+	childEvents, eventErr := durable.ChildStartEvents(r.Children)
+	if eventErr != nil {
+		return durable.Receipt{}, eventErr
+	}
 	updated, err := durable.UpdateTask(task.Task, r.TaskUpdate, now)
 	if err != nil {
 		return durable.Receipt{}, err
@@ -325,12 +338,19 @@ func (m *Store) CommitTransition(ctx context.Context, r durable.CommitRequest) (
 		}
 		changes[spec.ID] = created
 	}
-	for i, evt := range r.Events {
+	events := append(append([]durable.EventInput(nil), r.Events...), childEvents...)
+	for i, evt := range events {
 		evt.Payload = cloneBytes(evt.Payload)
 		record.history = append(record.history, durable.Event{EventInput: evt, Sequence: receipt.FirstSequence + int64(i), Time: now})
 	}
 	for taskID, change := range changes {
 		record.tasks[taskID] = &durableTask{Task: change}
+	}
+	for _, child := range r.Children {
+		m.executions[child.Start.Key] = children[child.Start.Key]
+		child.Start.Input = cloneBytes(child.Start.Input)
+		m.childParents[child.Start.Key] = durable.ChildExecution{Parent: r.Key, ChildStartSpec: child, CreatedAt: now}
+		record.children[child.CommandID] = child.Start.Key
 	}
 	record.execution = next
 	record.receipts[r.RequestID] = durableReceipt{digest: digest, intent: r.IntentDigest, value: receipt}
