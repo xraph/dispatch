@@ -20,6 +20,7 @@ type heartbeatSession struct {
 	sequence    int64
 	pending     *durable.HeartbeatRequest
 	pendingSent bool
+	detached    bool // protected by gate
 }
 
 func newHeartbeatSession(ctx context.Context, worker *Worker, task durable.Task) *heartbeatSession {
@@ -53,6 +54,9 @@ func (s *heartbeatSession) record(ctx context.Context, details []byte) error {
 	}
 	if s.ctx.Err() != nil {
 		return context.Cause(s.ctx)
+	}
+	if s.detached {
+		return durable.ErrLeaseLost
 	}
 	callCtx, cancel := context.WithCancelCause(ctx)
 	stop := context.AfterFunc(s.ctx, func() { cancel(context.Cause(s.ctx)) })

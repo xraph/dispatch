@@ -47,24 +47,30 @@ func taskRequest(task durable.Task, revision int64) durable.CommitRequest {
 // Persist retries the exact request after an ambiguous error. Only an explicit
 // revision or task observation conflict permits rebuilding against a new snapshot.
 func (w *Worker) persist(ctx context.Context, request durable.CommitRequest) error {
+	_, err := w.persistReceipt(ctx, request)
+	return err
+}
+
+func (w *Worker) persistReceipt(ctx context.Context, request durable.CommitRequest) (durable.Receipt, error) {
+	var receipt durable.Receipt
 	var last error
 	for attempt := range 3 {
 		if ctx.Err() != nil {
-			return context.Cause(ctx)
+			return durable.Receipt{}, context.Cause(ctx)
 		}
-		_, last = storeCall(ctx, w, func(callCtx context.Context) (durable.Receipt, error) {
+		receipt, last = storeCall(ctx, w, func(callCtx context.Context) (durable.Receipt, error) {
 			return w.store.CommitTransition(callCtx, request)
 		})
 		if last == nil || errors.Is(last, durable.ErrTaskDeadline) || errors.Is(last, durable.ErrTaskConflict) || errors.Is(last, durable.ErrInvalid) || errors.Is(last, durable.ErrLeaseLost) ||
 			errors.Is(last, durable.ErrRevisionConflict) || errors.Is(last, durable.ErrClosed) ||
 			errors.Is(last, durable.ErrRequestConflict) || errors.Is(last, durable.ErrExists) || errors.Is(last, durable.ErrNotFound) {
-			return last
+			return receipt, last
 		}
 		if attempt < 2 {
 			if waitErr := wait(ctx, time.Duration(attempt+1)*10*time.Millisecond); waitErr != nil {
-				return waitErr
+				return durable.Receipt{}, waitErr
 			}
 		}
 	}
-	return fmt.Errorf("persist task result after retries: %w", last)
+	return durable.Receipt{}, fmt.Errorf("persist task result after retries: %w", last)
 }

@@ -28,6 +28,7 @@ type recordedAttempt struct {
 	at      time.Time
 	retryAt time.Time
 	failed  bool
+	handoff *HeartbeatCheckpoint
 }
 
 func parseActivityAttempt(history *replayHistory, commands map[string]Command, event durable.Event) error {

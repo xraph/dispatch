@@ -69,6 +69,26 @@ func (eng *Engine) StartDurableWorkflow(ctx context.Context, request durable.Sta
 	return worker.StartExecution(ctx, request)
 }
 
+// CompleteDurableActivity publishes an asynchronous result or failure. Authorize
+// callers before exposing this trusted Go API through a remote endpoint.
+func (eng *Engine) CompleteDurableActivity(ctx context.Context, request drt.AsyncCompletionRequest) (durable.Receipt, error) {
+	worker := eng.DurableWorker()
+	if worker == nil {
+		return durable.Receipt{}, ErrDurableDisabled
+	}
+	return worker.CompleteAsyncActivity(ctx, request)
+}
+
+// HeartbeatDurableActivity persists progress for a deferred activity. The caller
+// supplies a stable request ID and the next consecutive heartbeat sequence.
+func (eng *Engine) HeartbeatDurableActivity(ctx context.Context, request drt.AsyncHeartbeatRequest) (durable.Receipt, error) {
+	worker := eng.DurableWorker()
+	if worker == nil {
+		return durable.Receipt{}, ErrDurableDisabled
+	}
+	return worker.HeartbeatAsyncActivity(ctx, request)
+}
+
 func (eng *Engine) startDurable(ctx context.Context) error {
 	d := eng.durable
 	if d == nil {

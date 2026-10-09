@@ -13,6 +13,7 @@ const (
 	EventCommandScheduled       = "workflow.command_scheduled"
 	EventWorkflowWaiting        = "workflow.waiting"
 	EventActivityCompleted      = "activity.completed"
+	EventActivityDeferred       = "activity.deferred"
 	EventActivityAttemptStarted = "activity.attempt_started"
 	EventActivityAttemptFailed  = "activity.attempt_failed"
 	EventTimerFired             = "timer.fired"

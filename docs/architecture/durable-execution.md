@@ -41,7 +41,7 @@ Store tests alone do not qualify a workflow runtime or a deployment.
 | Atomic history, state, tasks, and durable receipts | Memory and PostgreSQL stores integrated with initial Go runtime | Shared memory/PostgreSQL conformance, rollback, concurrent writers, ambiguous-response retry |
 | Fenced task claims and durable timer deadlines | Store contract and renewable workers implemented; process-kill qualification open | Expiry, same-owner reclaim, concurrent claims, restart recovery |
 | Deterministic Go workflow runtime | Activity, timer and future replay implemented; SDK expansion open | Recorded-history replay with no repeated external effects, changed-command rejection |
-| Activity retries and timeout classes | Queue, attempt, overall and heartbeat deadlines, progress recovery and retry policies implemented; asynchronous completion open | Queue, attempt, overall and heartbeat deadlines; heartbeat progress; asynchronous completion |
+| Activity retries and timeout classes | Queue, attempt, overall and heartbeat deadlines, progress recovery, retry policies and asynchronous Go callbacks implemented; remote authorization and process qualification open | Queue, attempt, overall and heartbeat deadlines; heartbeat progress; asynchronous completion |
 | Signals, queries, updates and signal-with-start | Open | Namespace isolation, deduplication, atomic acceptance, update results, read-only queries |
 | Child workflows and cancellation | Open | Stable child identity, duplicate creation prevention, parent-close policies, cancellation propagation |
 | Compensation, pause, termination and reset | Open | Resumable compensation attempts, audited controls, immutable reset lineage |
@@ -623,3 +623,76 @@ After the review fix, make f, make l (zero issues), go test ./..., and engine,
 durable, runtime and memory race tests pass. The full durable PostgreSQL race
 suite passes in 55.585 seconds. This closes the scoped store review and its
 single corrective pass.
+
+## Asynchronous activity runtime contract
+
+A running version 2 activity can call ActivityInfo.DeferCompletion to persist a
+handoff before dispatching external work. It returns a versioned, serializable
+handle containing the namespace/run, pinned build, exact asynchronous grant,
+secret and initial heartbeat sequence. The runtime generates the secret with a
+cryptographic random source. Human-readable handle formatting redacts it; JSON
+serialization deliberately carries it for delivery to a trusted recipient.
+
+Handoff preserves the attempt and all deadlines. It requires a finite overall,
+attempt or heartbeat deadline. The worker serializes handoff with renewal and
+progress writes, records its checkpoint with a task observation guard, then
+stops renewing without cancelling the handler. A result or panic after a
+confirmed handoff cannot publish another outcome. Repeated handoff calls during
+the handler return the same handle; retained callbacks expire when it returns.
+Unknown handoff acknowledgements retain the exact request and handle until
+resolved. A crash before handle delivery leaves the grant for deadline recovery.
+
+CompleteAsyncActivity accepts a stable request ID and a result or application
+failure. It uses the recorded retry policy and atomically publishes progress,
+outcome or retry, and the next workflow task. It computes the complete client
+intent before loading current state, resolves an accepted receipt first, and
+checks again after a concurrent state or ownership conflict. Different client
+intent cannot reuse an accepted request ID. IDs are unique within a run for each
+callback operation and are prefixed separately from worker transition IDs.
+
+HeartbeatAsyncActivity accepts the handle, request ID, consecutive sequence and
+copied progress. It uses the persisted asynchronous deadline and zero worker
+lease duration. Its exact receipt can be recovered after completion, retry or
+timeout. The initial sequence in the handle is informational; callers coordinate
+subsequent sequences separately. Current grant identity and secret authorize the
+store mutation. Application errors retain their existing user-defined types.
+
+Handoff history contains attempt identity and a checkpoint, never credentials.
+Replay rejects duplicate, late or mismatched handoffs and final progress that
+moves backward from the handoff checkpoint. Old histories remain valid. Store
+timeouts still fence callbacks and preserve progress for retries. Worker APIs
+check namespace/build routing; remote caller authorization remains required
+before adding a transport endpoint.
+
+Qualification requires callback completion before handler return, renewal and
+heartbeat races, lost responses, concurrent identical and changed requests,
+closure and timeout recovery, engine wrappers, a runnable SDK example, replay
+corruption tests and PostgreSQL connection replacement. Process kills, failover,
+sustained load and remote authorization retain their separate roadmap gates.
+
+2026-10-08: the Go runtime and engine expose durable handoff, completion, failure
+and external heartbeats. Race tests cover completion before handler return,
+ignored results and panics after handoff, blocked renewal and progress writes,
+late progress at publication, concurrent handoff and completion, terminal failure,
+lost responses and exact receipt recovery after closure. Replay tests reject
+contradictory handoff and checkpoint histories. PostgreSQL tests replace the
+connection pool before callback delivery and again before receipt recovery after
+closure; callback failures and heartbeat timeouts preserve progress for retry.
+
+A routing regression showed that changing both a handle's build label and the
+callback worker's label could bypass the heartbeat pin. Heartbeats now read the
+execution's immutable build before mutation or receipt recovery. The regression
+rejects the foreign build both before and after workflow closure. This adds one
+execution read per heartbeat call. Completion already checks the recorded build
+when publishing and binds it into its stable client intent.
+
+The executable examples/durable-async uses memory and prints completed: paid.
+Memory does not persist through process restarts. Handles carry callback secrets
+in JSON, heartbeat producers must coordinate sequences, and a crash before handle
+delivery relies on the saved deadline to recover. These trusted APIs do not yet
+provide an authorized remote callback endpoint.
+
+After the routing fix, make f, make l (zero issues), go test ./..., and engine,
+durable, runtime and memory race tests pass. The full durable PostgreSQL race
+suite passes in 60.087 seconds with no skipped tests. Independent review of this
+runtime layer is the next qualification step; full Temporal parity is not claimed.

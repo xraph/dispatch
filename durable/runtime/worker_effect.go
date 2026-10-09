@@ -10,7 +10,7 @@ import (
 	"github.com/xraph/dispatch/durable"
 )
 
-func (w *Worker) processEffect(ctx context.Context, task durable.Task) error {
+func (w *Worker) processEffect(ctx context.Context, task durable.Task, lease *taskLease) error {
 	var payload taskPayload
 	if err := decode(task.Payload, &payload); err != nil {
 		return err
@@ -24,7 +24,7 @@ func (w *Worker) processEffect(ctx context.Context, task durable.Task) error {
 		return w.processActivityTimeout(ctx, task, payload)
 	}
 	if command.Kind == durable.TaskActivity && command.Version == 2 {
-		return w.processActivity(ctx, task, payload)
+		return w.processActivity(ctx, task, payload, lease)
 	}
 	execution, _, err := w.effectSnapshot(ctx, task, command)
 	if err != nil {

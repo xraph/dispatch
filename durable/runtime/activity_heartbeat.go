@@ -70,6 +70,9 @@ func validateHeartbeat(prior recordedAttempt, checkpoint *HeartbeatCheckpoint, a
 		(checkpoint.Sequence == 0 && (!checkpoint.At.Equal(prior.at) || !bytes.Equal(checkpoint.Details, prior.value.Progress))) {
 		return fmt.Errorf("%w: invalid final heartbeat checkpoint", ErrHistory)
 	}
+	if prior.handoff != nil && (checkpoint.Sequence < prior.handoff.Sequence || checkpoint.At.Before(prior.handoff.At) || (checkpoint.Sequence == prior.handoff.Sequence && !sameHeartbeat(checkpoint, prior.handoff))) {
+		return fmt.Errorf("%w: heartbeat progress moved backward after handoff", ErrHistory)
+	}
 	return nil
 }
 

@@ -118,6 +118,10 @@ func parseHistory(execution durable.Execution, events []durable.Event) (replayHi
 			commands[command.ID] = command
 			result.scheduled[command.ID] = event.Time
 			result.commands = append(result.commands, command)
+		case EventActivityDeferred:
+			if err := parseActivityHandoff(&result, commands, event); err != nil {
+				return result, err
+			}
 		case EventActivityAttemptStarted, EventActivityAttemptFailed:
 			if err := parseActivityAttempt(&result, commands, event); err != nil {
 				return result, err

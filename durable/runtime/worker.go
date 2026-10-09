@@ -28,6 +28,7 @@ type ActivityInfo struct {
 	// Attempt counts durable starts for version 2 activities. Legacy activities
 	// expose the task claim count, which can include claims lost before execution.
 	Attempt          int64
+	deferCompletion  func(context.Context) (AsyncActivityHandle, error)
 	heartbeat        func(context.Context, []byte) error
 	heartbeatDetails []byte
 }
@@ -167,32 +168,15 @@ func (w *Worker) RunOnce(ctx context.Context, kind durable.TaskKind) (worked boo
 	if err != nil || task == nil {
 		return false, err
 	}
-	taskCtx, cancel := context.WithCancelCause(ctx)
-	renewed := make(chan struct{})
-	go func() {
-		defer close(renewed)
-		interval := w.renewInterval(*task)
-		for wait(taskCtx, interval) == nil {
-			_, renewErr := storeCall(taskCtx, w, func(callCtx context.Context) (time.Time, error) {
-				return w.store.RenewTask(callCtx, task.Key, task.Token(), w.options.LeaseDuration)
-			})
-			if renewErr != nil {
-				cancel(renewErr)
-				return
-			}
-		}
-	}()
-	defer func() {
-		cancel(nil)
-		<-renewed
-	}()
+	lease := newTaskLease(ctx, w, *task)
+	defer lease.close()
 	if kind == durable.TaskWorkflow {
-		err = w.processWorkflow(taskCtx, *task)
+		err = w.processWorkflow(lease.ctx, *task)
 	} else {
-		err = w.processEffect(taskCtx, *task)
+		err = w.processEffect(lease.ctx, *task, lease)
 	}
-	if err != nil && taskCtx.Err() != nil {
-		return true, context.Cause(taskCtx)
+	if err != nil && lease.ctx.Err() != nil {
+		return true, context.Cause(lease.ctx)
 	}
 	return true, err
 }
