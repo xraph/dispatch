@@ -11,6 +11,7 @@ import (
 	log "github.com/xraph/go-utils/log"
 
 	"github.com/xraph/forge"
+	"github.com/xraph/forge/extensions/auth"
 
 	"github.com/xraph/dispatch/stream"
 )
@@ -113,7 +114,26 @@ func (s *Server) handleWebSocket(ctx forge.Context, conn forge.Connection) error
 	if token == "" {
 		token = authFrame.Token
 	}
-	identity, authErr := s.authenticate(ctx.Context(), ctx.Request(), token)
+	frameCtx := ctx.Context()
+	var authErr error
+	if token != "" {
+		var scheme, credential string
+		scheme, credential, authErr = auth.ParseExplicitFrameCredential(token)
+		if authErr == nil {
+			frameCtx, authErr = auth.WithExplicitFrameCredential(frameCtx, scheme, credential)
+			// Request-aware providers receive the same presentation as the marker.
+			// Token-only authenticators retain their existing raw-token contract.
+			if _, ok := s.auth.(requestAuthenticator); ok {
+				token = scheme + " " + credential
+			}
+		}
+	}
+	var identity *Identity
+	if authErr == nil {
+		identity, authErr = s.authenticate(frameCtx, ctx.Request(), token)
+	} else {
+		_ = s.handler.security.AuthenticationDenied(ctx.Context(), subscriptionOperation("")) //nolint:errcheck // Admission remains denied if audit fails.
+	}
 	if authErr != nil {
 		//nolint:errcheck // best-effort error response before disconnect
 		_ = conn.WriteJSON(NewErrorFrame(authFrame.ID, ErrCodeUnauthorized, "authentication failed"))

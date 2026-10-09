@@ -14,7 +14,7 @@ require (
 	github.com/testcontainers/testcontainers-go/modules/redis v0.44.0
 	github.com/vmihailenco/msgpack/v5 v5.4.1
 	github.com/xraph/forge v1.12.3
-	github.com/xraph/forge/extensions/auth v1.12.3
+	github.com/xraph/forge/extensions/auth v1.12.4-0.20261009184218-9ec7ce62855a
 	github.com/xraph/grove v1.7.1
 	github.com/xraph/grove/drivers/mongodriver v1.7.1
 	github.com/xraph/grove/drivers/pgdriver v1.7.1
