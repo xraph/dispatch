@@ -15,6 +15,8 @@ func (d Deps) authorize(ctx context.Context, p fc.Principal, intent string) erro
 	principal, err := security.FromContract(p)
 	if err == nil {
 		err = d.Security.Check(ctx, principal, security.ContractOperation(intent))
+	} else {
+		err = d.Security.AuthenticationDenied(ctx, security.ContractOperation(intent))
 	}
 	if err == nil {
 		return nil
@@ -33,6 +35,7 @@ type operatorWarden struct{ deps Deps }
 func (w operatorWarden) Authorize(ctx context.Context, p fc.Principal, a fc.Action) (fc.Decision, error) {
 	op := security.ContractOperation(a.Intent)
 	if a.Contributor != ContributorName || op.Action == "" || (op.Action == security.OperatorWrite && a.Kind != fc.KindCommand) || (op.Action == security.OperatorRead && a.Kind != fc.KindQuery) {
+		_ = w.deps.Security.Check(ctx, security.Principal{}, security.Operation{}) //nolint:errcheck // Malformed Warden admissions remain denied.
 		return fc.Decision{}, fc.ErrPermissionDenied
 	}
 	err := w.deps.authorize(ctx, p, a.Intent)

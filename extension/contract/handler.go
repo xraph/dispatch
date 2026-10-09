@@ -2,11 +2,14 @@ package contract
 
 import (
 	"context"
+	"errors"
 	"time"
 
 	fc "github.com/xraph/forge/extensions/dashboard/contract"
 
+	"github.com/xraph/dispatch/durable"
 	"github.com/xraph/dispatch/ext"
+	"github.com/xraph/dispatch/security"
 )
 
 const queryTimeout = 10 * time.Second
@@ -31,7 +34,22 @@ func handle[I, O any](deps Deps, intent string, command bool, fn func(context.Co
 			var zero O
 			return zero, err
 		}
+		verified, identityErr := security.FromContract(principal)
+		if identityErr != nil {
+			var zero O
+			return zero, fc.ErrUnauthenticated
+		}
+		attempt, err := deps.Security.BeginCommand(ctx, verified, security.ContractOperation(intent))
+		if err != nil {
+			var zero O
+			return zero, fc.ErrUnavailable
+		}
+		ctx = durable.WithAuditMetadata(ctx, security.Metadata(verified))
 		output, err := fn(ctx, input, principal)
+		if outcomeErr := deps.Security.FinishCommand(ctx, attempt, err == nil); outcomeErr != nil {
+			var zero O
+			return zero, errors.Join(fc.ErrUnavailable, outcomeErr)
+		}
 		return output, deps.mapError(intent, err)
 	}
 }

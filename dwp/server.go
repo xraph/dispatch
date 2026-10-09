@@ -352,7 +352,7 @@ func (s *Server) handleHTTPRPC(ctx forge.Context) error {
 	if token == "" {
 		token = ctx.Header("Authorization")
 	}
-	identity, err := s.authenticate(ctx.Context(), ctx.Request(), token)
+	identity, err := s.authenticate(ctx.Context(), ctx.Request(), token, security.DWPOperation(frame.Method))
 	if err != nil {
 		return ctx.Status(401).JSON(NewErrorFrame(frame.ID, ErrCodeUnauthorized, "unauthorized"))
 	}

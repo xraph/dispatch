@@ -10,8 +10,10 @@ import (
 
 	"github.com/xraph/forge"
 
+	"github.com/xraph/dispatch/durable"
 	"github.com/xraph/dispatch/job"
 	"github.com/xraph/dispatch/security"
+	"github.com/xraph/dispatch/store/memory"
 )
 
 type nilAuthenticator struct{}
@@ -121,3 +123,48 @@ func TestForgeDWPRequestProofAndTokenOnlyDenial(t *testing.T) {
 }
 
 type dwpProofKey struct{}
+
+func TestDWPAnonymousAuditAndUnconfirmedOutcome(t *testing.T) {
+	eng, jobs := setupTestEngine(t)
+	audit := &failingOutcomeAudit{Store: memory.New()}
+	n := durable.NamespaceConfig{InstallationID: "test", Namespace: "audit", AppID: "test", TenantID: "test", RequireAudit: true, SchemaVersion: 1}
+	if _, err := audit.RegisterNamespace(t.Context(), n); err != nil {
+		t.Fatal(err)
+	}
+	b := testBoundary()
+	b.Audit = &security.AuditService{}
+	if err := b.Audit.Activate(t.Context(), audit, audit, b.Resource, n.Namespace, false); err != nil {
+		t.Fatal(err)
+	}
+	h := NewHandler(eng, eng.StreamBroker(), testLogger(), b)
+	server := NewServer(eng.StreamBroker(), h, WithAuth(nilAuthenticator{}))
+	if _, err := server.authenticate(t.Context(), httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/dwp/rpc", nil), "secret", security.DWPOperation(MethodJobCancel)); err == nil {
+		t.Fatal("anonymous accepted")
+	}
+	status, err := audit.DeliveryStatus(t.Context(), durable.DeliveryStatusRequest{DeliveryScope: durable.DeliveryScope{InstallationID: "test", Destination: durable.DestinationChronicle}, Limit: 100})
+	if err != nil || len(status.Records) != 1 || status.Records[0].Delivery.Metadata.ActorKind != "anonymous" {
+		t.Fatal(status, err)
+	}
+	j, err := eng.EnqueueRaw(t.Context(), "test", []byte(`{}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	response := h.Handle(t.Context(), &Frame{ID: "request", Method: MethodJobCancel, Data: mustJSON(JobCancelRequest{JobID: j.ID.String()})}, NewConnection("direct", &Identity{Subject: "machine", Kind: "service_acct"}, &JSONCodec{}))
+	if response.Error == nil || response.Error.Code != 503 || !strings.Contains(response.Error.Message, "outcome unconfirmed") {
+		t.Fatal(response)
+	}
+	got, err := jobs.GetJob(t.Context(), j.ID)
+	if err != nil || got.State != job.StateCancelled {
+		t.Fatal(got, err)
+	}
+	pending, err := audit.UnresolvedLegacyAttempts(t.Context(), durable.LegacyAttemptList{InstallationID: "test", Namespace: "audit", Limit: 100})
+	if err != nil || len(pending) != 1 || pending[0].Attempt.Metadata.ActorKind != "service_acct" {
+		t.Fatal(pending, err)
+	}
+}
+
+type failingOutcomeAudit struct{ *memory.Store }
+
+func (s *failingOutcomeAudit) CompleteLegacyAttempt(context.Context, durable.LegacyOutcome) error {
+	return errors.New("outcome persistence unavailable")
+}

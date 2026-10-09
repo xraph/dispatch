@@ -15,6 +15,7 @@ import (
 	"github.com/xraph/dispatch/dwp"
 	"github.com/xraph/dispatch/engine"
 	"github.com/xraph/dispatch/id"
+	"github.com/xraph/dispatch/internal/audittest"
 	"github.com/xraph/dispatch/job"
 	"github.com/xraph/dispatch/security"
 	"github.com/xraph/dispatch/store/memory"
@@ -587,5 +588,5 @@ func TestClient_WorkflowE2E(t *testing.T) {
 }
 
 func testOperatorBoundary() security.Boundary {
-	return security.Boundary{Resource: security.Resource{InstallationID: "test", PolicyTenant: "test"}, Authorizer: security.AuthorizerFunc(func(context.Context, security.Principal, string, security.Resource) error { return nil })}
+	return audittest.WithMemory(security.Boundary{Resource: security.Resource{InstallationID: "test", PolicyTenant: "test"}, Authorizer: security.AuthorizerFunc(func(context.Context, security.Principal, string, security.Resource) error { return nil })})
 }

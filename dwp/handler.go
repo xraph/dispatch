@@ -6,6 +6,7 @@ import (
 
 	log "github.com/xraph/go-utils/log"
 
+	"github.com/xraph/dispatch/durable"
 	"github.com/xraph/dispatch/engine"
 	"github.com/xraph/dispatch/ext"
 	"github.com/xraph/dispatch/id"
@@ -40,17 +41,28 @@ func (h *Handler) SetFederation(f *Federation) {
 }
 
 // Handle processes a single DWP request frame and returns a response.
-func (h *Handler) Handle(ctx context.Context, frame *Frame, conn *Connection) *Frame {
+func (h *Handler) Handle(ctx context.Context, frame *Frame, conn *Connection) (response *Frame) {
 	if frame == nil {
 		return NewErrorFrame("", ErrCodeBadRequest, "missing frame")
 	}
 	if conn == nil || conn.Identity == nil {
+		_ = h.security.AuthenticationDenied(ctx, security.DWPOperation(frame.Method)) //nolint:errcheck // The frame remains unauthorized if local audit fails.
 		return NewErrorFrame(frame.ID, ErrCodeUnauthorized, "authentication required")
 	}
 	if err := h.authorize(ctx, conn.Identity, frame.Method); err != nil {
 		return NewErrorFrame(frame.ID, authorizationCode(err), "access unavailable or denied")
 	}
-	ctx = ext.WithActor(ctx, conn.Identity.Subject)
+	op := security.DWPOperation(frame.Method)
+	attempt, err := h.security.BeginCommand(ctx, conn.Identity.principal(), op)
+	if err != nil {
+		return NewErrorFrame(frame.ID, 503, "audit acceptance unavailable")
+	}
+	defer func() {
+		if outcomeErr := h.security.FinishCommand(ctx, attempt, response != nil && response.Type != FrameErr && response.Error == nil); outcomeErr != nil {
+			response = NewErrorFrame(frame.ID, 503, outcomeErr.Error())
+		}
+	}()
+	ctx = durable.WithAuditMetadata(ext.WithActor(ctx, conn.Identity.Subject), security.Metadata(conn.Identity.principal()))
 	// Inject scope from connection identity.
 	if conn.Identity != nil {
 		ctx = scope.Restore(ctx, conn.Identity.AppID, conn.Identity.OrgID)

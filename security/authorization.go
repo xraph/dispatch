@@ -7,6 +7,8 @@ import (
 	"net/http"
 	"strings"
 	"time"
+
+	"github.com/xraph/dispatch/durable"
 )
 
 var (
@@ -22,7 +24,7 @@ const StreamLifetime = 5 * time.Minute
 type Principal struct{ Subject, Kind string }
 
 func (p Principal) Validate() error {
-	if strings.TrimSpace(p.Subject) == "" {
+	if !durable.DeliveryIdentifier(p.Subject) {
 		return ErrUnauthenticated
 	}
 	switch p.Kind {
@@ -56,9 +58,33 @@ func (f AuthenticatorFunc) Authenticate(ctx context.Context, r *http.Request) (P
 type Boundary struct {
 	Resource   Resource
 	Authorizer Authorizer
+	Audit      *AuditService
 }
 
 func (b Boundary) Check(ctx context.Context, p Principal, op Operation) error {
+	return b.CheckNamespace(ctx, p, op, "")
+}
+
+// CheckNamespace uses an already resolved authorized namespace for successful
+// read auditing. Unresolved and denied attempts always use the host binding.
+func (b Boundary) CheckNamespace(ctx context.Context, p Principal, op Operation, namespace string) error {
+	err := b.authorize(ctx, p, op)
+	outcome := "allowed"
+	switch {
+	case errors.Is(err, ErrUnauthenticated):
+		outcome = "unauthenticated"
+	case errors.Is(err, ErrForbidden):
+		outcome = "denied"
+	case err != nil:
+		outcome = "unavailable"
+	}
+	auditErr := b.audit(ctx, p, op, outcome, namespace)
+	if err != nil {
+		return err
+	}
+	return auditErr
+}
+func (b Boundary) authorize(ctx context.Context, p Principal, op Operation) error {
 	if err := p.Validate(); err != nil {
 		return err
 	}

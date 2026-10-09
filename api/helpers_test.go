@@ -15,6 +15,7 @@ import (
 	"github.com/xraph/dispatch/dlq"
 	"github.com/xraph/dispatch/engine"
 	"github.com/xraph/dispatch/id"
+	"github.com/xraph/dispatch/internal/audittest"
 	"github.com/xraph/dispatch/job"
 	"github.com/xraph/dispatch/security"
 	"github.com/xraph/dispatch/store/memory"
@@ -142,5 +143,5 @@ func storedJob(t *testing.T, f *fixture, jobID id.JobID) *job.Job {
 func testSecurity() api.Option {
 	return api.WithSecurity(security.AuthenticatorFunc(func(context.Context, *http.Request) (security.Principal, error) {
 		return security.Principal{Subject: "operator", Kind: "user"}, nil
-	}), security.Boundary{Resource: security.Resource{InstallationID: "test", PolicyTenant: "test"}, Authorizer: security.AuthorizerFunc(func(context.Context, security.Principal, string, security.Resource) error { return nil })})
+	}), audittest.WithMemory(security.Boundary{Resource: security.Resource{InstallationID: "test", PolicyTenant: "test"}, Authorizer: security.AuthorizerFunc(func(context.Context, security.Principal, string, security.Resource) error { return nil })}))
 }

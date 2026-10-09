@@ -29,7 +29,7 @@ func WithOperatorSecurity(config SecurityConfig) ExtOption {
 // WithRemoteSecurity supplies a host-owned verified authenticator and authorizer.
 // Custom authenticators must enforce their own cookie, origin and CSRF policy.
 func WithRemoteSecurity(authenticator security.Authenticator, boundary security.Boundary) ExtOption {
-	return func(e *Extension) { e.remoteAuth = authenticator; e.boundary = &boundary }
+	return func(e *Extension) { e.remoteAuth = authenticator; clone := boundary; e.boundary = &clone }
 }
 func (e *Extension) configureSecurity() {
 	if e.remoteAuth == nil {
@@ -38,4 +38,8 @@ func (e *Extension) configureSecurity() {
 	if e.boundary == nil {
 		e.boundary = &security.Boundary{Resource: security.Resource{InstallationID: e.config.Security.InstallationID, PolicyTenant: e.config.Security.PolicyTenant}, Authorizer: &security.WardenAuthorizer{Engine: func() (*warden.Engine, error) { return vessel.Inject[*warden.Engine](e.App().Container()) }}}
 	}
+
+	// Always replace supplied activation with an extension-owned handle. Protected
+	// requests cannot use a preactivated boundary before successful Start.
+	e.boundary.Audit = &security.AuditService{}
 }

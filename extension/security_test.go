@@ -35,7 +35,7 @@ func TestLazyHostSecurityRecoversAfterProviderAndWardenRegistration(t *testing.T
 	if err := vessel.Provide(app.Container(), func() auth.Registry { return reg }); err != nil {
 		t.Fatal(err)
 	}
-	e := extension.New(extension.WithStore(memory.New()), extension.WithOperatorSecurity(extension.SecurityConfig{InstallationID: "installation", PolicyTenant: "policy-tenant"}))
+	e := extension.New(extension.WithStore(memory.New()), extension.WithMemoryAuditForTesting(auditConfig()), extension.WithOperatorSecurity(extension.SecurityConfig{InstallationID: "installation", PolicyTenant: "policy-tenant"}))
 	if err := e.Register(app); err != nil {
 		t.Fatal(err)
 	}
@@ -66,6 +66,13 @@ func TestLazyHostSecurityRecoversAfterProviderAndWardenRegistration(t *testing.T
 	if err := vessel.Provide(app.Container(), func() *warden.Engine { return wardenEngine }); err != nil {
 		t.Fatal(err)
 	}
+	if code := read(); code != 503 {
+		t.Fatal("audit activated before Start", code)
+	}
+	if err := e.Start(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = e.Stop(context.Background()) })
 	if code := read(); code != 200 {
 		t.Fatal("late dependencies did not recover", code)
 	}

@@ -8,6 +8,7 @@ import (
 	fc "github.com/xraph/forge/extensions/dashboard/contract"
 	"github.com/xraph/forge/extensions/dashboard/contract/dispatcher"
 
+	"github.com/xraph/dispatch/durable"
 	"github.com/xraph/dispatch/security"
 	"github.com/xraph/dispatch/store/memory"
 )
@@ -59,5 +60,37 @@ func TestContractPolicyDenialErrorsPayloadAndForeignContributor(t *testing.T) {
 		if decision, err := w.Authorize(context.Background(), testPrincipal(), action); err == nil || decision.Allow {
 			t.Fatal(action)
 		}
+	}
+}
+
+func TestWardenAndHandlerAuditHaveIndependentIDs(t *testing.T) {
+	s := memory.New()
+	n := durable.NamespaceConfig{InstallationID: "test", Namespace: "audit", AppID: "test", TenantID: "test", RequireAudit: true, SchemaVersion: 1}
+	if _, err := s.RegisterNamespace(t.Context(), n); err != nil {
+		t.Fatal(err)
+	}
+	deps := Deps{Security: testBoundary()}
+	deps.Security.Audit = &security.AuditService{}
+	if err := deps.Security.Audit.Activate(t.Context(), s, s, deps.Security.Resource, n.Namespace, false); err != nil {
+		t.Fatal(err)
+	}
+	w := operatorWarden{deps: deps}
+	if _, err := w.Authorize(t.Context(), testPrincipal(), fc.Action{Contributor: ContributorName, Intent: "jobs.counts", Kind: fc.KindQuery}); err != nil {
+		t.Fatal(err)
+	}
+	handler := handle(deps, "jobs.counts", false, func(context.Context, struct{}, fc.Principal) (string, error) { return "read", nil })
+	if _, err := handler(t.Context(), struct{}{}, testPrincipal()); err != nil {
+		t.Fatal(err)
+	}
+	status, err := s.DeliveryStatus(t.Context(), durable.DeliveryStatusRequest{DeliveryScope: durable.DeliveryScope{InstallationID: "test", Destination: durable.DestinationChronicle}, Limit: 100})
+	if err != nil || len(status.Records) != 2 || status.Records[0].Delivery.SourceID == status.Records[1].Delivery.SourceID {
+		t.Fatal(status, err)
+	}
+	if err = deps.authorize(t.Context(), fc.Principal{}, "jobs.counts"); !errors.Is(err, fc.ErrUnauthenticated) {
+		t.Fatal(err)
+	}
+	status, err = s.DeliveryStatus(t.Context(), durable.DeliveryStatusRequest{DeliveryScope: durable.DeliveryScope{InstallationID: "test", Destination: durable.DestinationChronicle}, Limit: 100})
+	if err != nil || len(status.Records) != 3 {
+		t.Fatal(status, err)
 	}
 }

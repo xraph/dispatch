@@ -28,6 +28,7 @@ import (
 	"github.com/xraph/dispatch/artifact/cache"
 	"github.com/xraph/dispatch/artifact/sweeper"
 	"github.com/xraph/dispatch/backoff"
+	"github.com/xraph/dispatch/durable/delivery"
 	"github.com/xraph/dispatch/durable/runtime"
 	"github.com/xraph/dispatch/dwp"
 	"github.com/xraph/dispatch/engine"
@@ -58,23 +59,26 @@ var _ forge.Extension = (*Extension)(nil)
 type Extension struct {
 	*forge.BaseExtension
 
-	remoteAuth      security.Authenticator
-	boundary        *security.Boundary
-	durable         *runtime.Options
-	durableHandlers runtime.Options
-	config          Config
-	eng             *engine.Engine
-	apiHandler      *api.API
-	dwpServer       *dwp.Server
-	logger          log.Logger
-	dispatchOpts    []dispatch.Option
-	exts            []ext.Extension
-	mws             []mw.Middleware
-	dwpOpts         []dwp.Option
-	bo              backoff.Strategy
-	useGrove        bool
-	useGroveKV      bool
-	enableDWP       bool
+	deliveryConfig        *DeliveryConfig
+	publisher             *delivery.Publisher
+	memoryAuditForTesting bool
+	remoteAuth            security.Authenticator
+	boundary              *security.Boundary
+	durable               *runtime.Options
+	durableHandlers       runtime.Options
+	config                Config
+	eng                   *engine.Engine
+	apiHandler            *api.API
+	dwpServer             *dwp.Server
+	logger                log.Logger
+	dispatchOpts          []dispatch.Option
+	exts                  []ext.Extension
+	mws                   []mw.Middleware
+	dwpOpts               []dwp.Option
+	bo                    backoff.Strategy
+	useGrove              bool
+	useGroveKV            bool
+	enableDWP             bool
 
 	// artifactBackend is an explicitly supplied backend, taking priority
 	// over anything discovered in the container.
@@ -280,6 +284,7 @@ func (e *Extension) init(fapp forge.App) error {
 
 	// Create the API handler.
 	e.configureSecurity()
+	e.eng.Dispatcher().BeforeStoreClose(e.stopDelivery)
 	e.apiHandler = api.New(e.eng, fapp.Router(), api.WithSecurity(e.remoteAuth, *e.boundary))
 
 	// Register HTTP routes unless disabled.
@@ -329,6 +334,15 @@ func (e *Extension) Start(ctx context.Context) error {
 		}
 	}
 
+	if err := e.prepareDelivery(ctx); err != nil {
+		return err
+	}
+	if e.publisher != nil {
+		if err := e.publisher.Start(); err != nil {
+			return err
+		}
+	}
+
 	// Sweep stale workers from prior instances. On a hard kill (SIGKILL,
 	// pod restart, OOM), the previous worker's row stays in the cluster
 	// store with is_leader possibly still set; the partial-unique index
@@ -361,7 +375,10 @@ func (e *Extension) Start(ctx context.Context) error {
 	}
 
 	if err := e.eng.Start(ctx); err != nil {
-		return err
+		return errors.Join(err, e.stopDelivery(ctx))
+	}
+	if err := e.activateAudit(ctx); err != nil {
+		return errors.Join(err, e.eng.Stop(ctx))
 	}
 
 	e.startSweeper(ctx)
@@ -435,6 +452,7 @@ func (e *Extension) Stop(ctx context.Context) error {
 		}
 	}
 
+	e.boundary.Audit.Deactivate()
 	err := e.eng.Stop(ctx)
 	e.MarkStopped()
 	return err

@@ -48,7 +48,7 @@ type requestAuthenticator interface {
 	AuthenticateRequest(context.Context, *http.Request, string) (*Identity, error)
 }
 
-func (s *Server) authenticate(ctx context.Context, r *http.Request, token string) (*Identity, error) {
+func (s *Server) authenticate(ctx context.Context, r *http.Request, token string, operations ...security.Operation) (*Identity, error) {
 	ctx, cancel := context.WithTimeout(ctx, security.CheckTimeout)
 	defer cancel()
 	var identity *Identity
@@ -59,6 +59,11 @@ func (s *Server) authenticate(ctx context.Context, r *http.Request, token string
 		identity, err = s.auth.Authenticate(ctx, token)
 	}
 	if err != nil || identity == nil || identity.principal().Validate() != nil {
+		op := security.Operation{Action: security.Subscribe, Payload: true}
+		if len(operations) > 0 {
+			op = operations[0]
+		}
+		_ = s.handler.security.AuthenticationDenied(ctx, op) //nolint:errcheck // Audit failure cannot change the admission denial.
 		return nil, ErrUnauthorized
 	}
 	clone := *identity

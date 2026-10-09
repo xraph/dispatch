@@ -5,9 +5,11 @@ local durable acceptance of audit or hook delivery. PostgreSQL is the production
 backend. Memory implements the same contract for tests and development. Check
 both capabilities explicitly; a legacy store does not provide a reliable fallback.
 
-This slice persists delivery intents and sink receipts. It does not run a
-publisher, configure a Forge host, or connect Chronicle or Relay. Those remain
-separate composition work. Accepted local intents do not establish sink delivery.
+The independent publisher drains accepted intents through an injected
+`delivery.Sink.Accept` implementation. Forge composition registers namespaces and
+starts that publisher before worker admission. Concrete Chronicle and Relay
+acceptance adapters are separate work. Local acceptance and test sinks do not
+establish delivery to either deployed service.
 
 ## Configure ownership before admission
 
@@ -26,7 +28,7 @@ Keep a dedicated registered audit namespace for installation-wide reads,
 anonymous denials and attempts against unknown or unauthorized resources. It
 requires Chronicle delivery and needs no execution or worker queue. Your host
 must verify its installation and tenant against the authorization boundary before
-mounting protected routes. A requested namespace or identity claim cannot choose
+admitting protected requests. A requested namespace or identity claim cannot choose
 this binding. Successful resource reads can use their authorized catalog namespace
 when it requires audit, or an explicit host fallback policy.
 
@@ -157,3 +159,99 @@ Status reads return bounded records, pending count and the oldest pending local
 acceptance timestamp. You can derive backlog age from that timestamp. PostgreSQL
 count and page reads are separate READ COMMITTED statements, so status is
 observational rather than a transactionally consistent monitoring snapshot.
+
+
+## Compose a secured Forge host
+
+Use `extension.WithDurableDelivery(DeliveryConfig{...})` with PostgreSQL. Supply
+an `AuditNamespace`, execution `Namespaces`, a publisher installation and owner,
+and explicit sinks for every required destination. The owner identifies this
+publisher process. Configure `WithOperatorSecurity` or `WithRemoteSecurity` for
+verified identity and authorization. Execution namespace ownership must include
+required audit when you enable a durable worker in this mode.
+
+`Register` creates a shared inactive `security.AuditService` before copying the
+boundary into REST, DWP and contract handlers. `Start` migrates the store, verifies
+configuration, registers or verifies namespace ownership, and starts the publisher
+before the engine. It enables the audit handle only after engine startup succeeds.
+The audit namespace installation and tenant must match `Boundary.Resource`.
+Unresolved and denied targets cannot redirect that binding. Successful
+namespace-aware reads require an authorized registered namespace with audit,
+unless the host explicitly enables `AllowNamespaceAuditFallback`.
+
+Omitting delivery configuration leaves protected remote operations unavailable,
+even with valid identity and permission. A direct trusted engine remains usable.
+Tests can deliberately compose real memory acceptance through
+`WithMemoryAuditForTesting`; this option does not provide production durability.
+Standalone boundaries must explicitly activate their audit service against a
+registered catalog. There is no success-only audit bypass.
+
+All protected reads require local audit acceptance before returning data.
+Authentication failures, policy denials and policy outages use the host binding;
+a failed audit does not grant access or replace a denial with success. The shared
+handle counts local acceptance failures without retaining provider error text or
+creating recursive audit events. Warden admission and direct contract dispatch
+capture separate server-owned decision IDs. Verified `api_key` and `service_acct`
+actor kinds survive transport context binding.
+
+## Legacy command outcomes
+
+Legacy REST, DWP and contract mutations accept an attempt through
+`durable.LegacyAuditStore` before executing the handler. That write atomically
+persists the Chronicle intent and a retained unresolved-attempt marker. After the
+handler returns, a separate write atomically accepts its immutable outcome intent
+and resolves the marker. `returned_success` means the handler and response reported success;
+`returned_error` means a handler or response error, including serialization or
+capture overflow. Either result can follow a persisted state change. Neither
+write is atomic with the intervening legacy mutation. Durable execution commands retain their existing transactional history
+and receipt outbox path.
+
+`UnresolvedLegacyAttempts` returns installation- and audit-namespace-scoped pages
+of accepted attempts with no recorded outcome. They may be executing, may have
+failed, or may have succeeded before the process lost the result. The marker
+survives restart. Do not automatically repeat the mutation or infer an outcome.
+Reconcile it using the accepted attempt delivery ID and the actual legacy state.
+If you retain a captured `LegacyOutcome`, retry that exact value: identical
+acceptance resolves once, while changed content or scope fails.
+
+A post-command outcome write failure returns `OutcomeUnconfirmedError` with the
+safe attempt ID. REST captures the response writer until outcome acceptance, so
+it returns HTTP 503 rather than an already-written success. Captured mutation
+responses have a four MiB limit; larger responses return a reconciliation error
+after recording the command outcome. DWP emits an error frame, and contract
+handlers return an unavailable error with the same correlation. A process crash
+can still lose the in-memory outcome value; the durable marker reports that gap
+without claiming exact reconstruction.
+
+## Publisher lifetime and readiness
+
+Each configured destination has its own fixed set of goroutines. Every goroutine
+claims one fenced delivery, calls its sink with a deadline, verifies the returned
+receipt and acknowledges it through the outbox store. Chronicle backlog cannot
+consume Relay goroutines. Store deadlines, lease duration, concurrency and retry
+backoff are bounded in `delivery.Config`. Retry categories contain no payload or
+provider error strings, and retries have no terminal drop count.
+
+A sink must persist acceptance before returning a receipt and return the same
+receipt for identical retries after unknown outcomes. It must reject conflicting
+content. The publisher verifies delivery identity, destination, schema and the
+immutable fingerprint; transport success alone is insufficient. Sink panic or
+outage leaves accepted intents recoverable. A sink that ignores cancellation
+occupies its existing goroutine; the publisher never spawns replacements for it.
+Go cannot forcibly terminate arbitrary sink code.
+
+The publisher stays alive while workers and legacy shutdown hooks drain.
+`Dispatcher.BeforeStoreClose` then drains it before closing storage. If a required
+drain reaches the deadline, shutdown returns incomplete and keeps the store open.
+A later `Stop` with a fresh context can wait for canceled calls to exit, resume
+pending delivery and close storage exactly once. Concurrent callers honor their
+own deadlines while waiting for the shutdown gate. A canceled sink reply cannot
+acknowledge a delivery. Worker shutdown failure also remains visible and prevents
+premature store closure.
+
+`Extension.Health` remains execution readiness. `DeliveryStatus` separately
+reports pending count, oldest acceptance, calls in flight and the latest bounded
+error category for one destination. Sink outage does not fail execution readiness
+while required local acceptance works; it degrades delivery and may prevent a
+complete shutdown drain. The host must monitor backlog age and volume against its
+outage budget. No deployed Chronicle/Relay qualification is claimed here.

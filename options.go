@@ -2,6 +2,7 @@ package dispatch
 
 import (
 	"context"
+	"errors"
 	"sync"
 	"time"
 
@@ -50,14 +51,15 @@ type Dispatcher struct {
 	// started tracks whether Start has been called.
 	started bool
 
-	// stopOnce makes Stop idempotent. Engine.Stop calls it, and a service
-	// shutting down from both a signal handler and a deferred cleanup
-	// reaches it twice; without this, extensions saw two shutdown events
-	// and the store was closed twice. A sync.Once rather than a flag
-	// because those two callers are usually different goroutines, which
-	// an unsynchronised bool would not separate. This mirrors
-	// cron.Scheduler, which guards its own Stop the same way.
-	stopOnce sync.Once
+	// Worker shutdown and extension hooks run once. Required drains and store
+	// closure share a deadline-aware gate, so incomplete drains can be retried
+	// without repeating hooks or closing storage under active publisher calls.
+	stopOnce         sync.Once
+	stopErr          error
+	beforeStoreClose []func(context.Context) error
+	stopGateOnce     sync.Once
+	stopGate         chan struct{}
+	storeClosed      bool
 }
 
 // New creates a new Dispatcher with the given options.
@@ -103,26 +105,42 @@ func (d *Dispatcher) Start(ctx context.Context) error {
 
 // Stop gracefully shuts down the dispatcher.
 func (d *Dispatcher) Stop(ctx context.Context) error {
-	// A second call returns nil rather than repeating the first call's
-	// error, matching Pool.Stop, which also reports nothing once it has
-	// already stopped.
-	var err error
-
+	d.stopGateOnce.Do(func() { d.stopGate = make(chan struct{}, 1) })
+	select {
+	case d.stopGate <- struct{}{}:
+		defer func() { <-d.stopGate }()
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+	if d.storeClosed {
+		return d.stopErr
+	}
 	d.stopOnce.Do(func() {
 		if d.pool != nil && d.started {
-			if poolErr := d.pool.Stop(ctx); poolErr != nil {
-				d.logger.Error("pool stop error", log.String("error", poolErr.Error()))
-			}
+			d.stopErr = errors.Join(d.stopErr, d.pool.Stop(ctx))
 		}
 		if d.extensions != nil {
 			d.extensions.EmitShutdown(ctx)
 		}
-		if d.store != nil {
-			err = d.store.Close()
-		}
 	})
+	var drainErr error
+	for _, stop := range d.beforeStoreClose {
+		drainErr = errors.Join(drainErr, stop(ctx))
+	}
+	if err := errors.Join(d.stopErr, drainErr); err != nil {
+		return err
+	}
+	if d.store != nil {
+		d.stopErr = d.store.Close()
+	}
+	d.storeClosed = true
+	return d.stopErr
+}
 
-	return err
+// BeforeStoreClose installs a required drain step after workers and shutdown
+// hooks finish. Configure it before Start. Failure propagates through Stop.
+func (d *Dispatcher) BeforeStoreClose(stop func(context.Context) error) {
+	d.beforeStoreClose = append(d.beforeStoreClose, stop)
 }
 
 // WithConcurrency sets the maximum number of concurrent job processors.
