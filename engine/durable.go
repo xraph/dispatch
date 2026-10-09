@@ -109,8 +109,8 @@ func (eng *Engine) SignalWithStartDurableWorkflow(ctx context.Context, request d
 	return worker.SignalWithStart(ctx, request)
 }
 
-// QueryDurableWorkflow reconstructs one run without claiming tasks or writing
-// history. Authorize callers before exposing this trusted Go API remotely.
+// QueryDurableWorkflow selects and reconstructs one run without claiming tasks
+// or writing history. Authorize callers before exposing this trusted Go API remotely.
 func (eng *Engine) QueryDurableWorkflow(ctx context.Context, request drt.QueryRequest) (drt.QueryResult, error) {
 	worker := eng.DurableWorker()
 	if worker == nil {

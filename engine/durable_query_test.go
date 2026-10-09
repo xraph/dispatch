@@ -58,4 +58,17 @@ func TestDurableEngineQuery(t *testing.T) {
 	if err != nil || string(result.Output) != "approved" || result.State != durable.StateCompleted {
 		t.Fatalf("completed query: %+v %v", result, err)
 	}
+	for _, selection := range []durable.RunSelection{durable.RunCurrent, durable.RunLatest} {
+		selected := request
+		selected.RunID = ""
+		selected.Selection = selection
+		got, queryErr := eng.QueryDurableWorkflow(t.Context(), selected)
+		if selection == durable.RunCurrent {
+			if !errors.Is(queryErr, durable.ErrNotFound) {
+				t.Fatalf("closed current: %v", queryErr)
+			}
+		} else if queryErr != nil || got.Key != key || string(got.Output) != "approved" {
+			t.Fatalf("latest: %+v %v", got, queryErr)
+		}
+	}
 }

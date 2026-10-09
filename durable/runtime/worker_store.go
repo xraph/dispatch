@@ -21,6 +21,12 @@ func (w *Worker) readSnapshot(ctx context.Context, key durable.Key, allowClosed 
 	if err != nil {
 		return execution, nil, err
 	}
+	return w.readSnapshotHistory(ctx, key, execution, allowClosed)
+}
+
+// readSnapshotHistory consumes the projection already selected by the caller.
+// Its identity and sequence bound remain fixed across subsequent history reads.
+func (w *Worker) readSnapshotHistory(ctx context.Context, key durable.Key, execution durable.Execution, allowClosed bool) (durable.Execution, []durable.Event, error) {
 	if !allowClosed && execution.State != durable.StateRunning {
 		return execution, nil, durable.ErrClosed
 	}

@@ -20,13 +20,14 @@ var (
 // effects or asynchronous workflow operations. Each call uses a fresh replay.
 type QueryFunc func([]byte) ([]byte, error)
 
-// QueryRequest identifies a query on one explicit run and its pinned build.
+// QueryRequest selects an explicit, current or latest run and its pinned build.
 // Queries are observations and do not use mutation request IDs or receipts.
 type QueryRequest struct {
 	durable.Key
-	BuildID string `json:"build_id"`
-	Name    string `json:"name"`
-	Input   []byte `json:"input,omitempty"`
+	Selection durable.RunSelection `json:"selection,omitempty"`
+	BuildID   string               `json:"build_id"`
+	Name      string               `json:"name"`
+	Input     []byte               `json:"input,omitempty"`
 }
 
 // QueryResult identifies the persisted snapshot used to reconstruct the answer.
@@ -40,9 +41,9 @@ type QueryResult struct {
 	Output       []byte        `json:"output,omitempty"`
 }
 
-// Validate checks the explicit run, pinned build, query name and input bound.
+// Validate checks run selection, pinned build, query name and input bound.
 func (r QueryRequest) Validate() error {
-	if err := r.Key.Validate(); err != nil {
+	if err := (durable.ExecutionTarget{Key: r.Key, Selection: r.Selection}).Validate(); err != nil {
 		return err
 	}
 	if !validIdentifier(r.BuildID, 512) || !validID(r.Name) || len(r.Input) > 1<<20 {
@@ -80,7 +81,7 @@ func evaluateQuery(ctx context.Context, execution durable.Execution, events []du
 	if err := request.Validate(); err != nil {
 		return QueryResult{}, err
 	}
-	if request.Key != execution.Key || request.BuildID != execution.BuildID || execution.Revision < 1 {
+	if request.Selection != durable.RunExplicit || request.Key != execution.Key || request.BuildID != execution.BuildID || execution.Revision < 1 {
 		return QueryResult{}, fmt.Errorf("%w: query does not match execution snapshot", durable.ErrInvalid)
 	}
 	input := bytes.Clone(request.Input)

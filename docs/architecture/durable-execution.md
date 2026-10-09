@@ -42,7 +42,7 @@ Store tests alone do not qualify a workflow runtime or a deployment.
 | Fenced task claims and durable timer deadlines | Store contract and renewable workers implemented; process-kill qualification open | Expiry, same-owner reclaim, concurrent claims, restart recovery |
 | Deterministic Go workflow runtime | Activity, timer, signal, child and saved-winner selection replay implemented; coroutine and SDK expansion open | Recorded-history replay with no repeated external effects, changed-command rejection |
 | Activity retries and timeout classes | Queue, attempt, overall and heartbeat deadlines, progress recovery, retry policies and asynchronous Go callbacks implemented; remote authorization and process qualification open | Queue, attempt, overall and heartbeat deadlines; heartbeat progress; asynchronous completion |
-| Signals, queries, updates and signal-with-start | Atomic signals, signal-with-start, Go receive replay and explicit-run queries implemented; tracked updates and current/latest query selection open | Namespace isolation, deduplication, atomic acceptance, update results, read-only queries |
+| Signals, queries, updates and signal-with-start | Atomic signals, signal-with-start, Go receive replay and explicit/current/latest queries implemented; tracked updates open | Namespace isolation, deduplication, atomic acceptance, update results, read-only queries |
 | Child workflows and cancellation | Individual future, whole-workflow and child cancellation plus child composition implemented; cooperative external-activity completion acknowledgment open | Stable child identity, duplicate creation prevention, parent-close policies, cancellation propagation |
 | Compensation, pause, termination and reset | Parent-close termination implemented; operator controls, compensation, pause and reset open | Resumable compensation attempts, audited controls, immutable reset lineage |
 | Continue-as-new and run chains | Open | Bounded history, message handoff and version inheritance |
@@ -251,7 +251,7 @@ replace the connection pool after a reported failure and after an interrupted
 attempt. Both retain retry timing and complete with one final outcome. These are
 connection and worker replacement checks; process-kill qualification remains open.
 
-The activity retry change passes make f, make l, go test ./..., engine/runtime/
+The activity retry change passes make f, make l, go test ./..., engine, runtime and
 memory race tests and the PostgreSQL durable integration suite with race detection.
 Independent review of 070eead through 6ac3bf4 found no actionable correctness
 issues in the retry layer and independently reran the runtime race tests. The
@@ -822,12 +822,12 @@ failover, load and disaster-recovery qualification.
 
 You register a query with Workflow.SetQueryHandler(name, handler) before the
 workflow can yield. The handler reads local state reconstructed by replay and
-returns bytes or an error. QueryExecution requires an explicit namespace, workflow
-ID, run ID and pinned build. It returns the run key, persisted state, revision,
+returns bytes or an error. QueryExecution requires a namespace, workflow ID, pinned
+build and either an explicit run ID or a current/latest selector. It returns the run key, persisted state, revision,
 last history sequence and copied query output. Names contain at most 200 bytes;
 input and output each contain at most 1 MiB. Run and build identifiers retain the
-store's 512-byte bounds. Current/latest-run selection remains required work with
-the run identity and chain APIs.
+store's 512-byte bounds. The Durable query target contract below defines selection
+and migration behavior. Run chains remain separate required work.
 
 The query reads one immutable history prefix through the sequence in its first
 execution snapshot. Concurrent appends may produce a newer state, but cannot mix
@@ -861,8 +861,8 @@ Qualification requires fresh and waiting workflows, signal and activity state,
 terminal success/failure, copied inputs/results, rejected SDK mutations, recovered
 mutation attempts, panic/error paths, cancellation, identifier/payload boundaries,
 concurrent appends during paged reads, engine integration and PostgreSQL recovery.
-Remote authorization, current/latest selectors, tracked updates and operator query
-pages remain required parts of the broader roadmap.
+Remote authorization, tracked updates and operator query pages remain required
+parts of the broader roadmap.
 
 2026-10-08: query evaluator and client tests pass under the race detector. They
 cover fresh/waiting state, accepted signals, completed activity results and terminal
@@ -1274,7 +1274,7 @@ child := w.ChildWorkflow("shipment", "ship", input, runtime.ChildOptions{
 if _, err := child.Started(); err != nil {
     return nil, err
 }
-return child.Get()
+return nil, nil // The acknowledged child continues after this parent closes.
 ```
 
 Empty build and queue inherit the parent. Identity derives from the parent run and
@@ -1311,8 +1311,7 @@ open.
 suites and checked the PostgreSQL fault and replacement evidence. Final author
 checks passed make f, make l, go test ./..., engine/runtime/memory race tests and
 the full durable PostgreSQL integration race suite (130.982 seconds). The runnable
-example completed both parent and child. The abandon example above still needs a
-wording clarification: it awaits completion instead of demonstrating detachment.
+example completed both parent and child.
 
 This evidence does not qualify workflow deadlines, timed-out query reconstruction,
 run chains, operator transport, remote authorization, Dashboard flows, process kills,
@@ -1352,5 +1351,31 @@ connection replacement, migration retry, ambiguity and protected downgrade.
 
 2026-10-08: store checks passed make f, make l, go test ./..., engine/runtime/memory
 race tests and the full durable PostgreSQL integration race suite (139.127 seconds).
-Runtime query selection is still required. Operator transport, remote authorization
-and Dashboard flows remain separate required work.
+The Go runtime and engine now accept QueryRequest.Selection. You can request a
+current or latest snapshot without supplying RunID:
+
+```go
+result, err := worker.QueryExecution(ctx, runtime.QueryRequest{
+    Key: durable.Key{Namespace: "orders", WorkflowID: "order-42"},
+    Selection: durable.RunLatest,
+    BuildID: "orders-v1",
+    Name: "status",
+})
+```
+
+Use durable.RunCurrent for an open run, or omit Selection and set RunID for an
+explicit run. The pure EvaluateQuery API still requires an explicit identity
+because its caller already supplies the snapshot. A wrong build returns an error
+before replay. It never falls back to an older compatible run.
+
+Runtime tests expose only resolution and history reads, so any mutation or second
+projection lookup fails. They cover scope/build/handler errors, input isolation,
+closed runs and replacements after selection. PostgreSQL tests close the selected
+run, create its replacement, replace the connection pool and then read history;
+the result retains the original key, state, revision and sequence boundary.
+Operator transport, remote authorization and Dashboard flows remain required work.
+
+2026-10-08: runtime selection passed make f, make l, go test ./..., engine, runtime and
+memory race tests and the full durable PostgreSQL integration race suite (147.767
+seconds). Focused query checks also passed after the final lint edits. Independent
+review of the complete store and runtime change remains required.
