@@ -52,6 +52,10 @@ func (w *Worker) persist(ctx context.Context, request durable.CommitRequest) err
 }
 
 func (w *Worker) persistReceipt(ctx context.Context, request durable.CommitRequest) (durable.Receipt, error) {
+	return w.persistReceiptWithSend(ctx, request, nil)
+}
+
+func (w *Worker) persistReceiptWithSend(ctx context.Context, request durable.CommitRequest, onSend func()) (durable.Receipt, error) {
 	var receipt durable.Receipt
 	var last error
 	for attempt := range 3 {
@@ -59,11 +63,15 @@ func (w *Worker) persistReceipt(ctx context.Context, request durable.CommitReque
 			return durable.Receipt{}, context.Cause(ctx)
 		}
 		receipt, last = storeCall(ctx, w, func(callCtx context.Context) (durable.Receipt, error) {
+			if callCtx.Err() != nil {
+				return durable.Receipt{}, context.Cause(callCtx)
+			}
+			if onSend != nil {
+				onSend()
+			}
 			return w.store.CommitTransition(callCtx, request)
 		})
-		if last == nil || errors.Is(last, durable.ErrTaskDeadline) || errors.Is(last, durable.ErrTaskConflict) || errors.Is(last, durable.ErrInvalid) || errors.Is(last, durable.ErrLeaseLost) ||
-			errors.Is(last, durable.ErrRevisionConflict) || errors.Is(last, durable.ErrClosed) ||
-			errors.Is(last, durable.ErrRequestConflict) || errors.Is(last, durable.ErrExists) || errors.Is(last, durable.ErrNotFound) {
+		if last == nil || definitiveCommitError(last) {
 			return receipt, last
 		}
 		if attempt < 2 {
@@ -73,4 +81,10 @@ func (w *Worker) persistReceipt(ctx context.Context, request durable.CommitReque
 		}
 	}
 	return durable.Receipt{}, fmt.Errorf("persist task result after retries: %w", last)
+}
+
+func definitiveCommitError(err error) bool {
+	return errors.Is(err, durable.ErrTaskDeadline) || errors.Is(err, durable.ErrTaskConflict) || errors.Is(err, durable.ErrInvalid) || errors.Is(err, durable.ErrLeaseLost) ||
+		errors.Is(err, durable.ErrRevisionConflict) || errors.Is(err, durable.ErrClosed) ||
+		errors.Is(err, durable.ErrRequestConflict) || errors.Is(err, durable.ErrExists) || errors.Is(err, durable.ErrNotFound)
 }

@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -16,6 +17,27 @@ import (
 	drt "github.com/xraph/dispatch/durable/runtime"
 	"github.com/xraph/dispatch/store/postgres"
 )
+
+type lostRuntimeHandoffStore struct {
+	durable.Store
+	calls     atomic.Int64
+	recovered chan struct{}
+}
+
+func (s *lostRuntimeHandoffStore) CommitTransition(ctx context.Context, request durable.CommitRequest) (durable.Receipt, error) {
+	receipt, err := s.Store.CommitTransition(ctx, request)
+	if err != nil || len(request.Events) == 0 || request.Events[0].Type != drt.EventActivityDeferred {
+		return receipt, err
+	}
+	count := s.calls.Add(1)
+	if count <= 3 {
+		return durable.Receipt{}, errAsyncAcknowledgementLost
+	}
+	if count == 4 {
+		close(s.recovered)
+	}
+	return receipt, nil
+}
 
 // The first lookup succeeds. After a real completion commits, both the response
 // and receipt lookups fail until the caller replaces this client.
@@ -67,6 +89,12 @@ func TestDurableActivityAsyncRecovery(t *testing.T) {
 func testDurableActivityAsyncRecovery(t *testing.T, mode string) {
 	t.Helper()
 	s, dsn := setupTestStoreConnection(t)
+	var backend durable.Store = s
+	var handoffRecovery *lostRuntimeHandoffStore
+	if mode == "success" {
+		handoffRecovery = &lostRuntimeHandoffStore{Store: s, recovered: make(chan struct{})}
+		backend = handoffRecovery
+	}
 	policy := drt.ActivityOptions{StartToCloseTimeout: time.Minute,
 		RetryPolicy: &drt.RetryPolicy{InitialInterval: 50 * time.Millisecond, MaximumAttempts: 2}}
 	if mode == "heartbeat_timeout" {
@@ -86,6 +114,19 @@ func testDurableActivityAsyncRecovery(t *testing.T, mode string) {
 			identity = info.IdempotencyKey()
 			var err error
 			handle, err = info.DeferCompletion(ctx)
+			if handoffRecovery != nil {
+				if !errors.Is(err, errAsyncAcknowledgementLost) {
+					return nil, errors.New("test did not lose handoff acknowledgements")
+				}
+				select {
+				case <-handoffRecovery.recovered:
+				case <-ctx.Done():
+					return nil, context.Cause(ctx)
+				case <-time.After(5 * time.Second):
+					return nil, errors.New("handoff reconciliation did not run")
+				}
+				handle, err = info.DeferCompletion(ctx)
+			}
 			return nil, err
 		}
 		if info.Attempt != 2 || info.IdempotencyKey() != identity || string(info.HeartbeatDetails()) != "external" {
@@ -93,7 +134,7 @@ func testDurableActivityAsyncRecovery(t *testing.T, mode string) {
 		}
 		return []byte("paid"), nil
 	}}
-	worker, err := drt.NewWorker(s, options)
+	worker, err := drt.NewWorker(backend, options)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -105,6 +146,9 @@ func testDurableActivityAsyncRecovery(t *testing.T, mode string) {
 		if worked, workErr := worker.RunOnce(t.Context(), kind); workErr != nil || !worked {
 			t.Fatalf("run %s: %t %v", kind, worked, workErr)
 		}
+	}
+	if handoffRecovery != nil && handoffRecovery.calls.Load() != 4 {
+		t.Fatalf("handoff reconciliation calls: %d", handoffRecovery.calls.Load())
 	}
 	serialized, err := json.Marshal(handle)
 	if err != nil {

@@ -12,15 +12,16 @@ import (
 )
 
 type heartbeatSession struct {
-	worker      *Worker
-	task        durable.Task
-	ctx         context.Context
-	cancel      context.CancelCauseFunc
-	gate        chan struct{}
-	sequence    int64
-	pending     *durable.HeartbeatRequest
-	pendingSent bool
-	detached    bool // protected by gate
+	worker         *Worker
+	task           durable.Task
+	ctx            context.Context
+	cancel         context.CancelCauseFunc
+	gate           chan struct{}
+	sequence       int64
+	pending        *durable.HeartbeatRequest
+	pendingSent    bool
+	detached       bool // protected by gate
+	handoffPending bool // protected by gate
 }
 
 func newHeartbeatSession(ctx context.Context, worker *Worker, task durable.Task) *heartbeatSession {
@@ -57,6 +58,9 @@ func (s *heartbeatSession) record(ctx context.Context, details []byte) error {
 	}
 	if s.detached {
 		return durable.ErrLeaseLost
+	}
+	if s.handoffPending {
+		return ErrHandoffPending
 	}
 	callCtx, cancel := context.WithCancelCause(ctx)
 	stop := context.AfterFunc(s.ctx, func() { cancel(context.Cause(s.ctx)) })

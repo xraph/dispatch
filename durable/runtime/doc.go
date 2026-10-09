@@ -32,6 +32,10 @@
 // methods remotely. A crash before handle delivery leaves an orphaned handoff
 // which recovers through its persisted deadline. Memory is for development and
 // tests; use a qualified persistent execution store for restart recovery.
+// An uncertain sent handoff suspends ordinary worker heartbeats with
+// ErrHandoffPending. Retry DeferCompletion to recover its original handle.
+// Renewal also reconciles that saved request before using the old worker token;
+// a cancelled request that stayed unsent is never retried in the background.
 //
 // Evaluate requires a complete history snapshot with at most 100,000 events and
 // accepts at most 999 new commands per decision. Command IDs, names and queues

@@ -2,10 +2,15 @@ package runtime
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	"github.com/xraph/dispatch/durable"
 )
+
+// ErrHandoffPending means worker heartbeats are suspended until an uncertain
+// ownership transfer resolves. Retry DeferCompletion to recover its handle.
+var ErrHandoffPending = errors.New("durable runtime: asynchronous handoff response is unresolved")
 
 // AsyncActivityHandle transfers callback authority for one activity attempt.
 // Treat it as a credential. JSON carries the secret for explicit delivery;
@@ -32,7 +37,9 @@ func (h AsyncActivityHandle) Validate() error {
 	if err := h.Token.Validate(); err != nil {
 		return err
 	}
-	if h.Version != 1 || !validID(h.BuildID) || h.Token.LeaseKind != durable.LeaseAsync || h.InitialHeartbeatSequence < 0 {
+	// Builds use the durable store's 512-byte identifier limit. The 200-byte
+	// workflow command limit does not apply to deployment routing.
+	if h.Version != 1 || !validIdentifier(h.BuildID, 512) || h.Token.LeaseKind != durable.LeaseAsync || h.InitialHeartbeatSequence < 0 {
 		return fmt.Errorf("%w: invalid asynchronous activity handle", durable.ErrInvalid)
 	}
 	_, err := durable.HashAsyncSecret(h.Secret)
@@ -62,6 +69,8 @@ type AsyncHeartbeatRequest struct {
 // returning its handle. A confirmed handoff suppresses subsequent handler results.
 // Calling again during the handler returns the same handle. A finite persisted
 // overall, attempt or heartbeat deadline is required.
+// After an unknown response, retry to recover the handle. Renewal reconciles
+// sent pending requests; ordinary heartbeats return ErrHandoffPending meanwhile.
 func (a ActivityInfo) DeferCompletion(ctx context.Context) (AsyncActivityHandle, error) {
 	if a.deferCompletion == nil {
 		return AsyncActivityHandle{}, fmt.Errorf("%w: asynchronous handoff requires a running version 2 activity", durable.ErrInvalid)

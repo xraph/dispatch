@@ -640,7 +640,11 @@ stops renewing without cancelling the handler. A result or panic after a
 confirmed handoff cannot publish another outcome. Repeated handoff calls during
 the handler return the same handle; retained callbacks expire when it returns.
 Unknown handoff acknowledgements retain the exact request and handle until
-resolved. A crash before handle delivery leaves the grant for deadline recovery.
+resolved. Before renewing, the worker reconciles an uncertain request that was
+already sent. Ordinary heartbeats return ErrHandoffPending without cancelling
+delivery. A cancelled preparation that stayed unsent is discarded, and closing
+the handler session prevents further background handoff writes. A crash before
+handle delivery leaves the grant for deadline recovery.
 
 CompleteAsyncActivity accepts a stable request ID and a result or application
 failure. It uses the recorded retry policy and atomically publishes progress,
@@ -696,3 +700,28 @@ After the routing fix, make f, make l (zero issues), go test ./..., and engine,
 durable, runtime and memory race tests pass. The full durable PostgreSQL race
 suite passes in 60.087 seconds with no skipped tests. Independent review of this
 runtime layer is the next qualification step; full Temporal parity is not claimed.
+
+Independent review of 0184940 through 8d0cc4e found two Important defects and no
+Critical or Minor findings. An accepted handoff with lost responses could leave
+old-token renewal and ordinary heartbeats active; their lease-loss cancellation
+then blocked recovery of the saved handle. The correction tracks sent requests,
+reconciles their exact transaction before renewal and reports a pending handoff
+to ordinary heartbeats. The second defect applied the 200-byte command ID limit
+to build IDs, even though durable routing accepts 512 bytes. Handles now use the
+existing durable build limit.
+
+Regressions reproduce both cancellation paths, cancelled prepared requests and
+unusable 201/512-byte build handles. Corrected tests include both accepted and
+uncommitted unknown handoffs and preserve explicit retry after cancellation.
+The added session state can cause bounded background retry traffic while an
+acknowledgement remains unknown. It cannot send a cancelled unsent request.
+The reviewer independently passed async race tests (2.738 seconds), reviewed
+PostgreSQL evidence and declined to qualify process kills, failover, sustained
+load, remote authorization or full parity. Those requirements remain open.
+
+After the single corrective pass, make f, make l (zero issues), go test ./...,
+and engine/durable/runtime/memory race tests pass. The full durable PostgreSQL
+race suite passes in 61.243 seconds with no skipped tests, including lost handoff
+response reconciliation before connection replacement. The example still prints
+completed: paid. Both Important findings are fixed with reproducing regressions;
+no deferred minor findings remain. There was no second independent review.

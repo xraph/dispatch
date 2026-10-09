@@ -15,6 +15,9 @@ type taskLease struct {
 	gate     chan struct{}
 	done     chan struct{}
 	detached bool // protected by gate
+	// reconcile runs under gate before normal renewal. False suspends renewal
+	// while a sent ownership transfer has an unknown outcome.
+	reconcile func(context.Context) (bool, error)
 }
 
 func newTaskLease(ctx context.Context, w *Worker, task durable.Task) *taskLease {
@@ -35,14 +38,22 @@ func (l *taskLease) renew(w *Worker, task durable.Task) {
 			l.gate <- struct{}{}
 			return
 		}
-		_, err := storeCall(l.ctx, w, func(ctx context.Context) (time.Time, error) {
-			return w.store.RenewTask(ctx, task.Key, task.Token(), w.options.LeaseDuration)
-		})
+		renew := true
+		var err error
+		if l.reconcile != nil {
+			renew, err = l.reconcile(l.ctx)
+		}
+		if err == nil && renew {
+			_, err = storeCall(l.ctx, w, func(ctx context.Context) (time.Time, error) {
+				return w.store.RenewTask(ctx, task.Key, task.Token(), w.options.LeaseDuration)
+			})
+		}
 		if err != nil {
 			l.cancel(err)
 		}
+		stop := l.detached || err != nil
 		l.gate <- struct{}{}
-		if err != nil {
+		if stop {
 			return
 		}
 	}

@@ -124,7 +124,11 @@ func (f *Future) Get() ([]byte, error) {
 }
 
 func validID(value string) bool {
-	return value != "" && len(value) <= 200 && strings.TrimSpace(value) == value &&
+	return validIdentifier(value, 200)
+}
+
+func validIdentifier(value string, limit int) bool {
+	return value != "" && len(value) <= limit && strings.TrimSpace(value) == value &&
 		!strings.ContainsRune(value, 0) && utf8.ValidString(value)
 }
 

@@ -12,16 +12,17 @@ import (
 )
 
 type handoffSession struct {
-	worker     *Worker
-	lease      *taskLease
-	heartbeats *heartbeatSession
-	task       durable.Task
-	payload    taskPayload
-	buildID    string
-	attempt    int64
-	secret     string
-	pending    *durable.CommitRequest
-	handle     AsyncActivityHandle
+	worker      *Worker
+	lease       *taskLease
+	heartbeats  *heartbeatSession
+	task        durable.Task
+	payload     taskPayload
+	buildID     string
+	attempt     int64
+	secret      string
+	pending     *durable.CommitRequest
+	pendingSent bool
+	handle      AsyncActivityHandle
 }
 
 func (s *handoffSession) deferCompletion(ctx context.Context) (AsyncActivityHandle, error) {
@@ -50,21 +51,76 @@ func (s *handoffSession) deferCompletion(ctx context.Context) (AsyncActivityHand
 				return AsyncActivityHandle{}, err
 			}
 		}
-		_, err := s.worker.persistReceipt(callCtx, *s.pending)
+		err := s.persist(callCtx)
 		if err == nil {
-			s.heartbeats.detached, s.lease.detached = true, true
-			s.pending = nil
+			s.confirm()
 			return s.handle, nil
 		}
 		if errors.Is(err, durable.ErrRevisionConflict) || errors.Is(err, durable.ErrTaskConflict) {
-			s.pending = nil
+			s.clearPending()
 			continue
 		}
-		// An unknown outcome retains this exact transaction and its handle.
-		// A later explicit call resolves that request before reading newer state.
+		if definitiveCommitError(err) || !s.pendingSent {
+			s.clearPending()
+		} else {
+			// The old worker token may already be fenced. Resolve this sent
+			// request before renewal; ordinary heartbeats must wait too.
+			s.heartbeats.handoffPending = true
+			s.lease.reconcile = s.reconcile
+		}
 		return AsyncActivityHandle{}, err
 	}
 	return AsyncActivityHandle{}, durable.ErrRevisionConflict
+}
+
+func (s *handoffSession) persist(ctx context.Context) error {
+	_, err := s.worker.persistReceiptWithSend(ctx, *s.pending, func() { s.pendingSent = true })
+	return err
+}
+
+// reconcile runs with the ownership gate held. It can retry only a request that
+// already reached the store, never a cancelled preparation that stayed unsent.
+func (s *handoffSession) reconcile(ctx context.Context) (bool, error) {
+	if err := takeGate(ctx, s.heartbeats.gate); err != nil {
+		return false, err
+	}
+	defer func() { s.heartbeats.gate <- struct{}{} }()
+	if s.heartbeats.ctx.Err() != nil {
+		// Handler shutdown drains this gate before inspecting detached. Never
+		// change that decision or send another request after the session closes.
+		return false, nil
+	}
+	if s.pending == nil || !s.pendingSent {
+		s.clearPending()
+		return true, nil
+	}
+	err := s.persist(ctx)
+	if err == nil {
+		s.confirm()
+		return false, nil
+	}
+	if errors.Is(err, durable.ErrRevisionConflict) || errors.Is(err, durable.ErrTaskConflict) {
+		s.clearPending()
+		return true, nil
+	}
+	if definitiveCommitError(err) {
+		s.clearPending()
+		return false, err
+	}
+	// An unknown write cannot safely be followed by renewal of the old token.
+	// Keep the original request for the next tick or an explicit handoff retry.
+	return false, nil
+}
+
+func (s *handoffSession) clearPending() {
+	s.pending, s.pendingSent = nil, false
+	s.heartbeats.handoffPending = false
+	s.lease.reconcile = nil
+}
+
+func (s *handoffSession) confirm() {
+	s.heartbeats.detached, s.lease.detached = true, true
+	s.clearPending()
 }
 
 func (s *handoffSession) prepare(ctx context.Context) error {
