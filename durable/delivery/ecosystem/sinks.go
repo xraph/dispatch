@@ -2,10 +2,13 @@ package ecosystem
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 
 	ca "github.com/xraph/chronicle/acceptance"
+	"github.com/xraph/chronicle/hash"
 	ci "github.com/xraph/chronicle/id"
 	ra "github.com/xraph/relay/acceptance"
 	ri "github.com/xraph/relay/id"
@@ -49,7 +52,7 @@ func (s Chronicle) Accept(ctx context.Context, d durable.Delivery) (durable.Sink
 	if err != nil {
 		return durable.SinkReceipt{}, err
 	}
-	if r == nil || r.Producer != req.Producer || r.Installation != req.Installation || r.SourceKey != req.SourceKey || r.SourceFingerprint != req.SourceFingerprint || r.AppID != d.AppID || r.OrgID != req.OrgID || r.TenantID != d.TenantID || r.Fingerprint != fp || r.EventID.Prefix() != ci.PrefixAudit || r.StreamID.Prefix() != ci.PrefixStream || r.Sequence == 0 || r.Hash == "" || r.HashScheme == "" {
+	if r == nil || r.Producer != req.Producer || r.Installation != req.Installation || r.SourceKey != req.SourceKey || r.SourceFingerprint != req.SourceFingerprint || r.AppID != d.AppID || r.OrgID != req.OrgID || r.TenantID != d.TenantID || r.Fingerprint != fp || r.EventID.Prefix() != ci.PrefixAudit || r.StreamID.Prefix() != ci.PrefixStream || r.Sequence == 0 || !validChronicleProtection(r) {
 		return durable.SinkReceipt{}, durable.ErrRequestConflict
 	}
 	return receipt(d, r.EventID.String(), fp, r)
@@ -97,4 +100,23 @@ func receipt(d durable.Delivery, id, fp string, evidence any) (durable.SinkRecei
 		return durable.SinkReceipt{}, durable.ErrInvalid
 	}
 	return durable.SinkReceipt{ID: id, DeliveryID: d.ID, Destination: d.Destination, SchemaVersion: d.SchemaVersion, Fingerprint: d.Fingerprint, MappingVersion: MappingVersion, SinkFingerprint: fp, Evidence: string(raw)}, nil
+}
+
+// validChronicleProtection checks the receipt's declared digest provenance. It
+// does not recompute a chain digest or establish a minimum protection policy.
+func validChronicleProtection(r *ca.Receipt) bool {
+	if len(r.Hash) != sha256.Size*2 {
+		return false
+	}
+	if _, err := hex.DecodeString(r.Hash); err != nil {
+		return false
+	}
+	switch hash.Scheme(r.HashScheme) {
+	case hash.SchemeLegacy, hash.SchemePlain, hash.SchemePlainV4:
+		return r.HashKeyID == ""
+	case hash.SchemeHMAC, hash.SchemeHMACV5:
+		return r.HashKeyID != ""
+	default:
+		return false
+	}
 }

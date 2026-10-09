@@ -73,11 +73,12 @@ func (r *Remote) call(ctx context.Context, request any, expected ConflictRespons
 	if err != nil || len(body) > MaxResponseBytes {
 		return false, ErrTransport
 	}
-	canonical, err := ra.CanonicalJSON(body)
-	if err != nil {
+	// Validate strict JSON without rewriting integer tokens into exponent form.
+	// Chronicle receipts decode Sequence directly as uint64.
+	if _, err = ra.CanonicalJSON(body); err != nil {
 		return false, ErrTransport
 	}
-	decoder := json.NewDecoder(bytes.NewReader(canonical))
+	decoder := json.NewDecoder(bytes.NewReader(body))
 	decoder.UseNumber()
 	decoder.DisallowUnknownFields()
 	if response.StatusCode == http.StatusConflict {
