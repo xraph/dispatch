@@ -18,13 +18,16 @@ type recordedOutcome struct {
 }
 
 type replayHistory struct {
-	commands  []Command
-	outcomes  map[string]recordedOutcome
-	attempts  map[string]recordedAttempt
-	scheduled map[string]time.Time
-	terminal  durable.State
-	output    []byte
-	failure   *ApplicationError
+	commands      []Command
+	signals       map[string]recordedSignal
+	signalQueues  map[string][]string
+	signalOffsets map[string]int
+	outcomes      map[string]recordedOutcome
+	attempts      map[string]recordedAttempt
+	scheduled     map[string]time.Time
+	terminal      durable.State
+	output        []byte
+	failure       *ApplicationError
 }
 
 // Evaluate replays a complete history snapshot through LastSequence. It produces
@@ -52,7 +55,7 @@ func Evaluate(execution durable.Execution, events []durable.Event, handler Workf
 	if w.cursor < len(history.commands) {
 		return Decision{}, fmt.Errorf("%w: omitted command %d", ErrNondeterministic, w.cursor+1)
 	}
-	decision = Decision{Commands: w.commands, State: durable.StateCompleted, Output: bytes.Clone(output)}
+	decision = Decision{Commands: w.commands, Signals: w.signals, State: durable.StateCompleted, Output: bytes.Clone(output)}
 	if w.blocked {
 		decision.State, decision.Output = durable.StateRunning, nil
 	} else if handlerErr != nil {
@@ -71,7 +74,7 @@ func Evaluate(execution durable.Execution, events []durable.Event, handler Workf
 	if decision.Failure != nil && !validFailure(decision.Failure) {
 		return Decision{}, fmt.Errorf("%w: invalid application failure", durable.ErrInvalid)
 	}
-	if history.terminal != "" && (decision.State != history.terminal || len(decision.Commands) != 0 ||
+	if history.terminal != "" && (decision.State != history.terminal || len(decision.Commands) != 0 || len(decision.Signals) != 0 ||
 		!bytes.Equal(decision.Output, history.output) || !sameFailure(decision.Failure, history.failure)) {
 		return Decision{}, fmt.Errorf("%w: terminal result changed", ErrNondeterministic)
 	}
@@ -90,7 +93,7 @@ func invoke(w *Workflow, handler WorkflowFunc, input []byte) (output []byte, err
 }
 
 func parseHistory(execution durable.Execution, events []durable.Event) (replayHistory, error) {
-	result := replayHistory{outcomes: make(map[string]recordedOutcome), attempts: make(map[string]recordedAttempt), scheduled: make(map[string]time.Time)}
+	result := replayHistory{signals: make(map[string]recordedSignal), signalQueues: make(map[string][]string), signalOffsets: make(map[string]int), outcomes: make(map[string]recordedOutcome), attempts: make(map[string]recordedAttempt), scheduled: make(map[string]time.Time)}
 	if len(events) == 0 || len(events) > 100000 || execution.LastSequence != int64(len(events)) ||
 		execution.CreatedAt.IsZero() || events[0].Type != EventStarted ||
 		!events[0].Time.Equal(execution.CreatedAt) || !bytes.Equal(events[0].Payload, execution.Input) {
@@ -118,6 +121,10 @@ func parseHistory(execution durable.Execution, events []durable.Event) (replayHi
 			commands[command.ID] = command
 			result.scheduled[command.ID] = event.Time
 			result.commands = append(result.commands, command)
+		case EventSignalReceived, EventSignalConsumed:
+			if err := parseSignal(&result, commands, event); err != nil {
+				return result, err
+			}
 		case EventActivityDeferred:
 			if err := parseActivityHandoff(&result, commands, event); err != nil {
 				return result, err

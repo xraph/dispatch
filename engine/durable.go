@@ -89,6 +89,26 @@ func (eng *Engine) HeartbeatDurableActivity(ctx context.Context, request drt.Asy
 	return worker.HeartbeatAsyncActivity(ctx, request)
 }
 
+// SignalDurableWorkflow accepts a message for an explicit or current open run.
+// You must authorize callers before exposing this trusted Go method remotely.
+func (eng *Engine) SignalDurableWorkflow(ctx context.Context, request durable.SignalRequest) (durable.SignalReceipt, error) {
+	worker := eng.DurableWorker()
+	if worker == nil {
+		return durable.SignalReceipt{}, ErrDurableDisabled
+	}
+	return worker.SignalExecution(ctx, request)
+}
+
+// SignalWithStartDurableWorkflow accepts a message and creates a run when needed.
+// Reuse the whole request to recover its original target after a lost response.
+func (eng *Engine) SignalWithStartDurableWorkflow(ctx context.Context, request durable.SignalWithStartRequest) (durable.SignalReceipt, error) {
+	worker := eng.DurableWorker()
+	if worker == nil {
+		return durable.SignalReceipt{}, ErrDurableDisabled
+	}
+	return worker.SignalWithStart(ctx, request)
+}
+
 func (eng *Engine) startDurable(ctx context.Context) error {
 	d := eng.durable
 	if d == nil {

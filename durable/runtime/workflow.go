@@ -17,6 +17,7 @@ type Workflow struct {
 	history  replayHistory
 	cursor   int
 	commands []Command
+	signals  []SignalConsumption
 	ids      map[string]bool
 	blocked  bool
 	fault    error
@@ -25,8 +26,9 @@ type Workflow struct {
 // Future represents a recorded command's eventual result.
 // Get yields the workflow decision if its result has not been recorded.
 type Future struct {
-	workflow *Workflow
-	id       string
+	workflow   *Workflow
+	id         string
+	signalName string
 }
 
 type flowControl struct{}
@@ -88,13 +90,17 @@ func (w *Workflow) schedule(command Command) *Future {
 		}
 	} else {
 		// Reserve one event in the store's batch for workflow state.
-		if len(w.commands) >= 999 {
-			w.stop(fmt.Errorf("%w: more than 999 commands in one decision", durable.ErrInvalid))
+		if len(w.commands)+len(w.signals) >= 999 {
+			w.stop(fmt.Errorf("%w: more than 999 command and consumption events in one decision", durable.ErrInvalid))
 		}
 		w.commands = append(w.commands, command)
 	}
 	w.cursor++
-	return &Future{workflow: w, id: command.ID}
+	future := &Future{workflow: w, id: command.ID}
+	if command.Kind == CommandSignal {
+		future.signalName = command.Name
+	}
+	return future
 }
 
 // Get returns a copy of a saved result, or a typed recorded activity failure.
@@ -106,6 +112,9 @@ func (f *Future) Get() ([]byte, error) {
 		w.stop(fmt.Errorf("%w: workflow continued after an unresolved future", durable.ErrInvalid))
 	}
 	result, ok := w.history.outcomes[f.id]
+	if !ok && f.signalName != "" {
+		result, ok = w.receiveSignal(f.id, f.signalName)
+	}
 	if !ok {
 		w.blocked = true
 		panic(flowControl{})
@@ -152,6 +161,10 @@ func (c Command) validate() error {
 		}
 		if !validID(c.Name) || c.Delay != 0 || !c.Deadline.IsZero() {
 			return fmt.Errorf("%w: invalid activity command", durable.ErrInvalid)
+		}
+	case CommandSignal:
+		if c.Version != 1 || !validID(c.Name) || c.ActivityOptions != nil || c.Queue != "" || len(c.Input) != 0 || c.Delay != 0 || !c.Deadline.IsZero() {
+			return fmt.Errorf("%w: invalid signal receive command", durable.ErrInvalid)
 		}
 	case durable.TaskTimer:
 		if c.Version != 1 || c.ActivityOptions != nil || c.Delay <= 0 || c.Deadline.IsZero() || c.Deadline.Year() < 1 || c.Deadline.Year() > 9999 ||

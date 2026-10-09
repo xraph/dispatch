@@ -42,7 +42,7 @@ Store tests alone do not qualify a workflow runtime or a deployment.
 | Fenced task claims and durable timer deadlines | Store contract and renewable workers implemented; process-kill qualification open | Expiry, same-owner reclaim, concurrent claims, restart recovery |
 | Deterministic Go workflow runtime | Activity, timer and future replay implemented; SDK expansion open | Recorded-history replay with no repeated external effects, changed-command rejection |
 | Activity retries and timeout classes | Queue, attempt, overall and heartbeat deadlines, progress recovery, retry policies and asynchronous Go callbacks implemented; remote authorization and process qualification open | Queue, attempt, overall and heartbeat deadlines; heartbeat progress; asynchronous completion |
-| Signals, queries, updates and signal-with-start | Atomic signal store acceptance and receipts implemented; runtime, queries and updates open | Namespace isolation, deduplication, atomic acceptance, update results, read-only queries |
+| Signals, queries, updates and signal-with-start | Atomic signals, signal-with-start and Go receive replay implemented; queries and updates open | Namespace isolation, deduplication, atomic acceptance, update results, read-only queries |
 | Child workflows and cancellation | Open | Stable child identity, duplicate creation prevention, parent-close policies, cancellation propagation |
 | Compensation, pause, termination and reset | Open | Resumable compensation attempts, audited controls, immutable reset lineage |
 | Continue-as-new and run chains | Open | Bounded history, message handoff and version inheritance |
@@ -784,4 +784,27 @@ Signal store evidence: memory and PostgreSQL conformance cover receipt recovery
 across run replacement, queue retention, conflicting requests and closure races.
 PostgreSQL fault tests reject the final receipt insertion, reopen the pool after a
 lost response, retry migrations and reject downgrade with retained receipts.
-Runtime consumption remains unimplemented at this store checkpoint.
+Runtime consumption was pending at the store checkpoint ccb9fa9.
+
+You can receive a message with Workflow.ReceiveSignal("approval", "approve").Get().
+Use a new command ID for the next receive. Worker.SignalExecution and
+Worker.SignalWithStart accept trusted Go calls without a handler registration;
+the engine exposes SignalDurableWorkflow and SignalWithStartDurableWorkflow.
+The proposed queue and workflow type must fit the Go runtime's existing 200-byte
+limit. Build and request IDs retain the store's 512-byte limit.
+
+2026-10-08: signal runtime and engine regressions cover messages before and after
+waiting, preserved assignments across activity waits, copied repeated results,
+independent names, timer origins, changed commands and corrupt history. The parser
+rejects duplicate, missing, mismatched and out-of-order consumption. Per-name queues
+keep matching linear across the history. New commands and consumptions share the
+999-event decision budget, with one additional event reserved for workflow state.
+
+A forced concurrent signal invalidates a stale workflow commit; replay records
+each assignment once. Client tests exhaust lost-response retries, preserve copied
+request inputs and recover receipts after closure. PostgreSQL runtime tests reopen
+the connection pool after lost acceptance responses, resume two ordered receives,
+keep the original workflow queue and recover the receipt after a new run starts.
+The development example at examples/durable-signals prints completed: approved.
+Queries, updates, selectors, remote authorization, operator pages and process/load
+qualification remain open. These checks do not establish full Temporal parity.

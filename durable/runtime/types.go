@@ -68,10 +68,11 @@ type Outcome struct {
 	Heartbeat *HeartbeatCheckpoint `json:"heartbeat,omitempty"`
 }
 
-// Decision contains only new commands. Running means a future is unresolved.
+// Decision contains only new commands and signal consumptions. Running means a future is unresolved.
 // An evaluation error never returns a usable decision.
 type Decision struct {
 	Commands []Command
+	Signals  []SignalConsumption
 	State    durable.State
 	Output   []byte
 	Failure  *ApplicationError

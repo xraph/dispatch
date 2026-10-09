@@ -48,7 +48,7 @@ func decisionRequest(task durable.Task, execution durable.Execution, decision De
 			return request, err
 		}
 		request.Events = append(request.Events, durable.EventInput{Type: EventCommandScheduled, Payload: data})
-		if decision.State == durable.StateRunning {
+		if decision.State == durable.StateRunning && command.Kind != CommandSignal {
 			payload, payloadErr := json.Marshal(taskPayload{Version: 1, Command: command, WorkflowQueue: task.Queue})
 			if payloadErr != nil {
 				return request, payloadErr
@@ -60,6 +60,13 @@ func decisionRequest(task durable.Task, execution durable.Execution, decision De
 			request.Tasks = append(request.Tasks, durable.TaskSpec{ID: fmt.Sprintf("command:%d", command.Index),
 				Kind: command.Kind, Queue: queue, Payload: payload, AvailableAt: command.Deadline, DeadlineAfter: firstActivityTimeout(command.ActivityOptions)})
 		}
+	}
+	for _, consumed := range decision.Signals {
+		data, err := json.Marshal(consumed)
+		if err != nil {
+			return request, err
+		}
+		request.Events = append(request.Events, durable.EventInput{Type: EventSignalConsumed, Payload: data})
 	}
 	request.State, request.Output = decision.State, decision.Output
 	event := durable.EventInput{Type: EventWorkflowWaiting}

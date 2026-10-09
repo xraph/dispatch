@@ -1,6 +1,6 @@
 // Package runtime evaluates durable workflow decisions against recorded history.
 //
-// A workflow handler schedules named activities and timers. Schedule multiple
+// A workflow handler schedules named activities, timers and signal receives. Schedule multiple
 // futures before calling Get to allow parallel execution. Get returns a saved
 // result or yields the decision until an outcome arrives. The handler then runs
 // again from its beginning. Now advances from run creation through the outcomes
@@ -37,8 +37,24 @@
 // Renewal also reconciles that saved request before using the old worker token;
 // a cancelled request that stayed unsent is never retried in the background.
 //
+// ReceiveSignal returns a future for one message of a given name. Give each
+// receive a stable command ID. Messages are buffered in history, consumed in
+// arrival order within their name, and assigned to a receive in its decision
+// transaction. Repeated Get returns a copy of the same input. Now advances using
+// the recorded message arrival time, even if consumption commits much later.
+//
+// SignalExecution targets an explicit run or the current open run with an empty
+// RunID. SignalWithStart atomically selects an open run or creates the proposed
+// run first. Request IDs are unique across both operations within one namespace
+// and workflow ID. Retry the whole original request to recover its original
+// receipt, including after a replacement run starts. A receipt confirms durable
+// acceptance. Your workflow decides whether to consume all signals before closing.
+// Callback clients need the pinned namespace/build, but no registered handlers.
+// SignalWithStart proposals must fit the Go runtime's queue/type limits, even
+// when those fields are unused because an existing run wins.
+//
 // Evaluate requires a complete history snapshot with at most 100,000 events and
-// accepts at most 999 new commands per decision. Command IDs, names and queues
+// accepts at most 999 new command and signal consumption events per decision. Command IDs, names and queues
 // contain at most 200 bytes. History format version 1 is explicit; unknown
 // versions and event types fail evaluation so operators can supply compatible
 // code. A panic or nondeterministic replay fails the task, not the execution.
