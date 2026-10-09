@@ -385,3 +385,42 @@ func TestIncompleteDrainRetainsStoreAndStopCanRetry(t *testing.T) {
 		t.Fatal("retry close failed", s.closed, s.late)
 	}
 }
+
+func TestConfirmedConflictSurvivesPublisherRestart(t *testing.T) {
+	s := fixture(t, 2)
+	status, err := s.DeliveryStatus(t.Context(), durable.DeliveryStatusRequest{DeliveryScope: durable.DeliveryScope{InstallationID: "installation", Destination: durable.DestinationChronicle}, Limit: 100})
+	if err != nil {
+		t.Fatal(err)
+	}
+	blockedID := status.Records[0].Delivery.ID
+	var calls atomic.Int64
+	sink := sinkFunc(func(_ context.Context, d durable.Delivery) (durable.SinkReceipt, error) {
+		if d.ID == blockedID {
+			calls.Add(1)
+			return durable.SinkReceipt{}, delivery.ErrConfirmedConflict
+		}
+		return receipt(d), nil
+	})
+	for _, owner := range []string{"before-restart", "after-restart"} {
+		p, e := delivery.New(s, config(owner), map[durable.Destination]delivery.Sink{durable.DestinationChronicle: sink})
+		if e != nil {
+			t.Fatal(e)
+		}
+		if e = p.Start(); e != nil {
+			t.Fatal(e)
+		}
+		wait(t, func() bool {
+			state, statusErr := p.Status(t.Context(), durable.DestinationChronicle)
+			return statusErr == nil && state.Pending == 1 && state.Blocked == 1
+		})
+		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+		e = p.Stop(ctx)
+		cancel()
+		if !errors.Is(e, delivery.ErrIncompleteShutdown) {
+			t.Fatalf("blocked drain reported success: %v", e)
+		}
+	}
+	if calls.Load() != 1 {
+		t.Fatalf("blocked row automatically retried: %d", calls.Load())
+	}
+}

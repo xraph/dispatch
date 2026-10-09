@@ -15,7 +15,7 @@ import (
 )
 
 // DeliveryConfig is explicit host composition. Sinks must implement durable
-// idempotent acceptance; this package supplies no Chronicle or Relay adapter.
+// idempotent acceptance. Use durable/delivery/ecosystem for Chronicle and Relay.
 type DeliveryConfig struct {
 	AuditNamespace              durable.NamespaceConfig
 	Namespaces                  []durable.NamespaceConfig

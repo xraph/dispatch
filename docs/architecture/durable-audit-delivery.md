@@ -7,9 +7,9 @@ both capabilities explicitly; a legacy store does not provide a reliable fallbac
 
 The independent publisher drains accepted intents through an injected
 `delivery.Sink.Accept` implementation. Forge composition registers namespaces and
-starts that publisher before worker admission. Concrete Chronicle and Relay
-acceptance adapters are separate work. Local acceptance and test sinks do not
-establish delivery to either deployed service.
+starts that publisher before worker admission. `durable/delivery/ecosystem` supplies Chronicle and Relay
+adapters for their reliable acceptance APIs. Local acceptance and memory-engine
+tests do not establish delivery to either deployed service.
 
 ## Configure ownership before admission
 
@@ -166,7 +166,7 @@ pending. If a reply is lost, inspect status or let another publisher recover the
 pending record; never assume delivery from a transport error. A repeated ack with
 an already consumed token fails fencing, while status retains the accepted receipt.
 
-Status reads return bounded records, pending count and the oldest pending local
+Status reads return bounded records, pending and blocked counts, and the oldest pending local
 acceptance timestamp. You can derive backlog age from that timestamp. PostgreSQL
 count and page reads are separate READ COMMITTED statements, so status is
 observational rather than a transactionally consistent monitoring snapshot.
@@ -269,8 +269,95 @@ acknowledge a delivery. Worker shutdown failure also remains visible and prevent
 premature store closure.
 
 `Extension.Health` remains execution readiness. `DeliveryStatus` separately
-reports pending count, oldest acceptance, calls in flight and the latest bounded
+reports pending and blocked counts, oldest acceptance, calls in flight and the latest bounded
 error category for one destination. Sink outage does not fail execution readiness
 while required local acceptance works; it degrades delivery and may prevent a
 complete shutdown drain. The host must monitor backlog age and volume against its
 outage budget. No deployed Chronicle/Relay qualification is claimed here.
+
+
+## Reliable ecosystem adapters
+
+Inject `ecosystem.Chronicle` and `ecosystem.Relay` through `DeliveryConfig.Sinks`.
+Their clients implement Chronicle `RecordOnce` and Relay `SendReliable`. You can
+use the actual engines in a composed host or `ecosystem.NewRemote` for a fixed
+protected acceptance endpoint. Keep the host's Authsome and Warden composition
+in a separate module. Dispatch core imports neither Authsome nor Ctrlplane, and
+neither sink imports Dispatch.
+
+Supply an immutable `ecosystem.Binding` for each namespace: producer,
+installation, namespace, app, optional organization and tenant. The adapter
+rejects a delivery whose persisted ownership differs. If your publisher serves
+several namespaces, your host must choose among its configured adapters using
+that allowlist; delivery content cannot provide an endpoint or credential.
+
+Mapping version 1 preserves the original occurrence time, actor, scope and source
+identity. Chronicle receives the action, outcome, target and typed audit facts.
+Relay receives the immutable envelope as `dispatch.delivery.v1`. Neither mapping
+copies workflow payloads or callback secrets. Call `RegisterRelaySchema` on the
+actual Relay catalog before admitting requests. The schema requires envelope
+version 1, the Relay destination and an event source, and rejects additional
+payload fields.
+
+Source and sink fingerprints have different meanings. The request binds the
+source delivery ID and original fingerprint, while each sink's published
+canonicalization computes a separate semantic fingerprint. The adapter recomputes
+that fingerprint and verifies receipt scope and identity before returning an
+acknowledgement. `SinkReceipt` persists both fingerprints, the mapping version
+and the complete verified sink receipt as JSON evidence. Relay acceptance proves
+that its event and selected fanout were committed; inspect Relay delivery status
+separately to establish webhook completion.
+
+JSON mapping preserves integer sequences above 2^53 and the persisted timestamp's
+microsecond precision. Sink canonicalization preserves object-order equivalence
+and rejects duplicate keys and invalid numeric data. Remote responses use that
+strict canonicalization before decoding, including conflict responses.
+
+Remote clients require HTTPS with certificate verification by default. Configure
+one trusted endpoint and bearer credential; redirects are refused, proxies are
+not inherited from the environment, responses are capped at 256 KiB, and calls
+have a positive timeout no greater than one minute. The explicit local harness
+option permits HTTP only for numeric loopback addresses. It does not qualify
+production TLS. Client errors contain no URL, bearer value or response body.
+The host must use Forge authentication and an explicit destination Warden check
+before calling either reliable acceptance API. Disable default unprotected sink
+and administration routes.
+
+## Conflicts and publisher compatibility
+
+Only a confirmed reliable-API content conflict becomes `delivery.ErrConfirmedConflict`.
+A remote HTTP 409 must carry `ConflictResponse` with the matching destination,
+source identity, source fingerprint and recomputed sink fingerprint. A generic
+409, timeout, lost response, invalid receipt, unavailable sink or Chronicle stream
+head contention stays retryable. Never convert uncertainty into a permanent
+conflict.
+
+`BlockDelivery` persists `ErrorCategory=conflict` under the same owner, epoch and
+expiry fence as acknowledgement. Blocked rows remain pending, contribute to a
+separate blocked count and prevent a complete drain. Claims exclude them. A
+publisher restart cannot clear the disposition, change the immutable envelope or
+resume retries. Repair needs a separate protected operation; this API supplies
+no automatic repair or silent discard.
+
+Migration `20261029120000` installs the independent delivery publisher floor in
+`dispatch_delivery_compatibility`. `DeliveryPublisherProtocol=1` means the
+publisher understands conflict exclusion and sink receipt verification.
+`AuditWriterProtocol=1` still means audited history/receipt intent support and
+cannot establish publisher compatibility.
+
+A new PostgreSQL publisher checks the floor at construction. Each claim or
+fenced mutation sets its capability marker with transaction-local `set_config`.
+The database rejects missing, malformed or incompatible markers with SQLSTATE
+`DA003`, and refuses every mutation of a blocked row. Pooled connections cannot
+retain the marker after commit. Older artifacts, including Dispatch
+`v1.7.1-0.20261009193606-6d86536a4ba5`, cannot acquire durable ownership with their
+pre-protocol claim SQL after this migration. Compatible publishers can still
+claim unrelated rows. Stop incompatible publishers before migration and exclude
+them from rollback admission; a database refusal does not upgrade their code.
+The migration refuses downgrade even when no conflicts are present.
+
+The minimum safe artifact must include the conflict-aware publisher, both store
+implementations and this migration. Deployment preflight must compare its delivery
+publisher capability against the persisted floor, separately from namespace
+writer coverage. Installation-wide status is internal publisher telemetry; it is
+not an authorized namespace or run projection for an operator API.

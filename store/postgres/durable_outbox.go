@@ -93,7 +93,10 @@ func (s *Store) ClaimDeliveries(ctx context.Context, r durable.DeliveryClaim) ([
 		return nil, err
 	}
 	defer s.rollbackExecution(tx)
-	rows, err := tx.Query(ctx, `SELECT `+outboxColumns+` FROM dispatch_durable_outbox WHERE installation_id=$1 AND destination=$2 AND delivered_at IS NULL AND next_attempt_at<=clock_timestamp() AND (lease_until IS NULL OR lease_until<=clock_timestamp()) ORDER BY next_attempt_at,id LIMIT $3 FOR UPDATE SKIP LOCKED`, r.InstallationID, string(r.Destination), r.Limit)
+	if _, err = tx.Exec(ctx, `SELECT dispatch_delivery_publisher_check($1)`, durable.DeliveryPublisherProtocol); err != nil {
+		return nil, err
+	}
+	rows, err := tx.Query(ctx, `SELECT `+outboxColumns+` FROM dispatch_durable_outbox WHERE installation_id=$1 AND destination=$2 AND delivered_at IS NULL AND error_category<>'conflict' AND next_attempt_at<=clock_timestamp() AND (lease_until IS NULL OR lease_until<=clock_timestamp()) ORDER BY next_attempt_at,id LIMIT $3 FOR UPDATE SKIP LOCKED`, r.InstallationID, string(r.Destination), r.Limit)
 	if err != nil {
 		return nil, err
 	}
@@ -139,6 +142,9 @@ func (s *Store) mutateDelivery(ctx context.Context, t durable.DeliveryToken, fn 
 		return err
 	}
 	defer s.rollbackExecution(tx)
+	if _, err = tx.Exec(ctx, `SELECT dispatch_delivery_publisher_check($1)`, durable.DeliveryPublisherProtocol); err != nil {
+		return err
+	}
 	d, err := scanDelivery(tx.QueryRow(ctx, `SELECT `+outboxColumns+` FROM dispatch_durable_outbox WHERE id=$1 AND installation_id=$2 AND destination=$3 FOR UPDATE`, t.ID, t.InstallationID, string(t.Destination)))
 	if isNoRows(err) {
 		return durable.ErrLeaseLost
@@ -150,7 +156,7 @@ func (s *Store) mutateDelivery(ctx context.Context, t durable.DeliveryToken, fn 
 	if err != nil {
 		return err
 	}
-	if d.Owner != t.Owner || d.Epoch != t.Epoch || !d.DeliveredAt.IsZero() || !d.LeaseUntil.After(now) {
+	if d.Owner != t.Owner || d.Epoch != t.Epoch || !d.DeliveredAt.IsZero() || !d.LeaseUntil.After(now) || d.Blocked() {
 		return durable.ErrLeaseLost
 	}
 	if err := fn(tx, d, now); err != nil {
@@ -198,7 +204,7 @@ func (s *Store) DeliveryStatus(ctx context.Context, r durable.DeliveryStatusRequ
 		return result, err
 	}
 	var oldest sql.NullTime
-	err := s.pgdb.QueryRow(ctx, `SELECT count(*),min(accepted_at) FROM dispatch_durable_outbox WHERE installation_id=$1 AND destination=$2 AND delivered_at IS NULL`, r.InstallationID, string(r.Destination)).Scan(&result.Pending, &oldest)
+	err := s.pgdb.QueryRow(ctx, `SELECT count(*),count(*) FILTER (WHERE error_category='conflict'),min(accepted_at) FROM dispatch_durable_outbox WHERE installation_id=$1 AND destination=$2 AND delivered_at IS NULL`, r.InstallationID, string(r.Destination)).Scan(&result.Pending, &result.Blocked, &oldest)
 	if err != nil {
 		return result, err
 	}
@@ -219,4 +225,22 @@ func (s *Store) DeliveryStatus(ctx context.Context, r durable.DeliveryStatusRequ
 		result.Records = append(result.Records, d)
 	}
 	return result, rows.Err()
+}
+
+func (s *Store) BlockDelivery(ctx context.Context, t durable.DeliveryToken) error {
+	return s.mutateDelivery(ctx, t, func(tx driver.Tx, _ durable.DeliveryRecord, _ time.Time) error {
+		_, err := tx.Exec(ctx, `UPDATE dispatch_durable_outbox SET error_category='conflict',owner='',lease_until=NULL WHERE id=$1`, t.ID)
+		return err
+	})
+}
+
+func (s *Store) CheckDeliveryCompatibility(ctx context.Context, protocol int) error {
+	var floor int
+	if err := s.pgdb.QueryRow(ctx, `SELECT minimum_protocol FROM dispatch_delivery_compatibility WHERE singleton`).Scan(&floor); err != nil {
+		return err
+	}
+	if protocol != floor {
+		return durable.ErrInvalid
+	}
+	return nil
 }

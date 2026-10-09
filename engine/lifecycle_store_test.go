@@ -466,3 +466,8 @@ func (s *strictLifecycleStore) UpdateRun(arg0 context.Context, arg1 *workflow.Ru
 	defer s.call("UpdateRun")()
 	return s.base.UpdateRun(arg0, arg1)
 }
+
+func (s *strictLifecycleStore) BlockDelivery(ctx context.Context, token durable.DeliveryToken) error {
+	defer s.call("BlockDelivery")()
+	return s.base.BlockDelivery(ctx, token)
+}

@@ -230,11 +230,14 @@ func (t DeliveryToken) Validate() error {
 }
 
 type SinkReceipt struct {
-	ID            string
-	DeliveryID    string
-	Destination   Destination
-	SchemaVersion int
-	Fingerprint   string
+	MappingVersion  int
+	SinkFingerprint string
+	Evidence        string
+	ID              string
+	DeliveryID      string
+	Destination     Destination
+	SchemaVersion   int
+	Fingerprint     string
 }
 
 func (r SinkReceipt) Verify(d Delivery) error {
@@ -293,6 +296,7 @@ func (r DeliveryStatusRequest) Validate() error {
 }
 
 type DeliveryStatus struct {
+	Blocked          int64
 	Pending          int64
 	OldestAcceptedAt time.Time
 	Records          []DeliveryRecord
@@ -304,6 +308,7 @@ type OutboxStore interface {
 	RenewDelivery(context.Context, DeliveryToken, time.Duration) (time.Time, error)
 	AcknowledgeDelivery(context.Context, DeliveryToken, SinkReceipt) error
 	RetryDelivery(context.Context, DeliveryRetry) error
+	BlockDelivery(context.Context, DeliveryToken) error
 	DeliveryStatus(context.Context, DeliveryStatusRequest) (DeliveryStatus, error)
 }
 
@@ -313,4 +318,18 @@ func ValidateDeliveryRenewal(t DeliveryToken, d time.Duration) error {
 		return ErrInvalid
 	}
 	return nil
+}
+
+// Blocked reports a confirmed sink content conflict. Repair requires a separate
+// protected operation; automatic claims never clear this disposition.
+func (r DeliveryRecord) Blocked() bool { return r.ErrorCategory == "conflict" }
+
+// DeliveryPublisherProtocol is independent of the audit writer protocol. Version
+// 1 understands permanent conflict disposition and verifies sink receipts.
+const DeliveryPublisherProtocol = 1
+
+// DeliveryCompatibilityStore rejects unsupported publisher/schema combinations
+// before a publisher starts. Database fences also reject pre-protocol artifacts.
+type DeliveryCompatibilityStore interface {
+	CheckDeliveryCompatibility(context.Context, int) error
 }

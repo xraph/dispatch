@@ -19,6 +19,10 @@ type Sink interface {
 	Accept(context.Context, durable.Delivery) (durable.SinkReceipt, error)
 }
 
+// ErrConfirmedConflict is returned only after a sink confirms conflicting
+// durable content for this source identity. Unknown outcomes remain retryable.
+var ErrConfirmedConflict = errors.New("dispatch: confirmed sink conflict")
+
 var ErrIncompleteShutdown = errors.New("dispatch: delivery shutdown incomplete")
 
 // Config bounds work separately for each destination. Concurrency is the maximum
@@ -61,6 +65,7 @@ func (c Config) defaults() Config {
 }
 
 type Status struct {
+	Blocked          int64
 	Pending          int64
 	OldestAcceptedAt time.Time
 	InFlight         int
@@ -89,6 +94,14 @@ func New(store durable.OutboxStore, config Config, sinks map[durable.Destination
 	c := config.defaults()
 	if store == nil || !durable.DeliveryIdentifier(c.Owner) || !durable.DeliveryIdentifier(c.InstallationID) || c.Concurrency < 1 || c.Concurrency > durable.MaxDeliveryBatch || c.PollInterval <= 0 || c.CallTimeout <= 0 || c.CallTimeout >= 5*time.Minute || c.StoreTimeout <= 0 || c.StoreTimeout >= 5*time.Minute || c.LeaseDuration < time.Millisecond || c.LeaseDuration <= c.CallTimeout+c.StoreTimeout || c.LeaseDuration > 5*time.Minute || c.RetryMin <= 0 || c.RetryMax < c.RetryMin || c.RetryMax > 24*time.Hour || len(sinks) == 0 {
 		return nil, durable.ErrInvalid
+	}
+	if compatible, ok := store.(durable.DeliveryCompatibilityStore); ok {
+		ctx, cancel := context.WithTimeout(context.Background(), c.StoreTimeout)
+		err := compatible.CheckDeliveryCompatibility(ctx, durable.DeliveryPublisherProtocol)
+		cancel()
+		if err != nil {
+			return nil, fmt.Errorf("dispatch: publisher compatibility: %w", err)
+		}
 	}
 	p := &Publisher{store: store, config: c, sinks: make(map[durable.Destination]Sink), states: make(map[durable.Destination]destinationState), done: make(chan struct{}), stopGate: make(chan struct{}, 1)}
 	for destination, sink := range sinks {
@@ -176,7 +189,7 @@ func (p *Publisher) Status(ctx context.Context, destination durable.Destination)
 	p.mu.Lock()
 	s := p.states[destination]
 	p.mu.Unlock()
-	return Status{Pending: status.Pending, OldestAcceptedAt: status.OldestAcceptedAt, InFlight: s.inFlight, ErrorCategory: s.category}, nil
+	return Status{Blocked: status.Blocked, Pending: status.Pending, OldestAcceptedAt: status.OldestAcceptedAt, InFlight: s.inFlight, ErrorCategory: s.category}, nil
 }
 func (p *Publisher) scope(d durable.Destination) durable.DeliveryScope {
 	return durable.DeliveryScope{InstallationID: p.config.InstallationID, Destination: d}
@@ -242,6 +255,8 @@ func (p *Publisher) publish(ctx context.Context, d durable.Destination, sink Sin
 		switch {
 		case callErr != nil:
 			category = "timeout"
+		case errors.Is(err, ErrConfirmedConflict):
+			category = "conflict"
 		case err != nil:
 			category = "unavailable"
 		case receipt.Verify(envelope) != nil:
@@ -262,6 +277,12 @@ func (p *Publisher) publish(ctx context.Context, d durable.Destination, sink Sin
 	p.state(d, 0, category)
 	retryCtx, cancel := context.WithTimeout(ctx, p.config.StoreTimeout)
 	defer cancel()
+	if category == "conflict" {
+		if err := p.store.BlockDelivery(retryCtx, record.Token()); err != nil {
+			p.state(d, 0, "unavailable")
+		}
+		return
+	}
 	// Failed retry persistence leaves the original lease recoverable after expiry.
 	if err := p.store.RetryDelivery(retryCtx, durable.DeliveryRetry{Token: record.Token(), Delay: p.backoff(record.Attempts), Category: category}); err != nil {
 		p.state(d, 0, "unavailable")

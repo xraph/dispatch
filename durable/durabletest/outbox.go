@@ -19,6 +19,7 @@ type AuditStore interface {
 
 // RunOutbox exercises the public ownership, acceptance and delivery contract.
 func RunOutbox(t *testing.T, s AuditStore) {
+	RunOutboxConflict(t, s)
 	t.Helper()
 	ctx := t.Context()
 	config := durable.NamespaceConfig{InstallationID: "installation", Namespace: t.Name(), AppID: "app", TenantID: "tenant", RequireAudit: true, RequireHooks: true, SchemaVersion: 1}

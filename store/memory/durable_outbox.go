@@ -52,7 +52,7 @@ func (m *Store) ClaimDeliveries(ctx context.Context, r durable.DeliveryClaim) ([
 	now := time.Now().UTC()
 	ids := []string{}
 	for id, d := range m.outbox {
-		if inDeliveryScope(d, r.DeliveryScope) && d.DeliveredAt.IsZero() && !d.NextAttemptAt.After(now) && !d.LeaseUntil.After(now) {
+		if inDeliveryScope(d, r.DeliveryScope) && d.DeliveredAt.IsZero() && !d.Blocked() && !d.NextAttemptAt.After(now) && !d.LeaseUntil.After(now) {
 			ids = append(ids, id)
 		}
 	}
@@ -82,7 +82,7 @@ func inDeliveryScope(d durable.DeliveryRecord, s durable.DeliveryScope) bool {
 }
 func (m *Store) deliveryForToken(t durable.DeliveryToken) (durable.DeliveryRecord, error) {
 	d, ok := m.outbox[t.ID]
-	if !ok || !inDeliveryScope(d, t.DeliveryScope) || d.Owner != t.Owner || d.Epoch != t.Epoch || !d.LeaseUntil.After(time.Now().UTC()) || !d.DeliveredAt.IsZero() {
+	if !ok || !inDeliveryScope(d, t.DeliveryScope) || d.Owner != t.Owner || d.Epoch != t.Epoch || !d.LeaseUntil.After(time.Now().UTC()) || !d.DeliveredAt.IsZero() || d.Blocked() {
 		return durable.DeliveryRecord{}, durable.ErrLeaseLost
 	}
 	return d, nil
@@ -162,6 +162,9 @@ func (m *Store) DeliveryStatus(ctx context.Context, r durable.DeliveryStatusRequ
 		}
 		if d.DeliveredAt.IsZero() {
 			result.Pending++
+			if d.Blocked() {
+				result.Blocked++
+			}
 			if result.OldestAcceptedAt.IsZero() || d.AcceptedAt.Before(result.OldestAcceptedAt) {
 				result.OldestAcceptedAt = d.AcceptedAt
 			}
@@ -175,4 +178,24 @@ func (m *Store) DeliveryStatus(ctx context.Context, r durable.DeliveryStatusRequ
 		result.Records = result.Records[:r.Limit]
 	}
 	return result, nil
+}
+
+func (m *Store) BlockDelivery(ctx context.Context, t durable.DeliveryToken) error {
+	if err := t.Validate(); err != nil {
+		return err
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	d, err := m.deliveryForToken(t)
+	if err != nil {
+		return err
+	}
+	d.ErrorCategory = "conflict"
+	d.Owner = ""
+	d.LeaseUntil = time.Time{}
+	m.outbox[t.ID] = d
+	return nil
 }
