@@ -13,6 +13,7 @@ import (
 )
 
 type recordedOutcome struct {
+	child                *ChildWorkflowError
 	value                Outcome
 	at                   time.Time
 	sequence             int64
@@ -21,6 +22,8 @@ type recordedOutcome struct {
 }
 
 type replayHistory struct {
+	children              map[string]recordedChildStart
+	termination           *durable.ExecutionTermination
 	executionCancellation *recordedExecutionCancellation
 	cancellationRequests  map[string]bool
 	commands              []Command
@@ -58,10 +61,13 @@ func evaluateWorkflow(execution durable.Execution, events []durable.Event, handl
 	if err != nil {
 		return Decision{}, nil, err
 	}
-	if history.executionCancellation != nil {
-		return evaluateExecutionCancellation(execution, events, history, handler)
+	if history.termination != nil {
+		return evaluateTermination(execution, events, handler)
 	}
-	w = &Workflow{now: execution.CreatedAt, history: history, ids: make(map[string]bool)}
+	if history.executionCancellation != nil {
+		return evaluateExecutionCancellation(execution, events, history, handler, false)
+	}
+	w = &Workflow{key: execution.Key, buildID: execution.BuildID, now: execution.CreatedAt, history: history, ids: make(map[string]bool)}
 	output, handlerErr := invoke(w, handler, bytes.Clone(execution.Input))
 	return finishEvaluation(w, output, handlerErr)
 }
@@ -124,7 +130,7 @@ func invoke(w *Workflow, handler WorkflowFunc, input []byte) (output []byte, err
 }
 
 func parseHistory(execution durable.Execution, events []durable.Event) (replayHistory, error) {
-	result := replayHistory{selections: make(map[string]Selection), signals: make(map[string]recordedSignal), signalQueues: make(map[string][]string), signalOffsets: make(map[string]int), outcomes: make(map[string]recordedOutcome), attempts: make(map[string]recordedAttempt), scheduled: make(map[string]time.Time)}
+	result := replayHistory{children: make(map[string]recordedChildStart), selections: make(map[string]Selection), signals: make(map[string]recordedSignal), signalQueues: make(map[string][]string), signalOffsets: make(map[string]int), outcomes: make(map[string]recordedOutcome), attempts: make(map[string]recordedAttempt), scheduled: make(map[string]time.Time)}
 	if len(events) == 0 || len(events) > 100000 || execution.LastSequence != int64(len(events)) ||
 		execution.CreatedAt.IsZero() || events[0].Type != EventStarted ||
 		!events[0].Time.Equal(execution.CreatedAt) || !bytes.Equal(events[0].Payload, execution.Input) {
@@ -147,6 +153,22 @@ func parseHistory(execution durable.Execution, events []durable.Event) (replayHi
 			if err := parseExecutionCancellation(&result, event); err != nil {
 				return result, err
 			}
+		case durable.EventWorkflowTerminated:
+			if err := parseTermination(&result, event); err != nil {
+				return result, err
+			}
+		case durable.EventChildStarted, EventChildStartFailed:
+			if err := parseChildStart(&result, commands, event); err != nil {
+				return result, err
+			}
+		case durable.EventChildCompleted, durable.EventChildCancellationAcknowledged:
+			if err := parseChildDelivery(&result, commands, execution, event); err != nil {
+				return result, err
+			}
+		case EventChildCancellationFailed:
+			if err := parseChildCancellationFailure(&result, commands, event); err != nil {
+				return result, err
+			}
 		case EventCommandScheduled:
 			var command Command
 			if err := decode(event.Payload, &command); err != nil {
@@ -160,6 +182,9 @@ func parseHistory(execution durable.Execution, events []durable.Event) (replayHi
 				return result, err
 			}
 			if err := validateCancellationReference(command, commands); err != nil {
+				return result, err
+			}
+			if err := validateChildReference(command, commands, execution.Key); err != nil {
 				return result, err
 			}
 			commands[command.ID] = command
@@ -209,6 +234,11 @@ func parseHistory(execution durable.Execution, events []durable.Event) (replayHi
 		}
 	}
 	for _, command := range result.commands {
+		if command.Kind == CommandChild && result.terminal == "" {
+			if _, started := result.children[command.ID]; !started {
+				return result, fmt.Errorf("%w: child command has no start result", ErrHistory)
+			}
+		}
 		if command.Kind == CommandCancel {
 			if _, acknowledged := result.outcomes[command.ID]; !acknowledged {
 				return result, fmt.Errorf("%w: cancellation command has no acknowledgment", ErrHistory)
@@ -220,7 +250,7 @@ func parseHistory(execution durable.Execution, events []durable.Event) (replayHi
 			}
 		}
 	}
-	if result.terminal != "" && result.executionCancellation != nil && result.executionCancellation.started == nil {
+	if result.terminal != "" && result.terminal != durable.StateTerminated && result.executionCancellation != nil && result.executionCancellation.started == nil {
 		return result, fmt.Errorf("%w: terminal result before cancellation fencing", ErrHistory)
 	}
 	for id, attempt := range result.attempts {

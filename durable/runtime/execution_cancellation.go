@@ -51,7 +51,7 @@ func (w *Workflow) SetCancellationHandler(handler WorkflowCancellationFunc) {
 	w.cancellationHandler = handler
 }
 
-func evaluateExecutionCancellation(execution durable.Execution, events []durable.Event, history replayHistory, handler WorkflowFunc) (Decision, *Workflow, error) {
+func evaluateExecutionCancellation(execution durable.Execution, events []durable.Event, history replayHistory, handler WorkflowFunc, frozen bool) (Decision, *Workflow, error) {
 	cancellation := history.executionCancellation
 	prefix := execution
 	prefix.State, prefix.Output, prefix.LastSequence = durable.StateRunning, nil, cancellation.sequence-1
@@ -59,16 +59,16 @@ func evaluateExecutionCancellation(execution durable.Execution, events []durable
 	if err != nil {
 		return Decision{}, nil, err
 	}
-	w := &Workflow{now: execution.CreatedAt, history: normal, ids: make(map[string]bool), freezeNormal: true}
+	w := &Workflow{key: execution.Key, buildID: execution.BuildID, now: execution.CreatedAt, history: normal, ids: make(map[string]bool), freezeNormal: true}
 	// The immutable prefix reconstructs captured state, including query/cleanup
 	// closures, but publishes none of the normal path's speculative decisions.
 	_, _ = invoke(w, handler, append([]byte(nil), execution.Input...)) //nolint:errcheck // Cancellation replaces the normal application result; replay faults are checked below.
 	if replayErr := checkWorkflowReplay(w); replayErr != nil {
 		return Decision{}, nil, replayErr
 	}
-	w.freezeNormal, w.blocked = false, false
+	w.freezeNormal, w.blocked = frozen, false
 	w.commands, w.signals, w.selections = nil, nil, nil
-	w.cancellationCount = 0
+	w.acknowledgmentCount = 0
 	w.history = history
 	if cancellation.started == nil {
 		start := &CancellationStart{Version: 1, RequestID: cancellation.value.RequestID, CommandCount: int64(cancellation.commandCount)}

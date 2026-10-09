@@ -21,7 +21,7 @@ func validateExecutionCancellationPhase(history replayHistory, eventType string)
 	}
 	switch eventType {
 	case EventCommandScheduled, EventSelected, EventSignalConsumed, EventFutureCancelled,
-		EventWorkflowWaiting, EventWorkflowCompleted, EventWorkflowFailed:
+		EventWorkflowWaiting, EventWorkflowCompleted, EventWorkflowFailed, durable.EventChildStarted, EventChildStartFailed, EventChildCancellationFailed:
 		return fmt.Errorf("%w: normal workflow decision after cancellation acceptance", ErrHistory)
 	default:
 		return nil

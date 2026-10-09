@@ -14,6 +14,8 @@ import (
 // Workflow provides replayable decision primitives. Use these methods only from
 // the handler's goroutine. Schedule multiple futures before Get for parallel work.
 type Workflow struct {
+	key                 durable.Key
+	buildID             string
 	now                 time.Time
 	history             replayHistory
 	cursor              int
@@ -25,7 +27,7 @@ type Workflow struct {
 	fault               error
 	queries             map[string]QueryFunc
 	querying            bool
-	cancellationCount   int
+	acknowledgmentCount int
 	cancellationHandler WorkflowCancellationFunc
 	freezeNormal        bool
 	cancelling          bool
@@ -110,8 +112,8 @@ func (w *Workflow) schedule(command Command) *Future {
 			w.stop(fmt.Errorf("%w: command %d (%s)", ErrNondeterministic, command.Index, command.ID))
 		}
 	} else {
-		if command.Kind == CommandCancel {
-			w.cancellationCount++
+		if command.Kind == CommandCancel || command.Kind == CommandChild || command.Kind == CommandCancelChild {
+			w.acknowledgmentCount++
 		}
 		w.checkEventCapacity()
 		w.commands = append(w.commands, command)
@@ -139,6 +141,9 @@ func (f *Future) Get() ([]byte, error) {
 		panic(flowControl{})
 	}
 	w.advance(result)
+	if result.child != nil {
+		return nil, cloneChildError(result.child)
+	}
 	if result.workflowCancellation != nil {
 		c := result.workflowCancellation
 		return nil, &WorkflowCancelledError{RequestID: c.RequestID, Reason: c.Reason}
@@ -173,11 +178,16 @@ func (c Command) validate() error {
 	if c.Kind != CommandSelect && len(c.Candidates) != 0 {
 		return fmt.Errorf("%w: only selection commands accept candidates", durable.ErrInvalid)
 	}
-	if c.Kind != CommandCancel && c.TargetID != "" {
+	if c.Kind != CommandCancel && c.Kind != CommandCancelChild && c.TargetID != "" {
 		return fmt.Errorf("%w: only cancellation commands accept a target", durable.ErrInvalid)
 	}
+	if c.Kind != CommandChild && c.Child != nil {
+		return fmt.Errorf("%w: only child commands accept child metadata", durable.ErrInvalid)
+	}
 	switch c.Kind {
-	case CommandCancel:
+	case CommandChild:
+		return validateChildCommand(c)
+	case CommandCancel, CommandCancelChild:
 		return validateCancellationCommand(c)
 	case CommandSelect:
 		return validateSelectionCommand(c)
@@ -215,5 +225,12 @@ func (c Command) validate() error {
 func sameCommand(a, b Command) bool {
 	return a.Version == b.Version && a.Index == b.Index && a.ID == b.ID && a.Kind == b.Kind &&
 		a.Name == b.Name && a.Queue == b.Queue && bytes.Equal(a.Input, b.Input) &&
-		a.Delay == b.Delay && a.Deadline.Equal(b.Deadline) && sameActivityOptions(a.ActivityOptions, b.ActivityOptions) && slices.Equal(a.Candidates, b.Candidates) && a.TargetID == b.TargetID
+		a.Delay == b.Delay && a.Deadline.Equal(b.Deadline) && sameActivityOptions(a.ActivityOptions, b.ActivityOptions) && slices.Equal(a.Candidates, b.Candidates) && a.TargetID == b.TargetID && sameChildCommand(a.Child, b.Child)
+}
+
+func sameChildCommand(a, b *ChildCommand) bool {
+	if a == nil || b == nil {
+		return a == b
+	}
+	return *a == *b
 }

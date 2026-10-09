@@ -36,7 +36,7 @@ func (w *Worker) processWorkflow(ctx context.Context, task durable.Task) error {
 		}
 		err = w.prepareCancellations(ctx, task, execution, events, decision, &request)
 		if err == nil {
-			err = w.persist(ctx, request)
+			err = w.persistChildDecision(ctx, task, events, request)
 		}
 		if !errors.Is(err, durable.ErrRevisionConflict) && !errors.Is(err, durable.ErrTaskConflict) {
 			return err
@@ -64,7 +64,7 @@ func decisionRequest(task durable.Task, execution durable.Execution, decision De
 			return request, err
 		}
 		request.Events = append(request.Events, durable.EventInput{Type: EventCommandScheduled, Payload: data})
-		if decision.State == durable.StateRunning && command.Kind != CommandSignal && command.Kind != CommandSelect && command.Kind != CommandCancel {
+		if decision.State == durable.StateRunning && command.Kind != CommandSignal && command.Kind != CommandSelect && command.Kind != CommandCancel && command.Kind != CommandChild && command.Kind != CommandCancelChild {
 			payload, payloadErr := json.Marshal(taskPayload{Version: 1, Command: command, WorkflowQueue: task.Queue})
 			if payloadErr != nil {
 				return request, payloadErr
@@ -91,6 +91,7 @@ func decisionRequest(task durable.Task, execution durable.Execution, decision De
 		}
 		request.Events = append(request.Events, durable.EventInput{Type: EventSelected, Payload: data})
 	}
+	addChildDecision(task, decision, &request)
 	request.State, request.Output = decision.State, decision.Output
 	event := durable.EventInput{Type: EventWorkflowWaiting}
 	switch decision.State {

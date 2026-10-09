@@ -40,11 +40,11 @@ Store tests alone do not qualify a workflow runtime or a deployment.
 | --- | --- | --- |
 | Atomic history, state, tasks, and durable receipts | Memory and PostgreSQL stores integrated with initial Go runtime | Shared memory/PostgreSQL conformance, rollback, concurrent writers, ambiguous-response retry |
 | Fenced task claims and durable timer deadlines | Store contract and renewable workers implemented; process-kill qualification open | Expiry, same-owner reclaim, concurrent claims, restart recovery |
-| Deterministic Go workflow runtime | Activity, timer, signal and saved-winner selection replay implemented; coroutine and SDK expansion open | Recorded-history replay with no repeated external effects, changed-command rejection |
+| Deterministic Go workflow runtime | Activity, timer, signal, child and saved-winner selection replay implemented; coroutine and SDK expansion open | Recorded-history replay with no repeated external effects, changed-command rejection |
 | Activity retries and timeout classes | Queue, attempt, overall and heartbeat deadlines, progress recovery, retry policies and asynchronous Go callbacks implemented; remote authorization and process qualification open | Queue, attempt, overall and heartbeat deadlines; heartbeat progress; asynchronous completion |
 | Signals, queries, updates and signal-with-start | Atomic signals, signal-with-start, Go receive replay and explicit-run queries implemented; tracked updates and current/latest query selection open | Namespace isolation, deduplication, atomic acceptance, update results, read-only queries |
-| Child workflows and cancellation | Individual Go future and whole-workflow cancellation implemented; child creation and lifecycle delivery stored; child runtime and cooperative completion acknowledgment open | Stable child identity, duplicate creation prevention, parent-close policies, cancellation propagation |
-| Compensation, pause, termination and reset | Open | Resumable compensation attempts, audited controls, immutable reset lineage |
+| Child workflows and cancellation | Individual future, whole-workflow and child cancellation plus child composition implemented; cooperative external-activity completion acknowledgment open | Stable child identity, duplicate creation prevention, parent-close policies, cancellation propagation |
+| Compensation, pause, termination and reset | Parent-close termination implemented; operator controls, compensation, pause and reset open | Resumable compensation attempts, audited controls, immutable reset lineage |
 | Continue-as-new and run chains | Open | Bounded history, message handoff and version inheritance |
 | Schedules | Open | Overlap, catch-up, backfill, timezones and unique scheduled occurrences |
 | Deployment versioning | Pinned build polling implemented; rollout and patch markers open | Pinned build routing, gradual rollout, patch markers, replay checks, drainage |
@@ -1261,7 +1261,47 @@ replacement recovers delivery receipts after both runs close and a replacement r
 starts. Lock tests verify expiry after a target-row wait and closure without waiting
 on the other execution. Migration tests protect pending messages and saved receipts.
 
-Go child futures, replay, queries and the worker delivery poller remain required.
-The storage API alone does not provide a usable child workflow runtime. Operator
-transport, Dashboard flows and production failure/load qualification also remain
+The Go runtime exposes `ChildWorkflow`, `Future.Started` and `CancelChild`. You can
+start children in parallel, select their results, or await a saved startup before
+returning with an abandon policy:
+
+```go
+child := w.ChildWorkflow("shipment", "ship", input, runtime.ChildOptions{
+    Queue: "shipping",
+    BuildID: "shipping-v1",
+    ParentClosePolicy: durable.ParentCloseAbandon,
+})
+if _, err := child.Started(); err != nil {
+    return nil, err
+}
+return child.Get()
+```
+
+Empty build and queue inherit the parent. Identity derives from the parent run and
+command ID, and replay checks the saved name, input, identity, build, queue and close
+policy. A definitive creation conflict records `ChildStartFailure` and wakes the
+parent. Other children in the decision can still start. `ChildWorkflowError` retains
+the child identity and terminal state, with an application cause you can inspect
+through `errors.As`; `errors.Is(err, runtime.ErrChildStart)` identifies a child that
+was never created. Cancelling that failed start returns the original creation error.
+
+`Worker.Run` polls lifecycle deliveries alongside workflow, activity, timer and
+timeout tasks. It retries the same delivery request after an ambiguous response and
+surfaces errors to its supervisor. Engine startup and shutdown own that poller too.
+You can run `go run ./examples/durable-children` for a memory-backed example.
+
+Replay tests cover startup acknowledgment, changed commands, selectors, query mutation
+guards and distinct child terminal results. Cancellation cleanup can await a child's
+real result. Forced termination reconstructs the recorded prefix for queries while
+suppressing new decisions, including before cancellation fencing and during cleanup.
+Worker tests cover close policies, unacknowledged parent completion, conflicting
+creation batches, cancellation of failed starts, separate acceptance and completion,
+and exact delivery retries. PostgreSQL replacement tests lose creation and delivery
+responses, replace connection pools, and recover the original identity and receipt.
+Live PostgreSQL workers and the engine complete parent/child workflows through their
+normal pollers.
+
+Child result decoding includes timed_out, but workflow deadline scheduling and
+continue-as-new ownership remain separate open work. Operator transport, Dashboard
+flows, remote authorization and production failure/load qualification also remain
 open.
