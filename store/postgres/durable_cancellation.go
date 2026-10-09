@@ -50,6 +50,9 @@ func (s *Store) RequestCancelExecution(ctx context.Context, r durable.CancelExec
 		return durable.CancelExecutionReceipt{}, err
 	}
 	receipt := durable.CancelExecutionReceipt{Key: accepted.Key, Receipt: accepted.Receipt}
+	if intentErr := prepareReceiptIntent(ctx, tx, accepted.Key, "cancellation_receipt", r.RequestID, "accepted", "execution.cancel"); intentErr != nil {
+		return durable.CancelExecutionReceipt{}, intentErr
+	}
 	_, err = tx.Exec(ctx, `INSERT INTO dispatch_cancellation_receipts(namespace,workflow_id,request_id,run_id,digest,revision,first_sequence,last_sequence)
  VALUES($1,$2,$3,$4,$5,$6,$7,$8)`, receipt.Namespace, receipt.WorkflowID, r.RequestID, receipt.RunID, digest, receipt.Revision, receipt.FirstSequence, receipt.LastSequence)
 	if err != nil {

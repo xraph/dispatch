@@ -8,7 +8,7 @@ import (
 )
 
 // RecordHeartbeat persists progress and its receipt under the execution lock.
-func (m *Store) RecordHeartbeat(ctx context.Context, r durable.HeartbeatRequest) (durable.Receipt, error) {
+func (m *Store) recordHeartbeat(ctx context.Context, r durable.HeartbeatRequest) (durable.Receipt, error) {
 	if err := r.Validate(); err != nil {
 		return durable.Receipt{}, err
 	}
@@ -45,6 +45,6 @@ func (m *Store) RecordHeartbeat(ctx context.Context, r durable.HeartbeatRequest)
 	}
 	receipt := durable.Receipt{Revision: record.execution.Revision}
 	task.Task = next
-	record.receipts[r.RequestID] = durableReceipt{digest: digest, value: receipt}
+	record.receipts[r.RequestID] = durableReceipt{action: "activity.heartbeat", digest: digest, value: receipt}
 	return receipt, nil
 }

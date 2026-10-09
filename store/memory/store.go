@@ -36,7 +36,11 @@ var (
 // Store is a fully in-memory implementation of store.Store.
 // Safe for concurrent access. Intended for unit testing and development.
 type Store struct {
-	mu sync.RWMutex
+	mu         sync.RWMutex
+	namespaces map[string]durable.NamespaceRecord
+	outbox     map[string]durable.DeliveryRecord
+	// outboxPrepare injects preparation failure in package tests, before publication.
+	outboxPrepare func(durable.Delivery) error
 
 	jobs        map[string]*job.Job
 	runs        map[string]*workflow.Run
@@ -64,6 +68,8 @@ type Store struct {
 // New returns a new empty Store.
 func New() *Store {
 	return &Store{
+		namespaces:            make(map[string]durable.NamespaceRecord),
+		outbox:                make(map[string]durable.DeliveryRecord),
 		jobs:                  make(map[string]*job.Job),
 		runs:                  make(map[string]*workflow.Run),
 		checkpoints:           make(map[string]*workflow.Checkpoint),

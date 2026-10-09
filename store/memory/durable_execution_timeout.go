@@ -48,7 +48,7 @@ func (m *Store) ClaimExecutionTimeout(ctx context.Context, r durable.ExecutionTi
 }
 
 // ApplyExecutionTimeout stages every fallible change before publishing closure.
-func (m *Store) ApplyExecutionTimeout(ctx context.Context, r durable.ExecutionTimeoutRequest) (durable.Receipt, error) {
+func (m *Store) applyExecutionTimeout(ctx context.Context, r durable.ExecutionTimeoutRequest) (durable.Receipt, error) {
 	if err := r.Validate(); err != nil {
 		return durable.Receipt{}, err
 	}
@@ -125,7 +125,7 @@ func (m *Store) ApplyExecutionTimeout(ctx context.Context, r durable.ExecutionTi
 	if successor != nil {
 		m.installExecution(successor)
 	}
-	record.receipts[r.RequestID] = durableReceipt{digest: digest, value: receipt}
+	record.receipts[r.RequestID] = durableReceipt{action: "execution.timeout", digest: digest, value: receipt}
 	m.saveChildDeliveries(deliveries)
 	return receipt, nil
 }

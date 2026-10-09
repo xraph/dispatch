@@ -36,7 +36,7 @@ func insertStartedExecution(ctx context.Context, tx driver.Tx, r durable.StartRe
 		return false, taskErr
 	}
 	receipt := durable.Receipt{Revision: 1, FirstSequence: 1, LastSequence: 1}
-	if receiptErr := saveExecutionReceipt(ctx, tx, r.Key, r.RequestID, digest, "", receipt); receiptErr != nil {
+	if receiptErr := saveExecutionReceipt(ctx, tx, r.Key, r.RequestID, digest, "", "execution.start", receipt); receiptErr != nil {
 		return false, receiptErr
 	}
 	return true, nil

@@ -24,7 +24,7 @@ func (m *Store) prepareChildren(parent *executionRecord, r durable.CommitRequest
 		if err != nil {
 			return nil, err
 		}
-		created.receipts[child.Start.RequestID] = durableReceipt{digest: digest, value: durable.Receipt{Revision: 1, FirstSequence: 1, LastSequence: 1}}
+		created.receipts[child.Start.RequestID] = durableReceipt{action: "execution.start", digest: digest, value: durable.Receipt{Revision: 1, FirstSequence: 1, LastSequence: 1}}
 		children[child.Start.Key] = created
 	}
 	return children, nil

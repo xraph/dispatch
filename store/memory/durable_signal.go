@@ -18,7 +18,7 @@ type signalReceiptRecord struct {
 }
 
 // SignalExecution atomically accepts a message and schedules its workflow.
-func (m *Store) SignalExecution(ctx context.Context, r durable.SignalRequest) (durable.SignalReceipt, error) {
+func (m *Store) signalExecution(ctx context.Context, r durable.SignalRequest) (durable.SignalReceipt, error) {
 	r.Input = bytes.Clone(r.Input)
 	if err := r.Validate(); err != nil {
 		return durable.SignalReceipt{}, err
@@ -59,7 +59,7 @@ func (m *Store) SignalExecution(ctx context.Context, r durable.SignalRequest) (d
 }
 
 // SignalWithStart deduplicates before selecting or creating an open run.
-func (m *Store) SignalWithStart(ctx context.Context, r durable.SignalWithStartRequest) (durable.SignalReceipt, error) {
+func (m *Store) signalWithStart(ctx context.Context, r durable.SignalWithStartRequest) (durable.SignalReceipt, error) {
 	r.Input, r.Start = bytes.Clone(r.Input), r.Start.Clone()
 	if err := r.Validate(); err != nil {
 		return durable.SignalReceipt{}, err

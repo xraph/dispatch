@@ -24,13 +24,14 @@ type durableTask struct {
 }
 
 type durableReceipt struct {
+	action string
 	digest string
 	intent string
 	value  durable.Receipt
 }
 
 // StartExecution creates history and its initial task under one mutation lock.
-func (m *Store) StartExecution(ctx context.Context, r durable.StartRequest) (durable.Receipt, error) {
+func (m *Store) startExecution(ctx context.Context, r durable.StartRequest) (durable.Receipt, error) {
 	if err := r.Validate(); err != nil {
 		return durable.Receipt{}, err
 	}
@@ -60,7 +61,7 @@ func (m *Store) StartExecution(ctx context.Context, r durable.StartRequest) (dur
 	if err != nil {
 		return durable.Receipt{}, err
 	}
-	record.receipts[r.RequestID] = durableReceipt{digest: digest, value: receipt}
+	record.receipts[r.RequestID] = durableReceipt{action: "execution.start", digest: digest, value: receipt}
 	m.installExecution(record)
 	return receipt, nil
 }
@@ -264,7 +265,7 @@ func (m *Store) RenewTask(ctx context.Context, key durable.Key, token durable.Ta
 }
 
 // CommitTransition applies all state changes after validating the whole batch.
-func (m *Store) CommitTransition(ctx context.Context, r durable.CommitRequest) (durable.Receipt, error) {
+func (m *Store) commitTransition(ctx context.Context, r durable.CommitRequest) (durable.Receipt, error) {
 	if err := r.Validate(); err != nil {
 		return durable.Receipt{}, err
 	}
@@ -391,7 +392,7 @@ func (m *Store) CommitTransition(ctx context.Context, r durable.CommitRequest) (
 	if successor != nil {
 		m.installExecution(successor)
 	}
-	record.receipts[r.RequestID] = durableReceipt{digest: digest, intent: r.IntentDigest, value: receipt}
+	record.receipts[r.RequestID] = durableReceipt{action: "execution.transition", digest: digest, intent: r.IntentDigest, value: receipt}
 	return receipt, nil
 }
 

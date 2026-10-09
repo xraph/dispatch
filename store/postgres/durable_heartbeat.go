@@ -58,7 +58,7 @@ func (s *Store) RecordHeartbeat(ctx context.Context, r durable.HeartbeatRequest)
 		return durable.Receipt{}, saveErr
 	}
 	receipt := durable.Receipt{Revision: execution.Revision}
-	if receiptErr := saveExecutionReceipt(ctx, tx, r.Key, r.RequestID, digest, "", receipt); receiptErr != nil {
+	if receiptErr := saveExecutionReceipt(ctx, tx, r.Key, r.RequestID, digest, "", "activity.heartbeat", receipt); receiptErr != nil {
 		return durable.Receipt{}, receiptErr
 	}
 	if err = tx.Commit(); err != nil {

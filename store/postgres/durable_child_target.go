@@ -85,6 +85,9 @@ func cancelChildTarget(ctx context.Context, tx driver.Tx, target durable.Executi
 	if err != nil {
 		return durable.Receipt{}, err
 	}
+	if intentErr := prepareReceiptIntent(ctx, tx, r.Key, "cancellation_receipt", r.RequestID, "accepted", "execution.cancel"); intentErr != nil {
+		return durable.Receipt{}, intentErr
+	}
 	_, err = tx.Exec(ctx, `INSERT INTO dispatch_cancellation_receipts(namespace,workflow_id,request_id,run_id,digest,revision,first_sequence,last_sequence) VALUES($1,$2,$3,$4,$5,$6,$7,$8)`, r.Namespace, r.WorkflowID, r.RequestID, r.RunID, digest, accepted.Revision, accepted.FirstSequence, accepted.LastSequence)
 	if err != nil {
 		return durable.Receipt{}, err

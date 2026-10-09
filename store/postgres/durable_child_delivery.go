@@ -190,6 +190,9 @@ func readChildDeliveryReceipt(ctx context.Context, tx driver.Tx, r durable.Child
 }
 
 func finishChildDelivery(ctx context.Context, tx driver.Tx, r durable.ChildDeliveryRequest, digest string, receipt durable.ChildDeliveryReceipt) error {
+	if err := prepareReceiptIntent(ctx, tx, r.Source, "child_receipt", durable.ReceiptSourceID(r.DeliveryID, r.RequestID), receipt.Disposition, "child.deliver"); err != nil {
+		return err
+	}
 	_, err := tx.Exec(ctx, `UPDATE dispatch_child_deliveries SET done=TRUE,disposition=$5 WHERE namespace=$1 AND source_workflow_id=$2 AND source_run_id=$3 AND delivery_id=$4`, r.Source.Namespace, r.Source.WorkflowID, r.Source.RunID, r.DeliveryID, receipt.Disposition)
 	if err != nil {
 		return err

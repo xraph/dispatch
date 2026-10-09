@@ -162,7 +162,7 @@ func cloneChildTarget(record *executionRecord) *executionRecord {
 }
 
 // ApplyChildDelivery changes one target and its receipt atomically.
-func (m *Store) ApplyChildDelivery(ctx context.Context, r durable.ChildDeliveryRequest) (durable.ChildDeliveryReceipt, error) {
+func (m *Store) applyChildDelivery(ctx context.Context, r durable.ChildDeliveryRequest) (durable.ChildDeliveryReceipt, error) {
 	if err := r.Validate(); err != nil {
 		return durable.ChildDeliveryReceipt{}, err
 	}

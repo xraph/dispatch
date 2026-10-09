@@ -14,7 +14,7 @@ type cancellationReceiptRecord struct {
 }
 
 // RequestCancelExecution accepts cancellation and its wakeup atomically.
-func (m *Store) RequestCancelExecution(ctx context.Context, r durable.CancelExecutionRequest) (durable.CancelExecutionReceipt, error) {
+func (m *Store) requestCancelExecution(ctx context.Context, r durable.CancelExecutionRequest) (durable.CancelExecutionReceipt, error) {
 	if err := r.Validate(); err != nil {
 		return durable.CancelExecutionReceipt{}, err
 	}

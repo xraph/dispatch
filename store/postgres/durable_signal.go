@@ -159,6 +159,9 @@ func readSignalReceipt(ctx context.Context, tx driver.Tx, key durable.Key, reque
 }
 
 func finishSignal(ctx context.Context, tx driver.Tx, requestID, digest string, receipt durable.SignalReceipt) (durable.SignalReceipt, error) {
+	if err := prepareReceiptIntent(ctx, tx, receipt.Key, "signal_receipt", requestID, "accepted", "execution.signal"); err != nil {
+		return durable.SignalReceipt{}, err
+	}
 	_, err := tx.Exec(ctx, `INSERT INTO dispatch_signal_receipts
  (namespace,workflow_id,request_id,run_id,digest,revision,first_sequence,last_sequence,started)
  VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`, receipt.Namespace, receipt.WorkflowID, requestID, receipt.RunID, digest, receipt.Revision, receipt.FirstSequence, receipt.LastSequence, receipt.Started)

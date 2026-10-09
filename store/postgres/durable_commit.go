@@ -29,7 +29,10 @@ func readExecutionReceipt(ctx context.Context, tx driver.Tx, key durable.Key, re
 	return receipt, true, nil
 }
 
-func saveExecutionReceipt(ctx context.Context, tx driver.Tx, key durable.Key, requestID, digest, intent string, receipt durable.Receipt) error {
+func saveExecutionReceipt(ctx context.Context, tx driver.Tx, key durable.Key, requestID, digest, intent, action string, receipt durable.Receipt) error {
+	if err := prepareReceiptIntent(ctx, tx, key, "execution_receipt", requestID, "accepted", action); err != nil {
+		return err
+	}
 	_, err := tx.Exec(ctx, `INSERT INTO dispatch_execution_receipts
         (namespace, workflow_id, run_id, request_id, digest, revision, first_sequence, last_sequence, intent_digest)
         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`, key.Namespace, key.WorkflowID, key.RunID, requestID, digest,
@@ -38,6 +41,9 @@ func saveExecutionReceipt(ctx context.Context, tx driver.Tx, key durable.Key, re
 }
 
 func insertExecutionEvent(ctx context.Context, tx driver.Tx, key durable.Key, event durable.Event) error {
+	if err := prepareEventIntents(ctx, tx, key, event); err != nil {
+		return err
+	}
 	_, err := tx.Exec(ctx, `INSERT INTO dispatch_execution_events
         (namespace, workflow_id, run_id, sequence, type, payload, occurred_at)
         VALUES ($1,$2,$3,$4,$5,$6,$7)`, key.Namespace, key.WorkflowID, key.RunID,
@@ -265,7 +271,7 @@ func (s *Store) CommitTransition(ctx context.Context, r durable.CommitRequest) (
 			return durable.Receipt{}, err
 		}
 	}
-	if receiptErr := saveExecutionReceipt(ctx, tx, r.Key, r.RequestID, digest, r.IntentDigest, receipt); receiptErr != nil {
+	if receiptErr := saveExecutionReceipt(ctx, tx, r.Key, r.RequestID, digest, r.IntentDigest, "execution.transition", receipt); receiptErr != nil {
 		return durable.Receipt{}, receiptErr
 	}
 	if continuationErr := insertContinuation(ctx, tx, batch, r.Continuation); continuationErr != nil {

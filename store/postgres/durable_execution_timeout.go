@@ -163,7 +163,7 @@ func (s *Store) ApplyExecutionTimeout(ctx context.Context, r durable.ExecutionTi
 	if deliveryErr := insertChildDeliveries(ctx, tx, deliveries); deliveryErr != nil {
 		return durable.Receipt{}, deliveryErr
 	}
-	if receiptErr := saveExecutionReceipt(ctx, tx, r.Key, r.RequestID, digest, "", receipt); receiptErr != nil {
+	if receiptErr := saveExecutionReceipt(ctx, tx, r.Key, r.RequestID, digest, "", "execution.timeout", receipt); receiptErr != nil {
 		return durable.Receipt{}, receiptErr
 	}
 	if successorErr := insertContinuation(ctx, tx, batch, nil); successorErr != nil {
