@@ -64,7 +64,7 @@ func (s *Store) ListNamespaces(ctx context.Context, r durable.NamespaceList) ([]
 	if err := r.Validate(); err != nil {
 		return nil, err
 	}
-	rows, err := s.pgdb.Query(ctx, `SELECT `+namespaceColumns+` FROM dispatch_durable_namespaces WHERE installation_id=$1 AND namespace>$2 ORDER BY namespace LIMIT $3`, r.InstallationID, r.After, r.Limit)
+	rows, err := s.pgdb.Query(ctx, `SELECT `+namespaceColumns+` FROM dispatch_durable_namespaces WHERE installation_id=$1 AND namespace COLLATE "C">$2 COLLATE "C" ORDER BY namespace COLLATE "C" LIMIT $3`, r.InstallationID, r.After, r.Limit)
 	if err != nil {
 		return nil, err
 	}

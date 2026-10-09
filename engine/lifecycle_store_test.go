@@ -474,3 +474,20 @@ func (s *strictLifecycleStore) BlockDelivery(ctx context.Context, token durable.
 	defer s.call("BlockDelivery")()
 	return s.base.BlockDelivery(ctx, token)
 }
+
+func (s *strictLifecycleStore) ListExecutions(ctx context.Context, request durable.ExecutionList) ([]durable.Execution, string, error) {
+	defer s.call("ListExecutions")()
+	return s.base.ListExecutions(ctx, request)
+}
+func (s *strictLifecycleStore) ListTasks(ctx context.Context, request durable.TaskList) ([]durable.Task, string, error) {
+	defer s.call("ListTasks")()
+	return s.base.ListTasks(ctx, request)
+}
+func (s *strictLifecycleStore) ReadBuildFacts(ctx context.Context, namespace, build string) (durable.BuildFacts, error) {
+	defer s.call("ReadBuildFacts")()
+	return s.base.ReadBuildFacts(ctx, namespace, build)
+}
+func (s *strictLifecycleStore) ReadDeliveryStatus(ctx context.Context, request durable.ScopedDeliveryStatus) (durable.DeliveryStatus, error) {
+	defer s.call("ReadDeliveryStatus")()
+	return s.base.ReadDeliveryStatus(ctx, request)
+}

@@ -35,6 +35,7 @@ import (
 	"github.com/xraph/dispatch/engine"
 	"github.com/xraph/dispatch/ext"
 	mw "github.com/xraph/dispatch/middleware"
+	"github.com/xraph/dispatch/operator"
 	"github.com/xraph/dispatch/resource"
 	"github.com/xraph/dispatch/security"
 	mongostore "github.com/xraph/dispatch/store/mongo"
@@ -69,6 +70,7 @@ type Extension struct {
 	memoryAuditForTesting bool
 	remoteAuth            security.Authenticator
 	boundary              *security.Boundary
+	operatorOptions       *operator.Options
 	durable               *runtime.Options
 	durableHandlers       runtime.Options
 	config                Config

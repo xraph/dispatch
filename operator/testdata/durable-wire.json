@@ -1,0 +1,292 @@
+{
+  "chain_partial": {
+    "ok": true,
+    "envelope": "v1",
+    "kind": "query",
+    "data": {
+      "items": [
+        {
+          "namespace": "production",
+          "workflow_id": "invoice-42",
+          "run_id": "run-2",
+          "workflow_type": "invoice",
+          "build_id": "historical-build",
+          "state": "running",
+          "revision": "9007199254740993",
+          "last_sequence": "9007199254740994",
+          "run_number": "9007199254740995",
+          "retry_attempt": "1",
+          "created_at": "2026-10-09T12:00:00Z",
+          "updated_at": "2026-10-09T12:00:00Z",
+          "run_deadline_at": null,
+          "execution_deadline_at": null,
+          "run_available_at": "2026-10-09T12:00:00Z",
+          "payload": "restricted",
+          "runtime": "unavailable"
+        }
+      ],
+      "complete": false,
+      "as_of": "2026-10-09T12:00:00Z",
+      "observation": "current_page",
+      "total": null,
+      "restricted": true
+    },
+    "meta": {
+      "intentVersion": 1
+    }
+  },
+  "children_restricted": {
+    "ok": true,
+    "envelope": "v1",
+    "kind": "query",
+    "data": {
+      "items": [],
+      "complete": true,
+      "as_of": "2026-10-09T12:00:00Z",
+      "observation": "current_page",
+      "total": null,
+      "restricted": true
+    },
+    "meta": {
+      "intentVersion": 1
+    }
+  },
+  "deliveries_blocked": {
+    "ok": true,
+    "envelope": "v1",
+    "kind": "query",
+    "data": {
+      "items": [
+        {
+          "id": "source-record",
+          "state": "blocked",
+          "attempts": "9007199254740993",
+          "accepted_at": "2026-10-09T12:00:00Z",
+          "sink_accepted_at": null,
+          "next_attempt_at": null
+        }
+      ],
+      "complete": true,
+      "as_of": "2026-10-09T12:00:00Z",
+      "observation": "current_page",
+      "total": null,
+      "pending": "2",
+      "blocked": "1",
+      "remote_delivery": "unavailable",
+      "external_anchoring": "unavailable"
+    },
+    "meta": {
+      "intentVersion": 1
+    }
+  },
+  "detail": {
+    "ok": true,
+    "envelope": "v1",
+    "kind": "query",
+    "data": {
+      "namespace": "production",
+      "workflow_id": "invoice-42",
+      "run_id": "run-2",
+      "workflow_type": "invoice",
+      "build_id": "historical-build",
+      "state": "running",
+      "revision": "9007199254740993",
+      "last_sequence": "9007199254740994",
+      "run_number": "9007199254740995",
+      "retry_attempt": "1",
+      "created_at": "2026-10-09T12:00:00Z",
+      "updated_at": "2026-10-09T12:00:00Z",
+      "run_deadline_at": null,
+      "execution_deadline_at": null,
+      "run_available_at": "2026-10-09T12:00:00Z",
+      "payload": "restricted",
+      "runtime": "unavailable",
+      "links": [
+        {
+          "kind": "previous",
+          "namespace": "production",
+          "workflow_id": "invoice-42",
+          "run_id": "run-1"
+        }
+      ],
+      "links_restricted": true,
+      "as_of": "2026-10-09T12:00:00Z"
+    },
+    "meta": {
+      "intentVersion": 1
+    }
+  },
+  "discovery_complete": {
+    "ok": true,
+    "envelope": "v1",
+    "kind": "query",
+    "data": {
+      "items": [
+        {
+          "namespace": "production",
+          "app_id": "billing",
+          "tenant_id": "acme"
+        }
+      ],
+      "complete": true,
+      "as_of": "2026-10-09T12:00:00Z",
+      "observation": "bounded_catalog_scan",
+      "total": null
+    },
+    "meta": {
+      "intentVersion": 1
+    }
+  },
+  "discovery_incomplete_empty": {
+    "ok": true,
+    "envelope": "v1",
+    "kind": "query",
+    "data": {
+      "items": [],
+      "cursor": "v1.OPAQUE_CONTINUATION_EXAMPLE",
+      "complete": false,
+      "as_of": "2026-10-09T12:00:00Z",
+      "observation": "bounded_catalog_scan",
+      "total": null
+    },
+    "meta": {
+      "intentVersion": 1
+    }
+  },
+  "executions": {
+    "ok": true,
+    "envelope": "v1",
+    "kind": "query",
+    "data": {
+      "items": [
+        {
+          "namespace": "production",
+          "workflow_id": "invoice-42",
+          "run_id": "run-2",
+          "workflow_type": "invoice",
+          "build_id": "historical-build",
+          "state": "running",
+          "revision": "9007199254740993",
+          "last_sequence": "9007199254740994",
+          "run_number": "9007199254740995",
+          "retry_attempt": "1",
+          "created_at": "2026-10-09T12:00:00Z",
+          "updated_at": "2026-10-09T12:00:00Z",
+          "run_deadline_at": null,
+          "execution_deadline_at": null,
+          "run_available_at": "2026-10-09T12:00:00Z",
+          "payload": "restricted",
+          "runtime": "unavailable"
+        }
+      ],
+      "complete": true,
+      "as_of": "2026-10-09T12:00:00Z",
+      "observation": "current_page",
+      "total": null
+    },
+    "meta": {
+      "intentVersion": 1
+    }
+  },
+  "forbidden": {
+    "ok": false,
+    "envelope": "v1",
+    "error": {
+      "code": "PERMISSION_DENIED"
+    }
+  },
+  "history": {
+    "ok": true,
+    "envelope": "v1",
+    "kind": "query",
+    "data": {
+      "items": [
+        {
+          "type": "execution.started",
+          "sequence": "9007199254740994",
+          "time": "2026-10-09T12:00:00Z"
+        }
+      ],
+      "complete": true,
+      "as_of": "2026-10-09T12:00:00Z",
+      "observation": "captured_history_high_water",
+      "total": null,
+      "revision": "9007199254740993",
+      "high_water": "9007199254740994"
+    },
+    "meta": {
+      "intentVersion": 1
+    }
+  },
+  "invalid_cursor": {
+    "ok": false,
+    "envelope": "v1",
+    "error": {
+      "code": "BAD_REQUEST"
+    }
+  },
+  "not_found": {
+    "ok": false,
+    "envelope": "v1",
+    "error": {
+      "code": "NOT_FOUND"
+    }
+  },
+  "payload_reveal": {
+    "ok": true,
+    "envelope": "v1",
+    "kind": "query",
+    "data": {
+      "state": "revealed",
+      "encoding": "base64",
+      "input": "eyJpbnZvaWNlIjo0Mn0=",
+      "output": null,
+      "revision": "9007199254740993"
+    },
+    "meta": {
+      "intentVersion": 1
+    }
+  },
+  "tasks": {
+    "ok": true,
+    "envelope": "v1",
+    "kind": "query",
+    "data": {
+      "items": [
+        {
+          "id": "activity:payment",
+          "kind": "activity",
+          "state": "awaiting_callback",
+          "attempt": "9007199254740993",
+          "version": "9007199254740994",
+          "available_at": "2026-10-09T12:00:00Z",
+          "lease_until": "2026-10-09T12:00:00Z",
+          "deadline_at": null,
+          "heartbeat_at": null
+        }
+      ],
+      "complete": true,
+      "as_of": "2026-10-09T12:00:00Z",
+      "observation": "current_page",
+      "total": null,
+      "revision": "9007199254740993"
+    },
+    "meta": {
+      "intentVersion": 1
+    }
+  },
+  "unauthenticated": {
+    "ok": false,
+    "envelope": "v1",
+    "error": {
+      "code": "UNAUTHENTICATED"
+    }
+  },
+  "unavailable": {
+    "ok": false,
+    "envelope": "v1",
+    "error": {
+      "code": "UNAVAILABLE"
+    }
+  }
+}

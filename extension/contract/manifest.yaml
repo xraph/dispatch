@@ -41,3 +41,15 @@ intents:
   - { name: crons.disable, kind: command, version: 1, requires: { warden: dispatchInstallationOperator }, capability: write, invalidates: [crons.list, crons.get, overview.summary] }
   - { name: crons.delete, kind: command, version: 1, requires: { warden: dispatchInstallationOperator }, capability: write, invalidates: [crons.list, crons.get, overview.summary] }
   - { name: crons.runNow, kind: command, version: 1, requires: { warden: dispatchInstallationOperator }, capability: write, invalidates: [crons.get, jobs.list, jobs.counts, queues.list, queues.get, overview.summary] }
+
+# Durable targets use persisted namespace ownership and decoded payload input.
+  - { name: durable.namespaces, kind: query, version: 1, requires: { warden: dispatchDurableOperator }, capability: read }
+  - { name: durable.executions, kind: query, version: 1, requires: { warden: dispatchDurableOperator }, capability: read }
+  - { name: durable.execution, kind: query, version: 1, requires: { warden: dispatchDurableOperator }, capability: read }
+  - { name: durable.history, kind: query, version: 1, requires: { warden: dispatchDurableOperator }, capability: read }
+  - { name: durable.tasks, kind: query, version: 1, requires: { warden: dispatchDurableOperator }, capability: read }
+  - { name: durable.chain, kind: query, version: 1, requires: { warden: dispatchDurableOperator }, capability: read }
+  - { name: durable.children, kind: query, version: 1, requires: { warden: dispatchDurableOperator }, capability: read }
+  - { name: durable.payload, kind: query, version: 1, requires: { warden: dispatchDurableOperator }, capability: read }
+  - { name: durable.audit, kind: query, version: 1, requires: { warden: dispatchDurableOperator }, capability: read }
+  - { name: durable.hooks, kind: query, version: 1, requires: { warden: dispatchDurableOperator }, capability: read }

@@ -25,7 +25,7 @@ func TestEveryIntentRequiresWardenAndDirectDispatchDenies(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, intent := range loadManifest(t).Intents {
-		if intent.Requires.Warden != WardenName || security.ContractOperation(intent.Name).Action == "" {
+		if (intent.Requires.Warden != WardenName || security.ContractOperation(intent.Name).Action == "") && (intent.Requires.Warden != DurableWardenName || DurableAction(intent.Name) == "") {
 			t.Fatal("ungated intent", intent.Name)
 		}
 		kind := fc.KindQuery

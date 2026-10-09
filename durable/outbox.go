@@ -161,6 +161,8 @@ func ReceiptSourceID(parts ...string) string {
 type SecurityAudit struct {
 	InstallationID string
 	Namespace      string
+	WorkflowID     string
+	RunID          string
 	AttemptID      string
 	OccurredAt     time.Time
 	Action         string
@@ -185,7 +187,7 @@ func (a SecurityAudit) Delivery(n NamespaceRecord) (Delivery, error) {
 	if _, err := hex.DecodeString(a.AttemptID); err != nil {
 		return Delivery{}, ErrInvalid
 	}
-	return NewDelivery(n, DestinationChronicle, DeliverySource{Key: Key{Namespace: a.Namespace}, Kind: "security", ID: a.AttemptID, OccurredAt: a.OccurredAt, Action: a.Action, Outcome: a.Outcome, Target: a.Target, Metadata: a.Metadata})
+	return NewDelivery(n, DestinationChronicle, DeliverySource{Key: Key{Namespace: a.Namespace, WorkflowID: a.WorkflowID, RunID: a.RunID}, Kind: "security", ID: a.AttemptID, OccurredAt: a.OccurredAt, Action: a.Action, Outcome: a.Outcome, Target: a.Target, Metadata: a.Metadata})
 }
 
 type DeliveryScope struct {

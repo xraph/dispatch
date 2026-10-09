@@ -218,3 +218,45 @@ func (op Operation) auditAction() string {
 	}
 	return op.Action
 }
+
+// RecordDurableRead accepts denial and sensitive-read audit before protected data
+// leaves the operator service. Successful scope comes from the persisted catalog.
+func (b Boundary) RecordDurableRead(ctx context.Context, p Principal, action, outcome, namespace string, targets ...durable.Key) error {
+	binding := b.Audit.bound(b.Resource)
+	if binding == nil {
+		return ErrUnavailable
+	}
+	ctx, cancel := context.WithTimeout(ctx, CheckTimeout)
+	defer cancel()
+	auditNamespace := binding.namespace
+	if outcome == "allowed" {
+		n, err := binding.catalog.GetNamespace(ctx, b.Resource.InstallationID, namespace)
+		if err != nil || !n.RequireAudit {
+			return ErrUnavailable
+		}
+		auditNamespace = n.Namespace
+	}
+	record, err := durable.CaptureSecurityAudit(b.Resource.InstallationID, auditNamespace, action, outcome, namespace, Metadata(p))
+	if len(targets) > 1 {
+		return ErrUnavailable
+	}
+	if len(targets) == 1 {
+		key := targets[0]
+		if key.Validate() != nil || key.Namespace != auditNamespace {
+			return ErrUnavailable
+		}
+		record.WorkflowID = key.WorkflowID
+		record.RunID = key.RunID
+	}
+	if err == nil {
+		_, err = binding.store.AppendSecurityAudit(ctx, record)
+	}
+	if err != nil {
+		b.Audit.failures.Add(1)
+		return ErrUnavailable
+	}
+	return nil
+}
+
+// DurableReadsReady preserves the extension's post-start admission barrier.
+func (b Boundary) DurableReadsReady() bool { return b.Audit.bound(b.Resource) != nil }

@@ -7,12 +7,14 @@ import (
 	"github.com/xraph/forge"
 
 	"github.com/xraph/dispatch/engine"
+	"github.com/xraph/dispatch/operator"
 	"github.com/xraph/dispatch/security"
 	"github.com/xraph/dispatch/store"
 )
 
 // Deps contains the running engine and the stores its intents inspect.
 type Deps struct {
+	Durable  *operator.Service
 	Security security.Boundary
 	Engine   *engine.Engine
 	Store    store.Store

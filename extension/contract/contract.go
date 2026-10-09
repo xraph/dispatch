@@ -34,7 +34,7 @@ func command[I, O any](intent string, fn func(context.Context, I, fc.Principal) 
 }
 
 func bindings(deps Deps) []binding {
-	return []binding{
+	return append([]binding{
 		query("artifacts.list", artifactsListHandler(deps)),
 		query("artifacts.get", artifactsGetHandler(deps)),
 		query("artifacts.forJob", artifactsForJobHandler(deps)),
@@ -70,7 +70,7 @@ func bindings(deps Deps) []binding {
 		query("jobs.counts", jobsCountsHandler(deps)),
 		command("jobs.cancel", jobActionHandler(deps, "jobs.cancel", deps.Engine.CancelJob)),
 		command("jobs.retry", jobActionHandler(deps, "jobs.retry", deps.Engine.RetryJob)),
-	}
+	}, durableBindings(deps)...)
 }
 
 // Register validates the manifest and binds only implemented intents.
@@ -82,6 +82,9 @@ func Register(d *dispatcher.Dispatcher, reg fc.Registry, wreg fc.WardenRegistry,
 		return fmt.Errorf("dispatch/contract: dispatcher and registries are required")
 	}
 	if err := wreg.Register(WardenName, operatorWarden{deps: deps}); err != nil {
+		return err
+	}
+	if err := wreg.Register(DurableWardenName, durableWarden{deps: deps}); err != nil {
 		return err
 	}
 	manifest, err := loader.Load(bytes.NewReader(manifestYAML), "dispatch/contract/manifest.yaml")

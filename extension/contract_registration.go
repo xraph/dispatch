@@ -25,5 +25,9 @@ func (e *Extension) RegisterContractContributor(d *dispatcher.Dispatcher, reg fc
 	if !ok {
 		return fmt.Errorf("dispatch: dashboard requires cursor-capable stores")
 	}
-	return dispatchcontract.Register(d, reg, wreg, dispatchcontract.Deps{Engine: e.eng, Store: s, Logger: logger, Security: *e.boundary})
+	operators, err := e.operatorService()
+	if err != nil {
+		return err
+	}
+	return dispatchcontract.Register(d, reg, wreg, dispatchcontract.Deps{Durable: operators, Engine: e.eng, Store: s, Logger: logger, Security: *e.boundary})
 }
