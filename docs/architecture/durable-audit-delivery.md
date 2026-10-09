@@ -361,3 +361,14 @@ implementations and this migration. Deployment preflight must compare its delive
 publisher capability against the persisted floor, separately from namespace
 writer coverage. Installation-wide status is internal publisher telemetry; it is
 not an authorized namespace or run projection for an operator API.
+
+
+`Engine.StopWorkers(ctx)` permanently stops the durable runtime, legacy pool,
+scheduler, workflow replay, wake listener and heartbeat producers for that engine.
+It waits for the same quiescence task used by `Stop`. A caller deadline can return
+before a handler finishes; retry with a fresh context to confirm completion.
+This terminal worker stop keeps publisher delivery and storage live, so accepted
+commands can still append local intents and the publisher can drain them. It is
+not a resumable pause or a build-retirement protocol. Final `Stop` reuses confirmed
+worker completion, runs the existing final hooks and required publisher drain,
+then closes storage once. `Start` refuses after worker stop has begun.

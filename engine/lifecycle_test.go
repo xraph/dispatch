@@ -5,6 +5,7 @@ import (
 	"errors"
 	"reflect"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -13,6 +14,7 @@ import (
 	"github.com/xraph/dispatch/durable/delivery"
 	drt "github.com/xraph/dispatch/durable/runtime"
 	"github.com/xraph/dispatch/engine"
+	"github.com/xraph/dispatch/job"
 	"github.com/xraph/dispatch/store/memory"
 )
 
@@ -245,6 +247,126 @@ func TestEngineStopChecksContextAfterRequiredDrain(t *testing.T) {
 	}
 	s.assertState(t, 0, 1)
 	if err = eng.Stop(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	s.assertState(t, 1, 1)
+}
+
+func TestStopWorkersKeepsPublisherAndStoreLive(t *testing.T) {
+	s := &strictLifecycleStore{base: memory.New()}
+	n := durable.NamespaceConfig{InstallationID: "installation", Namespace: "audit", AppID: "app", TenantID: "tenant", RequireAudit: true, SchemaVersion: 1}
+	if _, err := s.RegisterNamespace(t.Context(), n); err != nil {
+		t.Fatal(err)
+	}
+	var accepted atomic.Int64
+	publisher, err := delivery.New(s, delivery.Config{InstallationID: n.InstallationID, Owner: "publisher", PollInterval: time.Millisecond}, map[durable.Destination]delivery.Sink{durable.DestinationChronicle: lifecycleSink(func(_ context.Context, d durable.Delivery) (durable.SinkReceipt, error) {
+		accepted.Add(1)
+		return lifecycleReceipt(d), nil
+	})})
+	if err != nil {
+		t.Fatal(err)
+	}
+	d, err := dispatch.New(dispatch.WithStore(s), dispatch.WithConcurrency(1), dispatch.WithPollInterval(time.Millisecond))
+	if err != nil {
+		t.Fatal(err)
+	}
+	d.BeforeStoreClose(publisher.Stop)
+	durableEntered, durableRelease := make(chan struct{}), make(chan struct{})
+	eng, err := engine.Build(d, engine.WithDurableWorkflows(drt.Options{Namespace: "workers", Queue: "work", BuildID: "v1", Owner: "worker", PollInterval: time.Millisecond, Workflows: map[string]drt.WorkflowFunc{"hold": func(*drt.Workflow, []byte) ([]byte, error) { close(durableEntered); <-durableRelease; return nil, nil }}}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacyEntered, legacyRelease := make(chan struct{}), make(chan struct{})
+	var runs atomic.Int64
+	engine.Register(eng, job.NewDefinition("hold", func(context.Context, struct{}) error { runs.Add(1); close(legacyEntered); <-legacyRelease; return nil }))
+	defer func() {
+		select {
+		case <-legacyRelease:
+		default:
+			close(legacyRelease)
+		}
+		select {
+		case <-durableRelease:
+		default:
+			close(durableRelease)
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		_ = eng.Stop(ctx)
+	}()
+	if _, err = engine.Enqueue(t.Context(), eng, "hold", struct{}{}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = eng.StartDurableWorkflow(t.Context(), durable.StartRequest{Key: durable.Key{Namespace: "workers", WorkflowID: "hold", RunID: "run"}, RequestID: "start", WorkflowType: "hold", BuildID: "v1", Queue: "work"}); err != nil {
+		t.Fatal(err)
+	}
+	if err = publisher.Start(); err != nil {
+		t.Fatal(err)
+	}
+	if err = eng.Start(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	awaitLifecycle(t, legacyEntered)
+	awaitLifecycle(t, durableEntered)
+	var wg sync.WaitGroup
+	for _, stop := range []func(context.Context) error{eng.StopWorkers, eng.Stop, eng.StopWorkers} {
+		wg.Go(func() {
+			ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+			defer cancel()
+			if e := stop(ctx); !errors.Is(e, context.DeadlineExceeded) {
+				t.Errorf("live handler quiescence reported: %v", e)
+			}
+		})
+	}
+	wg.Wait()
+	s.assertState(t, 0, 0)
+	close(durableRelease)
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	err = eng.StopWorkers(ctx)
+	cancel()
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("legacy handler did not hold quiescence: %v", err)
+	}
+	close(legacyRelease)
+	if err = eng.StopWorkers(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	s.assertState(t, 0, 1)
+	if err = eng.Start(t.Context()); !errors.Is(err, durable.ErrClosed) {
+		t.Fatalf("terminal worker stop restarted: %v", err)
+	}
+	queued, err := engine.Enqueue(t.Context(), eng, "hold", struct{}{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	audit, err := durable.CaptureSecurityAudit(n.InstallationID, n.Namespace, "after-workers", "accepted", "", durable.AuditMetadata{ActorKind: "system", ActorID: "host"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = s.AppendSecurityAudit(t.Context(), audit); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(time.Second)
+	for accepted.Load() == 0 {
+		if time.Now().After(deadline) {
+			t.Fatal("publisher stopped with workers")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	stored, err := s.GetJob(t.Context(), queued.ID)
+	if err != nil || stored.State != job.StatePending || runs.Load() != 1 {
+		t.Fatalf("stopped worker executed: %+v %v", stored, err)
+	}
+	for range 3 {
+		wg.Go(func() {
+			if e := eng.Stop(t.Context()); e != nil {
+				t.Error(e)
+			}
+		})
+	}
+	wg.Wait()
+	s.assertState(t, 1, 1)
+	if err = eng.StopWorkers(t.Context()); err != nil {
 		t.Fatal(err)
 	}
 	s.assertState(t, 1, 1)

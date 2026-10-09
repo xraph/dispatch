@@ -798,6 +798,37 @@ func (eng *Engine) Stop(ctx context.Context) error {
 	if eng.stopped {
 		return eng.stopErr
 	}
+	if err := eng.stopWorkersLocked(ctx); err != nil {
+		return err
+	}
+	if err := eng.d.Stop(ctx); err != nil {
+		return errors.Join(eng.quiesceErr, err)
+	}
+	eng.closeExecutors()
+	eng.stopped = true
+	eng.stopErr = eng.quiesceErr
+	return eng.stopErr
+}
+
+// StopWorkers permanently stops this engine's execution producers and waits for
+// both worker pools to finish. Publisher delivery, final extension hooks and
+// storage remain active. This is a terminal worker stop, not a resumable pause.
+// Concurrent Stop/StopWorkers calls share the same quiescence task. A caller's
+// timeout never establishes completion and can be retried with a fresh context.
+func (eng *Engine) StopWorkers(ctx context.Context) error {
+	if err := eng.lockLifecycle(ctx); err != nil {
+		return err
+	}
+	defer eng.unlockLifecycle()
+	if eng.stopped {
+		return eng.stopErr
+	}
+	if err := eng.stopWorkersLocked(ctx); err != nil {
+		return err
+	}
+	return eng.quiesceErr
+}
+func (eng *Engine) stopWorkersLocked(ctx context.Context) error {
 	eng.stopping = true
 	if eng.quiesced == nil {
 		eng.quiesced = make(chan struct{})
@@ -808,16 +839,7 @@ func (eng *Engine) Stop(ctx context.Context) error {
 	case <-ctx.Done():
 		return ctx.Err()
 	}
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-	if err := eng.d.Stop(ctx); err != nil {
-		return errors.Join(eng.quiesceErr, err)
-	}
-	eng.closeExecutors()
-	eng.stopped = true
-	eng.stopErr = eng.quiesceErr
-	return eng.stopErr
+	return ctx.Err()
 }
 func (eng *Engine) lockLifecycle(ctx context.Context) error {
 	if err := ctx.Err(); err != nil {
@@ -855,7 +877,8 @@ func (eng *Engine) quiesce() error {
 	cancel()
 	schedulerErr := eng.scheduler.Stop(ctx)
 	workflowErr := eng.wfRunner.Shutdown(ctx)
-	return errors.Join(durableErr, schedulerErr, workflowErr)
+	poolErr := eng.pool.Stop(ctx)
+	return errors.Join(durableErr, schedulerErr, workflowErr, poolErr)
 }
 
 // closeExecutors releases every configured executor's resources, logging
