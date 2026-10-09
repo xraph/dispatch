@@ -1706,3 +1706,8 @@ identities distinct. Capability, denied, loading, empty and failed states need
 separate treatment, followed by actual desktop and narrow-layout verification.
 This source inventory is planning evidence; no durable dashboard integration is
 implemented or browser-qualified by the run-chain checkpoint.
+
+The [Forge ecosystem review](durable-ecosystem-qualification.md) records the
+authorization, audit, hook and deployment findings behind the next operator and
+qualification phases. Its delivery sequence is a proposal; these roadmap gates
+remain open until the integrations and their evidence are recorded.
