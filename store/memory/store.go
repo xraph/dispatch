@@ -46,10 +46,11 @@ type Store struct {
 	events      map[string]*event.Event
 	workers     map[string]*cluster.Worker
 
-	artifacts      map[string]*artifact.Artifact
-	artifactLinks  []*artifact.Link
-	executions     map[durable.Key]*executionRecord
-	signalReceipts map[signalReceiptKey]signalReceiptRecord
+	artifacts            map[string]*artifact.Artifact
+	artifactLinks        []*artifact.Link
+	executions           map[durable.Key]*executionRecord
+	signalReceipts       map[signalReceiptKey]signalReceiptRecord
+	cancellationReceipts map[signalReceiptKey]cancellationReceiptRecord
 
 	// leader tracks the current cluster leader worker ID string.
 	leader      string
@@ -59,16 +60,17 @@ type Store struct {
 // New returns a new empty Store.
 func New() *Store {
 	return &Store{
-		jobs:           make(map[string]*job.Job),
-		runs:           make(map[string]*workflow.Run),
-		checkpoints:    make(map[string]*workflow.Checkpoint),
-		crons:          make(map[string]*cron.Entry),
-		dlqs:           make(map[string]*dlq.Entry),
-		events:         make(map[string]*event.Event),
-		workers:        make(map[string]*cluster.Worker),
-		artifacts:      make(map[string]*artifact.Artifact),
-		executions:     make(map[durable.Key]*executionRecord),
-		signalReceipts: make(map[signalReceiptKey]signalReceiptRecord),
+		jobs:                 make(map[string]*job.Job),
+		runs:                 make(map[string]*workflow.Run),
+		checkpoints:          make(map[string]*workflow.Checkpoint),
+		crons:                make(map[string]*cron.Entry),
+		dlqs:                 make(map[string]*dlq.Entry),
+		events:               make(map[string]*event.Event),
+		workers:              make(map[string]*cluster.Worker),
+		artifacts:            make(map[string]*artifact.Artifact),
+		executions:           make(map[durable.Key]*executionRecord),
+		signalReceipts:       make(map[signalReceiptKey]signalReceiptRecord),
+		cancellationReceipts: make(map[signalReceiptKey]cancellationReceiptRecord),
 	}
 }
 

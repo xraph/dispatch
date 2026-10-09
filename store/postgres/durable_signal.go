@@ -170,6 +170,10 @@ func finishSignal(ctx context.Context, tx driver.Tx, requestID, digest string, r
 }
 
 func appendSignal(ctx context.Context, tx driver.Tx, current durable.Execution, build string, payload []byte) (durable.SignalReceipt, error) {
+	return appendWorkflowInput(ctx, tx, current, build, payload, durable.EventSignalReceived, "signal")
+}
+
+func appendWorkflowInput(ctx context.Context, tx driver.Tx, current durable.Execution, build string, payload []byte, eventType, wakeKind string) (durable.SignalReceipt, error) {
 	if current.State != durable.StateRunning {
 		return durable.SignalReceipt{}, durable.ErrClosed
 	}
@@ -192,14 +196,14 @@ func appendSignal(ctx context.Context, tx driver.Tx, current durable.Execution, 
 		return durable.SignalReceipt{}, err
 	}
 	receipt := durable.SignalReceipt{Key: current.Key, Receipt: durable.Receipt{Revision: current.Revision + 1, FirstSequence: current.LastSequence + 1, LastSequence: current.LastSequence + 1}}
-	if eventErr := insertExecutionEvent(ctx, tx, current.Key, durable.Event{EventInput: durable.EventInput{Type: durable.EventSignalReceived, Payload: payload}, Sequence: receipt.LastSequence, Time: now}); eventErr != nil {
+	if eventErr := insertExecutionEvent(ctx, tx, current.Key, durable.Event{EventInput: durable.EventInput{Type: eventType, Payload: payload}, Sequence: receipt.LastSequence, Time: now}); eventErr != nil {
 		return durable.SignalReceipt{}, eventErr
 	}
 	_, err = tx.Exec(ctx, `UPDATE dispatch_executions SET revision=$4,last_sequence=$5,updated_at=$6 WHERE namespace=$1 AND workflow_id=$2 AND run_id=$3`, current.Namespace, current.WorkflowID, current.RunID, receipt.Revision, receipt.LastSequence, now)
 	if err != nil {
 		return durable.SignalReceipt{}, err
 	}
-	if err := insertExecutionTask(ctx, tx, current.Key, durable.TaskSpec{ID: fmt.Sprintf("workflow:signal:%d", receipt.Revision), Kind: durable.TaskWorkflow, Queue: queue}, now); err != nil {
+	if err := insertExecutionTask(ctx, tx, current.Key, durable.TaskSpec{ID: fmt.Sprintf("workflow:%s:%d", wakeKind, receipt.Revision), Kind: durable.TaskWorkflow, Queue: queue}, now); err != nil {
 		return durable.SignalReceipt{}, err
 	}
 	return receipt, nil

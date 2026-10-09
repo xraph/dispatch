@@ -231,11 +231,11 @@ func TestDurableRuntimeRecovery(t *testing.T) {
 }
 
 func TestDurableDeadlineCheckedAfterTaskLock(t *testing.T) {
-	t.Run("condition", func(t *testing.T) { testDurableDeadlineCheckedAfterTaskLock(t, false) })
-	t.Run("terminal", func(t *testing.T) { testDurableDeadlineCheckedAfterTaskLock(t, true) })
+	t.Run("condition", func(t *testing.T) { testDurableDeadlineCheckedAfterTaskLock(t, "condition") })
+	t.Run("terminal", func(t *testing.T) { testDurableDeadlineCheckedAfterTaskLock(t, "terminal") })
 }
 
-func testDurableDeadlineCheckedAfterTaskLock(t *testing.T, terminal bool) {
+func testDurableDeadlineCheckedAfterTaskLock(t *testing.T, mode string) {
 	t.Helper()
 	s := setupTestStore(t)
 	r := durable.StartRequest{Key: durable.Key{Namespace: t.Name(), WorkflowID: "order", RunID: "run"},
@@ -278,7 +278,9 @@ func testDurableDeadlineCheckedAfterTaskLock(t *testing.T, terminal bool) {
 	go func() {
 		request := durable.CommitRequest{Key: r.Key, RequestID: "finish", ExpectedRevision: 2,
 			Token: task.Token(), Events: []durable.EventInput{{Type: "attempt.completed"}}}
-		if terminal {
+		if mode == "pending" {
+			request.CancelPendingTasks = true
+		} else if mode == "terminal" {
 			request.State = durable.StateCompleted
 		} else {
 			request.Conditions = []durable.TaskCondition{{TaskID: target.ID, Version: target.Version}}

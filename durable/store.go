@@ -32,6 +32,8 @@ type Store interface {
 	// target closure. Acceptance records history and runnable work atomically.
 	SignalExecution(context.Context, SignalRequest) (SignalReceipt, error)
 	SignalWithStart(context.Context, SignalWithStartRequest) (SignalReceipt, error)
+	// RequestCancelExecution records acceptance and a wakeup, not terminal state.
+	RequestCancelExecution(context.Context, CancelExecutionRequest) (CancelExecutionReceipt, error)
 	GetExecution(context.Context, Key) (Execution, error)
 	// GetTask returns persisted state, including finished tasks, in one namespace.
 	GetTask(context.Context, Key, string) (Task, error)

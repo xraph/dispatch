@@ -27,6 +27,9 @@ func ValidateTaskSpec(task TaskSpec) error {
 }
 
 func validateTaskControl(r CommitRequest) error {
+	if r.CancelPendingTasks && (len(r.CancelTasks) != 0 || r.TaskUpdate != nil && r.TaskUpdate.Action != TaskComplete) {
+		return fmt.Errorf("%w: pending-task fencing requires a completed source without individual cancellations", ErrInvalid)
+	}
 	if len(r.Conditions) > 1000 || len(r.CancelTasks) > 1000 {
 		return fmt.Errorf("%w: at most 1000 task conditions and cancellations", ErrInvalid)
 	}

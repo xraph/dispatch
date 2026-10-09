@@ -1068,3 +1068,78 @@ used the executor's passing PostgreSQL evidence; it did not rerun that suite.
 Physical interruption and cooperative completion acknowledgment, the remaining
 workflow/child lifecycle controls, process kills, fleet-scale behavior and disaster
 recovery remain outside this checkpoint's evidence and open in the full roadmap.
+
+## Whole-workflow cancellation contract
+
+RequestCancelExecution accepts a CancelExecutionRequest with an explicit namespace,
+workflow ID, pinned build, request ID and optional reason. An empty run ID selects
+the current open run. IDs contain at most 512 bytes; a reason contains at most 4096
+UTF-8 bytes and no NUL. The store appends workflow.cancellation_requested and a
+workflow task atomically with its receipt. Receipts are scoped by namespace and
+workflow ID within the cancellation API, survive closure and run replacement, and
+bind the entire original request. Exact retries recover the original target;
+changed retries fail. A different request ID records another request while the
+run is open. The first accepted request controls cancellation and its reason.
+A receipt proves acceptance, not completion or physical interruption.
+
+Cancellation runs in three durable phases: acceptance, fencing, and cleanup.
+The first workflow decision after acceptance records workflow.cancellation_started,
+fences all previously pending tasks, and creates one cleanup workflow task in the
+same transaction. CommitRequest.CancelPendingTasks performs this atomic fence on
+existing tasks only; newly created tasks in that transaction stay runnable. It
+requires a completed source task and uses the execution revision and source grant.
+PostgreSQL locks all affected tasks before reading its clock. Rejected or failed
+commits leave history, state, task versions and receipts unchanged. A lost response
+retries the identical request. Closure still fences all pending work as before.
+
+Normal workflow code is reconstructed from the history prefix before the first
+cancellation request. It may replay saved commands and results, but cannot publish
+new normal work beyond that prefix. This fixed boundary preserves the captured
+state used for cleanup even if an activity finishes between acceptance and fencing.
+The main handler must still match every command in that prefix. Go effects remain
+trusted: neither cancellation nor replay can preempt arbitrary blocking Go code.
+
+Register an optional SetCancellationHandler before the first workflow command to
+handle requests accepted before the initial decision. Registration later in the
+normal path is available only if frozen replay reaches it. The handler receives the same Workflow and the first ExecutionCancellation payload. Cleanup
+runs only after the saved fencing event, uses ordinary durable activities, timers,
+signals and selectors, and resumes after worker or process replacement through
+replay. IDs remain unique across the normal and cleanup phases. Logical time starts
+from the later of reconstructed normal time and the saved fencing event time.
+Unresolved normal activity/timer/receive futures report ErrWorkflowCancelled;
+results already recorded before fencing remain readable. The handler can use the
+same captured state and query closures. It cannot register another cancellation
+handler, and queries cannot register one either.
+
+Without a handler, the run closes as cancelled. A handler returning
+ErrWorkflowCancelled closes as cancelled too; returning nil completes normally,
+and another error fails the run. A cancelled terminal event references the first
+accepted request, has no output, and remains queryable through validated replay.
+Individual ErrCancelled errors retain their existing meaning and do not silently
+become whole-workflow cancellation. Cleanup must use explicit control flow, not
+Go defers that run during the replay engine's internal yielding panic.
+
+The history parser rejects repeated request IDs, malformed request/start/terminal
+payloads, start without acceptance, changed fencing boundaries, normal commands
+between acceptance and fencing, later stale outcomes, and cancelled projection
+mismatches. Pending normal selectors may be interrupted at the fencing boundary;
+cleanup selections retain ordinary saved-winner semantics. Other messages accepted
+while cleanup runs remain buffered and can be consumed by cleanup.
+
+Qualification requires shared memory/PostgreSQL request and fencing conformance,
+namespace/build and payload validation, concurrent and changed receipts, closure
+and replacement races, rollback after receipt failure, migration retry/downgrade
+protection, default cancellation, cleanup success/failure/cancellation, frozen
+normal replay, selector interruption, buffered signals, active/async fencing,
+accepted callback receipt recovery, lost responses, replacement workers/pools,
+terminal queries, malformed histories and query guards. This does not finish child
+propagation, cooperative activity completion acknowledgment, administrative
+termination/reset/pause, remote authorization, or production failure qualification.
+
+The request and fencing store layer has shared memory/PostgreSQL conformance for
+receipt identity, distinct requests, concurrent duplicates, target/build isolation,
+limits, closure races and retained cleanup work. PostgreSQL cases cover receipt
+recovery after pool/run replacement, acceptance and fencing rollback after injected
+receipt failures, protected migration retry/downgrade, and a source deadline that
+expires while fencing waits on a target-task lock. Runtime phase handling and
+cleanup integration are the next implementation step in this contract.

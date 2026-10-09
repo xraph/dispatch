@@ -303,7 +303,7 @@ func (m *Store) CommitTransition(ctx context.Context, r durable.CommitRequest) (
 		}
 		changes[taskID] = cancelled
 	}
-	if next.State != durable.StateRunning {
+	if next.State != durable.StateRunning || r.CancelPendingTasks {
 		for taskID, pending := range record.tasks {
 			if _, changed := changes[taskID]; changed || pending.Done {
 				continue

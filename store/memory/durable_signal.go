@@ -120,6 +120,10 @@ func (m *Store) openSignalRun(namespace, workflowID string) *executionRecord {
 }
 
 func (m *Store) appendSignal(record *executionRecord, build string, payload []byte, now time.Time) (durable.SignalReceipt, error) {
+	return m.appendWorkflowInput(record, build, payload, now, durable.EventSignalReceived, "signal")
+}
+
+func (m *Store) appendWorkflowInput(record *executionRecord, build string, payload []byte, now time.Time, eventType, wakeKind string) (durable.SignalReceipt, error) {
 	current := record.execution
 	if current.State != durable.StateRunning {
 		return durable.SignalReceipt{}, durable.ErrClosed
@@ -137,7 +141,7 @@ func (m *Store) appendSignal(record *executionRecord, build string, payload []by
 	current.Revision++
 	current.LastSequence++
 	current.UpdatedAt = now
-	wake, err := durable.NewTask(current.Key, durable.TaskSpec{ID: fmt.Sprintf("workflow:signal:%d", current.Revision), Kind: durable.TaskWorkflow, Queue: initial.Queue}, now)
+	wake, err := durable.NewTask(current.Key, durable.TaskSpec{ID: fmt.Sprintf("workflow:%s:%d", wakeKind, current.Revision), Kind: durable.TaskWorkflow, Queue: initial.Queue}, now)
 	if err != nil {
 		return durable.SignalReceipt{}, err
 	}
@@ -146,7 +150,7 @@ func (m *Store) appendSignal(record *executionRecord, build string, payload []by
 	}
 	receipt := durable.SignalReceipt{Key: current.Key, Receipt: durable.Receipt{Revision: current.Revision, FirstSequence: current.LastSequence, LastSequence: current.LastSequence}}
 	record.execution = current
-	record.history = append(record.history, durable.Event{EventInput: durable.EventInput{Type: durable.EventSignalReceived, Payload: payload}, Sequence: current.LastSequence, Time: now})
+	record.history = append(record.history, durable.Event{EventInput: durable.EventInput{Type: eventType, Payload: payload}, Sequence: current.LastSequence, Time: now})
 	record.tasks[wake.ID] = &durableTask{Task: wake}
 	return receipt, nil
 }

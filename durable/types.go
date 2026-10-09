@@ -173,6 +173,9 @@ type CommitRequest struct {
 	TaskUpdate       *TaskUpdate     `json:"task_update,omitempty"`
 	Conditions       []TaskCondition `json:"conditions,omitempty"`
 	CancelTasks      []string        `json:"cancel_tasks,omitempty"`
+	// CancelPendingTasks fences existing pending tasks before creating Tasks.
+	// The source must complete; new cleanup work remains runnable.
+	CancelPendingTasks bool `json:"cancel_pending_tasks,omitempty"`
 	// AsyncSecret is required only for an asynchronous grant. Receipts store its
 	// request fingerprint, never this secret. Do not log callback requests.
 	AsyncSecret string `json:"async_secret,omitempty"`

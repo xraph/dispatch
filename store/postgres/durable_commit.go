@@ -154,7 +154,7 @@ func (s *Store) CommitTransition(ctx context.Context, r durable.CommitRequest) (
 	if err != nil {
 		return durable.Receipt{}, err
 	}
-	if r.State != "" && r.State != durable.StateRunning {
+	if r.CancelPendingTasks || r.State != "" && r.State != durable.StateRunning {
 		// Closure cancels all pending tasks, even those without explicit
 		// conditions. Acquire their locks before validating the source deadline.
 		_, err = tx.Exec(ctx, `SELECT 1 FROM dispatch_execution_tasks
@@ -196,6 +196,13 @@ func (s *Store) CommitTransition(ctx context.Context, r durable.CommitRequest) (
 		r.Namespace, r.WorkflowID, r.RunID, string(next.State), next.Revision, next.LastSequence, executionBytes(next.Output), next.UpdatedAt)
 	if err != nil {
 		return durable.Receipt{}, err
+	}
+	if r.CancelPendingTasks {
+		_, err = tx.Exec(ctx, `UPDATE dispatch_execution_tasks SET done=TRUE, version=version+1
+ WHERE namespace=$1 AND workflow_id=$2 AND run_id=$3 AND task_id<>$4 AND NOT done`, r.Namespace, r.WorkflowID, r.RunID, r.Token.TaskID)
+		if err != nil {
+			return durable.Receipt{}, err
+		}
 	}
 	for _, spec := range r.Tasks {
 		if taskErr := insertExecutionTask(ctx, tx, r.Key, spec, now); taskErr != nil {
