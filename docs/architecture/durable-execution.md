@@ -959,3 +959,16 @@ and retain a losing signal for later consumption. Terminal query results agree
 with the saved branch and leave the projection, history and tasks unchanged.
 The development example prints approved. These checks do not qualify process-kill,
 failover, sustained-load or disaster-recovery behavior.
+
+
+2026-10-08: selector commit 22ea219 passed make f, make l with zero issues,
+the full Go unit suite, engine/runtime/memory race tests and the full PostgreSQL
+durable race suite (78.801 seconds). A fresh independent review found no defects.
+The reviewer independently passed the focused selector/signal/query/replay race
+suite and the real PostgreSQL selector recovery tests (4.377 seconds).
+
+Selection retains the existing lifecycle: it leaves losers active while the run
+continues, and run closure cancels pending tasks under the store contract.
+Individual cancellation, deterministic coroutines, tracked updates, children and
+remote authorization remain open. The review does not qualify process-kill,
+failover, sustained-load or disaster-recovery behavior.
