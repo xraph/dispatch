@@ -57,7 +57,7 @@ func (m *Store) StartExecution(ctx context.Context, r durable.StartRequest) (dur
 	receipt := durable.Receipt{Revision: 1, FirstSequence: 1, LastSequence: 1}
 	record := newExecutionRecord(r, now)
 	record.receipts[r.RequestID] = durableReceipt{digest: digest, value: receipt}
-	m.executions[r.Key] = record
+	m.installExecution(record)
 	return receipt, nil
 }
 
@@ -354,7 +354,7 @@ func (m *Store) CommitTransition(ctx context.Context, r durable.CommitRequest) (
 		record.tasks[taskID] = &durableTask{Task: change}
 	}
 	for _, child := range r.Children {
-		m.executions[child.Start.Key] = children[child.Start.Key]
+		m.installExecution(children[child.Start.Key])
 		child.Start.Input = cloneBytes(child.Start.Input)
 		m.childParents[child.Start.Key] = durable.ChildExecution{Parent: r.Key, ChildStartSpec: child, CreatedAt: now}
 		record.children[child.CommandID] = child.Start.Key

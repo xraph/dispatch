@@ -96,7 +96,7 @@ func (m *Store) SignalWithStart(ctx context.Context, r durable.SignalWithStartRe
 		record.execution.LastSequence = 2
 		record.history = append(record.history, durable.Event{EventInput: durable.EventInput{Type: durable.EventSignalReceived, Payload: payload}, Sequence: 2, Time: now})
 		receipt = durable.SignalReceipt{Key: r.Start.Key, Receipt: durable.Receipt{Revision: 1, FirstSequence: 1, LastSequence: 2}, Started: true}
-		m.executions[r.Start.Key] = record
+		m.installExecution(record)
 	}
 	m.signalReceipts[id] = signalReceiptRecord{digest: digest, receipt: receipt}
 	return receipt, nil

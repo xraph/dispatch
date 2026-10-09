@@ -1319,3 +1319,38 @@ run chains, operator transport, remote authorization, Dashboard flows, process k
 failover, fleet load, disaster recovery or physical interruption of external work.
 Future retention must preserve pending delivery targets before changing relationship
 retention. These remain required work in the roadmap.
+
+## Durable query target contract
+
+You can select an explicit run, the current running run, or the latest created run.
+An empty selector keeps the explicit-run API. Current and latest selectors require
+an empty RunID, a namespace, a workflow ID and an explicit build. A build mismatch
+must fail before replay; it must not select an older run with compatible code.
+
+Every successful start, including signal-with-start and child creation, must update
+a durable latest pointer in the same transaction as its history, tasks and receipts.
+Closure retains that pointer. Retrying an old request returns its receipt without
+changing latest identity. Store timestamps do not establish run ordering.
+
+Resolution fixes one execution snapshot. History reads use its exact run ID and
+last sequence even if that run closes or another starts during the query. The result
+identifies the saved run, state, revision and history bound. Queries write nothing.
+
+For databases created before latest pointers, migration can identify a lone run or
+the unique running run. Multiple closed runs have no proven order, so latest queries
+must return ErrAmbiguousRun. You can query those runs explicitly. A subsequent new
+start establishes the latest pointer. Migration retries must preserve known pointers,
+and downgrades must not discard populated pointers.
+
+Memory and PostgreSQL now implement ResolveExecution and atomic latest pointers.
+PostgreSQL maintains the pointer through an insertion trigger, including for writers
+that predate this API. Migration locks execution writes while backfilling and
+installing the trigger. Shared tests cover selection, lifecycle states, identity
+reuse, copies, namespace isolation and concurrent starts. Database tests cover head
+and later-event failures in every creation path, older writers, timestamp reversal,
+connection replacement, migration retry, ambiguity and protected downgrade.
+
+2026-10-08: store checks passed make f, make l, go test ./..., engine/runtime/memory
+race tests and the full durable PostgreSQL integration race suite (139.127 seconds).
+Runtime query selection is still required. Operator transport, remote authorization
+and Dashboard flows remain separate required work.

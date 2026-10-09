@@ -49,6 +49,7 @@ type Store struct {
 	artifacts             map[string]*artifact.Artifact
 	artifactLinks         []*artifact.Link
 	executions            map[durable.Key]*executionRecord
+	executionHeads        map[durable.Key]durable.Key
 	childParents          map[durable.Key]durable.ChildExecution
 	childDeliveries       map[childDeliveryKey]durable.ChildDelivery
 	childDeliveryReceipts map[childDeliveryReceiptKey]childDeliveryReceiptRecord
@@ -72,6 +73,7 @@ func New() *Store {
 		workers:               make(map[string]*cluster.Worker),
 		artifacts:             make(map[string]*artifact.Artifact),
 		executions:            make(map[durable.Key]*executionRecord),
+		executionHeads:        make(map[durable.Key]durable.Key),
 		childParents:          make(map[durable.Key]durable.ChildExecution),
 		childDeliveries:       make(map[childDeliveryKey]durable.ChildDelivery),
 		childDeliveryReceipts: make(map[childDeliveryReceiptKey]childDeliveryReceiptRecord),

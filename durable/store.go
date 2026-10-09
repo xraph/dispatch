@@ -35,6 +35,8 @@ type Store interface {
 	// RequestCancelExecution records acceptance and a wakeup, not terminal state.
 	RequestCancelExecution(context.Context, CancelExecutionRequest) (CancelExecutionReceipt, error)
 	GetExecution(context.Context, Key) (Execution, error)
+	// ResolveExecution fixes one snapshot without claiming tasks or writing history.
+	ResolveExecution(context.Context, ExecutionTarget) (Execution, error)
 	GetChildExecution(context.Context, Key, string) (ChildExecution, error)
 	GetParentExecution(context.Context, Key) (ChildExecution, error)
 	ListChildExecutions(context.Context, Key, string, int) ([]ChildExecution, error)
