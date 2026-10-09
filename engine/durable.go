@@ -119,6 +119,16 @@ func (eng *Engine) QueryDurableWorkflow(ctx context.Context, request drt.QueryRe
 	return worker.QueryExecution(ctx, request)
 }
 
+// RequestCancelDurableWorkflow records cancellation acceptance for an explicit
+// or current run. Authorize callers before exposing this trusted API remotely.
+func (eng *Engine) RequestCancelDurableWorkflow(ctx context.Context, request durable.CancelExecutionRequest) (durable.CancelExecutionReceipt, error) {
+	worker := eng.DurableWorker()
+	if worker == nil {
+		return durable.CancelExecutionReceipt{}, ErrDurableDisabled
+	}
+	return worker.RequestCancelExecution(ctx, request)
+}
+
 func (eng *Engine) startDurable(ctx context.Context) error {
 	d := eng.durable
 	if d == nil {

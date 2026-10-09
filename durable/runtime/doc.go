@@ -70,16 +70,32 @@
 // external effect or prove that a running external operation physically stopped.
 // A running handler observes lost ownership through renewal or heartbeats.
 //
+// RequestCancelExecution accepts whole-workflow cancellation with an explicit
+// run or an empty RunID for the current open run. Retry the original request to
+// recover its receipt after closure or replacement. Acceptance leaves the run
+// open. A later decision atomically fences old pending tasks and schedules cleanup.
+//
+// Register SetCancellationHandler before your first command if it must handle
+// cancellation accepted before the initial decision. Normal code replays from the
+// history prefix before first acceptance; cleanup uses the same captured state
+// with full history after the saved fence. Already-recorded results remain readable;
+// unresolved normal activity, timer and receive futures return ErrWorkflowCancelled.
+// Cleanup can use ordinary durable commands with IDs unique across both phases.
+// Return ErrWorkflowCancelled to close cancelled, nil to complete, or another error
+// to fail. Without a handler, the run closes cancelled. The first request controls
+// the reason; later requests cannot replace it or restart cleanup. A handler
+// registered beyond the frozen normal boundary cannot handle that request.
+//
 // Register queries with SetQueryHandler before the workflow can yield. A query
 // reads local state reconstructed by validated replay, then returns a copied
 // result without committing that replay's decisions. QueryExecution requires an
-// explicit run and pinned build. Completed and failed runs remain queryable when
+// explicit run and pinned build. Completed, failed and cancelled runs remain queryable when
 // their history matches the registered workflow code. QueryResult carries the
 // persisted revision, sequence and lifecycle state for the history prefix used.
 // An accepted signal can be visible to a query before a worker commits consumption.
 //
 // Queries must return promptly and avoid external effects. SDK scheduling,
-// Future.Get, Select, Cancel and query registration are prohibited during a query,
+// Future.Get, Select, Cancel and handler registration are prohibited during a query,
 // even if it recovers the runtime's control-flow panic. Now remains readable.
 // Ordinary Go effects and blocking cannot be sandboxed. QueryExecution checks its
 // context between reads and invocation phases, and after code returns; it does

@@ -13,24 +13,27 @@ import (
 )
 
 type recordedOutcome struct {
-	value        Outcome
-	at           time.Time
-	sequence     int64
-	cancellation *Cancellation
+	value                Outcome
+	at                   time.Time
+	sequence             int64
+	cancellation         *Cancellation
+	workflowCancellation *durable.ExecutionCancellation
 }
 
 type replayHistory struct {
-	commands      []Command
-	selections    map[string]Selection
-	signals       map[string]recordedSignal
-	signalQueues  map[string][]string
-	signalOffsets map[string]int
-	outcomes      map[string]recordedOutcome
-	attempts      map[string]recordedAttempt
-	scheduled     map[string]time.Time
-	terminal      durable.State
-	output        []byte
-	failure       *ApplicationError
+	executionCancellation *recordedExecutionCancellation
+	cancellationRequests  map[string]bool
+	commands              []Command
+	selections            map[string]Selection
+	signals               map[string]recordedSignal
+	signalQueues          map[string][]string
+	signalOffsets         map[string]int
+	outcomes              map[string]recordedOutcome
+	attempts              map[string]recordedAttempt
+	scheduled             map[string]time.Time
+	terminal              durable.State
+	output                []byte
+	failure               *ApplicationError
 }
 
 // Evaluate replays a complete history snapshot through LastSequence. It produces
@@ -55,18 +58,38 @@ func evaluateWorkflow(execution durable.Execution, events []durable.Event, handl
 	if err != nil {
 		return Decision{}, nil, err
 	}
+	if history.executionCancellation != nil {
+		return evaluateExecutionCancellation(execution, events, history, handler)
+	}
 	w = &Workflow{now: execution.CreatedAt, history: history, ids: make(map[string]bool)}
 	output, handlerErr := invoke(w, handler, bytes.Clone(execution.Input))
+	return finishEvaluation(w, output, handlerErr)
+}
+
+func checkWorkflowReplay(w *Workflow) error {
 	if w.fault != nil {
-		return Decision{}, nil, w.fault
+		return w.fault
 	}
-	if w.cursor < len(history.commands) {
-		return Decision{}, nil, fmt.Errorf("%w: omitted command %d", ErrNondeterministic, w.cursor+1)
+	if w.cursor < len(w.history.commands) {
+		return fmt.Errorf("%w: omitted command %d", ErrNondeterministic, w.cursor+1)
 	}
-	decision = Decision{Commands: w.commands, Signals: w.signals, Selections: w.selections, State: durable.StateCompleted, Output: bytes.Clone(output)}
-	if w.blocked {
+	return nil
+}
+
+func finishEvaluation(w *Workflow, output []byte, handlerErr error) (Decision, *Workflow, error) {
+	if err := checkWorkflowReplay(w); err != nil {
+		return Decision{}, nil, err
+	}
+	history := w.history
+	decision := Decision{Commands: w.commands, Signals: w.signals, Selections: w.selections, State: durable.StateCompleted, Output: bytes.Clone(output)}
+	switch {
+	case w.blocked:
 		decision.State, decision.Output = durable.StateRunning, nil
-	} else if handlerErr != nil {
+	case w.cancelling && errors.Is(handlerErr, ErrWorkflowCancelled):
+		decision.State, decision.Output = durable.StateCancelled, nil
+		value := history.executionCancellation.value
+		decision.Cancelled = &value
+	case handlerErr != nil:
 		decision.State, decision.Output = durable.StateFailed, nil
 		var failure *ApplicationError
 		if errors.As(handlerErr, &failure) {
@@ -112,10 +135,17 @@ func parseHistory(execution durable.Execution, events []durable.Event) (replayHi
 		if event.Sequence != int64(i+1) || event.Time.IsZero() || result.terminal != "" {
 			return result, fmt.Errorf("%w: invalid event sequence %d", ErrHistory, event.Sequence)
 		}
+		if err := validateExecutionCancellationPhase(result, event.Type); err != nil {
+			return result, err
+		}
 		switch event.Type {
 		case EventStarted:
 			if i != 0 {
 				return result, fmt.Errorf("%w: repeated start event", ErrHistory)
+			}
+		case durable.EventCancellationRequested, EventCancellationStarted, EventWorkflowCancelled:
+			if err := parseExecutionCancellation(&result, event); err != nil {
+				return result, err
 			}
 		case EventCommandScheduled:
 			var command Command
@@ -184,11 +214,14 @@ func parseHistory(execution durable.Execution, events []durable.Event) (replayHi
 				return result, fmt.Errorf("%w: cancellation command has no acknowledgment", ErrHistory)
 			}
 		}
-		if command.Kind == CommandSelect && command.Index < int64(len(result.commands)) {
+		if command.Kind == CommandSelect && command.Index < int64(len(result.commands)) && !interruptedSelection(result, command) {
 			if _, chosen := result.selections[command.ID]; !chosen {
 				return result, fmt.Errorf("%w: pending selection precedes later commands", ErrHistory)
 			}
 		}
+	}
+	if result.terminal != "" && result.executionCancellation != nil && result.executionCancellation.started == nil {
+		return result, fmt.Errorf("%w: terminal result before cancellation fencing", ErrHistory)
 	}
 	for id, attempt := range result.attempts {
 		if _, done := result.outcomes[id]; attempt.failed && attempt.value.RetryAfter == 0 && !done {

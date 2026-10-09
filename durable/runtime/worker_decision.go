@@ -48,6 +48,16 @@ func (w *Worker) processWorkflow(ctx context.Context, task durable.Task) error {
 
 func decisionRequest(task durable.Task, execution durable.Execution, decision Decision) (durable.CommitRequest, error) {
 	request := taskRequest(task, execution.Revision)
+	if decision.CancellationStart != nil {
+		data, err := json.Marshal(decision.CancellationStart)
+		if err != nil {
+			return request, err
+		}
+		request.Events = []durable.EventInput{{Type: EventCancellationStarted, Payload: data}}
+		request.CancelPendingTasks, request.State = true, durable.StateRunning
+		request.Tasks = []durable.TaskSpec{{ID: fmt.Sprintf("workflow:cancel-cleanup:%d", execution.Revision+1), Kind: durable.TaskWorkflow, Queue: task.Queue}}
+		return request, nil
+	}
 	for _, command := range decision.Commands {
 		data, err := json.Marshal(command)
 		if err != nil {
@@ -86,6 +96,12 @@ func decisionRequest(task durable.Task, execution durable.Execution, decision De
 	switch decision.State {
 	case durable.StateCompleted:
 		event.Type, event.Payload = EventWorkflowCompleted, decision.Output
+	case durable.StateCancelled:
+		data, err := json.Marshal(decision.Cancelled)
+		if err != nil {
+			return request, err
+		}
+		event.Type, event.Payload = EventWorkflowCancelled, data
 	case durable.StateFailed:
 		data, err := json.Marshal(decision.Failure)
 		if err != nil {

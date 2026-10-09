@@ -14,18 +14,21 @@ import (
 // Workflow provides replayable decision primitives. Use these methods only from
 // the handler's goroutine. Schedule multiple futures before Get for parallel work.
 type Workflow struct {
-	now               time.Time
-	history           replayHistory
-	cursor            int
-	commands          []Command
-	signals           []SignalConsumption
-	selections        []Selection
-	ids               map[string]bool
-	blocked           bool
-	fault             error
-	queries           map[string]QueryFunc
-	querying          bool
-	cancellationCount int
+	now                 time.Time
+	history             replayHistory
+	cursor              int
+	commands            []Command
+	signals             []SignalConsumption
+	selections          []Selection
+	ids                 map[string]bool
+	blocked             bool
+	fault               error
+	queries             map[string]QueryFunc
+	querying            bool
+	cancellationCount   int
+	cancellationHandler WorkflowCancellationFunc
+	freezeNormal        bool
+	cancelling          bool
 }
 
 // Future represents a recorded command's eventual result.
@@ -96,6 +99,10 @@ func (w *Workflow) schedule(command Command) *Future {
 	if w.ids[command.ID] {
 		w.stop(fmt.Errorf("%w: duplicate command ID %q", durable.ErrInvalid, command.ID))
 	}
+	if w.freezeNormal && w.cursor >= len(w.history.commands) {
+		w.blocked = true
+		panic(flowControl{})
+	}
 	w.ids[command.ID] = true
 	if w.cursor < len(w.history.commands) {
 		prior := w.history.commands[w.cursor]
@@ -132,6 +139,10 @@ func (f *Future) Get() ([]byte, error) {
 		panic(flowControl{})
 	}
 	w.advance(result)
+	if result.workflowCancellation != nil {
+		c := result.workflowCancellation
+		return nil, &WorkflowCancelledError{RequestID: c.RequestID, Reason: c.Reason}
+	}
 	if result.cancellation != nil {
 		c := result.cancellation
 		return nil, &CancelledError{CommandID: c.TargetID, Attempt: c.Attempt, Heartbeat: cloneHeartbeat(c.Heartbeat)}

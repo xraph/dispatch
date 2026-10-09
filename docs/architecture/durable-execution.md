@@ -43,7 +43,7 @@ Store tests alone do not qualify a workflow runtime or a deployment.
 | Deterministic Go workflow runtime | Activity, timer, signal and saved-winner selection replay implemented; coroutine and SDK expansion open | Recorded-history replay with no repeated external effects, changed-command rejection |
 | Activity retries and timeout classes | Queue, attempt, overall and heartbeat deadlines, progress recovery, retry policies and asynchronous Go callbacks implemented; remote authorization and process qualification open | Queue, attempt, overall and heartbeat deadlines; heartbeat progress; asynchronous completion |
 | Signals, queries, updates and signal-with-start | Atomic signals, signal-with-start, Go receive replay and explicit-run queries implemented; tracked updates and current/latest query selection open | Namespace isolation, deduplication, atomic acceptance, update results, read-only queries |
-| Child workflows and cancellation | Individual Go future cancellation implemented; children, whole-workflow cancellation and cooperative completion acknowledgment open | Stable child identity, duplicate creation prevention, parent-close policies, cancellation propagation |
+| Child workflows and cancellation | Individual Go future and whole-workflow cancellation implemented; children and cooperative completion acknowledgment open | Stable child identity, duplicate creation prevention, parent-close policies, cancellation propagation |
 | Compensation, pause, termination and reset | Open | Resumable compensation attempts, audited controls, immutable reset lineage |
 | Continue-as-new and run chains | Open | Bounded history, message handoff and version inheritance |
 | Schedules | Open | Overlap, catch-up, backfill, timezones and unique scheduled occurrences |
@@ -1120,7 +1120,7 @@ become whole-workflow cancellation. Cleanup must use explicit control flow, not
 Go defers that run during the replay engine's internal yielding panic.
 
 The history parser rejects repeated request IDs, malformed request/start/terminal
-payloads, start without acceptance, changed fencing boundaries, normal commands
+payloads, start without acceptance, changed fencing boundaries, normal workflow decisions
 between acceptance and fencing, later stale outcomes, and cancelled projection
 mismatches. Pending normal selectors may be interrupted at the fencing boundary;
 cleanup selections retain ordinary saved-winner semantics. Other messages accepted
@@ -1141,5 +1141,16 @@ receipt identity, distinct requests, concurrent duplicates, target/build isolati
 limits, closure races and retained cleanup work. PostgreSQL cases cover receipt
 recovery after pool/run replacement, acceptance and fencing rollback after injected
 receipt failures, protected migration retry/downgrade, and a source deadline that
-expires while fencing waits on a target-task lock. Runtime phase handling and
-cleanup integration are the next implementation step in this contract.
+expires while fencing waits on a target-task lock. Runtime and engine APIs now connect those phases to deterministic cleanup. Memory
+and PostgreSQL worker tests cover default cancellation and cleanup that succeeds,
+fails or closes cancelled, plus query replay, async receipt recovery and late-result
+fencing. PostgreSQL tests replace connection pools before fencing, after fencing
+and after cleanup results; they also inject a winning callback between the fencing
+snapshot and commit, then require revision-conflict recovery. Lost acceptance,
+fencing and terminal responses must retry their exact request contents.
+
+Use `go run ./examples/durable-workflow-cancellation` to run the development memory
+example. It requests cancellation before the first workflow decision, runs a cleanup
+activity and checks the cancelled terminal state. These checks do not establish
+process-kill recovery, database failover, physical activity interruption or production
+readiness. Those qualification tasks remain open above.

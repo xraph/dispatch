@@ -90,6 +90,9 @@ func (w *Workflow) advance(result recordedOutcome) {
 }
 
 func (w *Workflow) checkEventCapacity() {
+	if w.freezeNormal {
+		return
+	}
 	// Reserve the final store event for workflow state.
 	if len(w.commands)+len(w.signals)+len(w.selections)+w.cancellationCount >= 999 {
 		w.stop(fmt.Errorf("%w: more than 999 decision events", durable.ErrInvalid))
