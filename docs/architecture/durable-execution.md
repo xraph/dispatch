@@ -1120,8 +1120,8 @@ become whole-workflow cancellation. Cleanup must use explicit control flow, not
 Go defers that run during the replay engine's internal yielding panic.
 
 The history parser rejects repeated request IDs, malformed request/start/terminal
-payloads, start without acceptance, changed fencing boundaries, normal workflow decisions
-between acceptance and fencing, later stale outcomes, and cancelled projection
+payloads, start without acceptance, changed fencing boundaries, normal workflow
+decisions between acceptance and fencing, later stale outcomes, and cancelled projection
 mismatches. Pending normal selectors may be interrupted at the fencing boundary;
 cleanup selections retain ordinary saved-winner semantics. Other messages accepted
 while cleanup runs remain buffered and can be consumed by cleanup.
@@ -1141,8 +1141,9 @@ receipt identity, distinct requests, concurrent duplicates, target/build isolati
 limits, closure races and retained cleanup work. PostgreSQL cases cover receipt
 recovery after pool/run replacement, acceptance and fencing rollback after injected
 receipt failures, protected migration retry/downgrade, and a source deadline that
-expires while fencing waits on a target-task lock. Runtime and engine APIs now connect those phases to deterministic cleanup. Memory
-and PostgreSQL worker tests cover default cancellation and cleanup that succeeds,
+expires while fencing waits on a target-task lock. Runtime and engine APIs connect
+those phases to deterministic cleanup. Memory and PostgreSQL worker tests cover
+default cancellation and cleanup that succeeds,
 fails or closes cancelled, plus query replay, async receipt recovery and late-result
 fencing. PostgreSQL tests replace connection pools before fencing, after fencing
 and after cleanup results; they also inject a winning callback between the fencing
@@ -1154,3 +1155,17 @@ example. It requests cancellation before the first workflow decision, runs a cle
 activity and checks the cancelled terminal state. These checks do not establish
 process-kill recovery, database failover, physical activity interruption or production
 readiness. Those qualification tasks remain open above.
+
+The whole-workflow cancellation checkpoint passed final formatting, lint with zero
+issues, the full Go suite, engine/runtime/store race tests and the full durable
+PostgreSQL integration race suite (108.783 seconds). A fresh independent review of
+bbe74ee..0807fd7 found no critical, important or minor issues. The reviewer reran
+focused runtime/engine and memory race checks; PostgreSQL and full-repository
+results came from the implementation run.
+
+The review retained the limits above. Child propagation and administrative controls
+remain required work. Task fencing does not confirm physical interruption or
+cooperative completion, and these trusted Go APIs require caller authorization
+before remote exposure. Arbitrary Go effects, blocking and deferred workflow cleanup
+remain prohibited. Worker and connection-pool replacement tests do not qualify
+process kills, database failover, fleet scale or disaster recovery.
