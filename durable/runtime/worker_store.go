@@ -10,29 +10,40 @@ import (
 )
 
 func (w *Worker) snapshot(ctx context.Context, key durable.Key) (durable.Execution, []durable.Event, error) {
+	return w.readSnapshot(ctx, key, false)
+}
+
+func (w *Worker) readSnapshot(ctx context.Context, key durable.Key, allowClosed bool) (durable.Execution, []durable.Event, error) {
+	if ctx.Err() != nil {
+		return durable.Execution{}, nil, context.Cause(ctx)
+	}
 	execution, err := storeCall(ctx, w, func(callCtx context.Context) (durable.Execution, error) { return w.store.GetExecution(callCtx, key) })
 	if err != nil {
 		return execution, nil, err
 	}
-	if execution.State != durable.StateRunning {
+	if !allowClosed && execution.State != durable.StateRunning {
 		return execution, nil, durable.ErrClosed
 	}
-	if execution.BuildID != w.options.BuildID || execution.Namespace != w.options.Namespace {
+	if execution.Key != key || execution.BuildID != w.options.BuildID || execution.Namespace != w.options.Namespace {
 		return execution, nil, fmt.Errorf("%w: execution does not match worker routing", durable.ErrInvalid)
 	}
-	if execution.LastSequence < 1 || execution.LastSequence > 100000 {
+	if execution.Revision < 1 || execution.LastSequence < 1 || execution.LastSequence > 100000 {
 		return execution, nil, fmt.Errorf("%w: history exceeds runtime bounds", ErrHistory)
 	}
 	events := make([]durable.Event, 0, execution.LastSequence)
 	for int64(len(events)) < execution.LastSequence {
+		if ctx.Err() != nil {
+			return execution, nil, context.Cause(ctx)
+		}
+		limit := int(min(1000, execution.LastSequence-int64(len(events))))
 		page, readErr := storeCall(ctx, w, func(callCtx context.Context) ([]durable.Event, error) {
-			return w.store.ReadHistory(callCtx, key, int64(len(events)), int(min(1000, execution.LastSequence-int64(len(events)))))
+			return w.store.ReadHistory(callCtx, key, int64(len(events)), limit)
 		})
 		if readErr != nil {
 			return execution, nil, readErr
 		}
-		if len(page) == 0 {
-			return execution, nil, fmt.Errorf("%w: history ended before snapshot sequence", ErrHistory)
+		if len(page) == 0 || len(page) > limit {
+			return execution, nil, fmt.Errorf("%w: history page does not match snapshot bounds", ErrHistory)
 		}
 		events = append(events, page...)
 	}

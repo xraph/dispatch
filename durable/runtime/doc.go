@@ -53,6 +53,22 @@
 // SignalWithStart proposals must fit the Go runtime's queue/type limits, even
 // when those fields are unused because an existing run wins.
 //
+// Register queries with SetQueryHandler before the workflow can yield. A query
+// reads local state reconstructed by validated replay, then returns a copied
+// result without committing that replay's decisions. QueryExecution requires an
+// explicit run and pinned build. Completed and failed runs remain queryable when
+// their history matches the registered workflow code. QueryResult carries the
+// persisted revision, sequence and lifecycle state for the history prefix used.
+// An accepted signal can be visible to a query before a worker commits consumption.
+//
+// Queries must return promptly and avoid external effects. SDK scheduling,
+// Future.Get and query registration are prohibited while a query handler runs,
+// even if it recovers the runtime's control-flow panic. Now remains readable.
+// Ordinary Go effects and blocking cannot be sandboxed. QueryExecution checks its
+// context between reads and invocation phases, and after code returns; it does
+// not launch an evaluator goroutine that could outlive cancellation. Input and
+// output are each limited to 1 MiB. Query names contain at most 200 bytes.
+//
 // Evaluate requires a complete history snapshot with at most 100,000 events and
 // accepts at most 999 new command and signal consumption events per decision. Command IDs, names and queues
 // contain at most 200 bytes. History format version 1 is explicit; unknown

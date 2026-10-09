@@ -21,6 +21,8 @@ type Workflow struct {
 	ids      map[string]bool
 	blocked  bool
 	fault    error
+	queries  map[string]QueryFunc
+	querying bool
 }
 
 // Future represents a recorded command's eventual result.
@@ -46,6 +48,7 @@ func (w *Workflow) Activity(id, name, queue string, input []byte) *Future {
 // ActivityWithOptions captures a retry policy in a version 2 activity command.
 // Use this for new workflows; changing saved options is nondeterministic replay.
 func (w *Workflow) ActivityWithOptions(id, name, queue string, input []byte, options ActivityOptions) *Future {
+	w.checkOperation()
 	normalized, err := normalizeActivityOptions(options)
 	if err != nil {
 		w.stop(err)
@@ -68,10 +71,17 @@ func (w *Workflow) stop(err error) {
 	panic(flowControl{})
 }
 
-func (w *Workflow) schedule(command Command) *Future {
+func (w *Workflow) checkOperation() {
+	if w.querying {
+		w.stop(ErrQueryMutation)
+	}
 	if w.blocked || w.fault != nil {
 		w.stop(fmt.Errorf("%w: workflow continued after an unresolved future", durable.ErrInvalid))
 	}
+}
+
+func (w *Workflow) schedule(command Command) *Future {
+	w.checkOperation()
 	if command.Version == 0 {
 		command.Version = 1
 	}
@@ -108,9 +118,7 @@ func (w *Workflow) schedule(command Command) *Future {
 // workflow code or perform work in a defer. The handler is replayed to resume.
 func (f *Future) Get() ([]byte, error) {
 	w := f.workflow
-	if w.blocked || w.fault != nil {
-		w.stop(fmt.Errorf("%w: workflow continued after an unresolved future", durable.ErrInvalid))
-	}
+	w.checkOperation()
 	result, ok := w.history.outcomes[f.id]
 	if !ok && f.signalName != "" {
 		result, ok = w.receiveSignal(f.id, f.signalName)

@@ -33,27 +33,32 @@ type replayHistory struct {
 // Evaluate replays a complete history snapshot through LastSequence. It produces
 // a decision without writing state or running activities. Errors must never be
 // converted into successful workflow transitions by a caller.
-func Evaluate(execution durable.Execution, events []durable.Event, handler WorkflowFunc) (decision Decision, evalErr error) {
+func Evaluate(execution durable.Execution, events []durable.Event, handler WorkflowFunc) (Decision, error) {
+	decision, _, err := evaluateWorkflow(execution, events, handler)
+	return decision, err
+}
+
+func evaluateWorkflow(execution durable.Execution, events []durable.Event, handler WorkflowFunc) (decision Decision, w *Workflow, evalErr error) {
 	defer func() {
 		if recovered := recover(); recovered != nil {
-			decision = Decision{}
+			decision, w = Decision{}, nil
 			evalErr = fmt.Errorf("%w: %v", ErrWorkflowPanic, recovered)
 		}
 	}()
 	if handler == nil {
-		return Decision{}, fmt.Errorf("%w: workflow handler is required", durable.ErrInvalid)
+		return Decision{}, nil, fmt.Errorf("%w: workflow handler is required", durable.ErrInvalid)
 	}
 	history, err := parseHistory(execution, events)
 	if err != nil {
-		return Decision{}, err
+		return Decision{}, nil, err
 	}
-	w := &Workflow{now: execution.CreatedAt, history: history, ids: make(map[string]bool)}
+	w = &Workflow{now: execution.CreatedAt, history: history, ids: make(map[string]bool)}
 	output, handlerErr := invoke(w, handler, bytes.Clone(execution.Input))
 	if w.fault != nil {
-		return Decision{}, w.fault
+		return Decision{}, nil, w.fault
 	}
 	if w.cursor < len(history.commands) {
-		return Decision{}, fmt.Errorf("%w: omitted command %d", ErrNondeterministic, w.cursor+1)
+		return Decision{}, nil, fmt.Errorf("%w: omitted command %d", ErrNondeterministic, w.cursor+1)
 	}
 	decision = Decision{Commands: w.commands, Signals: w.signals, State: durable.StateCompleted, Output: bytes.Clone(output)}
 	if w.blocked {
@@ -63,7 +68,7 @@ func Evaluate(execution durable.Execution, events []durable.Event, handler Workf
 		var failure *ApplicationError
 		if errors.As(handlerErr, &failure) {
 			if failure == nil {
-				return Decision{}, fmt.Errorf("%w: nil application failure", durable.ErrInvalid)
+				return Decision{}, nil, fmt.Errorf("%w: nil application failure", durable.ErrInvalid)
 			}
 			copyFailure := *failure
 			decision.Failure = &copyFailure
@@ -72,13 +77,13 @@ func Evaluate(execution durable.Execution, events []durable.Event, handler Workf
 		}
 	}
 	if decision.Failure != nil && !validFailure(decision.Failure) {
-		return Decision{}, fmt.Errorf("%w: invalid application failure", durable.ErrInvalid)
+		return Decision{}, nil, fmt.Errorf("%w: invalid application failure", durable.ErrInvalid)
 	}
 	if history.terminal != "" && (decision.State != history.terminal || len(decision.Commands) != 0 || len(decision.Signals) != 0 ||
 		!bytes.Equal(decision.Output, history.output) || !sameFailure(decision.Failure, history.failure)) {
-		return Decision{}, fmt.Errorf("%w: terminal result changed", ErrNondeterministic)
+		return Decision{}, nil, fmt.Errorf("%w: terminal result changed", ErrNondeterministic)
 	}
-	return decision, nil
+	return decision, w, nil
 }
 
 func invoke(w *Workflow, handler WorkflowFunc, input []byte) (output []byte, err error) {

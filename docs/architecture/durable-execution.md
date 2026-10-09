@@ -42,7 +42,7 @@ Store tests alone do not qualify a workflow runtime or a deployment.
 | Fenced task claims and durable timer deadlines | Store contract and renewable workers implemented; process-kill qualification open | Expiry, same-owner reclaim, concurrent claims, restart recovery |
 | Deterministic Go workflow runtime | Activity, timer and future replay implemented; SDK expansion open | Recorded-history replay with no repeated external effects, changed-command rejection |
 | Activity retries and timeout classes | Queue, attempt, overall and heartbeat deadlines, progress recovery, retry policies and asynchronous Go callbacks implemented; remote authorization and process qualification open | Queue, attempt, overall and heartbeat deadlines; heartbeat progress; asynchronous completion |
-| Signals, queries, updates and signal-with-start | Atomic signals, signal-with-start and Go receive replay implemented; queries and updates open | Namespace isolation, deduplication, atomic acceptance, update results, read-only queries |
+| Signals, queries, updates and signal-with-start | Atomic signals, signal-with-start, Go receive replay and explicit-run queries implemented; tracked updates and current/latest query selection open | Namespace isolation, deduplication, atomic acceptance, update results, read-only queries |
 | Child workflows and cancellation | Open | Stable child identity, duplicate creation prevention, parent-close policies, cancellation propagation |
 | Compensation, pause, termination and reset | Open | Resumable compensation attempts, audited controls, immutable reset lineage |
 | Continue-as-new and run chains | Open | Bounded history, message handoff and version inheritance |
@@ -817,3 +817,61 @@ independently passed the focused signal race tests. No corrective pass was neede
 The review does not qualify the open roadmap work or remove the current decision
 and history limits. PostgreSQL pool recovery remains distinct from process-kill,
 failover, load and disaster-recovery qualification.
+
+## Durable query contract
+
+You register a query with Workflow.SetQueryHandler(name, handler) before the
+workflow can yield. The handler reads local state reconstructed by replay and
+returns bytes or an error. QueryExecution requires an explicit namespace, workflow
+ID, run ID and pinned build. It returns the run key, persisted state, revision,
+last history sequence and copied query output. Names contain at most 200 bytes;
+input and output each contain at most 1 MiB. Run and build identifiers retain the
+store's 512-byte bounds. Current/latest-run selection remains required work with
+the run identity and chain APIs.
+
+The query reads one immutable history prefix through the sequence in its first
+execution snapshot. Concurrent appends may produce a newer state, but cannot mix
+new history with old response metadata. Replay may reconstruct local state from
+accepted signals or completed activities before the next workflow decision is
+committed. The response state and revision describe the persisted snapshot, not
+a claim that those reconstructed decisions have been committed.
+
+Queries never claim or renew tasks, consume persisted messages, append history,
+write receipts or publish workflow decisions. Each invocation uses a fresh replay
+instance. SDK command scheduling, future consumption and handler registration are
+forbidden while the query handler runs, even if the handler recovers an internal
+control-flow panic. Reading logical time is allowed. Arbitrary Go side effects
+and noncooperative blocking cannot be sandboxed; query handlers must return
+promptly and must not perform external work. The client checks cancellation before
+reads, before invoking code and after code returns, without leaking background
+query goroutines.
+
+Completed and failed executions can be queried when their saved terminal result
+matches replay. Unknown query names, missing workflow code, wrong scope/build,
+invalid history, changed decisions, programming errors and query panics fail
+explicitly. Unsupported terminal history formats remain errors until their
+lifecycle implementation exists. Application query errors return to the caller
+without changing execution state. Query results are observations, so repeated
+calls can return different revisions; they have no mutation request receipt.
+
+Qualification requires fresh and waiting workflows, signal and activity state,
+terminal success/failure, copied inputs/results, rejected SDK mutations, recovered
+mutation attempts, panic/error paths, cancellation, identifier/payload boundaries,
+concurrent appends during paged reads, engine integration and PostgreSQL recovery.
+Remote authorization, current/latest selectors, tracked updates and operator query
+pages remain required parts of the broader roadmap.
+
+2026-10-08: query evaluator and client tests pass under the race detector. They
+cover fresh/waiting state, accepted signals, completed activity results and terminal
+success/failure, logical time, rejected query mutations, recovered mutation attempts,
+invalid registrations, panics, errors and copied payloads. A read-only adapter
+exposes only the real execution/history reads; query tests also compare the saved
+projection, history and task state before and after each call.
+
+Tests force a signal or closure between pages of a 1002-event snapshot. The first
+query retains revision 3 and sequence 1002; the next sees revision 4 and sequence
+1003. Cancellation before reads, during snapshot/replay and during the query returns
+no successful result. PostgreSQL tests replace the pool before resuming a workflow
+and after closure, query both completed and failed runs, and compare every persisted
+task field through a digest. The development example prints pending then approved
+without committing a workflow decision to answer either query.
