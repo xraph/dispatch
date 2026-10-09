@@ -100,11 +100,11 @@ func TestDurableWorkflowRetryRollback(t *testing.T) {
 				if boundary.name == "commit" {
 					trigger = `CREATE CONSTRAINT TRIGGER reject_workflow_retry AFTER INSERT ON dispatch_execution_receipts DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION reject_workflow_retry()`
 				}
-				if _, err := pg.Exec(t.Context(), fmt.Sprintf(`CREATE FUNCTION reject_workflow_retry() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF %s THEN RAISE EXCEPTION 'injected workflow retry failure'; END IF; RETURN NEW; END $$; %s`, boundary.condition, trigger)); err != nil {
-					t.Fatal(err)
+				if _, checkErr := pg.Exec(t.Context(), fmt.Sprintf(`CREATE FUNCTION reject_workflow_retry() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF %s THEN RAISE EXCEPTION 'injected workflow retry failure'; END IF; RETURN NEW; END $$; %s`, boundary.condition, trigger)); checkErr != nil {
+					t.Fatal(checkErr)
 				}
-				if _, err := apply(); err == nil || !strings.Contains(err.Error(), "injected workflow retry failure") {
-					t.Fatalf("fault not reached: %v", err)
+				if _, checkErr := apply(); checkErr == nil || !strings.Contains(checkErr.Error(), "injected workflow retry failure") {
+					t.Fatalf("fault not reached: %v", checkErr)
 				}
 				after, err := s.GetExecution(t.Context(), r.Key)
 				if err != nil || !reflect.DeepEqual(before, after) {
@@ -116,8 +116,8 @@ func TestDurableWorkflowRetryRollback(t *testing.T) {
 				}
 				key := r.Key
 				key.RunID = "retry-" + identity
-				if _, err := s.GetExecution(t.Context(), key); !errors.Is(err, durable.ErrNotFound) {
-					t.Fatalf("partial successor: %v", err)
+				if _, checkErr := s.GetExecution(t.Context(), key); !errors.Is(checkErr, durable.ErrNotFound) {
+					t.Fatalf("partial successor: %v", checkErr)
 				}
 				latest, err := s.ResolveExecution(t.Context(), latestTarget(r.Key))
 				if err != nil || latest.Key != r.Key {
@@ -136,18 +136,18 @@ func TestDurableWorkflowRetryRollback(t *testing.T) {
 					t.Fatalf("partial task: %+v %v", task, err)
 				}
 				var accepted bool
-				if err := pg.QueryRow(t.Context(), `SELECT EXISTS(SELECT 1 FROM dispatch_execution_receipts WHERE namespace=$1 AND workflow_id=$2 AND run_id=$3 AND request_id=$4)`, r.Namespace, r.WorkflowID, r.RunID, requestID).Scan(&accepted); err != nil || accepted {
-					t.Fatalf("partial receipt: %t %v", accepted, err)
+				if checkErr := pg.QueryRow(t.Context(), `SELECT EXISTS(SELECT 1 FROM dispatch_execution_receipts WHERE namespace=$1 AND workflow_id=$2 AND run_id=$3 AND request_id=$4)`, r.Namespace, r.WorkflowID, r.RunID, requestID).Scan(&accepted); checkErr != nil || accepted {
+					t.Fatalf("partial receipt: %t %v", accepted, checkErr)
 				}
-				if _, err := pg.Exec(t.Context(), fmt.Sprintf(`DROP TRIGGER reject_workflow_retry ON %s; DROP FUNCTION reject_workflow_retry()`, boundary.table)); err != nil {
-					t.Fatal(err)
+				if _, checkErr := pg.Exec(t.Context(), fmt.Sprintf(`DROP TRIGGER reject_workflow_retry ON %s; DROP FUNCTION reject_workflow_retry()`, boundary.table)); checkErr != nil {
+					t.Fatal(checkErr)
 				}
 				receipt, err := apply()
 				if err != nil {
 					t.Fatalf("retry after rollback: %v", err)
 				}
-				if again, err := apply(); err != nil || again != receipt {
-					t.Fatalf("exact retry: %+v %v", again, err)
+				if again, checkErr := apply(); checkErr != nil || again != receipt {
+					t.Fatalf("exact retry: %+v %v", again, checkErr)
 				}
 				created, err := s.GetExecution(t.Context(), key)
 				if err != nil || created.PreviousRunID != r.RunID || created.WorkflowAttempt() != 2 {
@@ -196,36 +196,36 @@ func TestDurableWorkflowRetryMigration(t *testing.T) {
 		t.Fatalf("backfill: %+v %v", old, err)
 	}
 	r := workflowRetryStart(t)
-	if _, err := s.StartExecution(t.Context(), r); err != nil {
-		t.Fatal(err)
+	if _, checkErr := s.StartExecution(t.Context(), r); checkErr != nil {
+		t.Fatal(checkErr)
 	}
 	for _, mutation := range []string{"retry_attempt=2", "retry_policy=NULL", "run_available_at=run_available_at+interval '1 second'"} {
-		if _, err := pg.Exec(t.Context(), `UPDATE dispatch_executions SET `+mutation+` WHERE namespace=$1`, r.Namespace); err == nil || !strings.Contains(err.Error(), "DX004") {
-			t.Fatalf("immutable retry metadata changed: %s %v", mutation, err)
+		if _, checkErr := pg.Exec(t.Context(), `UPDATE dispatch_executions SET `+mutation+` WHERE namespace=$1`, r.Namespace); checkErr == nil || !strings.Contains(checkErr.Error(), "DX004") {
+			t.Fatalf("immutable retry metadata changed: %s %v", mutation, checkErr)
 		}
 	}
 	r.WorkflowID, r.RunTimeout = "timeout", time.Microsecond
-	if _, err := s.StartExecution(t.Context(), r); err != nil {
-		t.Fatal(err)
+	if _, checkErr := s.StartExecution(t.Context(), r); checkErr != nil {
+		t.Fatal(checkErr)
 	}
 	_, request := timeoutGrant(t, s, r, time.Minute)
 	for _, get := range []func(*testing.T, *postgres.Store) (*migrate.Migration, migrate.Executor){deadlineMigration, timeoutMigration, runChainMigration, continuationMigration, workflowRetryMigration} {
 		prior, executor := get(t, s)
-		if err := prior.Up(t.Context(), executor); err != nil {
-			t.Fatal(err)
+		if checkErr := prior.Up(t.Context(), executor); checkErr != nil {
+			t.Fatal(checkErr)
 		}
 	}
-	if _, err := pg.Exec(t.Context(), `CREATE OR REPLACE FUNCTION dispatch_execution_timeout_update_allowed(old_run dispatch_executions,new_run dispatch_executions) RETURNS boolean LANGUAGE sql AS $$ SELECT FALSE $$`); err != nil {
-		t.Fatal(err)
+	if _, checkErr := pg.Exec(t.Context(), `CREATE OR REPLACE FUNCTION dispatch_execution_timeout_update_allowed(old_run dispatch_executions,new_run dispatch_executions) RETURNS boolean LANGUAGE sql AS $$ SELECT FALSE $$`); checkErr != nil {
+		t.Fatal(checkErr)
 	}
-	if _, err := s.ApplyExecutionTimeout(t.Context(), request); !errors.Is(err, durable.ErrExecutionDeadline) {
-		t.Fatalf("preceding guard fixture did not reject retry: %v", err)
+	if _, checkErr := s.ApplyExecutionTimeout(t.Context(), request); !errors.Is(checkErr, durable.ErrExecutionDeadline) {
+		t.Fatalf("preceding guard fixture did not reject retry: %v", checkErr)
 	}
-	if err := m.Up(t.Context(), exec); err != nil {
-		t.Fatal(err)
+	if checkErr := m.Up(t.Context(), exec); checkErr != nil {
+		t.Fatal(checkErr)
 	}
-	if err := m.Down(t.Context(), exec); err == nil || !strings.Contains(err.Error(), "retained workflow retry metadata") {
-		t.Fatalf("destructive retry downgrade: %v", err)
+	if checkErr := m.Down(t.Context(), exec); checkErr == nil || !strings.Contains(checkErr.Error(), "retained workflow retry metadata") {
+		t.Fatalf("destructive retry downgrade: %v", checkErr)
 	}
 	s = reopenAsyncStore(t, s, dsn)
 	receipt, err := s.ApplyExecutionTimeout(t.Context(), request)
@@ -305,30 +305,30 @@ func TestDurableWorkflowRetryLockExpiry(t *testing.T) {
 				t.Fatal(err)
 			}
 			defer func() { _ = lock.Rollback() }()
-			if _, err := lock.Exec(t.Context(), `SELECT 1 FROM dispatch_execution_tasks WHERE namespace=$1 FOR UPDATE`, r.Namespace); err != nil {
-				t.Fatal(err)
+			if _, checkErr := lock.Exec(t.Context(), `SELECT 1 FROM dispatch_execution_tasks WHERE namespace=$1 FOR UPDATE`, r.Namespace); checkErr != nil {
+				t.Fatal(checkErr)
 			}
 			done := make(chan error, 1)
 			go func() { done <- apply() }()
 			for {
 				var waiting bool
-				if err := pg.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE wait_event_type='Lock' AND query LIKE '%dispatch_execution_tasks%' AND query LIKE '%FOR UPDATE%')`).Scan(&waiting); err != nil {
-					t.Fatal(err)
+				if checkErr := pg.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE wait_event_type='Lock' AND query LIKE '%dispatch_execution_tasks%' AND query LIKE '%FOR UPDATE%')`).Scan(&waiting); checkErr != nil {
+					t.Fatal(checkErr)
 				}
 				if waiting {
 					break
 				}
 				select {
-				case err := <-done:
-					t.Fatalf("did not wait: %v", err)
+				case applyErr := <-done:
+					t.Fatalf("did not wait: %v", applyErr)
 				case <-ctx.Done():
 					t.Fatal(ctx.Err())
 				case <-time.After(5 * time.Millisecond):
 				}
 			}
 			waitDurableStoreTime(t, s, until)
-			if err := lock.Commit(); err != nil {
-				t.Fatal(err)
+			if checkErr := lock.Commit(); checkErr != nil {
+				t.Fatal(checkErr)
 			}
 			err = <-done
 			want := durable.ErrLeaseLost
@@ -423,11 +423,11 @@ func TestDurableWorkflowRetryCapacityMigration(t *testing.T) {
 	}
 	time.Sleep(max(time.Until(e.RunDeadlineAt)+time.Millisecond, 0))
 	_, request := timeoutGrant(t, s, r, time.Minute)
-	if _, err := pg.Exec(t.Context(), `CREATE OR REPLACE FUNCTION dispatch_execution_timeout_update_allowed(old_run dispatch_executions,new_run dispatch_executions) RETURNS boolean LANGUAGE sql AS $$ SELECT FALSE $$`); err != nil {
-		t.Fatal(err)
+	if _, checkErr := pg.Exec(t.Context(), `CREATE OR REPLACE FUNCTION dispatch_execution_timeout_update_allowed(old_run dispatch_executions,new_run dispatch_executions) RETURNS boolean LANGUAGE sql AS $$ SELECT FALSE $$`); checkErr != nil {
+		t.Fatal(checkErr)
 	}
-	if _, err := s.ApplyExecutionTimeout(t.Context(), request); !errors.Is(err, durable.ErrExecutionDeadline) {
-		t.Fatalf("old guard accepted suppression: %v", err)
+	if _, checkErr := s.ApplyExecutionTimeout(t.Context(), request); !errors.Is(checkErr, durable.ErrExecutionDeadline) {
+		t.Fatalf("old guard accepted suppression: %v", checkErr)
 	}
 	after, err := s.GetExecution(t.Context(), r.Key)
 	if err != nil || after.State != durable.StateRunning || after.LastSequence != e.LastSequence || after.Revision != e.Revision {
@@ -438,8 +438,8 @@ func TestDurableWorkflowRetryCapacityMigration(t *testing.T) {
 		t.Fatalf("rejected suppression leaked history: %+v %v", tail, err)
 	}
 	for range 2 {
-		if err := migration.Up(t.Context(), exec); err != nil {
-			t.Fatal(err)
+		if checkErr := migration.Up(t.Context(), exec); checkErr != nil {
+			t.Fatal(checkErr)
 		}
 	}
 	receipt, err := s.ApplyExecutionTimeout(t.Context(), request)

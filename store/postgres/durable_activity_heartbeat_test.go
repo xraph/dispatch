@@ -95,7 +95,8 @@ func testDurableActivityHeartbeatRecovery(t *testing.T, mode string) {
 	if err != nil || string(task.Progress) != "offset:42" {
 		t.Fatalf("persisted heartbeat disappeared: %+v %v", task, err)
 	}
-	if mode == "heartbeat_timeout" {
+	switch mode {
+	case "heartbeat_timeout":
 		waitDurableStoreTime(t, reopened, task.DeadlineAt)
 		coordinator, newErr := drt.NewWorker(reopened, drt.Options{Namespace: options.Namespace, Queue: "coordinator-only", BuildID: options.BuildID, Owner: "coordinator"})
 		if newErr != nil {
@@ -104,7 +105,7 @@ func testDurableActivityHeartbeatRecovery(t *testing.T, mode string) {
 		if worked, workErr := coordinator.RunOnce(t.Context(), drt.TaskTimeout); workErr != nil || !worked {
 			t.Fatalf("heartbeat timeout coordinator: %t %v", worked, workErr)
 		}
-	} else if mode == "worker_loss" {
+	case "worker_loss":
 		waitDurableStoreTime(t, reopened, task.LeaseUntil)
 		if worked, workErr := worker.RunOnce(t.Context(), durable.TaskActivity); workErr != nil || !worked {
 			t.Fatalf("adjudicate lost worker: %t %v", worked, workErr)

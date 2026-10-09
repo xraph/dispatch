@@ -278,11 +278,12 @@ func testDurableDeadlineCheckedAfterTaskLock(t *testing.T, mode string) {
 	go func() {
 		request := durable.CommitRequest{Key: r.Key, RequestID: "finish", ExpectedRevision: 2,
 			Token: task.Token(), Events: []durable.EventInput{{Type: "attempt.completed"}}}
-		if mode == "pending" {
+		switch mode {
+		case "pending":
 			request.CancelPendingTasks = true
-		} else if mode == "terminal" {
+		case "terminal":
 			request.State = durable.StateCompleted
-		} else {
+		default:
 			request.Conditions = []durable.TaskCondition{{TaskID: target.ID, Version: target.Version}}
 			request.CancelTasks = []string{target.ID}
 		}

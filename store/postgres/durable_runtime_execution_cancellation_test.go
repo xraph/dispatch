@@ -148,14 +148,15 @@ func TestDurableRuntimeWorkflowCancellationRecovery(t *testing.T) {
 			ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
 			defer cancel()
 			done := make(chan error, 1)
-			if mode == "active" {
+			switch mode {
+			case "active":
 				go func() { _, err := worker.RunOnce(ctx, durable.TaskActivity); done <- err }()
 				select {
 				case <-started:
 				case <-ctx.Done():
 					t.Fatal("activity did not start")
 				}
-			} else if mode == "async" || mode == "callback_race" {
+			case "async", "callback_race":
 				runQueryTask(t, worker, durable.TaskActivity)
 			}
 			progress := drt.AsyncHeartbeatRequest{Handle: handle, RequestID: "progress", Sequence: handle.InitialHeartbeatSequence + 1, Details: []byte("saved")}

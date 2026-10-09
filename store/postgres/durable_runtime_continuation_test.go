@@ -166,9 +166,10 @@ func TestDurableRuntimeContinuationChildReplacement(t *testing.T) {
 			}
 			e, err := s.GetExecution(t.Context(), start.Key)
 			want := ""
-			if mode == "result" {
+			switch mode {
+			case "result":
 				want = "result"
-			} else if mode == "timeout" {
+			case "timeout":
 				want = "handled"
 			}
 			if err != nil || e.State != durable.StateCompleted || string(e.Output) != want {
