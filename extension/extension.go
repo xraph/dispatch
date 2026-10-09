@@ -470,7 +470,9 @@ func (e *Extension) Stop(ctx context.Context) error {
 		if e.sweeperStopped == nil {
 			e.sweeperStopped = make(chan struct{})
 			go func() {
-				if err := e.sweeper.Stop(context.Background()); err != nil {
+				// Retain caller values while waiting for actual completion. Individual
+				// Stop deadlines must not finish this shared cleanup task early.
+				if err := e.sweeper.Stop(context.WithoutCancel(ctx)); err != nil {
 					e.Logger().Warn("dispatch: artifact sweeper stop failed", forge.F("error", err.Error()))
 				}
 				close(e.sweeperStopped)
