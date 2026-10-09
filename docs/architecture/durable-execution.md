@@ -844,7 +844,10 @@ control-flow panic. Reading logical time is allowed. Arbitrary Go side effects
 and noncooperative blocking cannot be sandboxed; query handlers must return
 promptly and must not perform external work. The client checks cancellation before
 reads, before invoking code and after code returns, without leaking background
-query goroutines.
+query goroutines. Use the supplied Workflow and Future objects only within their
+current evaluation. Do not copy or reset Workflow values, or retain runtime
+objects for another evaluation; those operations are outside the SDK ownership
+contract and can bypass instance-local guards.
 
 Completed and failed executions can be queried when their saved terminal result
 matches replay. Unknown query names, missing workflow code, wrong scope/build,
@@ -875,3 +878,19 @@ no successful result. PostgreSQL tests replace the pool before resuming a workfl
 and after closure, query both completed and failed runs, and compare every persisted
 task field through a digest. The development example prints pending then approved
 without committing a workflow decision to answer either query.
+
+
+2026-10-08: query commit 02eb107 passed make f, make l with zero issues, the
+full Go unit suite, engine/runtime/memory race checks and the full PostgreSQL
+durable race suite (76.559 seconds). A fresh independent review found no required
+fixes and independently passed focused query, replay and closure race tests, plus
+the runnable query example. The reviewer inspected the PostgreSQL tests and saved
+results without rerunning that suite.
+
+The review retains the trusted Go and per-evaluation ownership boundaries.
+You must not treat the SDK guards as a sandbox for copied runtime objects,
+external effects or noncooperative code. Current/latest run selection, tracked
+updates, remote authorization, lifecycle controls and operator pages remain open.
+Unsupported terminal formats fail explicitly. Pool replacement tests establish
+connection recovery; process kills, failover, load and disaster recovery still
+need their own qualification.
