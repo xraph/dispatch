@@ -59,7 +59,7 @@ func evaluateExecutionCancellation(execution durable.Execution, events []durable
 	if err != nil {
 		return Decision{}, nil, err
 	}
-	w := &Workflow{execution: execution, key: execution.Key, buildID: execution.BuildID, now: execution.CreatedAt, history: normal, ids: make(map[string]bool), freezeNormal: true}
+	w := &Workflow{execution: execution, key: execution.Key, buildID: execution.BuildID, now: execution.AvailableAt(), history: normal, ids: make(map[string]bool), freezeNormal: true}
 	// The immutable prefix reconstructs captured state, including query/cleanup
 	// closures, but publishes none of the normal path's speculative decisions.
 	_, _ = invoke(w, handler, append([]byte(nil), execution.Input...)) //nolint:errcheck // Cancellation replaces the normal application result; replay faults are checked below.

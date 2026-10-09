@@ -69,7 +69,7 @@ func evaluateWorkflow(execution durable.Execution, events []durable.Event, handl
 	if history.executionCancellation != nil {
 		return evaluateExecutionCancellation(execution, events, history, handler, false)
 	}
-	w = &Workflow{execution: execution, key: execution.Key, buildID: execution.BuildID, now: execution.CreatedAt, history: history, ids: make(map[string]bool)}
+	w = &Workflow{execution: execution, key: execution.Key, buildID: execution.BuildID, now: execution.AvailableAt(), history: history, ids: make(map[string]bool)}
 	output, handlerErr := invoke(w, handler, bytes.Clone(execution.Input))
 	return finishEvaluation(w, output, handlerErr)
 }
@@ -154,6 +154,7 @@ func parseHistory(execution durable.Execution, events []durable.Event) (replayHi
 		return result, fmt.Errorf("%w: successor lineage missing", ErrHistory)
 	}
 	commands := make(map[string]Command)
+	retryRecorded := false
 	carryOpen, carryBytes, carryCount := false, 0, 0
 	for i, event := range events {
 		if event.Sequence != int64(i+1) || event.Time.IsZero() || result.terminal != "" {
@@ -166,6 +167,11 @@ func parseHistory(execution durable.Execution, events []durable.Event) (replayHi
 			carryOpen = false
 		}
 		switch event.Type {
+		case durable.EventWorkflowRetryScheduled:
+			if err := validateWorkflowRetry(execution, events, i); err != nil {
+				return result, err
+			}
+			retryRecorded = true
 		case durable.EventRunStarted:
 			if err := parseRunStarted(execution, event); err != nil {
 				return result, err
@@ -278,6 +284,9 @@ func parseHistory(execution durable.Execution, events []durable.Event) (replayHi
 	}
 	if result.continuation != nil && result.terminal != durable.StateContinuedAsNew {
 		return result, fmt.Errorf("%w: continuation has no terminal handoff", ErrHistory)
+	}
+	if execution.NextRunID != "" && result.terminal != durable.StateContinuedAsNew && !retryRecorded {
+		return result, fmt.Errorf("%w: successor has no recorded handoff", ErrHistory)
 	}
 	for _, command := range result.commands {
 		if command.Kind == CommandChild && result.terminal == "" {

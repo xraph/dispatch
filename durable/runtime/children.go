@@ -22,6 +22,7 @@ const (
 // ChildOptions captures routing and parent-close behavior in the saved command.
 // Empty build and queue inherit the parent. The default close policy terminates.
 type ChildOptions struct {
+	RetryPolicy       *durable.WorkflowRetryPolicy
 	WorkflowID        string
 	BuildID           string
 	Queue             string
@@ -32,11 +33,12 @@ type ChildOptions struct {
 
 // ChildCommand retains a child's exact identity and build across parent replay.
 type ChildCommand struct {
-	Key               durable.Key               `json:"key"`
-	BuildID           string                    `json:"build_id"`
-	ParentClosePolicy durable.ParentClosePolicy `json:"parent_close_policy"`
-	RunTimeout        time.Duration             `json:"run_timeout,omitempty"`
-	ExecutionTimeout  time.Duration             `json:"execution_timeout,omitempty"`
+	RetryPolicy       *durable.WorkflowRetryPolicy `json:"retry_policy,omitempty"`
+	Key               durable.Key                  `json:"key"`
+	BuildID           string                       `json:"build_id"`
+	ParentClosePolicy durable.ParentClosePolicy    `json:"parent_close_policy"`
+	RunTimeout        time.Duration                `json:"run_timeout,omitempty"`
+	ExecutionTimeout  time.Duration                `json:"execution_timeout,omitempty"`
 }
 
 var (
@@ -142,7 +144,11 @@ func (w *Workflow) ChildWorkflow(id, name string, input []byte, options ChildOpt
 	if options.ParentClosePolicy == "" {
 		options.ParentClosePolicy = durable.ParentCloseTerminate
 	}
-	child := &ChildCommand{Key: durable.Key{Namespace: w.key.Namespace, WorkflowID: options.WorkflowID, RunID: identity}, BuildID: options.BuildID, ParentClosePolicy: options.ParentClosePolicy, RunTimeout: options.RunTimeout, ExecutionTimeout: options.ExecutionTimeout}
+	retryPolicy, err := durable.NormalizeWorkflowRetryPolicy(options.RetryPolicy)
+	if err != nil {
+		w.stop(err)
+	}
+	child := &ChildCommand{RetryPolicy: retryPolicy, Key: durable.Key{Namespace: w.key.Namespace, WorkflowID: options.WorkflowID, RunID: identity}, BuildID: options.BuildID, ParentClosePolicy: options.ParentClosePolicy, RunTimeout: options.RunTimeout, ExecutionTimeout: options.ExecutionTimeout}
 	if child.Key.WorkflowID == w.key.WorkflowID {
 		w.stop(fmt.Errorf("%w: child workflow identity matches parent", durable.ErrInvalid))
 	}
@@ -180,6 +186,12 @@ func (w *Workflow) CancelChild(id string, target *Future) *Future {
 }
 
 func validateChildCommand(c Command) error {
+	if c.Child != nil {
+		policy, err := durable.NormalizeWorkflowRetryPolicy(c.Child.RetryPolicy)
+		if err != nil || !durable.SameWorkflowRetryPolicy(policy, c.Child.RetryPolicy) {
+			return fmt.Errorf("%w: invalid child workflow retry policy", durable.ErrInvalid)
+		}
+	}
 	if c.Version != 1 || c.Child == nil || c.Child.Key.Validate() != nil || !validIdentifier(c.Child.BuildID, 512) || !validID(c.Name) || len(c.Input) > 1<<20 || c.ActivityOptions != nil || c.Delay != 0 || !c.Deadline.IsZero() {
 		return fmt.Errorf("%w: invalid child command", durable.ErrInvalid)
 	}

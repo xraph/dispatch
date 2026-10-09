@@ -29,6 +29,8 @@ type ContinueSpec struct {
 
 // RunMetadata identifies one run within an immutable chain without its payloads.
 type RunMetadata struct {
+	RetryAttempt   int64     `json:"retry_attempt,omitempty"`
+	RunAvailableAt time.Time `json:"run_available_at,omitzero"`
 	Key
 	FirstRunID          string        `json:"first_run_id"`
 	PreviousRunID       string        `json:"previous_run_id,omitempty"`
@@ -70,11 +72,15 @@ type RunStarted struct {
 
 // RunMetadataOf copies the lineage used in successor and child-result history.
 func RunMetadataOf(e Execution) RunMetadata {
-	return RunMetadata{Key: e.Key, FirstRunID: e.FirstRunID, PreviousRunID: e.PreviousRunID, RunNumber: e.RunNumber, FirstStartedAt: e.FirstStartedAt, CreatedAt: e.CreatedAt, RunTimeout: e.RunTimeout, RunDeadlineAt: e.RunDeadlineAt, ExecutionDeadlineAt: e.ExecutionDeadlineAt}
+	metadata := RunMetadata{Key: e.Key, FirstRunID: e.FirstRunID, PreviousRunID: e.PreviousRunID, RunNumber: e.RunNumber, FirstStartedAt: e.FirstStartedAt, CreatedAt: e.CreatedAt, RunTimeout: e.RunTimeout, RunDeadlineAt: e.RunDeadlineAt, ExecutionDeadlineAt: e.ExecutionDeadlineAt}
+	if e.WorkflowAttempt() > 1 || !e.AvailableAt().Equal(e.CreatedAt) {
+		metadata.RetryAttempt, metadata.RunAvailableAt = e.WorkflowAttempt(), e.AvailableAt()
+	}
+	return metadata
 }
 
 func (r RunMetadata) Validate() error {
-	return ValidateRunMetadata(Execution{Key: r.Key, State: StateRunning, FirstRunID: r.FirstRunID, PreviousRunID: r.PreviousRunID, RunNumber: r.RunNumber, FirstStartedAt: r.FirstStartedAt, CreatedAt: r.CreatedAt, RunTimeout: r.RunTimeout, RunDeadlineAt: r.RunDeadlineAt, ExecutionDeadlineAt: r.ExecutionDeadlineAt})
+	return ValidateRunMetadata(Execution{RetryAttempt: r.RetryAttempt, RunAvailableAt: r.RunAvailableAt, Key: r.Key, State: StateRunning, FirstRunID: r.FirstRunID, PreviousRunID: r.PreviousRunID, RunNumber: r.RunNumber, FirstStartedAt: r.FirstStartedAt, CreatedAt: r.CreatedAt, RunTimeout: r.RunTimeout, RunDeadlineAt: r.RunDeadlineAt, ExecutionDeadlineAt: r.ExecutionDeadlineAt})
 }
 
 func (s ContinueSpec) Validate() error {
@@ -106,9 +112,11 @@ func validateContinuation(r CommitRequest) error {
 
 // ContinuationBatch is staged completely before either run becomes visible.
 type ContinuationBatch struct {
-	Execution Execution
-	History   []Event
-	Terminal  EventInput
+	Spec       ContinueSpec
+	RetryEvent *EventInput
+	Execution  Execution
+	History    []Event
+	Terminal   EventInput
 }
 
 // PrepareContinuation builds a successor and carries accepted, unconsumed signals.
@@ -140,19 +148,44 @@ func PrepareContinuation(current Execution, task Task, r CommitRequest, history 
 			return nil, ErrInvalid
 		}
 	}
-	carried, err := pendingContinuationSignals(current.Key, history, r.Events)
+	batch, err := prepareRunSuccessor(current, *r.Continuation, history, r.Events, now, 1, now)
 	if err != nil {
 		return nil, err
 	}
-	spec := *r.Continuation
+	terminal, err := json.Marshal(ContinuedRun{Version: 1, Next: *r.Continuation})
+	if err != nil {
+		return nil, err
+	}
+	batch.Terminal = EventInput{Type: EventWorkflowContinued, Payload: terminal}
+	return batch, nil
+}
+
+func prepareRunSuccessor(current Execution, spec ContinueSpec, history []Event, inputs []EventInput, now time.Time, attempt int64, available time.Time) (*ContinuationBatch, error) {
+	if len(history) == 0 || len(history) > 100000 || int64(len(history)) != current.LastSequence || current.RunNumber == math.MaxInt64 {
+		return nil, ErrInvalid
+	}
+	for i, event := range history {
+		if event.Sequence != int64(i+1) {
+			return nil, ErrInvalid
+		}
+	}
+	carried, err := pendingContinuationSignals(current.Key, history, inputs)
+	if err != nil {
+		return nil, err
+	}
 	key := current.Key
 	key.RunID = spec.RunID
-	e, err := NewExecution(StartRequest{Key: key, RequestID: "continuation", WorkflowType: spec.WorkflowType, BuildID: spec.BuildID, Queue: spec.Queue, Input: spec.Input, RunTimeout: spec.RunTimeout}, now)
+	e, err := NewExecution(StartRequest{Key: key, RequestID: "successor", WorkflowType: spec.WorkflowType, BuildID: spec.BuildID, Queue: spec.Queue, Input: spec.Input, RunTimeout: spec.RunTimeout, RetryPolicy: current.RetryPolicy}, now)
 	if err != nil {
 		return nil, err
 	}
 	e.FirstRunID, e.PreviousRunID, e.RunNumber = current.FirstRunID, current.RunID, current.RunNumber+1
 	e.FirstStartedAt, e.ExecutionDeadlineAt = current.FirstStartedAt, current.ExecutionDeadlineAt
+	e.RetryAttempt, e.RunAvailableAt = attempt, available
+	e.RunDeadlineAt, _, err = ResolveExecutionDeadlines(StartRequest{RunTimeout: e.RunTimeout}, available)
+	if err != nil {
+		return nil, err
+	}
 	e.LastSequence = int64(2 + len(carried))
 	if metadataErr := ValidateRunMetadata(e); metadataErr != nil {
 		return nil, metadataErr
@@ -161,11 +194,7 @@ func PrepareContinuation(current Execution, task Task, r CommitRequest, history 
 	if err != nil {
 		return nil, err
 	}
-	terminal, err := json.Marshal(ContinuedRun{Version: 1, Next: spec})
-	if err != nil {
-		return nil, err
-	}
-	b := &ContinuationBatch{Execution: e, Terminal: EventInput{Type: EventWorkflowContinued, Payload: terminal}, History: []Event{
+	b := &ContinuationBatch{Execution: e, Spec: spec, History: []Event{
 		{EventInput: EventInput{Type: "execution.started", Payload: bytes.Clone(spec.Input)}, Sequence: 1, Time: e.CreatedAt},
 		{EventInput: EventInput{Type: EventRunStarted, Payload: lineage}, Sequence: 2, Time: e.CreatedAt},
 	}}

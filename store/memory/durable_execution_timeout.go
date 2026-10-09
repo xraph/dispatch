@@ -79,6 +79,25 @@ func (m *Store) ApplyExecutionTimeout(ctx context.Context, r durable.ExecutionTi
 	if err != nil {
 		return durable.Receipt{}, err
 	}
+	initial := record.tasks["workflow:1"]
+	if initial == nil {
+		return durable.Receipt{}, durable.ErrInvalid
+	}
+	batch, err := durable.PrepareWorkflowRetry(record.execution, durable.StateTimedOut, []durable.EventInput{event.EventInput}, record.history, initial.Queue, now)
+	if err != nil {
+		return durable.Receipt{}, err
+	}
+	successor, err := m.prepareContinuationRecord(batch, nil)
+	if err != nil {
+		return durable.Receipt{}, err
+	}
+	if successor != nil {
+		next.NextRunID = successor.execution.RunID
+	}
+	inputs, err := durable.AddWorkflowRetryEvent(&next, &receipt, []durable.EventInput{event.EventInput}, batch)
+	if err != nil {
+		return durable.Receipt{}, err
+	}
 	deliveries, err := m.prepareChildDeliveries(next, durable.CommitRequest{Key: r.Key, Events: []durable.EventInput{event.EventInput}}, now)
 	if err != nil {
 		return durable.Receipt{}, err
@@ -100,7 +119,12 @@ func (m *Store) ApplyExecutionTimeout(ctx context.Context, r durable.ExecutionTi
 	record.timeout.Owner = ""
 	record.timeout.LeaseUntil = time.Time{}
 	record.execution = next
-	record.history = append(record.history, event)
+	for i, input := range inputs {
+		record.history = append(record.history, durable.Event{EventInput: input, Sequence: receipt.FirstSequence + int64(i), Time: now})
+	}
+	if successor != nil {
+		m.installExecution(successor)
+	}
 	record.receipts[r.RequestID] = durableReceipt{digest: digest, value: receipt}
 	m.saveChildDeliveries(deliveries)
 	return receipt, nil

@@ -116,13 +116,13 @@ func (s *Store) CommitTransition(ctx context.Context, r durable.CommitRequest) (
 	defer s.rollbackExecution(tx)
 	// A committed child decision is independent of later ownership of its child
 	// identities. Recover it before waiting on those identities again.
-	if len(r.Children) != 0 || r.Continuation != nil {
+	if len(r.Children) != 0 || r.Continuation != nil || r.State == durable.StateFailed {
 		accepted, exists, receiptErr := readExecutionReceipt(ctx, tx, r.Key, r.RequestID, digest)
 		if receiptErr != nil || exists {
 			return accepted, receiptErr
 		}
 	}
-	if r.Continuation != nil {
+	if r.Continuation != nil || r.State == durable.StateFailed {
 		if lockErr := lockSignalWorkflow(ctx, tx, r.Namespace, r.WorkflowID); lockErr != nil {
 			return durable.Receipt{}, lockErr
 		}
@@ -214,7 +214,11 @@ func (s *Store) CommitTransition(ctx context.Context, r durable.CommitRequest) (
 		return durable.Receipt{}, eventErr
 	}
 	events := append(append([]durable.EventInput(nil), r.Events...), childEvents...)
-	if batch != nil {
+	events, err = durable.AddWorkflowRetryEvent(&next, &receipt, events, batch)
+	if err != nil {
+		return durable.Receipt{}, err
+	}
+	if batch != nil && batch.Terminal.Type != "" {
 		events = append(events, batch.Terminal)
 	}
 	for i, input := range events {

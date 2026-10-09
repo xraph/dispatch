@@ -46,9 +46,17 @@ type Future struct {
 
 type flowControl struct{}
 
-// Now returns logical time: run creation, advanced by outcomes consumed by Get or Select.
+// Now returns logical time: run availability, advanced by outcomes consumed by Get or Select.
 // It never reads the worker's wall clock.
 func (w *Workflow) Now() time.Time { return w.now }
+
+// RunInfo returns a copy of the saved run coordinates. RetryAttempt starts at
+// one and resets after ContinueAsNew; RunNumber counts every run in the chain.
+func (w *Workflow) RunInfo() durable.RunMetadata {
+	info := durable.RunMetadataOf(w.execution)
+	info.RetryAttempt, info.RunAvailableAt = w.execution.WorkflowAttempt(), w.execution.AvailableAt()
+	return info
+}
 
 // Activity schedules an external operation. Empty queue uses the workflow queue.
 // The ID must be unique within this run and stable when the handler is replayed.
@@ -237,5 +245,7 @@ func sameChildCommand(a, b *ChildCommand) bool {
 	if a == nil || b == nil {
 		return a == b
 	}
-	return *a == *b
+	x, y := *a, *b
+	x.RetryPolicy, y.RetryPolicy = nil, nil
+	return x == y && durable.SameWorkflowRetryPolicy(a.RetryPolicy, b.RetryPolicy)
 }

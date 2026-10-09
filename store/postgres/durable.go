@@ -18,18 +18,22 @@ var _ durable.Store = (*Store)(nil)
 
 const executionColumns = `namespace, workflow_id, run_id, workflow_type, build_id,
     state, revision, last_sequence, input, output, created_at, updated_at, run_deadline_at, execution_deadline_at,
-    first_run_id, previous_run_id, next_run_id, run_number, first_started_at, run_timeout`
+    first_run_id, previous_run_id, next_run_id, run_number, first_started_at, run_timeout, retry_policy, retry_attempt, run_available_at`
 
 func scanExecution(row driver.Row) (durable.Execution, error) {
 	var e durable.Execution
 	var runDeadline, executionDeadline sql.NullTime
+	var retryPolicy []byte
 	err := row.Scan(&e.Namespace, &e.WorkflowID, &e.RunID, &e.WorkflowType, &e.BuildID,
 		&e.State, &e.Revision, &e.LastSequence, &e.Input, &e.Output, &e.CreatedAt, &e.UpdatedAt, &runDeadline, &executionDeadline,
-		&e.FirstRunID, &e.PreviousRunID, &e.NextRunID, &e.RunNumber, &e.FirstStartedAt, &e.RunTimeout)
+		&e.FirstRunID, &e.PreviousRunID, &e.NextRunID, &e.RunNumber, &e.FirstStartedAt, &e.RunTimeout, &retryPolicy, &e.RetryAttempt, &e.RunAvailableAt)
 	if isNoRows(err) {
 		return durable.Execution{}, durable.ErrNotFound
 	}
 	e.RunDeadlineAt, e.ExecutionDeadlineAt = runDeadline.Time, executionDeadline.Time
+	if err == nil && len(retryPolicy) > 0 {
+		err = decodeWorkflowRetryPolicy(retryPolicy, &e.RetryPolicy)
+	}
 	if err == nil && e.RunID != "" {
 		err = durable.ValidateRunMetadata(e)
 	}
@@ -109,7 +113,7 @@ func (s *Store) ClaimTask(ctx context.Context, r durable.ClaimRequest) (result *
         FROM dispatch_execution_tasks t JOIN dispatch_executions e
           USING (namespace, workflow_id, run_id)
         WHERE t.namespace=$1 AND t.queue=$2 AND t.kind=$3 AND NOT t.done
-          AND e.state='running' AND (LEAST(e.run_deadline_at,e.execution_deadline_at) IS NULL OR LEAST(e.run_deadline_at,e.execution_deadline_at)>clock_timestamp()) AND ($6='' OR e.build_id=$6) AND t.available_at <= clock_timestamp()
+          AND e.state='running' AND e.run_available_at<=clock_timestamp() AND (LEAST(e.run_deadline_at,e.execution_deadline_at) IS NULL OR LEAST(e.run_deadline_at,e.execution_deadline_at)>clock_timestamp()) AND ($6='' OR e.build_id=$6) AND t.available_at <= clock_timestamp()
           AND t.lease_kind <> 'async' AND (t.lease_until IS NULL OR t.lease_until <= clock_timestamp())
           AND (t.deadline_at IS NULL OR t.deadline_at > clock_timestamp())
         ORDER BY t.available_at, t.workflow_id, t.run_id, t.task_id

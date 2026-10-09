@@ -89,6 +89,9 @@ func (s *Store) ApplyExecutionTimeout(ctx context.Context, r durable.ExecutionTi
 	if receipt, found, readErr := readExecutionReceipt(ctx, tx, r.Key, r.RequestID, digest); readErr != nil || found {
 		return receipt, readErr
 	}
+	if lockErr := lockSignalWorkflow(ctx, tx, r.Namespace, r.WorkflowID); lockErr != nil {
+		return durable.Receipt{}, lockErr
+	}
 	current, err := scanExecution(tx.QueryRow(ctx, `SELECT `+executionColumns+` FROM dispatch_executions WHERE namespace=$1 AND workflow_id=$2 AND run_id=$3 FOR UPDATE`, r.Namespace, r.WorkflowID, r.RunID))
 	if err != nil {
 		return durable.Receipt{}, err
@@ -118,14 +121,38 @@ func (s *Store) ApplyExecutionTimeout(ctx context.Context, r durable.ExecutionTi
 	if err != nil {
 		return durable.Receipt{}, err
 	}
+	var batch *durable.ContinuationBatch
+	if current.RetryPolicy != nil {
+		history, readErr := loadSuccessorHistory(ctx, tx, current.Key)
+		if readErr != nil {
+			return durable.Receipt{}, readErr
+		}
+		var queue string
+		if queueErr := tx.QueryRow(ctx, `SELECT queue FROM dispatch_execution_tasks WHERE namespace=$1 AND workflow_id=$2 AND run_id=$3 AND task_id='workflow:1'`, r.Namespace, r.WorkflowID, r.RunID).Scan(&queue); queueErr != nil {
+			return durable.Receipt{}, queueErr
+		}
+		batch, err = durable.PrepareWorkflowRetry(current, durable.StateTimedOut, []durable.EventInput{event.EventInput}, history, queue, now)
+		if err != nil {
+			return durable.Receipt{}, err
+		}
+		if batch != nil {
+			next.NextRunID = batch.Execution.RunID
+		}
+	}
+	inputs, err := durable.AddWorkflowRetryEvent(&next, &receipt, []durable.EventInput{event.EventInput}, batch)
+	if err != nil {
+		return durable.Receipt{}, err
+	}
 	deliveries, err := prepareChildDeliveries(ctx, tx, next, durable.CommitRequest{Key: r.Key, Events: []durable.EventInput{event.EventInput}}, now)
 	if err != nil {
 		return durable.Receipt{}, err
 	}
-	if eventErr := insertExecutionEvent(ctx, tx, r.Key, event); eventErr != nil {
-		return durable.Receipt{}, eventErr
+	for i, input := range inputs {
+		if eventErr := insertExecutionEvent(ctx, tx, r.Key, durable.Event{EventInput: input, Sequence: receipt.FirstSequence + int64(i), Time: now}); eventErr != nil {
+			return durable.Receipt{}, eventErr
+		}
 	}
-	_, err = tx.Exec(ctx, `UPDATE dispatch_executions SET state='timed_out',timeout_owner='',timeout_lease_until=NULL,revision=$4,last_sequence=$5,output=$6,updated_at=$7 WHERE namespace=$1 AND workflow_id=$2 AND run_id=$3`, r.Namespace, r.WorkflowID, r.RunID, next.Revision, next.LastSequence, []byte{}, now)
+	_, err = tx.Exec(ctx, `UPDATE dispatch_executions SET state='timed_out',timeout_owner='',timeout_lease_until=NULL,revision=$4,last_sequence=$5,output=$6,updated_at=$7,next_run_id=$8 WHERE namespace=$1 AND workflow_id=$2 AND run_id=$3`, r.Namespace, r.WorkflowID, r.RunID, next.Revision, next.LastSequence, []byte{}, now, next.NextRunID)
 	if err != nil {
 		return durable.Receipt{}, err
 	}
@@ -138,6 +165,9 @@ func (s *Store) ApplyExecutionTimeout(ctx context.Context, r durable.ExecutionTi
 	}
 	if receiptErr := saveExecutionReceipt(ctx, tx, r.Key, r.RequestID, digest, "", receipt); receiptErr != nil {
 		return durable.Receipt{}, receiptErr
+	}
+	if successorErr := insertContinuation(ctx, tx, batch, nil); successorErr != nil {
+		return durable.Receipt{}, successorErr
 	}
 	if commitErr := tx.Commit(); commitErr != nil {
 		return durable.Receipt{}, commitErr

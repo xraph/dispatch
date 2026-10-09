@@ -27,7 +27,26 @@
 // The successor does not adopt the source's child futures. A child that continues
 // remains one invocation to its original parent until the chain finally closes.
 // Historical queries of a continued run reconstruct its saved decisions without
-// creating another successor. Whole-workflow failure retries are not implemented.
+// creating another successor.
+//
+// Set StartRequest.RetryPolicy or ChildOptions.RetryPolicy to opt into whole-workflow
+// retries. Nil and entirely zero policies keep retries disabled. A configured policy
+// defaults to a 1s initial interval, coefficient 2, a 100x maximum interval and
+// unlimited attempts. MaximumAttempts includes the first run. NonRetryableTypes
+// and ApplicationError.NonRetryable make failures final. Accepted cancellation,
+// termination and execution timeout also prevent retries; run timeout may retry.
+//
+// Each retry retains the failed/timed-out source and atomically creates a delayed
+// successor with the same input, type, build and queue. Unread signals follow it;
+// consumed signals and completed activity results stay in the source history.
+// Whole-workflow retries can repeat external effects, so choose idempotency keys
+// that cover the business operation across runs. Child futures wait for the chain's
+// final result. Timeout coordinators need no registered workflow handler.
+//
+// RunInfo exposes saved lineage and RetryAttempt. ContinueAsNew resets that attempt
+// to one; RunNumber includes both retries and continuations. Now starts at saved
+// run availability, so retry backoff is excluded from the run timeout but counts
+// against the unchanged execution deadline. No retry starts at or after that limit.
 //
 // A version 2 activity with a finite deadline can call ActivityInfo.DeferCompletion
 // before delivering its handle to an external service. A confirmed handoff stops
@@ -115,7 +134,8 @@
 //
 // Evaluate requires a complete history snapshot with at most 100,000 events and
 // accepts at most 999 new command, signal consumption, selection and cancellation
-// acknowledgment events per decision. Command IDs, names and queues contain at
+// acknowledgment events per decision, or 998 when a workflow retry policy is set
+// to leave room for a store-owned retry link. Command IDs, names and queues contain at
 // most 200 bytes. History format version 1 is explicit; unknown versions and event
 // types fail evaluation so operators can supply compatible
 // code. A panic or nondeterministic replay fails the task, not the execution.

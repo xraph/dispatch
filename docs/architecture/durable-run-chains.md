@@ -1,8 +1,8 @@
 # Durable run chains
 
-Status: the memory and PostgreSQL stores support atomic continuation through
-CommitRequest.Continuation. The Go runtime supports ContinueAsNew, replay of
-successor histories and historical queries. Whole-workflow retries remain open.
+Status: the memory and PostgreSQL stores implement atomic continuation and opt-in
+workflow retries. The Go runtime supports ContinueAsNew, retry/continuation history
+replay, RunInfo and historical queries. Final whole-plan qualification is pending.
 The full [durability roadmap](durable-execution.md#required-work-and-evidence)
 remains the completion gate.
 
@@ -101,6 +101,13 @@ provenance. Queries and inspection expose both original and current identities.
 
 ## Whole-workflow retries
 
+Set `StartRequest.RetryPolicy` or `ChildOptions.RetryPolicy` to opt in. Nil and an
+entirely zero policy disable retries. If you configure any field, unspecified
+intervals use 1 second initially and 100 times that interval at most, the backoff
+coefficient defaults to 2, and zero maximum attempts means unlimited attempts.
+`MaximumAttempts` includes the original run. The store saves a normalized copy,
+including the sorted, deduplicated non-retryable type list.
+
 Retries are opt-in, with persisted initial/maximum intervals, exponential
 coefficient, maximum attempts and non-retryable failure types. Application
 non-retryable flags, cancellation, termination and execution timeout prohibit a
@@ -114,6 +121,29 @@ unchanged execution deadline, and no signal wakeup may run workflow code before
 the saved retry availability. Resolve the run deadline against that availability;
 the earlier run/execution deadline still wins. Continue-as-new starts a fresh retry
 attempt while preserving the chain identity and execution deadline.
+
+The failed or timed-out run retains its original terminal event. Immediately
+before it, `workflow.retry_scheduled` records the deterministic successor identity,
+resolved metadata, delay and failure type. A run timeout uses the failure type
+`workflow_run_timeout`; you can put that type in `NonRetryableTypes`. The runtime
+checks this record against the saved policy and closure clock during replay.
+
+Use `w.RunInfo()` to read the current `RunNumber` and `RetryAttempt`, both starting
+at one. `w.Now()` begins at the saved availability time and advances when you
+consume outcomes. The coordinator creates a successor only when its availability
+precedes the chain's execution deadline. A delayed run can still expire before a
+worker polls it. A retry policy reserves one additional history slot, leaving at
+most 998 decision events before the final state and retry records.
+
+Your retry starts with the same input, workflow type, build, queue and timeout
+configuration. Consumed signals and activity results remain in the failed run;
+only unread signals carry forward. If repeating the business operation can repeat
+an external effect, give your activity an idempotency key that covers all relevant
+runs. Per-run command identity alone does not deduplicate effects across retries.
+
+Run `go run ./examples/durable-workflow-retry` to inspect a failed run, a replacement
+worker completing its successor, signal carry and a historical query. The example
+uses memory; PostgreSQL tests exercise the same chain across replaced connections.
 
 ## Qualification
 

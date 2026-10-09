@@ -15,6 +15,10 @@ import (
 // Run exercises a store with unique namespaces so cases can share a database.
 func Run(t *testing.T, s durable.Store) {
 	t.Helper()
+	t.Run("workflow_retry_roots", func(t *testing.T) { workflowRetryRoots(t, s) })
+	t.Run("workflow_retry_failure", func(t *testing.T) { workflowRetryFailure(t, s) })
+	t.Run("workflow_retry_timeout", func(t *testing.T) { workflowRetryTimeout(t, s) })
+	t.Run("workflow_retry_finality", func(t *testing.T) { workflowRetryFinality(t, s) })
 	t.Run("continuation_atomic", func(t *testing.T) { continuationAtomic(t, s) })
 	t.Run("continuation_signals", func(t *testing.T) { continuationSignals(t, s) })
 	t.Run("continuation_children", func(t *testing.T) { continuationChildren(t, s) })

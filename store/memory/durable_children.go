@@ -36,7 +36,7 @@ func (m *Store) childProjection(key durable.Key) durable.ChildExecution {
 	link.CurrentKey = m.currentChildKey(root)
 	child := m.executions[link.CurrentKey].execution
 	link.State, link.UpdatedAt = child.State, child.UpdatedAt
-	link.Start.Input = cloneBytes(link.Start.Input)
+	link.Start = link.Start.Clone()
 	return link
 }
 

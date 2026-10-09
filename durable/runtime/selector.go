@@ -93,8 +93,12 @@ func (w *Workflow) checkEventCapacity() {
 	if w.freezeNormal {
 		return
 	}
-	// Reserve the final store event for workflow state.
-	if len(w.commands)+len(w.signals)+len(w.selections)+w.acknowledgmentCount >= 999 {
-		w.stop(fmt.Errorf("%w: more than 999 decision events", durable.ErrInvalid))
+	// Reserve the terminal event and, for opted-in workflows, its retry link.
+	limit := 999
+	if w.execution.RetryPolicy != nil {
+		limit--
+	}
+	if len(w.commands)+len(w.signals)+len(w.selections)+w.acknowledgmentCount >= limit {
+		w.stop(fmt.Errorf("%w: more than %d decision events", durable.ErrInvalid, limit))
 	}
 }

@@ -101,8 +101,7 @@ func (m *Store) GetExecution(ctx context.Context, key durable.Key) (durable.Exec
 	if !ok {
 		return durable.Execution{}, durable.ErrNotFound
 	}
-	result := record.execution
-	result.Input, result.Output = cloneBytes(result.Input), cloneBytes(result.Output)
+	result := record.execution.Clone()
 	return result, nil
 }
 
@@ -149,7 +148,7 @@ func (m *Store) ClaimTask(ctx context.Context, r durable.ClaimRequest) (*durable
 	now := durable.Timestamp(time.Now())
 	var selected *durableTask
 	for key, record := range m.executions {
-		if key.Namespace != r.Namespace || record.execution.State != durable.StateRunning || durable.CheckExecutionDeadline(record.execution, now) != nil ||
+		if key.Namespace != r.Namespace || record.execution.State != durable.StateRunning || record.execution.AvailableAt().After(now) || durable.CheckExecutionDeadline(record.execution, now) != nil ||
 			(r.BuildID != "" && record.execution.BuildID != r.BuildID) {
 			continue
 		}
@@ -297,7 +296,7 @@ func (m *Store) CommitTransition(ctx context.Context, r durable.CommitRequest) (
 	if err != nil {
 		return durable.Receipt{}, err
 	}
-	batch, err := durable.PrepareContinuation(record.execution, task.Task, r, record.history, now)
+	batch, err := durable.PrepareTransitionSuccessor(record.execution, task.Task, r, record.history, now)
 	if err != nil {
 		return durable.Receipt{}, err
 	}
@@ -367,7 +366,11 @@ func (m *Store) CommitTransition(ctx context.Context, r durable.CommitRequest) (
 		changes[spec.ID] = created
 	}
 	events := append(append([]durable.EventInput(nil), r.Events...), childEvents...)
-	if batch != nil {
+	events, err = durable.AddWorkflowRetryEvent(&next, &receipt, events, batch)
+	if err != nil {
+		return durable.Receipt{}, err
+	}
+	if batch != nil && batch.Terminal.Type != "" {
 		events = append(events, batch.Terminal)
 	}
 	for i, evt := range events {
@@ -379,7 +382,7 @@ func (m *Store) CommitTransition(ctx context.Context, r durable.CommitRequest) (
 	}
 	for _, child := range r.Children {
 		m.installExecution(children[child.Start.Key])
-		child.Start.Input = cloneBytes(child.Start.Input)
+		child.Start = child.Start.Clone()
 		m.childParents[child.Start.Key] = durable.ChildExecution{Parent: r.Key, ChildStartSpec: child, CreatedAt: now}
 		record.children[child.CommandID] = child.Start.Key
 	}

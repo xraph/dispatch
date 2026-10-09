@@ -42,11 +42,11 @@ Store tests alone do not qualify a workflow runtime or a deployment.
 | Fenced task claims and durable timer deadlines | Store contract and renewable workers implemented; process-kill qualification open | Expiry, same-owner reclaim, concurrent claims, restart recovery |
 | Deterministic Go workflow runtime | Activity, timer, signal, child and saved-winner selection replay implemented; coroutine and SDK expansion open | Recorded-history replay with no repeated external effects, changed-command rejection |
 | Activity retries and timeout classes | Queue, attempt, overall and heartbeat deadlines, progress recovery, retry policies and asynchronous Go callbacks implemented; remote authorization and process qualification open | Queue, attempt, overall and heartbeat deadlines; heartbeat progress; asynchronous completion |
-| Workflow deadlines and whole-workflow retries | Run/execution deadlines, fencing, atomic closure, runtime polling and frozen replay implemented; retries and run chains open | Expiry across lock waits, durable timeout closure, frozen replay, inherited execution deadlines across run chains |
+| Workflow deadlines and whole-workflow retries | Run/execution deadlines, fencing, closure, opt-in retry successors and replay implemented; whole-plan review pending | Expiry across lock waits, durable timeout closure, frozen replay, inherited execution deadlines across run chains |
 | Signals, queries, updates and signal-with-start | Atomic signals, signal-with-start, Go receive replay and explicit/current/latest queries implemented; tracked updates open | Namespace isolation, deduplication, atomic acceptance, update results, read-only queries |
 | Child workflows and cancellation | Individual future, whole-workflow and child cancellation plus child composition implemented; cooperative external-activity completion acknowledgment open | Stable child identity, duplicate creation prevention, parent-close policies, cancellation propagation |
 | Compensation, pause, termination and reset | Parent-close termination implemented; operator controls, compensation, pause and reset open | Resumable compensation attempts, audited controls, immutable reset lineage |
-| Continue-as-new and run chains | Atomic store continuation, signal handoff and child-chain routing implemented; runtime continuation and retries open | Bounded history, message handoff and version inheritance |
+| Continue-as-new and run chains | Store/runtime continuation and retries, signal handoff and child-chain routing implemented; whole-plan review pending | Bounded history, message handoff and version inheritance |
 | Schedules | Open | Overlap, catch-up, backfill, timezones and unique scheduled occurrences |
 | Deployment versioning | Pinned build polling implemented; rollout and patch markers open | Pinned build routing, gradual rollout, patch markers, replay checks, drainage |
 | Distributed scheduling | Open | Partition ownership, long polling, fairness, fleet-wide quotas and backpressure under load |
@@ -234,10 +234,11 @@ again. A claim lost before an attempt starts does not consume an activity attemp
 The idempotency key remains stable across attempts; an interrupted operation may
 already have affected an external service.
 
-This layer still needs heartbeat progress and asynchronous
-completion. Unlimited retries also require the planned bounded-history and
-continue-as-new work for sustained operation. No broad runtime qualification is
-claimed by the activity retry implementation alone.
+Later checkpoints add heartbeat progress, asynchronous completion and
+continue-as-new. Activity attempts still append to their current run's bounded
+history, so unlimited activity retries need an explicit exhaustion or rollover
+strategy. The activity retry implementation alone does not qualify sustained
+operation.
 
 2026-10-08: runtime race tests cover exponential retry delays and caps, final
 attempt limits, explicit and type-based non-retryable failures, stable operation
@@ -1392,11 +1393,11 @@ does not qualify those operations or the remaining lifecycle and operator roadma
 
 ## Workflow deadline contract
 
-RunTimeout limits one run. ExecutionTimeout sets the deadline that future retry
-and continue-as-new chains must inherit. Chain creation and inheritance remain
-separate roadmap work. Zero means unlimited; positive values must be at least one
-microsecond. The store resolves both against its creation timestamp and persists
-the absolute deadlines. The earlier deadline wins, with execution taking precedence
+RunTimeout limits one run. ExecutionTimeout sets the deadline inherited across
+retry and continue-as-new chains. Zero means unlimited; positive values must be at
+least one microsecond. The store resolves both against the root's creation timestamp
+and persists the absolute deadlines. Successor run limits start at their saved
+availability; the execution deadline never resets. The earlier deadline wins, with execution taking precedence
 on a tie. You cannot extend either deadline through a normal mutation.
 
 Once that deadline elapses, claims, lease renewals, heartbeats, signals,
@@ -1415,7 +1416,7 @@ a rejected completion does not undo an external side effect.
 
 Deadline persistence and enforcement, durable closure, and runtime polling have
 separate validation gates. The runtime integration below completes single-run
-timeout processing. Retry chains and continue-as-new remain open.
+timeout processing. Later run-chain checkpoints add retries and continue-as-new.
 
 2026-10-09: memory and PostgreSQL persist deadlines in ordinary starts,
 signal-with-start and child creation. The earliest deadline fences new progress;
@@ -1513,8 +1514,8 @@ actionable defects, including no deferred minor findings. The reviewer also ran
 the focused deadline/timeout runtime and store tests independently.
 
 These checks do not qualify process kills, database failover or disaster recovery.
-ExecutionTimeout is enforced for the current run; inheritance across retries and
-continue-as-new still needs its own implementation. Neither timeout closure nor
+The run-chain checkpoints below add deadline inheritance across retries and
+continue-as-new. Neither timeout closure nor
 task fencing can undo an external effect. Cooperative external-activity completion
 acknowledgment, remote authorization and audit, rollout compatibility and operator
 transport remain separate requirements in the delivery table.
@@ -1543,8 +1544,8 @@ deadlines. It leaves those absolute deadlines and original receipts unchanged.
 Schema guards make creation time and lineage immutable; older root inserts receive
 the missing metadata automatically. Populated chains prevent destructive downgrade.
 
-This was the metadata storage checkpoint. The SDK checkpoint below adds
-continuation; workflow retries remain open. The [run-chain contract](durable-run-chains.md) includes
+This was the metadata storage checkpoint. The later checkpoints add SDK
+continuation and workflow retries. The [run-chain contract](durable-run-chains.md) includes
 atomic successor creation, pending-message handoff, child-chain relationships,
 deterministic replay and inherited execution deadlines as required work.
 
@@ -1576,8 +1577,8 @@ lineage. Migration retries preserve the handoff guard. A failed handoff rolls ba
 its source events, projection, task fencing, receipt, successor, latest pointer,
 new history and task, and child-close outbox together.
 
-The SDK checkpoint below adds the Go continuation method and replay/query
-support. Whole-workflow retries remain open. Enable these new
+The later checkpoints add the Go continuation method, replay/query support and
+workflow retries. Enable these new
 history shapes only with compatible readers; full rollout, authorization and
 production recovery qualification remain separate roadmap requirements.
 
@@ -1619,7 +1620,46 @@ The engine test runs a child through two continuations. PostgreSQL tests replace
 connection pools between handoffs and delivery, and the runnable
 `examples/durable-continuation` demonstrates signal carry with memory storage.
 
-This checkpoint does not add workflow retries. Full deployment compatibility,
+The following checkpoint adds workflow retries. Full deployment compatibility,
 operator APIs and dashboard controls, authorization, external-effect recovery,
 process-kill testing, database failover and production capacity qualification
 remain required work in the roadmap.
+
+## Whole-workflow retry checkpoint
+
+You can opt in through `StartRequest.RetryPolicy` or `ChildOptions.RetryPolicy`.
+Nil and entirely zero policies keep existing single-attempt behavior. Configured
+policies save normalized, copied intervals, coefficient, attempt limit and
+non-retryable types. `MaximumAttempts` counts the original run.
+
+A retryable failure or run timeout closes its run and atomically creates a
+successor. The source stays failed or timed_out, with a retry-link event just
+before its terminal event. The successor retains input and routing, gets a new
+history and increments RunNumber and RetryAttempt. ContinueAsNew resets the
+retry attempt to one. `w.RunInfo()` exposes those saved coordinates.
+
+Backoff is persisted as RunAvailableAt. Claims and signal wakeups cannot execute
+the workflow before that time. RunTimeout begins there, but backoff consumes the
+chain's unchanged ExecutionDeadlineAt. A successor whose availability reaches
+that deadline is not created. Accepted cancellation, termination, exhausted
+attempts and non-retryable failures finish the chain. Run-timeout processing
+requires no workflow handler on the coordinator's build.
+
+Unread signals retain their original acceptance identities through mixed retry
+and continuation chains. Consumed messages and completed activities stay with
+their original run. Repeating workflow code can repeat external effects, so you
+need business idempotency across runs. Parents await the final child-chain result;
+each source run still applies its own children's parent-close policies.
+
+Tests cover failure/timeout replay, historical queries, corrupted retry metadata,
+copied policies, backoff wakeups, finality, mixed chains, child results and original
+receipts after later runs. PostgreSQL checks replace connection pools, reapply old
+and new migrations, reject metadata changes and downgrade, wait through grant and
+execution expiry, and inject failures at 26 closure/successor persistence boundaries.
+The final whole-plan review is pending. Full deployment and production recovery
+qualification remain separate roadmap work.
+
+Qualification for this checkpoint: `make f`, `make l` with zero issues,
+`go test ./...`, and durable/runtime/engine/memory races passed. The complete
+durable PostgreSQL integration race suite passed in 268.707 seconds after the
+lineage-backfill regression was fixed. Both continuation and retry examples ran.

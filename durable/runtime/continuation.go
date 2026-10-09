@@ -157,7 +157,7 @@ func parseRunStarted(execution durable.Execution, event durable.Event) error {
 }
 
 func sameRunMetadata(a, b durable.RunMetadata) bool {
-	return a.Key == b.Key && a.FirstRunID == b.FirstRunID && a.PreviousRunID == b.PreviousRunID && a.RunNumber == b.RunNumber && a.RunTimeout == b.RunTimeout &&
+	return a.RetryAttempt == b.RetryAttempt && a.RunAvailableAt.Equal(b.RunAvailableAt) && a.Key == b.Key && a.FirstRunID == b.FirstRunID && a.PreviousRunID == b.PreviousRunID && a.RunNumber == b.RunNumber && a.RunTimeout == b.RunTimeout &&
 		a.CreatedAt.Equal(b.CreatedAt) && a.FirstStartedAt.Equal(b.FirstStartedAt) && a.RunDeadlineAt.Equal(b.RunDeadlineAt) && a.ExecutionDeadlineAt.Equal(b.ExecutionDeadlineAt)
 }
 

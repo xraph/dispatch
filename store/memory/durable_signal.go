@@ -60,7 +60,7 @@ func (m *Store) SignalExecution(ctx context.Context, r durable.SignalRequest) (d
 
 // SignalWithStart deduplicates before selecting or creating an open run.
 func (m *Store) SignalWithStart(ctx context.Context, r durable.SignalWithStartRequest) (durable.SignalReceipt, error) {
-	r.Input, r.Start.Input = bytes.Clone(r.Input), bytes.Clone(r.Start.Input)
+	r.Input, r.Start = bytes.Clone(r.Input), r.Start.Clone()
 	if err := r.Validate(); err != nil {
 		return durable.SignalReceipt{}, err
 	}
@@ -147,7 +147,7 @@ func (m *Store) appendWorkflowInput(record *executionRecord, build string, paylo
 	current.Revision++
 	current.LastSequence++
 	current.UpdatedAt = now
-	wake, err := durable.NewTask(current.Key, durable.TaskSpec{ID: fmt.Sprintf("workflow:%s:%d", wakeKind, current.Revision), Kind: durable.TaskWorkflow, Queue: initial.Queue}, now)
+	wake, err := durable.NewTask(current.Key, durable.TaskSpec{ID: fmt.Sprintf("workflow:%s:%d", wakeKind, current.Revision), Kind: durable.TaskWorkflow, Queue: initial.Queue, AvailableAt: current.AvailableAt()}, now)
 	if err != nil {
 		return durable.SignalReceipt{}, err
 	}

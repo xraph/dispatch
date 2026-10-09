@@ -40,7 +40,6 @@ func (m *Store) ResolveExecution(ctx context.Context, r durable.ExecutionTarget)
 	if record == nil {
 		return durable.Execution{}, durable.ErrNotFound
 	}
-	result := record.execution
-	result.Input, result.Output = cloneBytes(result.Input), cloneBytes(result.Output)
+	result := record.execution.Clone()
 	return result, nil
 }

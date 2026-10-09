@@ -22,7 +22,7 @@ func addChildDecision(task durable.Task, decision Decision, request *durable.Com
 			if queue == "" {
 				queue = task.Queue
 			}
-			request.Children = append(request.Children, durable.ChildStartSpec{CommandID: command.ID, Start: durable.StartRequest{Key: command.Child.Key, RequestID: "child-start", WorkflowType: command.Name, BuildID: command.Child.BuildID, Queue: queue, Input: command.Input, RunTimeout: command.Child.RunTimeout, ExecutionTimeout: command.Child.ExecutionTimeout}, ParentQueue: task.Queue, ParentClosePolicy: command.Child.ParentClosePolicy})
+			request.Children = append(request.Children, durable.ChildStartSpec{CommandID: command.ID, Start: durable.StartRequest{Key: command.Child.Key, RequestID: "child-start", WorkflowType: command.Name, BuildID: command.Child.BuildID, Queue: queue, Input: command.Input, RunTimeout: command.Child.RunTimeout, ExecutionTimeout: command.Child.ExecutionTimeout, RetryPolicy: command.Child.RetryPolicy.Clone()}, ParentQueue: task.Queue, ParentClosePolicy: command.Child.ParentClosePolicy})
 		case CommandCancelChild:
 			request.CancelChildren = append(request.CancelChildren, durable.ChildCancellationSpec{CommandID: command.ID, TargetID: command.TargetID})
 		}

@@ -31,6 +31,9 @@ func (r StartRequest) Validate() error {
 	if !identifier(r.RequestID) || !identifier(r.WorkflowType) || !identifier(r.BuildID) || !identifier(r.Queue) {
 		return fmt.Errorf("%w: request ID, workflow type, build ID and queue are required", ErrInvalid)
 	}
+	if _, err := NormalizeWorkflowRetryPolicy(r.RetryPolicy); err != nil {
+		return err
+	}
 	return validateExecutionTimeouts(r)
 }
 
@@ -68,6 +71,11 @@ func (t TaskToken) Validate() error {
 
 // Validate checks a transition before any writes occur.
 func (r CommitRequest) Validate() error {
+	for _, event := range r.Events {
+		if event.Type == EventWorkflowRetryScheduled {
+			return fmt.Errorf("%w: retry links are store-owned", ErrInvalid)
+		}
+	}
 	if err := r.Key.Validate(); err != nil {
 		return err
 	}

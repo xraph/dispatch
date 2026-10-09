@@ -60,7 +60,7 @@ func (s *Store) SignalExecution(ctx context.Context, r durable.SignalRequest) (r
 // SignalWithStart resolves its workflow-scoped receipt before choosing a run.
 func (s *Store) SignalWithStart(ctx context.Context, r durable.SignalWithStartRequest) (result durable.SignalReceipt, resultErr error) {
 	defer func() { resultErr = normalizeExecutionError(resultErr) }()
-	r.Input, r.Start.Input = bytes.Clone(r.Input), bytes.Clone(r.Start.Input)
+	r.Input, r.Start = bytes.Clone(r.Input), r.Start.Clone()
 	if err := r.Validate(); err != nil {
 		return durable.SignalReceipt{}, err
 	}
@@ -208,7 +208,7 @@ func appendWorkflowInput(ctx context.Context, tx driver.Tx, current durable.Exec
 	if err != nil {
 		return durable.SignalReceipt{}, err
 	}
-	if err := insertExecutionTask(ctx, tx, current.Key, durable.TaskSpec{ID: fmt.Sprintf("workflow:%s:%d", wakeKind, receipt.Revision), Kind: durable.TaskWorkflow, Queue: queue}, now); err != nil {
+	if err := insertExecutionTask(ctx, tx, current.Key, durable.TaskSpec{ID: fmt.Sprintf("workflow:%s:%d", wakeKind, receipt.Revision), Kind: durable.TaskWorkflow, Queue: queue, AvailableAt: current.AvailableAt()}, now); err != nil {
 		return durable.SignalReceipt{}, err
 	}
 	return receipt, nil
@@ -223,8 +223,12 @@ func createSignalRun(ctx context.Context, tx driver.Tx, r durable.StartRequest, 
 	if err != nil {
 		return false, err
 	}
+	policy, err := encodeWorkflowRetryPolicy(execution.RetryPolicy)
+	if err != nil {
+		return false, err
+	}
 	result, err := tx.Exec(ctx, `INSERT INTO dispatch_executions (`+executionColumns+`)
- VALUES ($1,$2,$3,$4,$5,'running',1,2,$6,$7,$8,$8,$9,$10,$3,'','',1,$8,$11) ON CONFLICT DO NOTHING`, r.Namespace, r.WorkflowID, r.RunID, r.WorkflowType, r.BuildID, executionBytes(r.Input), []byte{}, now, taskNullableTime(execution.RunDeadlineAt), taskNullableTime(execution.ExecutionDeadlineAt), int64(execution.RunTimeout))
+ VALUES ($1,$2,$3,$4,$5,'running',1,2,$6,$7,$8,$8,$9,$10,$3,'','',1,$8,$11,$12,1,$8) ON CONFLICT DO NOTHING`, r.Namespace, r.WorkflowID, r.RunID, r.WorkflowType, r.BuildID, executionBytes(r.Input), []byte{}, now, taskNullableTime(execution.RunDeadlineAt), taskNullableTime(execution.ExecutionDeadlineAt), int64(execution.RunTimeout), policy)
 	if err != nil {
 		return false, err
 	}

@@ -8,11 +8,14 @@ func (m *Store) prepareContinuationRecord(batch *durable.ContinuationBatch, spec
 	if batch == nil {
 		return nil, nil
 	}
+	if spec == nil {
+		spec = &batch.Spec
+	}
 	if _, exists := m.executions[batch.Execution.Key]; exists {
 		return nil, durable.ErrExists
 	}
 	return &executionRecord{execution: batch.Execution, history: batch.History,
-		tasks:    map[string]*durableTask{"workflow:1": {Task: durable.Task{Key: batch.Execution.Key, Version: 1, TaskSpec: durable.TaskSpec{ID: "workflow:1", Kind: durable.TaskWorkflow, Queue: spec.Queue, AvailableAt: batch.Execution.CreatedAt}}}},
+		tasks:    map[string]*durableTask{"workflow:1": {Task: durable.Task{Key: batch.Execution.Key, Version: 1, TaskSpec: durable.TaskSpec{ID: "workflow:1", Kind: durable.TaskWorkflow, Queue: spec.Queue, AvailableAt: batch.Execution.AvailableAt()}}}},
 		receipts: make(map[string]durableReceipt), children: make(map[string]durable.Key)}, nil
 }
 

@@ -10,17 +10,18 @@ import (
 )
 
 func prepareContinuation(ctx context.Context, tx driver.Tx, current durable.Execution, task durable.Task, r durable.CommitRequest, now time.Time) (*durable.ContinuationBatch, error) {
-	if r.Continuation == nil {
+	if r.Continuation == nil && (current.RetryPolicy == nil || r.State != durable.StateFailed) {
 		return nil, nil
 	}
-	var exists bool
-	if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM dispatch_executions WHERE namespace=$1 AND workflow_id=$2 AND run_id=$3)`, r.Namespace, r.WorkflowID, r.Continuation.RunID).Scan(&exists); err != nil {
+	history, err := loadSuccessorHistory(ctx, tx, current.Key)
+	if err != nil {
 		return nil, err
 	}
-	if exists {
-		return nil, durable.ErrExists
-	}
-	rows, err := tx.Query(ctx, `SELECT sequence,type,payload,occurred_at FROM dispatch_execution_events WHERE namespace=$1 AND workflow_id=$2 AND run_id=$3 ORDER BY sequence LIMIT 100001`, r.Namespace, r.WorkflowID, r.RunID)
+	return durable.PrepareTransitionSuccessor(current, task, r, history, now)
+}
+
+func loadSuccessorHistory(ctx context.Context, tx driver.Tx, key durable.Key) ([]durable.Event, error) {
+	rows, err := tx.Query(ctx, `SELECT sequence,type,payload,occurred_at FROM dispatch_execution_events WHERE namespace=$1 AND workflow_id=$2 AND run_id=$3 ORDER BY sequence LIMIT 100001`, key.Namespace, key.WorkflowID, key.RunID)
 	if err != nil {
 		return nil, err
 	}
@@ -36,7 +37,7 @@ func prepareContinuation(ctx context.Context, tx driver.Tx, current durable.Exec
 	if rowsErr := rows.Err(); rowsErr != nil {
 		return nil, rowsErr
 	}
-	return durable.PrepareContinuation(current, task, r, history, now)
+	return history, nil
 }
 
 func insertContinuation(ctx context.Context, tx driver.Tx, batch *durable.ContinuationBatch, spec *durable.ContinueSpec) error {
@@ -44,8 +45,15 @@ func insertContinuation(ctx context.Context, tx driver.Tx, batch *durable.Contin
 		return nil
 	}
 	e := batch.Execution
-	_, err := tx.Exec(ctx, `INSERT INTO dispatch_executions (`+executionColumns+`)
- VALUES($1,$2,$3,$4,$5,'running',1,$6,$7,$8,$9,$9,$10,$11,$12,$13,'',$14,$15,$16)`, e.Namespace, e.WorkflowID, e.RunID, e.WorkflowType, e.BuildID, e.LastSequence, executionBytes(e.Input), []byte{}, e.CreatedAt, taskNullableTime(e.RunDeadlineAt), taskNullableTime(e.ExecutionDeadlineAt), e.FirstRunID, e.PreviousRunID, e.RunNumber, e.FirstStartedAt, int64(e.RunTimeout))
+	if spec == nil {
+		spec = &batch.Spec
+	}
+	policy, err := encodeWorkflowRetryPolicy(e.RetryPolicy)
+	if err != nil {
+		return err
+	}
+	_, err = tx.Exec(ctx, `INSERT INTO dispatch_executions (`+executionColumns+`)
+ VALUES($1,$2,$3,$4,$5,'running',1,$6,$7,$8,$9,$9,$10,$11,$12,$13,'',$14,$15,$16,$17,$18,$19)`, e.Namespace, e.WorkflowID, e.RunID, e.WorkflowType, e.BuildID, e.LastSequence, executionBytes(e.Input), []byte{}, e.CreatedAt, taskNullableTime(e.RunDeadlineAt), taskNullableTime(e.ExecutionDeadlineAt), e.FirstRunID, e.PreviousRunID, e.RunNumber, e.FirstStartedAt, int64(e.RunTimeout), policy, e.RetryAttempt, e.AvailableAt())
 	if isDuplicateKey(err) {
 		return durable.ErrExists
 	}
@@ -57,5 +65,5 @@ func insertContinuation(ctx context.Context, tx driver.Tx, batch *durable.Contin
 			return eventErr
 		}
 	}
-	return insertExecutionTask(ctx, tx, e.Key, durable.TaskSpec{ID: "workflow:1", Kind: durable.TaskWorkflow, Queue: spec.Queue}, e.CreatedAt)
+	return insertExecutionTask(ctx, tx, e.Key, durable.TaskSpec{ID: "workflow:1", Kind: durable.TaskWorkflow, Queue: spec.Queue, AvailableAt: e.AvailableAt()}, e.CreatedAt)
 }
