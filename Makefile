@@ -246,3 +246,16 @@ lf: lint-fix
 v: vet
 d: dev
 i: install
+
+# Qualification is a separate published-module consumer. Keep workspace
+# overrides disabled so these checks exercise the pinned host composition.
+.PHONY: qualification-check qualification-lint
+qualification-lint:
+	cd qualification && GOWORK=off GOTOOLCHAIN=go1.26.9 golangci-lint run --allow-serial-runners --max-same-issues=0 --max-issues-per-linter=0 ./...
+
+qualification-check:
+	cd qualification && GOWORK=off GOTOOLCHAIN=go1.26.9 go mod tidy -diff
+	cd qualification && GOWORK=off GOTOOLCHAIN=go1.26.9 go mod verify
+	cd qualification && GOWORK=off GOTOOLCHAIN=go1.26.9 go vet ./...
+	cd qualification && GOWORK=off GOTOOLCHAIN=go1.26.9 go test -race -count=1 ./...
+	cd qualification && GOWORK=off GOTOOLCHAIN=go1.26.9 go build ./...
