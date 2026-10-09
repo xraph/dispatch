@@ -16,7 +16,6 @@ import (
 	authsome "github.com/xraph/authsome"
 	"github.com/xraph/authsome/app"
 	"github.com/xraph/authsome/authprovider"
-	"github.com/xraph/authsome/bridge"
 	aid "github.com/xraph/authsome/id"
 	authmw "github.com/xraph/authsome/middleware"
 	"github.com/xraph/authsome/session"
@@ -35,6 +34,7 @@ import (
 	"github.com/xraph/dispatch/durable"
 	"github.com/xraph/dispatch/dwp"
 	"github.com/xraph/dispatch/engine"
+	"github.com/xraph/dispatch/qualification/internal/authority"
 	"github.com/xraph/dispatch/security"
 	"github.com/xraph/dispatch/store/memory"
 )
@@ -74,7 +74,7 @@ func newCredentialHost(t *testing.T) *credentialHost {
 	if err != nil {
 		t.Fatal(err)
 	}
-	h.auth, err = authsome.NewEngine(authsome.WithStore(st), authsome.WithWarden(w), authsome.WithChronicle(bridge.NewMemoryChronicle()), authsome.WithDisableMigrate(), authsome.WithAppID(h.app.String()))
+	h.auth, err = authority.New(st, w, h.app.String(), nil)
 	if err != nil {
 		t.Fatal(err)
 	}

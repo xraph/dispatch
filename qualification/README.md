@@ -33,7 +33,54 @@ Cookie-only WS, REST and SSE admissions stay denied. A mismatched marker cannot
 promote an unchanged bridged cookie, but it does not invalidate an unrelated
 ordinary explicit header.
 
-These are memory-store credential regressions. They do not qualify PostgreSQL,
-production deployments, service accounts, credential rotation or revocation,
-external denial audit sinks, or the final assembled-host authorization matrix.
-The fixture is a starting point for those later gates.
+The default suite keeps these memory-store credential regressions fast. It skips
+process qualification unless you supply an explicit PostgreSQL fixture and host
+binary. A passing default suite alone does not establish sink integration.
+
+Run the separate process gate from the repository root:
+
+```sh
+go install golang.org/x/vuln/cmd/govulncheck@latest
+make qualification-process-check
+```
+
+You need Docker and Go 1.26.9. The gate builds the actual `cmd/sinkhost` executable,
+records its compiler/module metadata, scans the program and binary, and starts
+one private PostgreSQL 17 container capped at 512 MiB, one CPU and 128 PIDs.
+Chronicle, Relay, Dispatch and the webhook receiver run as separate native
+processes. Each has a 128 MiB Go memory target and a supervisor that stops it if
+sampled RSS exceeds 384 MiB. This is sampled supervision, not a native kernel
+memory limit. The scenario has a four-minute deadline and the Go test has a
+six-minute timeout. The script removes only its own container, anonymous volume
+and temporary files on exit. CI runs this gate separately after the credential
+suite and test-graph vulnerability scan. Missing fixture inputs fail the explicit
+gate instead of silently skipping it.
+
+Bootstrap uses real Authsome PostgreSQL storage and the public environment-bound
+service-account constructor, then issues persisted machine keys. The Forge
+acceptance routes verify the real API-key strategy, persisted key/account scope,
+trusted installation/app/environment mapping and destination-specific Warden
+policies. No default Authsome, Warden, Chronicle or Relay administration routes
+are registered. Only acceptance, command, terminal worker-stop and content-free
+health routes are exposed by the relevant process. Receiver routes verify Relay
+signatures before storing delivery evidence. Token encryption and Chronicle HMAC
+use separate random keys held in private temporary configuration files.
+
+The matrix kills each sink independently while PostgreSQL stays available,
+checks local source admission/backlog and complete two-endpoint Relay fanout,
+and kills Dispatch after sink acceptance but before source acknowledgement.
+Restart must recover the same receipt without another sink event. It also stops
+the receiver, confirms retry/recovery, stops managed workers while publication
+continues, checks denied-command audit without execution, and tests persisted
+credential, account, resolver, policy and obligation refusals. Confirmed conflicts
+remain immutable, pending and blocked across restart; unrelated work continues,
+and final publisher shutdown reports incomplete drain.
+
+The assertions recompute source/sink bindings from acknowledged rows, compare
+stored sink receipt evidence, verify Chronicle HMAC-v5 digests and chain linkage,
+and check source-payload and credential exclusion. Set
+`DISPATCH_SINK_EVIDENCE_DIR` to retain sanitized logs and receipt JSON outside the
+temporary directory. Never retain bootstrap configuration files or upload them
+as CI artifacts. Process test fixtures are not production server configuration.
+Local numeric-loopback HTTP, one database instance and small fixtures do not
+qualify production TLS, high load, failover or external anchoring.
