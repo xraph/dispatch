@@ -62,6 +62,14 @@
 // does not cancel losing work or create a polled task. For a draining loop, remove
 // each winner from your candidate slice; ready futures can otherwise win again.
 //
+// Cancel requests cancellation of an activity, timer or signal receive. Wait on
+// its returned future for durable acknowledgment, then use errors.Is with
+// ErrCancelled on the target's Get result. A winning completion remains intact.
+// CancelledError carries copied attempt/heartbeat progress when available.
+// Cancel fences task results and preserves unused signals. It cannot undo an
+// external effect or prove that a running external operation physically stopped.
+// A running handler observes lost ownership through renewal or heartbeats.
+//
 // Register queries with SetQueryHandler before the workflow can yield. A query
 // reads local state reconstructed by validated replay, then returns a copied
 // result without committing that replay's decisions. QueryExecution requires an
@@ -71,7 +79,7 @@
 // An accepted signal can be visible to a query before a worker commits consumption.
 //
 // Queries must return promptly and avoid external effects. SDK scheduling,
-// Future.Get, Select and query registration are prohibited while a query handler runs,
+// Future.Get, Select, Cancel and query registration are prohibited during a query,
 // even if it recovers the runtime's control-flow panic. Now remains readable.
 // Ordinary Go effects and blocking cannot be sandboxed. QueryExecution checks its
 // context between reads and invocation phases, and after code returns; it does
@@ -79,8 +87,9 @@
 // output are each limited to 1 MiB. Query names contain at most 200 bytes.
 //
 // Evaluate requires a complete history snapshot with at most 100,000 events and
-// accepts at most 999 new command, signal consumption and selection events per
-// decision. Command IDs, names and queues contain at most 200 bytes. History format version 1 is explicit; unknown
-// versions and event types fail evaluation so operators can supply compatible
+// accepts at most 999 new command, signal consumption, selection and cancellation
+// acknowledgment events per decision. Command IDs, names and queues contain at
+// most 200 bytes. History format version 1 is explicit; unknown versions and event
+// types fail evaluation so operators can supply compatible
 // code. A panic or nondeterministic replay fails the task, not the execution.
 package runtime

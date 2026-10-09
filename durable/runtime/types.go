@@ -46,6 +46,7 @@ type Command struct {
 	Deadline        time.Time        `json:"deadline,omitempty"`
 	ActivityOptions *ActivityOptions `json:"activity_options,omitempty"`
 	Candidates      []string         `json:"candidates,omitempty"`
+	TargetID        string           `json:"target_id,omitempty"`
 }
 
 // ApplicationError is a recorded application failure. Type allows deterministic handling.

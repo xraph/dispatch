@@ -16,6 +16,7 @@ type taskPayload struct {
 }
 
 func (w *Worker) processWorkflow(ctx context.Context, task durable.Task) error {
+	var conflict error
 	for range 16 {
 		execution, events, err := w.snapshot(ctx, task.Key)
 		if err != nil {
@@ -33,11 +34,16 @@ func (w *Worker) processWorkflow(ctx context.Context, task durable.Task) error {
 		if err != nil {
 			return err
 		}
-		if err = w.persist(ctx, request); !errors.Is(err, durable.ErrRevisionConflict) {
+		err = w.prepareCancellations(ctx, task, execution, events, decision, &request)
+		if err == nil {
+			err = w.persist(ctx, request)
+		}
+		if !errors.Is(err, durable.ErrRevisionConflict) && !errors.Is(err, durable.ErrTaskConflict) {
 			return err
 		}
+		conflict = err
 	}
-	return durable.ErrRevisionConflict
+	return conflict
 }
 
 func decisionRequest(task durable.Task, execution durable.Execution, decision Decision) (durable.CommitRequest, error) {
@@ -48,7 +54,7 @@ func decisionRequest(task durable.Task, execution durable.Execution, decision De
 			return request, err
 		}
 		request.Events = append(request.Events, durable.EventInput{Type: EventCommandScheduled, Payload: data})
-		if decision.State == durable.StateRunning && command.Kind != CommandSignal && command.Kind != CommandSelect {
+		if decision.State == durable.StateRunning && command.Kind != CommandSignal && command.Kind != CommandSelect && command.Kind != CommandCancel {
 			payload, payloadErr := json.Marshal(taskPayload{Version: 1, Command: command, WorkflowQueue: task.Queue})
 			if payloadErr != nil {
 				return request, payloadErr

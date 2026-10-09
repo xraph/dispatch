@@ -43,7 +43,7 @@ Store tests alone do not qualify a workflow runtime or a deployment.
 | Deterministic Go workflow runtime | Activity, timer, signal and saved-winner selection replay implemented; coroutine and SDK expansion open | Recorded-history replay with no repeated external effects, changed-command rejection |
 | Activity retries and timeout classes | Queue, attempt, overall and heartbeat deadlines, progress recovery, retry policies and asynchronous Go callbacks implemented; remote authorization and process qualification open | Queue, attempt, overall and heartbeat deadlines; heartbeat progress; asynchronous completion |
 | Signals, queries, updates and signal-with-start | Atomic signals, signal-with-start, Go receive replay and explicit-run queries implemented; tracked updates and current/latest query selection open | Namespace isolation, deduplication, atomic acceptance, update results, read-only queries |
-| Child workflows and cancellation | Open | Stable child identity, duplicate creation prevention, parent-close policies, cancellation propagation |
+| Child workflows and cancellation | Individual Go future cancellation implemented; children, whole-workflow cancellation and cooperative completion acknowledgment open | Stable child identity, duplicate creation prevention, parent-close policies, cancellation propagation |
 | Compensation, pause, termination and reset | Open | Resumable compensation attempts, audited controls, immutable reset lineage |
 | Continue-as-new and run chains | Open | Bounded history, message handoff and version inheritance |
 | Schedules | Open | Overlap, catch-up, backfill, timezones and unique scheduled occurrences |
@@ -972,3 +972,91 @@ continues, and run closure cancels pending tasks under the store contract.
 Individual cancellation, deterministic coroutines, tracked updates, children and
 remote authorization remain open. The review does not qualify process-kill,
 failover, sustained-load or disaster-recovery behavior.
+
+
+## Individual future cancellation contract
+
+You request cancellation with Workflow.Cancel(id, target). The ID is a stable,
+unique command ID and the target must be an activity, timer or signal-receive
+future from this evaluation. The returned future acknowledges the persisted
+cancellation decision with nil output and nil error. Wait for it before assuming
+the request took effect. A result or signal consumption already recorded in the
+same decision wins; cancellation preserves that result. Repeated requests with
+different command IDs acknowledge without replacing an earlier result.
+
+Cancellation has a persistence boundary. Scheduling Cancel does not immediately
+resolve the target. The workflow decision records the cancel command, a version 1
+workflow.future_cancelled event and, when still running, a workflow wakeup in one
+transaction. Cancellation records contain CommandID, TargetID, Cancelled, Attempt
+and an optional Heartbeat checkpoint. Cancelled distinguishes a newly fenced
+future from an already-resolved target. No cancellation task is polled.
+
+For an unfinished stored activity or timer, the coordinator reads its task version
+and cancels it through CommitRequest.Conditions and CancelTasks. A changed version
+or execution revision causes a new snapshot and replay. Unknown responses retry
+the identical request. A task scheduled and canceled in the same decision is never
+published. A canceled receive does not consume a buffered signal. Canceling an
+already-resolved future is a recorded no-op. Closing the workflow retains the same
+atomic cancellation behavior, including the target's recorded outcome.
+
+After acknowledgment, a canceled target's Get returns CancelledError, matching
+ErrCancelled through errors.Is. Activity cancellation retains its attempt and last
+persisted heartbeat checkpoint; each returned error contains a copy. A pending
+retry retains its prior failed-attempt checkpoint. Ordinary activity attempts and
+callbacks cannot publish over that outcome, while retries of already-accepted
+callback requests still recover their original receipts. Cancel does not by itself
+set the whole workflow state to cancelled. You can handle the error and continue;
+an unhandled future error follows the existing workflow failure path.
+
+Logical time advances only when you consume recorded cancellation or acknowledgment
+outcomes. Their store event time and sequence are authoritative. The acknowledgment
+can participate in Select. A target and its cancellation acknowledgment share the
+same availability sequence, so candidate order breaks that tie. Query code cannot
+call Cancel or consume its future. The existing trusted-Go and per-evaluation
+ownership restrictions still apply.
+
+The history parser validates cancel targets against prior cancellable commands,
+requires exactly one acknowledgment for every saved cancel command, and rejects
+inconsistent dispositions, overwritten outcomes, malformed attempt/checkpoint data
+and later activity or timer outcomes after cancellation. Cancel commands reserve
+both their command and acknowledgment events within the shared 999-event budget.
+
+The acknowledgment proves storage fencing, not that an external system stopped.
+Running workers receive context cancellation when renewal or heartbeat observes
+lost ownership. Cooperative completion acknowledgment, whole-workflow cancellation,
+child propagation, pause, termination, compensation and reset remain required
+lifecycle work. Process interruption, failover and production qualification remain
+open too.
+
+Qualification requires same-decision and stored targets; queued, running, retrying
+and asynchronous activities; timers and buffered receives; both sides of completion
+races; task-version and heartbeat changes; lost responses; preserved callback
+receipts; copied progress; cancellation/selector logical time; malformed history;
+query guards; memory and real PostgreSQL recovery with replacement workers/pools.
+
+## Individual future cancellation verification
+
+Replay tests cover acknowledgment timing, preserved completions, buffered signals,
+repeated requests, changed targets, malformed history, copied active/retry progress,
+selector ties, query guards and the two-event cancellation budget. Memory workers
+cover same-decision suppression, stored targets, active contexts, retries and
+asynchronous activity cancellation. They inject claims, completion, retry activation
+and heartbeats around cancellation, then drop an accepted response to verify the
+identical retry and a single recorded acknowledgment. A separate snapshot race
+restarts an asynchronous attempt between history and task reads; the coordinator
+reloads the advanced revision instead of reporting corrupt progress.
+
+Real PostgreSQL tests exercise same-decision activity/timer suppression, a queued
+timer, retained signal input, active and asynchronous activity progress, completion
+and heartbeat races, lost acknowledgments and connection-pool replacement. A fresh
+worker reconstructs the saved outcome through a terminal query. A losing callback
+is fenced; retrying a completion accepted before cancellation recovers its receipt.
+The active-handler case checks that its stale result never enters history.
+
+The development example at examples/durable-cancellation prints cancelled after a
+timer's acknowledgment. The checkpoint runs make f, make l, the repository suite,
+engine/runtime/memory races and the full durable PostgreSQL integration suite.
+These checks qualify the scoped cancellation paths. They do not establish physical
+external interruption, cooperative completion acknowledgment, whole-workflow or
+child cancellation, process-kill recovery, fleet-scale behavior or disaster recovery.
+Those requirements remain open in the roadmap above.

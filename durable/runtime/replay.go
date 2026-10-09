@@ -13,9 +13,10 @@ import (
 )
 
 type recordedOutcome struct {
-	value    Outcome
-	at       time.Time
-	sequence int64
+	value        Outcome
+	at           time.Time
+	sequence     int64
+	cancellation *Cancellation
 }
 
 type replayHistory struct {
@@ -128,9 +129,16 @@ func parseHistory(execution durable.Execution, events []durable.Event) (replayHi
 			if err := validateSelectionReferences(command, commands); err != nil {
 				return result, err
 			}
+			if err := validateCancellationReference(command, commands); err != nil {
+				return result, err
+			}
 			commands[command.ID] = command
 			result.scheduled[command.ID] = event.Time
 			result.commands = append(result.commands, command)
+		case EventFutureCancelled:
+			if err := parseCancellation(&result, commands, event); err != nil {
+				return result, err
+			}
 		case EventSelected:
 			if err := parseSelection(&result, commands, event); err != nil {
 				return result, err
@@ -171,6 +179,11 @@ func parseHistory(execution durable.Execution, events []durable.Event) (replayHi
 		}
 	}
 	for _, command := range result.commands {
+		if command.Kind == CommandCancel {
+			if _, acknowledged := result.outcomes[command.ID]; !acknowledged {
+				return result, fmt.Errorf("%w: cancellation command has no acknowledgment", ErrHistory)
+			}
+		}
 		if command.Kind == CommandSelect && command.Index < int64(len(result.commands)) {
 			if _, chosen := result.selections[command.ID]; !chosen {
 				return result, fmt.Errorf("%w: pending selection precedes later commands", ErrHistory)

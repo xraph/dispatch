@@ -14,17 +14,18 @@ import (
 // Workflow provides replayable decision primitives. Use these methods only from
 // the handler's goroutine. Schedule multiple futures before Get for parallel work.
 type Workflow struct {
-	now        time.Time
-	history    replayHistory
-	cursor     int
-	commands   []Command
-	signals    []SignalConsumption
-	selections []Selection
-	ids        map[string]bool
-	blocked    bool
-	fault      error
-	queries    map[string]QueryFunc
-	querying   bool
+	now               time.Time
+	history           replayHistory
+	cursor            int
+	commands          []Command
+	signals           []SignalConsumption
+	selections        []Selection
+	ids               map[string]bool
+	blocked           bool
+	fault             error
+	queries           map[string]QueryFunc
+	querying          bool
+	cancellationCount int
 }
 
 // Future represents a recorded command's eventual result.
@@ -33,6 +34,7 @@ type Future struct {
 	workflow   *Workflow
 	id         string
 	signalName string
+	kind       durable.TaskKind
 }
 
 type flowControl struct{}
@@ -101,11 +103,14 @@ func (w *Workflow) schedule(command Command) *Future {
 			w.stop(fmt.Errorf("%w: command %d (%s)", ErrNondeterministic, command.Index, command.ID))
 		}
 	} else {
+		if command.Kind == CommandCancel {
+			w.cancellationCount++
+		}
 		w.checkEventCapacity()
 		w.commands = append(w.commands, command)
 	}
 	w.cursor++
-	future := &Future{workflow: w, id: command.ID}
+	future := &Future{workflow: w, id: command.ID, kind: command.Kind}
 	if command.Kind == CommandSignal {
 		future.signalName = command.Name
 	}
@@ -127,6 +132,10 @@ func (f *Future) Get() ([]byte, error) {
 		panic(flowControl{})
 	}
 	w.advance(result)
+	if result.cancellation != nil {
+		c := result.cancellation
+		return nil, &CancelledError{CommandID: c.TargetID, Attempt: c.Attempt, Heartbeat: cloneHeartbeat(c.Heartbeat)}
+	}
 	if result.value.Failure != nil {
 		failure := *result.value.Failure
 		if result.value.Heartbeat != nil {
@@ -153,7 +162,12 @@ func (c Command) validate() error {
 	if c.Kind != CommandSelect && len(c.Candidates) != 0 {
 		return fmt.Errorf("%w: only selection commands accept candidates", durable.ErrInvalid)
 	}
+	if c.Kind != CommandCancel && c.TargetID != "" {
+		return fmt.Errorf("%w: only cancellation commands accept a target", durable.ErrInvalid)
+	}
 	switch c.Kind {
+	case CommandCancel:
+		return validateCancellationCommand(c)
 	case CommandSelect:
 		return validateSelectionCommand(c)
 	case durable.TaskActivity:
@@ -190,5 +204,5 @@ func (c Command) validate() error {
 func sameCommand(a, b Command) bool {
 	return a.Version == b.Version && a.Index == b.Index && a.ID == b.ID && a.Kind == b.Kind &&
 		a.Name == b.Name && a.Queue == b.Queue && bytes.Equal(a.Input, b.Input) &&
-		a.Delay == b.Delay && a.Deadline.Equal(b.Deadline) && sameActivityOptions(a.ActivityOptions, b.ActivityOptions) && slices.Equal(a.Candidates, b.Candidates)
+		a.Delay == b.Delay && a.Deadline.Equal(b.Deadline) && sameActivityOptions(a.ActivityOptions, b.ActivityOptions) && slices.Equal(a.Candidates, b.Candidates) && a.TargetID == b.TargetID
 }
