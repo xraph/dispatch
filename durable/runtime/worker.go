@@ -123,7 +123,7 @@ func (w *Worker) Run(ctx context.Context) error {
 	defer cancel()
 	failures := make(chan error, 1)
 	var group sync.WaitGroup
-	for _, kind := range []durable.TaskKind{durable.TaskWorkflow, durable.TaskActivity, durable.TaskTimer, TaskTimeout, TaskChildDelivery} {
+	for _, kind := range []durable.TaskKind{durable.TaskWorkflow, durable.TaskActivity, durable.TaskTimer, TaskTimeout, TaskChildDelivery, TaskExecutionTimeout} {
 		for range w.options.Concurrency {
 			group.Go(func() {
 				for workCtx.Err() == nil {
@@ -157,6 +157,9 @@ func (w *Worker) Run(ctx context.Context) error {
 // RunOnce claims and processes at most one task. Worked is true after a claim,
 // including when processing fails. It is safe to call concurrently.
 func (w *Worker) RunOnce(ctx context.Context, kind durable.TaskKind) (worked bool, err error) {
+	if kind == TaskExecutionTimeout {
+		return w.runExecutionTimeout(ctx)
+	}
 	if kind == TaskChildDelivery {
 		return w.runChildDelivery(ctx)
 	}

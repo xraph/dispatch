@@ -24,6 +24,7 @@ type recordedOutcome struct {
 type replayHistory struct {
 	children              map[string]recordedChildStart
 	termination           *durable.ExecutionTermination
+	timeout               *durable.ExecutionTimeout
 	executionCancellation *recordedExecutionCancellation
 	cancellationRequests  map[string]bool
 	commands              []Command
@@ -61,8 +62,8 @@ func evaluateWorkflow(execution durable.Execution, events []durable.Event, handl
 	if err != nil {
 		return Decision{}, nil, err
 	}
-	if history.termination != nil {
-		return evaluateTermination(execution, events, handler)
+	if history.termination != nil || history.timeout != nil {
+		return evaluateForcedClosure(execution, events, handler)
 	}
 	if history.executionCancellation != nil {
 		return evaluateExecutionCancellation(execution, events, history, handler, false)
@@ -151,6 +152,10 @@ func parseHistory(execution durable.Execution, events []durable.Event) (replayHi
 			}
 		case durable.EventCancellationRequested, EventCancellationStarted, EventWorkflowCancelled:
 			if err := parseExecutionCancellation(&result, event); err != nil {
+				return result, err
+			}
+		case durable.EventWorkflowTimedOut:
+			if err := parseExecutionTimeout(&result, execution, event); err != nil {
 				return result, err
 			}
 		case durable.EventWorkflowTerminated:
@@ -250,7 +255,7 @@ func parseHistory(execution durable.Execution, events []durable.Event) (replayHi
 			}
 		}
 	}
-	if result.terminal != "" && result.terminal != durable.StateTerminated && result.executionCancellation != nil && result.executionCancellation.started == nil {
+	if result.terminal != "" && result.terminal != durable.StateTerminated && result.terminal != durable.StateTimedOut && result.executionCancellation != nil && result.executionCancellation.started == nil {
 		return result, fmt.Errorf("%w: terminal result before cancellation fencing", ErrHistory)
 	}
 	for id, attempt := range result.attempts {

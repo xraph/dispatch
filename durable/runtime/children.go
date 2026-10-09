@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/xraph/dispatch/durable"
 )
@@ -14,7 +15,7 @@ const (
 	TaskChildDelivery            durable.TaskKind = "child_delivery"
 	EventChildStartFailed                         = "workflow.child_start_failed"
 	EventChildCancellationFailed                  = "workflow.child_cancellation_failed"
-	EventWorkflowTimedOut                         = "workflow.timed_out"
+	EventWorkflowTimedOut                         = durable.EventWorkflowTimedOut
 	FailureChildStartConflict                     = "child_start_conflict"
 )
 
@@ -25,6 +26,8 @@ type ChildOptions struct {
 	BuildID           string
 	Queue             string
 	ParentClosePolicy durable.ParentClosePolicy
+	RunTimeout        time.Duration
+	ExecutionTimeout  time.Duration
 }
 
 // ChildCommand retains a child's exact identity and build across parent replay.
@@ -32,6 +35,8 @@ type ChildCommand struct {
 	Key               durable.Key               `json:"key"`
 	BuildID           string                    `json:"build_id"`
 	ParentClosePolicy durable.ParentClosePolicy `json:"parent_close_policy"`
+	RunTimeout        time.Duration             `json:"run_timeout,omitempty"`
+	ExecutionTimeout  time.Duration             `json:"execution_timeout,omitempty"`
 }
 
 var (
@@ -47,6 +52,7 @@ type ChildWorkflowError struct {
 	Child   durable.Key
 	State   durable.State
 	Failure *ApplicationError
+	Timeout *durable.ExecutionTimeout
 }
 
 func (e *ChildWorkflowError) Error() string {
@@ -88,6 +94,10 @@ func cloneChildError(e *ChildWorkflowError) *ChildWorkflowError {
 	if e.Failure != nil {
 		failure := *e.Failure
 		result.Failure = &failure
+	}
+	if e.Timeout != nil {
+		timeout := *e.Timeout
+		result.Timeout = &timeout
 	}
 	return &result
 }
@@ -132,7 +142,7 @@ func (w *Workflow) ChildWorkflow(id, name string, input []byte, options ChildOpt
 	if options.ParentClosePolicy == "" {
 		options.ParentClosePolicy = durable.ParentCloseTerminate
 	}
-	child := &ChildCommand{Key: durable.Key{Namespace: w.key.Namespace, WorkflowID: options.WorkflowID, RunID: identity}, BuildID: options.BuildID, ParentClosePolicy: options.ParentClosePolicy}
+	child := &ChildCommand{Key: durable.Key{Namespace: w.key.Namespace, WorkflowID: options.WorkflowID, RunID: identity}, BuildID: options.BuildID, ParentClosePolicy: options.ParentClosePolicy, RunTimeout: options.RunTimeout, ExecutionTimeout: options.ExecutionTimeout}
 	if child.Key.WorkflowID == w.key.WorkflowID {
 		w.stop(fmt.Errorf("%w: child workflow identity matches parent", durable.ErrInvalid))
 	}
@@ -172,6 +182,11 @@ func (w *Workflow) CancelChild(id string, target *Future) *Future {
 func validateChildCommand(c Command) error {
 	if c.Version != 1 || c.Child == nil || c.Child.Key.Validate() != nil || !validIdentifier(c.Child.BuildID, 512) || !validID(c.Name) || len(c.Input) > 1<<20 || c.ActivityOptions != nil || c.Delay != 0 || !c.Deadline.IsZero() {
 		return fmt.Errorf("%w: invalid child command", durable.ErrInvalid)
+	}
+	for _, timeout := range []time.Duration{c.Child.RunTimeout, c.Child.ExecutionTimeout} {
+		if timeout != 0 && timeout < time.Microsecond {
+			return durable.ErrInvalid
+		}
 	}
 	switch c.Child.ParentClosePolicy {
 	case durable.ParentCloseTerminate, durable.ParentCloseRequestCancel, durable.ParentCloseAbandon:

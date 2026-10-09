@@ -42,7 +42,7 @@ Store tests alone do not qualify a workflow runtime or a deployment.
 | Fenced task claims and durable timer deadlines | Store contract and renewable workers implemented; process-kill qualification open | Expiry, same-owner reclaim, concurrent claims, restart recovery |
 | Deterministic Go workflow runtime | Activity, timer, signal, child and saved-winner selection replay implemented; coroutine and SDK expansion open | Recorded-history replay with no repeated external effects, changed-command rejection |
 | Activity retries and timeout classes | Queue, attempt, overall and heartbeat deadlines, progress recovery, retry policies and asynchronous Go callbacks implemented; remote authorization and process qualification open | Queue, attempt, overall and heartbeat deadlines; heartbeat progress; asynchronous completion |
-| Workflow deadlines and whole-workflow retries | Run/execution deadlines, fencing and atomic timeout closure implemented; runtime polling, replay and retries open | Expiry across lock waits, durable timeout closure, frozen replay, inherited execution deadlines across run chains |
+| Workflow deadlines and whole-workflow retries | Run/execution deadlines, fencing, atomic closure, runtime polling and frozen replay implemented; retries and run chains open | Expiry across lock waits, durable timeout closure, frozen replay, inherited execution deadlines across run chains |
 | Signals, queries, updates and signal-with-start | Atomic signals, signal-with-start, Go receive replay and explicit/current/latest queries implemented; tracked updates open | Namespace isolation, deduplication, atomic acceptance, update results, read-only queries |
 | Child workflows and cancellation | Individual future, whole-workflow and child cancellation plus child composition implemented; cooperative external-activity completion acknowledgment open | Stable child identity, duplicate creation prevention, parent-close policies, cancellation propagation |
 | Compensation, pause, termination and reset | Parent-close termination implemented; operator controls, compensation, pause and reset open | Resumable compensation attempts, audited controls, immutable reset lineage |
@@ -1302,10 +1302,10 @@ responses, replace connection pools, and recover the original identity and recei
 Live PostgreSQL workers and the engine complete parent/child workflows through their
 normal pollers.
 
-Child result decoding includes timed_out, but workflow deadline scheduling and
-continue-as-new ownership remain separate open work. Operator transport, Dashboard
-flows, remote authorization and production failure/load qualification also remain
-open.
+At this child checkpoint, result decoding included timed_out while deadline
+scheduling was still open. The workflow timeout sections below record its later
+implementation. Continue-as-new ownership, operator transport, Dashboard flows,
+remote authorization and production failure/load qualification remain open.
 
 2026-10-08: the complete child workflow change passed independent review through
 7683dbd with no blocking findings. The reviewer independently ran the focused child
@@ -1314,11 +1314,12 @@ checks passed make f, make l, go test ./..., engine/runtime/memory race tests an
 the full durable PostgreSQL integration race suite (130.982 seconds). The runnable
 example completed both parent and child.
 
-This evidence does not qualify workflow deadlines, timed-out query reconstruction,
-run chains, operator transport, remote authorization, Dashboard flows, process kills,
-failover, fleet load, disaster recovery or physical interruption of external work.
+The child checkpoint evidence alone does not qualify workflow deadlines or timed-out
+query reconstruction. Run chains, operator transport, remote authorization, Dashboard
+flows, process kills, failover, fleet load, disaster recovery and physical interruption
+of external work still need separate implementation or qualification.
 Future retention must preserve pending delivery targets before changing relationship
-retention. These remain required work in the roadmap.
+retention. The delivery table tracks those remaining requirements.
 
 ## Durable query target contract
 
@@ -1405,16 +1406,16 @@ uses store time after ownership locks. PostgreSQL guards also fence older writer
 A child delivery to an expired running target is acknowledged as ignored_expired;
 its timeout processor owns the terminal outcome.
 
-A separate namespace poller will claim expired executions without requiring their
-original workflow build or handler. Timeout closure must save its typed terminal
+A separate namespace poller claims expired executions without requiring their
+original workflow build or handler. Timeout closure saves its typed terminal
 event, projection, pending-task fencing, child lifecycle deliveries and receipt
-atomically. Queries will replay the saved prefix without generating more work.
+atomically. Queries replay the saved prefix without generating more work.
 External activities can continue outside Dispatch until they observe cancellation;
 a rejected completion does not undo an external side effect.
 
-Implementation is in progress. Deadline persistence and enforcement, durable
-closure, and runtime polling have separate validation gates. This contract does
-not yet establish a usable workflow timeout service or run-chain support.
+Deadline persistence and enforcement, durable closure, and runtime polling have
+separate validation gates. The runtime integration below completes single-run
+timeout processing. Retry chains and continue-as-new remain open.
 
 2026-10-09: memory and PostgreSQL persist deadlines in ordinary starts,
 signal-with-start and child creation. The earliest deadline fences new progress;
@@ -1425,7 +1426,7 @@ completion, signal and cancellation wait for locks. Tiny timeouts still allow
 atomic creation. Migration retries retain deadlines, populated downgrade fails,
 and deadlines survive connection-pool replacement. Child deliveries acknowledge
 expired targets without advancing their history. Automatic timeout closure and
-runtime replay remain the next implementation gates.
+runtime replay were the next gates at this store checkpoint.
 
 This store checkpoint passes make f, make l, go test ./..., engine/runtime/memory
 race tests and the full PostgreSQL durable race suite (154.797s). An earlier full
@@ -1459,9 +1460,59 @@ same-owner reclaim, child results and all parent-close policies. Fault injection
 at history, projection, task, child-delivery and receipt writes verifies rollback.
 Memory also rejects task-version overflow before publishing any closure. Deadline
 and lease checks run after lock waits, and closure receipts survive pool replacement.
-Runtime polling, frozen timeout replay and child SDK options remain in progress;
-these store APIs alone do not qualify automatic workflow timeout processing.
+Runtime polling, frozen timeout replay and child SDK options were still pending
+at this checkpoint; these store APIs alone did not qualify automatic processing.
 
 The timeout-closure store checkpoint passes make f, make l, go test ./...,
 engine/runtime/memory races and the full PostgreSQL durable race suite (198.902s).
 Its independent review remains scheduled after runtime integration.
+
+## Workflow timeout runtime
+
+Run `go run ./examples/durable-timeouts` to see a child on an unserved build time
+out, its parent handle the typed result, and the parent reach its own deadline
+while waiting for approval. You can still query the saved parent state afterward.
+The example uses memory and does not retain data across process restarts.
+
+Worker.Run now owns a namespace timeout poller. For explicit driving, call
+RunOnce with runtime.TaskExecutionTimeout. It claims without a build or queue
+filter, validates the returned grant, and retries the identical closure request
+up to three times after an ambiguous response. A definitive ownership rejection
+stops that attempt. Processing failures reach the worker supervisor.
+
+You can set RunTimeout and ExecutionTimeout on StartRequest and ChildOptions.
+Child commands capture both values, so changing either during replay is a
+nondeterministic-code error. Zero keeps the existing unlimited behavior and
+encoding. A positive duration must be at least one microsecond. Stores resolve
+absolute deadlines using the child's actual creation timestamp, and replay checks
+typed child timeout results against that recorded start and captured policy.
+ChildWorkflowError.Timeout contains a private copy of the kind and deadline;
+errors.Is(err, runtime.ErrChildTimedOut) also works for older child histories
+that used the strict ApplicationError timeout payload.
+
+Timeout replay validates the saved deadline, timeout kind and event time before
+reconstructing workflow state. Queries freeze at the persisted history prefix,
+including before cancellation fencing and during cleanup. They cannot create
+commands, consume signals or start more cleanup. You still need the run's
+compatible workflow handler to query it, even though closing an expired run does
+not require that handler or its build.
+
+Focused runtime and engine tests cover automatic polling and shutdown, retired
+builds, identical retries after response loss, malformed grants and history,
+changed child policies, typed child errors and frozen queries. PostgreSQL tests
+replace connection pools before timeout processing and result delivery, and
+verify that queries leave execution projections, history and task rows unchanged
+in initial, normal, cancellation-accepted and cleanup phases.
+
+2026-10-09: this runtime checkpoint passes make f, make l, go test ./...,
+engine/durable/runtime/memory races and the full durable PostgreSQL race suite
+(256.490s). The example prints the parent's timed_out state and its saved
+child-timeout observation. The whole deadline change still awaits independent
+review from its original base.
+
+These checks do not qualify process kills, database failover or disaster recovery.
+ExecutionTimeout is enforced for the current run; inheritance across retries and
+continue-as-new still needs its own implementation. Neither timeout closure nor
+task fencing can undo an external effect. Cooperative external-activity completion
+acknowledgment, remote authorization and audit, rollout compatibility and operator
+transport remain separate requirements in the delivery table.

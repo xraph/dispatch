@@ -80,6 +80,11 @@ func parseChildDelivery(history *replayHistory, commands map[string]Command, par
 		if err != nil {
 			return err
 		}
+		if failure != nil && failure.Timeout != nil {
+			if err := validateChildExecutionTimeout(*failure.Timeout, command, start.at, event.Time); err != nil {
+				return err
+			}
+		}
 		outcome.child = failure
 		outcome.value.Output = bytes.Clone(message.Output)
 	}
@@ -99,11 +104,12 @@ func childTerminalError(message durable.ChildMessage) (*ChildWorkflowError, erro
 			return nil, fmt.Errorf("%w: child completion output changed", ErrHistory)
 		}
 		return nil, nil
-	case durable.StateFailed, durable.StateTimedOut:
-		expected := EventWorkflowFailed
-		if message.State == durable.StateTimedOut {
-			expected = EventWorkflowTimedOut
+	case durable.StateTimedOut:
+		if err := decodeChildExecutionTimeout(event, failure); err != nil {
+			return nil, err
 		}
+	case durable.StateFailed:
+		expected := EventWorkflowFailed
 		var application ApplicationError
 		if event.Type != expected || decode(event.Payload, &application) != nil || !validFailure(&application) {
 			return nil, fmt.Errorf("%w: invalid child failure", ErrHistory)

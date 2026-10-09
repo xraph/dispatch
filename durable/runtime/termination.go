@@ -20,7 +20,7 @@ func parseTermination(history *replayHistory, event durable.Event) error {
 	return nil
 }
 
-func evaluateTermination(execution durable.Execution, events []durable.Event, handler WorkflowFunc) (Decision, *Workflow, error) {
+func evaluateForcedClosure(execution durable.Execution, events []durable.Event, handler WorkflowFunc) (Decision, *Workflow, error) {
 	prefix := execution
 	prefix.State, prefix.Output, prefix.LastSequence = durable.StateRunning, nil, execution.LastSequence-1
 	history, err := parseHistory(prefix, events[:prefix.LastSequence])
@@ -40,5 +40,5 @@ func evaluateTermination(execution durable.Execution, events []durable.Event, ha
 			return Decision{}, nil, replayErr
 		}
 	}
-	return Decision{State: durable.StateTerminated}, w, nil
+	return Decision{State: execution.State}, w, nil
 }
