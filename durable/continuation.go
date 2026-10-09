@@ -112,11 +112,12 @@ func validateContinuation(r CommitRequest) error {
 
 // ContinuationBatch is staged completely before either run becomes visible.
 type ContinuationBatch struct {
-	Spec       ContinueSpec
-	RetryEvent *EventInput
-	Execution  Execution
-	History    []Event
-	Terminal   EventInput
+	RetrySuppressed bool
+	Spec            ContinueSpec
+	RetryEvent      *EventInput
+	Execution       Execution
+	History         []Event
+	Terminal        EventInput
 }
 
 // PrepareContinuation builds a successor and carries accepted, unconsumed signals.
@@ -324,8 +325,11 @@ func pendingContinuationSignals(key Key, history []Event, inputs []EventInput) (
 			return nil, err
 		}
 		size += len(payload)
-		if len(pending) >= 998 || size > 4<<20 {
-			return nil, fmt.Errorf("%w: pending signals exceed continuation carry limit", ErrInvalid)
+		if len(pending) >= 998 {
+			return nil, &retryCapacityError{reason: "signal_count"}
+		}
+		if size > 4<<20 {
+			return nil, &retryCapacityError{reason: "signal_bytes"}
 		}
 		pending = append(pending, signal)
 	}

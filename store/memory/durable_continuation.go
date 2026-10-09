@@ -5,7 +5,7 @@ import (
 )
 
 func (m *Store) prepareContinuationRecord(batch *durable.ContinuationBatch, spec *durable.ContinueSpec) (*executionRecord, error) {
-	if batch == nil {
+	if batch == nil || batch.RetrySuppressed {
 		return nil, nil
 	}
 	if spec == nil {

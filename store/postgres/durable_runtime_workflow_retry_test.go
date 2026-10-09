@@ -16,3 +16,10 @@ func TestDurableWorkflowRetryChains(t *testing.T) {
 		return s
 	})
 }
+
+func TestDurableRunChainHistoryBoundary(t *testing.T) {
+	durabletest.RunRunChainHistoryBoundary(t, setupTestStore(t))
+}
+func TestDurableWorkflowRetryCapacity(t *testing.T) {
+	durabletest.RunWorkflowRetryCapacity(t, setupTestStore(t))
+}

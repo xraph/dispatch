@@ -25,11 +25,11 @@ func evaluateForcedClosure(execution durable.Execution, events []durable.Event, 
 	prefix.State, prefix.Output, prefix.LastSequence = durable.StateRunning, nil, execution.LastSequence-1
 	// Full history validation already checked the retry pair. Neither event is
 	// part of the running prefix used to reconstruct pre-timeout query closures.
-	if prefix.LastSequence > 0 && events[prefix.LastSequence-1].Type == durable.EventWorkflowRetryScheduled {
+	if prefix.LastSequence > 0 && (events[prefix.LastSequence-1].Type == durable.EventWorkflowRetryScheduled || events[prefix.LastSequence-1].Type == durable.EventWorkflowRetrySuppressed) {
 		prefix.LastSequence--
 		prefix.NextRunID = ""
 	}
-	history, err := parseHistory(prefix, events[:prefix.LastSequence])
+	history, err := parseHistoryWithin(prefix, events[:prefix.LastSequence], maxClosedHistory)
 	if err != nil {
 		return Decision{}, nil, err
 	}

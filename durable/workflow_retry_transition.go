@@ -2,6 +2,7 @@ package durable
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math"
 	"time"
@@ -9,8 +10,9 @@ import (
 )
 
 const (
-	EventWorkflowRetryScheduled = "workflow.retry_scheduled"
-	FailureWorkflowRunTimeout   = "workflow_run_timeout"
+	EventWorkflowRetrySuppressed = "workflow.retry_suppressed"
+	EventWorkflowRetryScheduled  = "workflow.retry_scheduled"
+	FailureWorkflowRunTimeout    = "workflow_run_timeout"
 )
 
 // WorkflowRetryScheduled binds the original failed/timed-out outcome to its
@@ -20,6 +22,28 @@ type WorkflowRetryScheduled struct {
 	Next        RunMetadata   `json:"next"`
 	Delay       time.Duration `json:"delay"`
 	FailureType string        `json:"failure_type"`
+}
+
+// WorkflowRetrySuppressed records why a valid policy could not carry retained
+// input into a bounded successor. The source keeps its original terminal outcome.
+type WorkflowRetrySuppressed struct {
+	Version            int    `json:"version"`
+	Reason             string `json:"reason"`
+	SourceLastSequence int64  `json:"source_last_sequence"`
+	FailureType        string `json:"failure_type"`
+}
+
+type retryCapacityError struct{ reason string }
+
+func (e *retryCapacityError) Error() string { return "durable: retry capacity exhausted: " + e.reason }
+func (e *retryCapacityError) Unwrap() error { return ErrInvalid }
+
+func suppressedWorkflowRetry(reason, failureType string, sequence int64) (*ContinuationBatch, error) {
+	payload, err := json.Marshal(WorkflowRetrySuppressed{Version: 1, Reason: reason, FailureType: failureType, SourceLastSequence: sequence})
+	if err != nil {
+		return nil, err
+	}
+	return &ContinuationBatch{RetrySuppressed: true, RetryEvent: &EventInput{Type: EventWorkflowRetrySuppressed, Payload: payload}}, nil
 }
 
 type workflowFailure struct {
@@ -87,9 +111,12 @@ func PrepareWorkflowRetry(current Execution, state State, inputs []EventInput, h
 		switch event.Type {
 		case EventCancellationRequested, "workflow.cancellation_started":
 			return nil, nil
-		case EventWorkflowRetryScheduled, EventWorkflowContinued, "workflow.completed", "workflow.failed", "workflow.cancelled", EventWorkflowTerminated, EventWorkflowTimedOut:
+		case EventWorkflowRetrySuppressed, EventWorkflowRetryScheduled, EventWorkflowContinued, "workflow.completed", "workflow.failed", "workflow.cancelled", EventWorkflowTerminated, EventWorkflowTimedOut:
 			return nil, ErrInvalid
 		}
+	}
+	if current.LastSequence > 100000 {
+		return suppressedWorkflowRetry("source_history", failureType, current.LastSequence)
 	}
 	id, err := Fingerprint("workflow-retry", current.Key)
 	if err != nil {
@@ -98,6 +125,10 @@ func PrepareWorkflowRetry(current Execution, state State, inputs []EventInput, h
 	spec := ContinueSpec{RunID: "retry-" + id, WorkflowType: current.WorkflowType, BuildID: current.BuildID, Queue: queue, Input: current.Input, RunTimeout: current.RunTimeout}
 	batch, err := prepareRunSuccessor(current, spec, history, inputs, now, current.WorkflowAttempt()+1, available)
 	if err != nil {
+		var capacity *retryCapacityError
+		if errors.As(err, &capacity) {
+			return suppressedWorkflowRetry(capacity.reason, failureType, current.LastSequence)
+		}
 		return nil, err
 	}
 	payload, err := json.Marshal(WorkflowRetryScheduled{Version: 1, Next: RunMetadataOf(batch.Execution), Delay: delay, FailureType: failureType})

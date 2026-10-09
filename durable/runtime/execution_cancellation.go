@@ -55,7 +55,7 @@ func evaluateExecutionCancellation(execution durable.Execution, events []durable
 	cancellation := history.executionCancellation
 	prefix := execution
 	prefix.State, prefix.Output, prefix.LastSequence = durable.StateRunning, nil, cancellation.sequence-1
-	normal, err := parseHistory(prefix, events[:prefix.LastSequence])
+	normal, err := parseHistoryWithin(prefix, events[:prefix.LastSequence], historyLimit(execution))
 	if err != nil {
 		return Decision{}, nil, err
 	}

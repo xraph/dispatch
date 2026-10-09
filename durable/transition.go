@@ -72,7 +72,7 @@ func (t TaskToken) Validate() error {
 // Validate checks a transition before any writes occur.
 func (r CommitRequest) Validate() error {
 	for _, event := range r.Events {
-		if event.Type == EventWorkflowRetryScheduled {
+		if event.Type == EventWorkflowRetryScheduled || event.Type == EventWorkflowRetrySuppressed {
 			return fmt.Errorf("%w: retry links are store-owned", ErrInvalid)
 		}
 	}

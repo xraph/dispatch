@@ -33,7 +33,7 @@ func (w *Worker) readSnapshotHistory(ctx context.Context, key durable.Key, execu
 	if execution.Key != key || execution.BuildID != w.options.BuildID || execution.Namespace != w.options.Namespace {
 		return execution, nil, fmt.Errorf("%w: execution does not match worker routing", durable.ErrInvalid)
 	}
-	if execution.Revision < 1 || execution.LastSequence < 1 || execution.LastSequence > 100000 {
+	if execution.Revision < 1 || execution.LastSequence < 1 || execution.LastSequence > historyLimit(execution) {
 		return execution, nil, fmt.Errorf("%w: history exceeds runtime bounds", ErrHistory)
 	}
 	events := make([]durable.Event, 0, execution.LastSequence)

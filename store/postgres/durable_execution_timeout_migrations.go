@@ -48,7 +48,10 @@ const executionTimeoutGuardSQL = ` CREATE OR REPLACE FUNCTION dispatch_execution
  RAISE EXCEPTION USING ERRCODE='DX003',MESSAGE='execution timeout lease expired'; END IF;
  RETURN TRUE;
  END IF;
- IF new_run.state='timed_out' AND new_run.timeout_owner='' AND new_run.timeout_lease_until IS NULL AND new_run.revision=old_run.revision+1 AND new_run.last_sequence=old_run.last_sequence+1
+ IF new_run.state='timed_out' AND new_run.timeout_owner='' AND new_run.timeout_lease_until IS NULL AND new_run.revision=old_run.revision+1 AND (new_run.last_sequence=old_run.last_sequence+1 OR
+ (new_run.last_sequence=old_run.last_sequence+2 AND to_jsonb(old_run)->>'retry_policy' IS NOT NULL
+ AND EXISTS(SELECT 1 FROM dispatch_execution_events WHERE namespace=old_run.namespace AND workflow_id=old_run.workflow_id AND run_id=old_run.run_id
+ AND sequence=old_run.last_sequence+1 AND type='workflow.retry_suppressed' AND occurred_at=new_run.updated_at)))
  AND new_run.output=''::bytea AND new_run.updated_at>=LEAST(old_run.run_deadline_at,old_run.execution_deadline_at)
  AND (to_jsonb(old_run)-ARRAY['state','revision','last_sequence','output','updated_at','timeout_owner','timeout_lease_until'])=(to_jsonb(new_run)-ARRAY['state','revision','last_sequence','output','updated_at','timeout_owner','timeout_lease_until']) THEN
  IF old_run.timeout_owner='' OR old_run.timeout_epoch<1 OR old_run.timeout_lease_until IS NULL OR old_run.timeout_lease_until<=clock_timestamp() THEN

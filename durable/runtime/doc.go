@@ -132,8 +132,9 @@
 // not launch an evaluator goroutine that could outlive cancellation. Input and
 // output are each limited to 1 MiB. Query names contain at most 200 bytes.
 //
-// Evaluate requires a complete history snapshot with at most 100,000 events and
-// accepts at most 999 new command, signal consumption, selection and cancellation
+// Evaluate requires a complete history snapshot with at most 100,000 events for
+// a running execution, or 101,000 for a closed execution including its final
+// decision. It accepts at most 999 new command, signal consumption, selection and cancellation
 // acknowledgment events per decision, or 998 when a workflow retry policy is set
 // to leave room for a store-owned retry link. Command IDs, names and queues contain at
 // most 200 bytes. History format version 1 is explicit; unknown versions and event

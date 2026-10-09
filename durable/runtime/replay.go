@@ -143,9 +143,23 @@ func invoke(w *Workflow, handler WorkflowFunc, input []byte) (output []byte, err
 	return handler(w, input)
 }
 
+const maxLiveHistory = 100000
+const maxClosedHistory = maxLiveHistory + 1000
+
+func historyLimit(execution durable.Execution) int64 {
+	if execution.State == durable.StateRunning {
+		return maxLiveHistory
+	}
+	return maxClosedHistory
+}
+
 func parseHistory(execution durable.Execution, events []durable.Event) (replayHistory, error) {
+	return parseHistoryWithin(execution, events, historyLimit(execution))
+}
+
+func parseHistoryWithin(execution durable.Execution, events []durable.Event, limit int64) (replayHistory, error) {
 	result := replayHistory{children: make(map[string]recordedChildStart), selections: make(map[string]Selection), signals: make(map[string]recordedSignal), signalQueues: make(map[string][]string), signalOffsets: make(map[string]int), outcomes: make(map[string]recordedOutcome), attempts: make(map[string]recordedAttempt), scheduled: make(map[string]time.Time)}
-	if len(events) == 0 || len(events) > 100000 || execution.LastSequence != int64(len(events)) ||
+	if len(events) == 0 || int64(len(events)) > limit || execution.LastSequence != int64(len(events)) ||
 		execution.CreatedAt.IsZero() || events[0].Type != EventStarted ||
 		!events[0].Time.Equal(execution.CreatedAt) || !bytes.Equal(events[0].Payload, execution.Input) {
 		return result, fmt.Errorf("%w: missing or inconsistent execution history", ErrHistory)
@@ -167,6 +181,10 @@ func parseHistory(execution durable.Execution, events []durable.Event) (replayHi
 			carryOpen = false
 		}
 		switch event.Type {
+		case durable.EventWorkflowRetrySuppressed:
+			if err := validateWorkflowRetrySuppression(execution, events, i); err != nil {
+				return result, err
+			}
 		case durable.EventWorkflowRetryScheduled:
 			if err := validateWorkflowRetry(execution, events, i); err != nil {
 				return result, err

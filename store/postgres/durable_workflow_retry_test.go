@@ -387,3 +387,70 @@ func TestDurableWorkflowRetryBackfillRollback(t *testing.T) {
 		}
 	}
 }
+
+func TestDurableWorkflowRetryCapacityMigration(t *testing.T) {
+	s, dsn := setupTestStoreConnection(t)
+	pg := pgdriver.Unwrap(s.DB())
+	var migration *migrate.Migration
+	for _, m := range postgres.Migrations.Migrations() {
+		if m.Name == "repair_durable_retry_capacity_closure" {
+			migration = m
+		}
+	}
+	if migration == nil {
+		t.Fatal("capacity closure migration missing")
+	}
+	_, exec := workflowRetryMigration(t, s)
+	for range 2 {
+		if err := migration.Up(t.Context(), exec); err != nil {
+			t.Fatal(err)
+		}
+	}
+	r := workflowRetryStart(t)
+	r.RunTimeout = time.Second
+	r.ExecutionTimeout = 0
+	if _, err := s.StartExecution(t.Context(), r); err != nil {
+		t.Fatal(err)
+	}
+	for i := range 4 {
+		if _, err := s.SignalExecution(t.Context(), durable.SignalRequest{Key: r.Key, RequestID: fmt.Sprint(i), BuildID: r.BuildID, Name: "large", Input: make([]byte, 1<<20)}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	e, err := s.GetExecution(t.Context(), r.Key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(max(time.Until(e.RunDeadlineAt)+time.Millisecond, 0))
+	_, request := timeoutGrant(t, s, r, time.Minute)
+	if _, err := pg.Exec(t.Context(), `CREATE OR REPLACE FUNCTION dispatch_execution_timeout_update_allowed(old_run dispatch_executions,new_run dispatch_executions) RETURNS boolean LANGUAGE sql AS $$ SELECT FALSE $$`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.ApplyExecutionTimeout(t.Context(), request); !errors.Is(err, durable.ErrExecutionDeadline) {
+		t.Fatalf("old guard accepted suppression: %v", err)
+	}
+	after, err := s.GetExecution(t.Context(), r.Key)
+	if err != nil || after.State != durable.StateRunning || after.LastSequence != e.LastSequence || after.Revision != e.Revision {
+		t.Fatalf("rejected suppression leaked state: %+v %v", after, err)
+	}
+	tail, err := s.ReadHistory(t.Context(), r.Key, e.LastSequence, 1000)
+	if err != nil || len(tail) != 0 {
+		t.Fatalf("rejected suppression leaked history: %+v %v", tail, err)
+	}
+	for range 2 {
+		if err := migration.Up(t.Context(), exec); err != nil {
+			t.Fatal(err)
+		}
+	}
+	receipt, err := s.ApplyExecutionTimeout(t.Context(), request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s = reopenAsyncStore(t, s, dsn)
+	if again, err := s.ApplyExecutionTimeout(t.Context(), request); err != nil || again != receipt {
+		t.Fatalf("suppression recovery: %+v %v", again, err)
+	}
+	if err := migration.Down(t.Context(), exec); err == nil {
+		t.Fatal("downgrade discarded retained suppression support")
+	}
+}

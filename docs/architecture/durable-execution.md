@@ -42,11 +42,11 @@ Store tests alone do not qualify a workflow runtime or a deployment.
 | Fenced task claims and durable timer deadlines | Store contract and renewable workers implemented; process-kill qualification open | Expiry, same-owner reclaim, concurrent claims, restart recovery |
 | Deterministic Go workflow runtime | Activity, timer, signal, child and saved-winner selection replay implemented; coroutine and SDK expansion open | Recorded-history replay with no repeated external effects, changed-command rejection |
 | Activity retries and timeout classes | Queue, attempt, overall and heartbeat deadlines, progress recovery, retry policies and asynchronous Go callbacks implemented; remote authorization and process qualification open | Queue, attempt, overall and heartbeat deadlines; heartbeat progress; asynchronous completion |
-| Workflow deadlines and whole-workflow retries | Run/execution deadlines, fencing, closure, opt-in retry successors and replay implemented; whole-plan review pending | Expiry across lock waits, durable timeout closure, frozen replay, inherited execution deadlines across run chains |
+| Workflow deadlines and whole-workflow retries | Run/execution deadlines, fencing, closure, opt-in retry successors and replay implemented; whole-plan review and capacity corrections verified | Expiry across lock waits, durable timeout closure, frozen replay, inherited execution deadlines across run chains |
 | Signals, queries, updates and signal-with-start | Atomic signals, signal-with-start, Go receive replay and explicit/current/latest queries implemented; tracked updates open | Namespace isolation, deduplication, atomic acceptance, update results, read-only queries |
 | Child workflows and cancellation | Individual future, whole-workflow and child cancellation plus child composition implemented; cooperative external-activity completion acknowledgment open | Stable child identity, duplicate creation prevention, parent-close policies, cancellation propagation |
 | Compensation, pause, termination and reset | Parent-close termination implemented; operator controls, compensation, pause and reset open | Resumable compensation attempts, audited controls, immutable reset lineage |
-| Continue-as-new and run chains | Store/runtime continuation and retries, signal handoff and child-chain routing implemented; whole-plan review pending | Bounded history, message handoff and version inheritance |
+| Continue-as-new and run chains | Store/runtime continuation and retries, signal handoff and child-chain routing implemented; whole-plan review and capacity corrections verified | Bounded history, message handoff and version inheritance |
 | Schedules | Open | Overlap, catch-up, backfill, timezones and unique scheduled occurrences |
 | Deployment versioning | Pinned build polling implemented; rollout and patch markers open | Pinned build routing, gradual rollout, patch markers, replay checks, drainage |
 | Distributed scheduling | Open | Partition ownership, long polling, fairness, fleet-wide quotas and backpressure under load |
@@ -1656,10 +1656,53 @@ copied policies, backoff wakeups, finality, mixed chains, child results and orig
 receipts after later runs. PostgreSQL checks replace connection pools, reapply old
 and new migrations, reject metadata changes and downgrade, wait through grant and
 execution expiry, and inject failures at 26 closure/successor persistence boundaries.
-The final whole-plan review is pending. Full deployment and production recovery
-qualification remain separate roadmap work.
+The whole-plan review and its capacity corrections are recorded below. Full
+deployment and production recovery qualification remain separate roadmap work.
 
 Qualification for this checkpoint: `make f`, `make l` with zero issues,
 `go test ./...`, and durable/runtime/engine/memory races passed. The complete
 durable PostgreSQL integration race suite passed in 268.707 seconds after the
 lineage-backfill regression was fixed. Both continuation and retry examples ran.
+
+## Run-chain review corrections
+
+The independent whole-plan review found two Important defects. An accepted
+closing decision could push the source beyond the runtime's history reader bound.
+An automatic retry could also reject an oversized carry batch after run expiry,
+leaving the source running when its handler could no longer drain accepted input.
+
+Closed replay now reserves a 1000-event closing tail above the 100000-event live
+bound. Automatic retry capacity exhaustion records `workflow.retry_suppressed`
+before the original failure or timeout, retains accepted messages and receipts,
+and delivers a final child result. The source releases its workflow identity.
+See the [run-chain contract](durable-run-chains.md) for capacity and reader limits.
+The review found no Critical issues or deferred minors. Both Important findings
+were reproduced before their fixes. The final `make f`, `make l` with zero issues,
+`go test ./...`, and durable/runtime/engine/memory race checks pass. The complete
+PostgreSQL durable integration race suite passes in 461.540 seconds. It includes
+maximum closing batches, count/byte/history suppression, historical queries,
+final child delivery, migration recovery and exact receipts.
+
+The reviewer independently passed local races and focused PostgreSQL migration
+and lock-expiry checks. The final regression and full-suite evidence comes from
+the implementation pass. No second review was commissioned. Namespace security,
+operator integration, compatible-reader rollout, external-effect idempotency,
+fleet capacity, process-kill recovery, failover and disaster recovery remain
+required roadmap gates. This checkpoint qualifies memory and PostgreSQL only.
+
+## Durable operator integration discovery
+
+The current Go contributor's `workflows.list` and `workflows.get` inspect legacy
+workflow runs and checkpoints through `store.Store`. They do not expose durable
+namespace/workflow/run identity or event histories. The existing React Dispatch
+plugin registers Overview, Queues, Workers, Handlers and Engine pages. It has no
+durable execution page yet.
+
+Durable operator work therefore needs namespace-authorized read contracts and
+paged execution/task discovery before the React pages can show complete persisted
+state. Build those views through the existing contributor and plugin transport,
+then add history, chain, message and retry-suppression inspection. Keep legacy run
+identities distinct. Capability, denied, loading, empty and failed states need
+separate treatment, followed by actual desktop and narrow-layout verification.
+This source inventory is planning evidence; no durable dashboard integration is
+implemented or browser-qualified by the run-chain checkpoint.

@@ -2,7 +2,9 @@
 
 Status: the memory and PostgreSQL stores implement atomic continuation and opt-in
 workflow retries. The Go runtime supports ContinueAsNew, retry/continuation history
-replay, RunInfo and historical queries. Final whole-plan qualification is pending.
+replay, RunInfo and historical queries. Independent review and the regression fix
+pass are complete. Repository checks and the full durable PostgreSQL race suite
+pass. Production and fleet qualification remain open.
 The full [durability roadmap](durable-execution.md#required-work-and-evidence)
 remains the completion gate.
 
@@ -74,7 +76,10 @@ in the handoff decision counts before choosing carried signals. Reject an
 oversized carry batch without partial closure so the workflow can drain messages.
 The store accepts at most 998 carried signals and 4 MiB of encoded carry records,
 and requires a source history of at most 100000 events. Consumption in the same decision
-can bring a pending batch within those limits.
+can bring a pending batch within those limits. Live runtime replay retains the
+100000-event limit. Closed replay and queries accept up to 101000 events, including
+the final decision and store-generated closure records. Continue before the live
+limit; the extra closing allowance does not extend running execution.
 Cancellation accepted before handoff prevents normal continuation and enters
 cleanup; a cancellation racing after handoff targets the successor under the
 same workflow identity lock. Exact older receipts still identify their original
@@ -134,6 +139,23 @@ consume outcomes. The coordinator creates a successor only when its availability
 precedes the chain's execution deadline. A delayed run can still expire before a
 worker polls it. A retry policy reserves one additional history slot, leaving at
 most 998 decision events before the final state and retry records.
+
+If the saved source exceeds 100000 events, or unread carry exceeds 998 signals or
+4 MiB, an automatic retry closes the source with its original failure or timeout.
+It records `workflow.retry_suppressed` immediately before that terminal event, with
+`source_history`, `signal_count` or `signal_bytes` as the reason. The record includes
+the pre-decision sequence and failure type so replay can check the decision. Your
+accepted signals and receipts remain in the closed source, and a waiting parent
+receives the final child result. There is no successor. This rule also applies when
+you have no execution timeout; an expired run cannot depend on workflow code
+running again to drain its inbox. Oversized explicit continuation still rejects
+without closing, so a live workflow can drain input before trying again.
+
+The capacity repair migration updates existing PostgreSQL deadline guards while
+retaining their live timeout-grant requirement. Reapplying earlier migrations keeps
+the repair. Downgrade is refused while suppression history is retained. Histories
+larger than the closed reader limit remain available through paged store reads;
+this repair does not qualify unbounded runtime replay or an admission-quota system.
 
 Your retry starts with the same input, workflow type, build, queue and timeout
 configuration. Consumed signals and activity results remain in the failed run;

@@ -41,7 +41,7 @@ func loadSuccessorHistory(ctx context.Context, tx driver.Tx, key durable.Key) ([
 }
 
 func insertContinuation(ctx context.Context, tx driver.Tx, batch *durable.ContinuationBatch, spec *durable.ContinueSpec) error {
-	if batch == nil {
+	if batch == nil || batch.RetrySuppressed {
 		return nil
 	}
 	e := batch.Execution
