@@ -2,7 +2,6 @@ package runtime
 
 import (
 	"bytes"
-	"fmt"
 
 	"github.com/xraph/dispatch/durable"
 )
@@ -37,13 +36,11 @@ func (w *Workflow) receiveSignal(id, name string) (recordedOutcome, bool) {
 	if offset >= len(queue) {
 		return recordedOutcome{}, false
 	}
-	if len(w.commands)+len(w.signals) >= 999 {
-		w.stop(fmt.Errorf("%w: more than 999 command and consumption events in one decision", durable.ErrInvalid))
-	}
+	w.checkEventCapacity()
 	message := w.history.signals[queue[offset]]
 	w.history.signalOffsets[name] = offset + 1
 	w.signals = append(w.signals, SignalConsumption{Version: 1, CommandID: id, SignalID: message.value.ID})
-	result := recordedOutcome{value: Outcome{Version: 1, CommandID: id, Output: bytes.Clone(message.value.Input)}, at: message.at}
+	result := recordedOutcome{value: Outcome{Version: 1, CommandID: id, Output: bytes.Clone(message.value.Input)}, at: message.at, sequence: message.sequence}
 	w.history.outcomes[id] = result
 	return result, true
 }

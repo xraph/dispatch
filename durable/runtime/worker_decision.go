@@ -48,7 +48,7 @@ func decisionRequest(task durable.Task, execution durable.Execution, decision De
 			return request, err
 		}
 		request.Events = append(request.Events, durable.EventInput{Type: EventCommandScheduled, Payload: data})
-		if decision.State == durable.StateRunning && command.Kind != CommandSignal {
+		if decision.State == durable.StateRunning && command.Kind != CommandSignal && command.Kind != CommandSelect {
 			payload, payloadErr := json.Marshal(taskPayload{Version: 1, Command: command, WorkflowQueue: task.Queue})
 			if payloadErr != nil {
 				return request, payloadErr
@@ -67,6 +67,13 @@ func decisionRequest(task durable.Task, execution durable.Execution, decision De
 			return request, err
 		}
 		request.Events = append(request.Events, durable.EventInput{Type: EventSignalConsumed, Payload: data})
+	}
+	for _, selected := range decision.Selections {
+		data, err := json.Marshal(selected)
+		if err != nil {
+			return request, err
+		}
+		request.Events = append(request.Events, durable.EventInput{Type: EventSelected, Payload: data})
 	}
 	request.State, request.Output = decision.State, decision.Output
 	event := durable.EventInput{Type: EventWorkflowWaiting}

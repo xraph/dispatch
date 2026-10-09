@@ -40,7 +40,7 @@ Store tests alone do not qualify a workflow runtime or a deployment.
 | --- | --- | --- |
 | Atomic history, state, tasks, and durable receipts | Memory and PostgreSQL stores integrated with initial Go runtime | Shared memory/PostgreSQL conformance, rollback, concurrent writers, ambiguous-response retry |
 | Fenced task claims and durable timer deadlines | Store contract and renewable workers implemented; process-kill qualification open | Expiry, same-owner reclaim, concurrent claims, restart recovery |
-| Deterministic Go workflow runtime | Activity, timer and future replay implemented; SDK expansion open | Recorded-history replay with no repeated external effects, changed-command rejection |
+| Deterministic Go workflow runtime | Activity, timer, signal and saved-winner selection replay implemented; coroutine and SDK expansion open | Recorded-history replay with no repeated external effects, changed-command rejection |
 | Activity retries and timeout classes | Queue, attempt, overall and heartbeat deadlines, progress recovery, retry policies and asynchronous Go callbacks implemented; remote authorization and process qualification open | Queue, attempt, overall and heartbeat deadlines; heartbeat progress; asynchronous completion |
 | Signals, queries, updates and signal-with-start | Atomic signals, signal-with-start, Go receive replay and explicit-run queries implemented; tracked updates and current/latest query selection open | Namespace isolation, deduplication, atomic acceptance, update results, read-only queries |
 | Child workflows and cancellation | Open | Stable child identity, duplicate creation prevention, parent-close policies, cancellation propagation |
@@ -894,3 +894,68 @@ updates, remote authorization, lifecycle controls and operator pages remain open
 Unsupported terminal formats fail explicitly. Pool replacement tests establish
 connection recovery; process kills, failover, load and disaster recovery still
 need their own qualification.
+
+
+## Durable selection contract
+
+You can race existing futures with Workflow.Select(id, futures...). The ID is a
+unique command ID within the run. Select returns the winning candidate pointer;
+call Get to read its copied output or recorded failure. If no candidate is ready,
+the workflow yields. Schedule candidates before selecting them. Each call accepts
+1 through 1000 distinct, non-nil activity, timer or signal futures belonging to
+this evaluation. Reusing a ready future in a later Select is allowed; remove prior
+winners yourself when draining a set. Selection never cancels losing work.
+
+A version 1 select command records ordered candidate IDs. It creates no polled
+task. The workflow.selected event records a version 1 Selection with CommandID
+and FutureID. The winner, any signal consumption, new commands and workflow state
+commit atomically under the existing revision, lease and receipt checks.
+Replay uses the recorded winner. Changing candidate order, identity or membership
+fails command validation even when the old winner remains present.
+
+For a new selection, choose the ready candidate whose availability event has the
+lowest history sequence. Signal availability uses message arrival; activity and
+timer availability use their final outcome. Candidate order breaks a tie when
+two signal futures could consume the same message. Select consumes only its winning
+signal and advances logical time to the winning outcome, even before Get. A failed
+activity is ready; its error is returned by Get. Losing signals remain buffered,
+and losing activities and timers retain their existing lifecycle.
+
+History validation requires each candidate to name a prior non-selection command.
+It rejects duplicate candidates, unknown/cyclic references, invalid versions or
+fields, repeated winners, winners outside the candidate set and missing outcomes
+at the selection event. An unresolved selection cannot precede further recorded
+commands. Terminal replay cannot invent an unrecorded winner. New commands,
+signal consumptions and selections share the 999-event decision budget; the final
+state event uses the remaining slot. The 100000-event history bound stays in force.
+
+Queries may reconstruct a selection privately but must not commit it. Calling
+Select from a query handler is prohibited, including after recovered control-flow
+panics. Runtime objects retain the existing per-evaluation ownership contract.
+This primitive does not supply cancellation, deterministic goroutines, tracked
+update handlers or child workflows; those remain required roadmap work.
+
+Qualification requires approval/timeout races in both orders, multiple ready
+candidates, later losing results without a changed branch, failed activities,
+repeated selection and signal FIFO, logical time, copied results, invalid future
+ownership, changed/corrupt history, decision limits and query guards. Real memory
+and PostgreSQL workers must preserve selection through response loss, revision
+conflict, worker/pool replacement and terminal query replay without selector tasks.
+
+
+2026-10-08: selector replay and worker race tests pass. They cover both approval
+and timeout winners, multiple ready activities ordered by sequence, recorded
+failures, stable logical time after later losing results, same-name signal ties,
+FIFO consumption and repeated selection. Invalid futures, changed candidate lists,
+corrupt histories, query mutation attempts and exact candidate/decision limits
+fail explicitly. Terminal replay rejects an unrecorded winner.
+
+The memory worker test forces a stale decision with a concurrent signal, then
+loses the successful selection acknowledgement. Its identical retry leaves one
+winner and no selector task. A replacement worker processes the losing timer and
+finishes with the original branch. PostgreSQL tests pass in both event orders,
+replace the pool before selection and after its commit, recover a lost response,
+and retain a losing signal for later consumption. Terminal query results agree
+with the saved branch and leave the projection, history and tasks unchanged.
+The development example prints approved. These checks do not qualify process-kill,
+failover, sustained-load or disaster-recovery behavior.

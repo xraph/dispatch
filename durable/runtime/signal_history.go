@@ -9,8 +9,9 @@ import (
 )
 
 type recordedSignal struct {
-	value durable.Signal
-	at    time.Time
+	value    durable.Signal
+	at       time.Time
+	sequence int64
 }
 
 func parseSignal(history *replayHistory, commands map[string]Command, event durable.Event) error {
@@ -23,7 +24,7 @@ func parseSignal(history *replayHistory, commands map[string]Command, event dura
 		if signal.Validate() != nil || duplicate {
 			return fmt.Errorf("%w: invalid or duplicate signal at event %d", ErrHistory, event.Sequence)
 		}
-		history.signals[signal.ID] = recordedSignal{value: signal, at: event.Time}
+		history.signals[signal.ID] = recordedSignal{value: signal, at: event.Time, sequence: event.Sequence}
 		history.signalQueues[signal.Name] = append(history.signalQueues[signal.Name], signal.ID)
 		return nil
 	}
@@ -42,6 +43,6 @@ func parseSignal(history *replayHistory, commands map[string]Command, event dura
 		return fmt.Errorf("%w: signal consumed twice or out of order", ErrHistory)
 	}
 	history.signalOffsets[command.Name] = offset + 1
-	history.outcomes[command.ID] = recordedOutcome{value: Outcome{Version: 1, CommandID: command.ID, Output: bytes.Clone(message.value.Input)}, at: message.at}
+	history.outcomes[command.ID] = recordedOutcome{value: Outcome{Version: 1, CommandID: command.ID, Output: bytes.Clone(message.value.Input)}, at: message.at, sequence: message.sequence}
 	return nil
 }

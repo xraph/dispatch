@@ -45,6 +45,7 @@ type Command struct {
 	Delay           time.Duration    `json:"delay,omitempty"`
 	Deadline        time.Time        `json:"deadline,omitempty"`
 	ActivityOptions *ActivityOptions `json:"activity_options,omitempty"`
+	Candidates      []string         `json:"candidates,omitempty"`
 }
 
 // ApplicationError is a recorded application failure. Type allows deterministic handling.
@@ -68,12 +69,13 @@ type Outcome struct {
 	Heartbeat *HeartbeatCheckpoint `json:"heartbeat,omitempty"`
 }
 
-// Decision contains only new commands and signal consumptions. Running means a future is unresolved.
+// Decision contains new commands, signal consumptions and selections. Running means a future is unresolved.
 // An evaluation error never returns a usable decision.
 type Decision struct {
-	Commands []Command
-	Signals  []SignalConsumption
-	State    durable.State
-	Output   []byte
-	Failure  *ApplicationError
+	Commands   []Command
+	Signals    []SignalConsumption
+	Selections []Selection
+	State      durable.State
+	Output     []byte
+	Failure    *ApplicationError
 }

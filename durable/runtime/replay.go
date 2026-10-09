@@ -13,12 +13,14 @@ import (
 )
 
 type recordedOutcome struct {
-	value Outcome
-	at    time.Time
+	value    Outcome
+	at       time.Time
+	sequence int64
 }
 
 type replayHistory struct {
 	commands      []Command
+	selections    map[string]Selection
 	signals       map[string]recordedSignal
 	signalQueues  map[string][]string
 	signalOffsets map[string]int
@@ -60,7 +62,7 @@ func evaluateWorkflow(execution durable.Execution, events []durable.Event, handl
 	if w.cursor < len(history.commands) {
 		return Decision{}, nil, fmt.Errorf("%w: omitted command %d", ErrNondeterministic, w.cursor+1)
 	}
-	decision = Decision{Commands: w.commands, Signals: w.signals, State: durable.StateCompleted, Output: bytes.Clone(output)}
+	decision = Decision{Commands: w.commands, Signals: w.signals, Selections: w.selections, State: durable.StateCompleted, Output: bytes.Clone(output)}
 	if w.blocked {
 		decision.State, decision.Output = durable.StateRunning, nil
 	} else if handlerErr != nil {
@@ -79,7 +81,7 @@ func evaluateWorkflow(execution durable.Execution, events []durable.Event, handl
 	if decision.Failure != nil && !validFailure(decision.Failure) {
 		return Decision{}, nil, fmt.Errorf("%w: invalid application failure", durable.ErrInvalid)
 	}
-	if history.terminal != "" && (decision.State != history.terminal || len(decision.Commands) != 0 || len(decision.Signals) != 0 ||
+	if history.terminal != "" && (decision.State != history.terminal || len(decision.Commands) != 0 || len(decision.Signals) != 0 || len(decision.Selections) != 0 ||
 		!bytes.Equal(decision.Output, history.output) || !sameFailure(decision.Failure, history.failure)) {
 		return Decision{}, nil, fmt.Errorf("%w: terminal result changed", ErrNondeterministic)
 	}
@@ -98,7 +100,7 @@ func invoke(w *Workflow, handler WorkflowFunc, input []byte) (output []byte, err
 }
 
 func parseHistory(execution durable.Execution, events []durable.Event) (replayHistory, error) {
-	result := replayHistory{signals: make(map[string]recordedSignal), signalQueues: make(map[string][]string), signalOffsets: make(map[string]int), outcomes: make(map[string]recordedOutcome), attempts: make(map[string]recordedAttempt), scheduled: make(map[string]time.Time)}
+	result := replayHistory{selections: make(map[string]Selection), signals: make(map[string]recordedSignal), signalQueues: make(map[string][]string), signalOffsets: make(map[string]int), outcomes: make(map[string]recordedOutcome), attempts: make(map[string]recordedAttempt), scheduled: make(map[string]time.Time)}
 	if len(events) == 0 || len(events) > 100000 || execution.LastSequence != int64(len(events)) ||
 		execution.CreatedAt.IsZero() || events[0].Type != EventStarted ||
 		!events[0].Time.Equal(execution.CreatedAt) || !bytes.Equal(events[0].Payload, execution.Input) {
@@ -123,9 +125,16 @@ func parseHistory(execution durable.Execution, events []durable.Event) (replayHi
 			if command.validate() != nil || command.Index != int64(len(result.commands)+1) || duplicate {
 				return result, fmt.Errorf("%w: invalid command at event %d", ErrHistory, event.Sequence)
 			}
+			if err := validateSelectionReferences(command, commands); err != nil {
+				return result, err
+			}
 			commands[command.ID] = command
 			result.scheduled[command.ID] = event.Time
 			result.commands = append(result.commands, command)
+		case EventSelected:
+			if err := parseSelection(&result, commands, event); err != nil {
+				return result, err
+			}
 		case EventSignalReceived, EventSignalConsumed:
 			if err := parseSignal(&result, commands, event); err != nil {
 				return result, err
@@ -161,6 +170,13 @@ func parseHistory(execution durable.Execution, events []durable.Event) (replayHi
 			return result, fmt.Errorf("%w: unknown event %q", ErrHistory, event.Type)
 		}
 	}
+	for _, command := range result.commands {
+		if command.Kind == CommandSelect && command.Index < int64(len(result.commands)) {
+			if _, chosen := result.selections[command.ID]; !chosen {
+				return result, fmt.Errorf("%w: pending selection precedes later commands", ErrHistory)
+			}
+		}
+	}
 	for id, attempt := range result.attempts {
 		if _, done := result.outcomes[id]; attempt.failed && attempt.value.RetryAfter == 0 && !done {
 			return result, fmt.Errorf("%w: final attempt failure has no outcome", ErrHistory)
@@ -192,7 +208,7 @@ func parseOutcome(history *replayHistory, commands map[string]Command, event dur
 			return err
 		}
 	}
-	history.outcomes[outcome.CommandID] = recordedOutcome{value: outcome, at: event.Time}
+	history.outcomes[outcome.CommandID] = recordedOutcome{value: outcome, at: event.Time, sequence: event.Sequence}
 	return nil
 }
 

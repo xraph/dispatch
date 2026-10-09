@@ -3,6 +3,7 @@ package runtime
 import (
 	"bytes"
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -13,16 +14,17 @@ import (
 // Workflow provides replayable decision primitives. Use these methods only from
 // the handler's goroutine. Schedule multiple futures before Get for parallel work.
 type Workflow struct {
-	now      time.Time
-	history  replayHistory
-	cursor   int
-	commands []Command
-	signals  []SignalConsumption
-	ids      map[string]bool
-	blocked  bool
-	fault    error
-	queries  map[string]QueryFunc
-	querying bool
+	now        time.Time
+	history    replayHistory
+	cursor     int
+	commands   []Command
+	signals    []SignalConsumption
+	selections []Selection
+	ids        map[string]bool
+	blocked    bool
+	fault      error
+	queries    map[string]QueryFunc
+	querying   bool
 }
 
 // Future represents a recorded command's eventual result.
@@ -35,7 +37,7 @@ type Future struct {
 
 type flowControl struct{}
 
-// Now returns logical time: run creation, advanced by outcomes consumed by Get.
+// Now returns logical time: run creation, advanced by outcomes consumed by Get or Select.
 // It never reads the worker's wall clock.
 func (w *Workflow) Now() time.Time { return w.now }
 
@@ -99,10 +101,7 @@ func (w *Workflow) schedule(command Command) *Future {
 			w.stop(fmt.Errorf("%w: command %d (%s)", ErrNondeterministic, command.Index, command.ID))
 		}
 	} else {
-		// Reserve one event in the store's batch for workflow state.
-		if len(w.commands)+len(w.signals) >= 999 {
-			w.stop(fmt.Errorf("%w: more than 999 command and consumption events in one decision", durable.ErrInvalid))
-		}
+		w.checkEventCapacity()
 		w.commands = append(w.commands, command)
 	}
 	w.cursor++
@@ -127,9 +126,7 @@ func (f *Future) Get() ([]byte, error) {
 		w.blocked = true
 		panic(flowControl{})
 	}
-	if result.at.After(w.now) {
-		w.now = result.at
-	}
+	w.advance(result)
 	if result.value.Failure != nil {
 		failure := *result.value.Failure
 		if result.value.Heartbeat != nil {
@@ -153,7 +150,12 @@ func (c Command) validate() error {
 	if (c.Version != 1 && c.Version != 2) || c.Index < 1 || !validID(c.ID) || (c.Queue != "" && !validID(c.Queue)) {
 		return fmt.Errorf("%w: invalid command version, index, ID or queue", durable.ErrInvalid)
 	}
+	if c.Kind != CommandSelect && len(c.Candidates) != 0 {
+		return fmt.Errorf("%w: only selection commands accept candidates", durable.ErrInvalid)
+	}
 	switch c.Kind {
+	case CommandSelect:
+		return validateSelectionCommand(c)
 	case durable.TaskActivity:
 		if c.Version == 1 && c.ActivityOptions != nil {
 			return fmt.Errorf("%w: legacy activity cannot set options", durable.ErrInvalid)
@@ -188,5 +190,5 @@ func (c Command) validate() error {
 func sameCommand(a, b Command) bool {
 	return a.Version == b.Version && a.Index == b.Index && a.ID == b.ID && a.Kind == b.Kind &&
 		a.Name == b.Name && a.Queue == b.Queue && bytes.Equal(a.Input, b.Input) &&
-		a.Delay == b.Delay && a.Deadline.Equal(b.Deadline) && sameActivityOptions(a.ActivityOptions, b.ActivityOptions)
+		a.Delay == b.Delay && a.Deadline.Equal(b.Deadline) && sameActivityOptions(a.ActivityOptions, b.ActivityOptions) && slices.Equal(a.Candidates, b.Candidates)
 }
