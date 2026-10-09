@@ -27,3 +27,6 @@ coverage/
 # Logs
 *.log
 npm-debug.log*
+
+# Compiled Node test fixture
+.test-build/

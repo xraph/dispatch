@@ -122,3 +122,26 @@ All final commands above passed. The final audit exited 0, returned an empty adv
 A local production server started with `corepack pnpm@10 start --hostname 127.0.0.1 --port 0`. HTTP checks returned 200 for `/`, `/docs/getting-started`, `/api/search?query=job`, `/llms-full.txt`, `/llms.mdx/docs/getting-started` and `/og/docs/getting-started/image.png`. The search response parsed as JSON, the full Markdown export contained the getting-started content, and the image had a PNG signature. Browser layout and deployed-server checks were not performed.
 
 GitHub recalculates Dependabot alerts asynchronously after a push. The clean local audit and patched lockfile do not establish that GitHub has already closed all 95 entries. No alerts were dismissed and no deployment was performed.
+
+## TypeScript transport validation
+
+You can verify the DWP parser correction from `sdk/typescript/`. The transport parses peer JSON as unknown and checks the envelope, correlation IDs and error code/message before calling a pending resolver. A malformed reply with an identifiable pending operation rejects with `ConnectionError` and removes that operation once. Authentication succeeds only with a nonempty string `session_id` and negotiated `format: "json"`, which matches this SDK's codec. Application event handler exceptions still propagate.
+
+The native Map lookup does not select prototype methods. Regression controls for `__proto__`, `constructor` and `toString` invoke no pending resolver; a locally registered key resolves only its intended request. This is separate from the reproduced client failures: JSON `null` threw through the message callback, malformed error messages could strand a promise, and invalid session IDs were accepted. These fixtures do not establish a production denial of service or server authentication bypass.
+
+Run these SDK checks:
+
+```sh
+npm ci
+npm run format
+npm run format:check
+npm run lint
+npm run typecheck
+npm run build
+npm test
+npm audit --json
+```
+
+Biome 2.4.2 supplies the focused SDK lint and format commands. Its include list covers the transport, validation helper, regression tests and tooling configuration, so unrelated SDK source keeps its existing style. TypeScript remains the installed 5.9.3 compiler; the build configuration includes DOM types for WebSocket, and the public `ErrorDetail` export aliases the existing `FrameError` type. Both build issues existed before the parser correction. Node's built-in test runner exercises the compiled transport with controlled WebSocket callbacks. The local Node.js 24.16.0 run passed all 72 cases, and npm audit reported zero vulnerabilities.
+
+GitHub [code-scanning alert 1](https://github.com/xraph/dispatch/security/code-scanning/1) remained open when checked on 2026-10-09, with its most recent instance on `1818f437380614e1e8be37853e0df60ec004cd6d`, before this correction. No alert was dismissed. The local regression results do not establish closure; that requires a subsequent CodeQL analysis. No live server or browser qualification was performed for this parser correction.
