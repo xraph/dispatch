@@ -1432,7 +1432,7 @@ This store checkpoint passes make f, make l, go test ./..., engine/runtime/memor
 race tests and the full PostgreSQL durable race suite (154.797s). An earlier full
 race run hit the existing activity-recovery test's 50 ms store timeout; that test
 then passed three isolated runs without changes before the full suite passed.
-The deadline plan's independent review follows its closure and runtime tasks.
+The deadline plan's independent review is recorded after the runtime section below.
 
 ## Durable workflow timeout closure
 
@@ -1465,7 +1465,7 @@ at this checkpoint; these store APIs alone did not qualify automatic processing.
 
 The timeout-closure store checkpoint passes make f, make l, go test ./...,
 engine/runtime/memory races and the full PostgreSQL durable race suite (198.902s).
-Its independent review remains scheduled after runtime integration.
+Its independent review is recorded with the complete runtime integration below.
 
 ## Workflow timeout runtime
 
@@ -1492,8 +1492,9 @@ that used the strict ApplicationError timeout payload.
 
 Timeout replay validates the saved deadline, timeout kind and event time before
 reconstructing workflow state. Queries freeze at the persisted history prefix,
-including before cancellation fencing and during cleanup. They cannot create
-commands, consume signals or start more cleanup. You still need the run's
+including before cancellation fencing and during cleanup. Private replay may
+observe accepted signals and ready selections, but it cannot publish commands,
+consumption, winners or more cleanup work. You still need the run's
 compatible workflow handler to query it, even though closing an expired run does
 not require that handler or its build.
 
@@ -1507,8 +1508,9 @@ in initial, normal, cancellation-accepted and cleanup phases.
 2026-10-09: this runtime checkpoint passes make f, make l, go test ./...,
 engine/durable/runtime/memory races and the full durable PostgreSQL race suite
 (256.490s). The example prints the parent's timed_out state and its saved
-child-timeout observation. The whole deadline change still awaits independent
-review from its original base.
+child-timeout observation. Independent review of 8f668b0 through c6d0217 found no
+actionable defects, including no deferred minor findings. The reviewer also ran
+the focused deadline/timeout runtime and store tests independently.
 
 These checks do not qualify process kills, database failover or disaster recovery.
 ExecutionTimeout is enforced for the current run; inheritance across retries and
@@ -1516,3 +1518,14 @@ continue-as-new still needs its own implementation. Neither timeout closure nor
 task fencing can undo an external effect. Cooperative external-activity completion
 acknowledgment, remote authorization and audit, rollout compatibility and operator
 transport remain separate requirements in the delivery table.
+
+Deploy compatible runtime readers before enabling deadline fields. The schema
+guards fence older database writers, but they do not teach older workflow or
+parent-history decoders to read the new timeout payload. Keep compatible handlers
+available for historical queries. Full rollout compatibility is still open.
+
+The deadline governs acceptance after ownership locks and the guarded write. A
+transaction accepted before expiry can finish committing later; no commit or fsync
+deadline is promised. Privileged SQL and arbitrary Go side effects also remain
+trusted boundaries. The [deadline review record](durable-workflow-deadlines-review.md)
+lists the decisions and qualification limits for this change.
