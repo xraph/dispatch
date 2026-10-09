@@ -12,6 +12,9 @@ import (
 func (m *Store) AppendSecurityAudit(ctx context.Context, a durable.SecurityAudit) (durable.Delivery, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	return m.appendSecurityAudit(ctx, a)
+}
+func (m *Store) appendSecurityAudit(ctx context.Context, a durable.SecurityAudit) (durable.Delivery, error) {
 	if err := ctx.Err(); err != nil {
 		return durable.Delivery{}, err
 	}

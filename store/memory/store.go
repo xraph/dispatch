@@ -36,9 +36,10 @@ var (
 // Store is a fully in-memory implementation of store.Store.
 // Safe for concurrent access. Intended for unit testing and development.
 type Store struct {
-	mu         sync.RWMutex
-	namespaces map[string]durable.NamespaceRecord
-	outbox     map[string]durable.DeliveryRecord
+	mu             sync.RWMutex
+	legacyAttempts map[string]durable.LegacyAttempt
+	namespaces     map[string]durable.NamespaceRecord
+	outbox         map[string]durable.DeliveryRecord
 	// outboxPrepare injects preparation failure in package tests, before publication.
 	outboxPrepare func(durable.Delivery) error
 
