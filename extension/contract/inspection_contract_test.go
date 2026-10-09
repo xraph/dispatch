@@ -42,7 +42,7 @@ func inspectionContractDeps(t *testing.T) Deps {
 func TestHandlerContractDescribesDeclarationsWithoutExecutingThem(t *testing.T) {
 	d := inspectionContractDeps(t)
 	ctx := context.Background()
-	p := fc.Principal{}
+	p := testPrincipal()
 	def := job.NewDefinition("convert", func(context.Context, struct{}) error { return nil },
 		job.WithArtifactInputs(artifact.Input("source", artifact.Required, artifact.MaxSize(1024), artifact.StageAsPath)),
 		job.WithResources(resource.Set{resource.Memory: 128}), job.WithResourceLimits(resource.Set{resource.Memory: 256}), job.WithResourceClass("batch"),
@@ -102,7 +102,7 @@ func TestHandlerContractDescribesDeclarationsWithoutExecutingThem(t *testing.T) 
 }
 func TestEngineContractEffectiveSettingsAndPrivateConfiguration(t *testing.T) {
 	d := inspectionContractDeps(t)
-	got, err := engineConfigHandler(d)(context.Background(), EmptyInput{}, fc.Principal{})
+	got, err := engineConfigHandler(d)(context.Background(), EmptyInput{}, testPrincipal())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -136,7 +136,7 @@ func TestEngineContractEffectiveSettingsAndPrivateConfiguration(t *testing.T) {
 	}
 	got.Resources.Defaults[resource.Memory] = 0
 	got.Resources.Queues["batch"][resource.Memory] = 0
-	again, err := engineConfigHandler(d)(context.Background(), EmptyInput{}, fc.Principal{})
+	again, err := engineConfigHandler(d)(context.Background(), EmptyInput{}, testPrincipal())
 	if err != nil || again.Resources.Defaults[resource.Memory] != 10 || again.Resources.Queues["batch"][resource.Memory] != 20 {
 		t.Fatalf("detached settings=%+v, %v", again, err)
 	}
@@ -152,7 +152,7 @@ func TestEngineContractDisabledSubsystemsAndHeartbeatFallback(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = eng.Stop(context.Background()) })
-	got, err := engineConfigHandler(Deps{Engine: eng, Store: s})(context.Background(), EmptyInput{}, fc.Principal{})
+	got, err := engineConfigHandler(Deps{Engine: eng, Store: s, Security: testBoundary()})(context.Background(), EmptyInput{}, testPrincipal())
 	if err != nil || got.Artifacts.Enabled || got.Artifacts.Backend != nil || got.Artifacts.Cache != nil || got.Resources.Enabled || got.Resources.CustomKeys == nil ||
 		got.Pool.JobHeartbeatInterval.MS != 0 || got.Pool.WorkerHeartbeatInterval.MS != 10000 || got.Queues == nil {
 		t.Fatalf("defaults=%+v, %v", got, err)

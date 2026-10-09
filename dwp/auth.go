@@ -8,6 +8,7 @@ import (
 
 // Identity represents an authenticated caller.
 type Identity struct {
+	Kind string `json:"kind,omitempty"`
 	// Subject is the authenticated user/service ID.
 	Subject string `json:"subject"`
 
@@ -59,6 +60,10 @@ func NewAPIKeyAuthenticator(entries ...APIKeyEntry) *APIKeyAuthenticator {
 	keys := make(map[string]*Identity, len(entries))
 	for _, e := range entries {
 		id := e.Identity
+		if id.Kind == "" {
+			id.Kind = "api_key"
+		}
+		id.Scopes = append([]string(nil), id.Scopes...)
 		keys[e.Token] = &id
 	}
 	return &APIKeyAuthenticator{keys: keys}
@@ -69,7 +74,9 @@ func (a *APIKeyAuthenticator) Authenticate(_ context.Context, token string) (*Id
 	if !ok {
 		return nil, ErrUnauthorized
 	}
-	return id, nil
+	clone := *id
+	clone.Scopes = append([]string(nil), id.Scopes...)
+	return &clone, nil
 }
 
 // ── No-op authenticator ─────────────────────────────
@@ -81,6 +88,7 @@ type NoopAuthenticator struct{}
 func (a *NoopAuthenticator) Authenticate(_ context.Context, _ string) (*Identity, error) {
 	return &Identity{
 		Subject: "anonymous",
+		Kind:    "user",
 		Scopes:  []string{"*"},
 	}, nil
 }
@@ -101,7 +109,7 @@ func NewCompositeAuthenticator(auths ...Authenticator) *CompositeAuthenticator {
 func (c *CompositeAuthenticator) Authenticate(ctx context.Context, token string) (*Identity, error) {
 	for _, auth := range c.authenticators {
 		id, err := auth.Authenticate(ctx, token)
-		if err == nil {
+		if err == nil && id != nil && id.principal().Validate() == nil {
 			return id, nil
 		}
 	}
@@ -125,7 +133,8 @@ const (
 	ScopeAll           = "*"
 )
 
-// RequiredScope returns the minimum scope required for a DWP method.
+// RequiredScope describes the legacy scope vocabulary. It does not grant
+// installation authority; remote operations require the security boundary.
 func RequiredScope(method string) string {
 	switch {
 	case method == MethodAuth:

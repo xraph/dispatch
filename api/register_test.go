@@ -11,6 +11,7 @@ import (
 	"github.com/xraph/forge"
 
 	"github.com/xraph/dispatch/api"
+	"github.com/xraph/dispatch/security"
 )
 
 // allRoutes is every route the api serves, as forge lists them.
@@ -47,13 +48,16 @@ func TestRegisterRoutes(t *testing.T) {
 	f := newFixture(t)
 	r := forge.NewRouter()
 
-	if err := api.New(f.eng, r).RegisterRoutes(r); err != nil {
+	if err := api.New(f.eng, r, testSecurity()).RegisterRoutes(r); err != nil {
 		t.Fatalf("RegisterRoutes: %v", err)
 	}
 
 	got := make([]string, 0, len(allRoutes))
 	for _, info := range r.Routes() {
 		got = append(got, info.Method+" "+info.Path)
+		if security.RESTOperation(info.Method, strings.TrimPrefix(info.Path, "/v1")).Action == "" {
+			t.Fatalf("route has no closed authorization mapping: %s %s", info.Method, info.Path)
+		}
 	}
 	slices.Sort(got)
 	want := slices.Sorted(slices.Values(allRoutes))
@@ -68,7 +72,7 @@ func TestRegisterRoutes(t *testing.T) {
 func TestRegisterRoutes_ReportsRefusedRoutes(t *testing.T) {
 	f := newFixture(t)
 	r := forge.NewRouter()
-	a := api.New(f.eng, r)
+	a := api.New(f.eng, r, testSecurity())
 
 	if err := a.RegisterRoutes(r); err != nil {
 		t.Fatalf("first RegisterRoutes: %v", err)
@@ -91,7 +95,7 @@ func TestRegisterRoutes_ReportsRefusedRoutes(t *testing.T) {
 func TestHandler_PanicsOnARefusedRoute(t *testing.T) {
 	f := newFixture(t)
 	r := forge.NewRouter()
-	if err := api.New(f.eng, r).RegisterRoutes(r); err != nil {
+	if err := api.New(f.eng, r, testSecurity()).RegisterRoutes(r); err != nil {
 		t.Fatalf("RegisterRoutes: %v", err)
 	}
 
@@ -102,7 +106,7 @@ func TestHandler_PanicsOnARefusedRoute(t *testing.T) {
 		}
 	}()
 
-	api.New(f.eng, r).Handler()
+	api.New(f.eng, r, testSecurity()).Handler()
 	t.Error("Handler returned on a router where every route collides")
 }
 
@@ -110,7 +114,7 @@ func TestHandler_PanicsOnARefusedRoute(t *testing.T) {
 // register every route again, which would collide and panic.
 func TestHandler_RegistersOnce(t *testing.T) {
 	f := newFixture(t)
-	a := api.New(f.eng, nil)
+	a := api.New(f.eng, nil, testSecurity())
 
 	a.Handler()
 	h := a.Handler()

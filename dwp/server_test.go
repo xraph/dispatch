@@ -48,7 +48,7 @@ func setupTestServer(t *testing.T) (*Server, *engine.Engine, *memory.Store) {
 	eng, s := setupTestEngine(t)
 	broker := eng.StreamBroker()
 	logger := testLogger()
-	handler := NewHandler(eng, broker, logger)
+	handler := NewHandler(eng, broker, logger, testBoundary())
 
 	srv := NewServer(broker, handler,
 		WithAuth(NewAPIKeyAuthenticator(APIKeyEntry{
@@ -78,7 +78,7 @@ func setupTestServer(t *testing.T) (*Server, *engine.Engine, *memory.Store) {
 
 func TestServer_NewServer(t *testing.T) {
 	broker := stream.NewBroker(testLogger())
-	handler := &Handler{logger: testLogger()}
+	handler := &Handler{logger: testLogger(), security: testBoundary()}
 
 	srv := NewServer(broker, handler)
 
@@ -102,7 +102,7 @@ func TestServer_NewServer(t *testing.T) {
 
 func TestServer_NewServerWithOptions(t *testing.T) {
 	broker := stream.NewBroker(testLogger())
-	handler := &Handler{logger: testLogger()}
+	handler := &Handler{logger: testLogger(), security: testBoundary()}
 	auth := NewAPIKeyAuthenticator(APIKeyEntry{Token: "k", Identity: Identity{Subject: "s"}})
 	logger := testLogger()
 
@@ -164,7 +164,7 @@ func TestServer_ConnectionManager(t *testing.T) {
 func TestHandler_JobEnqueueViaHandler(t *testing.T) {
 	_, eng, _ := setupTestServer(t)
 	broker := eng.StreamBroker()
-	handler := NewHandler(eng, broker, testLogger())
+	handler := NewHandler(eng, broker, testLogger(), testBoundary())
 
 	conn := NewConnection("c-1", &Identity{Subject: "test", Scopes: []string{ScopeAll}}, &JSONCodec{})
 
@@ -208,7 +208,7 @@ func TestHandler_JobEnqueueViaHandler(t *testing.T) {
 func TestHandler_JobGetViaHandler(t *testing.T) {
 	_, eng, _ := setupTestServer(t)
 	broker := eng.StreamBroker()
-	handler := NewHandler(eng, broker, testLogger())
+	handler := NewHandler(eng, broker, testLogger(), testBoundary())
 	conn := NewConnection("c-1", &Identity{Subject: "test", Scopes: []string{ScopeAll}}, &JSONCodec{})
 
 	// Enqueue first.
@@ -250,7 +250,7 @@ func TestHandler_JobGetViaHandler(t *testing.T) {
 func TestHandler_JobCancelViaHandler(t *testing.T) {
 	_, eng, _ := setupTestServer(t)
 	broker := eng.StreamBroker()
-	handler := NewHandler(eng, broker, testLogger())
+	handler := NewHandler(eng, broker, testLogger(), testBoundary())
 	conn := NewConnection("c-1", &Identity{Subject: "test", Scopes: []string{ScopeAll}}, &JSONCodec{})
 
 	// Enqueue.
@@ -284,7 +284,7 @@ func TestHandler_JobCancelViaHandler(t *testing.T) {
 func TestHandler_WorkflowStartViaHandler(t *testing.T) {
 	_, eng, _ := setupTestServer(t)
 	broker := eng.StreamBroker()
-	handler := NewHandler(eng, broker, testLogger())
+	handler := NewHandler(eng, broker, testLogger(), testBoundary())
 	conn := NewConnection("c-1", &Identity{Subject: "test", Scopes: []string{ScopeAll}}, &JSONCodec{})
 
 	// Register a simple workflow.
@@ -326,7 +326,7 @@ func TestHandler_WorkflowStartViaHandler(t *testing.T) {
 func TestHandler_WorkflowGetViaHandler(t *testing.T) {
 	_, eng, _ := setupTestServer(t)
 	broker := eng.StreamBroker()
-	handler := NewHandler(eng, broker, testLogger())
+	handler := NewHandler(eng, broker, testLogger(), testBoundary())
 	conn := NewConnection("c-1", &Identity{Subject: "test", Scopes: []string{ScopeAll}}, &JSONCodec{})
 
 	engine.RegisterWorkflow(eng, workflow.NewWorkflow("get-test-wf", func(_ *workflow.Workflow, _ struct{}) error {
@@ -363,7 +363,7 @@ func TestHandler_WorkflowGetViaHandler(t *testing.T) {
 func TestHandler_WorkflowEventViaHandler(t *testing.T) {
 	_, eng, _ := setupTestServer(t)
 	broker := eng.StreamBroker()
-	handler := NewHandler(eng, broker, testLogger())
+	handler := NewHandler(eng, broker, testLogger(), testBoundary())
 	conn := NewConnection("c-1", &Identity{
 		Subject: "test",
 		AppID:   "app-1",
@@ -396,7 +396,7 @@ func TestHandler_WorkflowEventViaHandler(t *testing.T) {
 func TestHandler_WorkflowTimelineViaHandler(t *testing.T) {
 	_, eng, _ := setupTestServer(t)
 	broker := eng.StreamBroker()
-	handler := NewHandler(eng, broker, testLogger())
+	handler := NewHandler(eng, broker, testLogger(), testBoundary())
 	conn := NewConnection("c-1", &Identity{Subject: "test", Scopes: []string{ScopeAll}}, &JSONCodec{})
 
 	// Register a multi-step workflow.
@@ -439,7 +439,7 @@ func TestHandler_WorkflowTimelineViaHandler(t *testing.T) {
 func TestHandler_StatsViaHandler(t *testing.T) {
 	_, eng, _ := setupTestServer(t)
 	broker := eng.StreamBroker()
-	handler := NewHandler(eng, broker, testLogger())
+	handler := NewHandler(eng, broker, testLogger(), testBoundary())
 	conn := NewConnection("c-1", &Identity{Subject: "test", Scopes: []string{ScopeAll}}, &JSONCodec{})
 
 	resp := handler.Handle(context.Background(), &Frame{
@@ -627,7 +627,7 @@ func TestConnection_Touch(t *testing.T) {
 
 func TestHandler_JobGetInvalidID(t *testing.T) {
 	_, eng, _ := setupTestServer(t)
-	handler := NewHandler(eng, eng.StreamBroker(), testLogger())
+	handler := NewHandler(eng, eng.StreamBroker(), testLogger(), testBoundary())
 	conn := NewConnection("c-1", &Identity{Subject: "test", Scopes: []string{ScopeAll}}, &JSONCodec{})
 
 	resp := handler.Handle(context.Background(), &Frame{
@@ -647,7 +647,7 @@ func TestHandler_JobGetInvalidID(t *testing.T) {
 
 func TestHandler_JobGetNotFound(t *testing.T) {
 	_, eng, _ := setupTestServer(t)
-	handler := NewHandler(eng, eng.StreamBroker(), testLogger())
+	handler := NewHandler(eng, eng.StreamBroker(), testLogger(), testBoundary())
 	conn := NewConnection("c-1", &Identity{Subject: "test", Scopes: []string{ScopeAll}}, &JSONCodec{})
 
 	resp := handler.Handle(context.Background(), &Frame{
@@ -664,7 +664,7 @@ func TestHandler_JobGetNotFound(t *testing.T) {
 
 func TestHandler_WorkflowStartUnknown(t *testing.T) {
 	_, eng, _ := setupTestServer(t)
-	handler := NewHandler(eng, eng.StreamBroker(), testLogger())
+	handler := NewHandler(eng, eng.StreamBroker(), testLogger(), testBoundary())
 	conn := NewConnection("c-1", &Identity{Subject: "test", Scopes: []string{ScopeAll}}, &JSONCodec{})
 
 	resp := handler.Handle(context.Background(), &Frame{
@@ -686,7 +686,7 @@ func TestHandler_WorkflowStartUnknown(t *testing.T) {
 
 func TestHandler_JobEnqueueWithOptions(t *testing.T) {
 	_, eng, s := setupTestServer(t)
-	handler := NewHandler(eng, eng.StreamBroker(), testLogger())
+	handler := NewHandler(eng, eng.StreamBroker(), testLogger(), testBoundary())
 	conn := NewConnection("c-1", &Identity{Subject: "test", Scopes: []string{ScopeAll}}, &JSONCodec{})
 
 	resp := handler.Handle(context.Background(), &Frame{

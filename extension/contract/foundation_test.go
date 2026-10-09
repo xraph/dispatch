@@ -142,7 +142,7 @@ func TestHandleBoundsRequestsPreservesEarlierDeadlineAndSetsActor(t *testing.T) 
 	defer cancel()
 	deadline, _ := parent.Deadline()
 	principal := fc.Principal{User: &dashauth.UserInfo{Subject: "operator"}, Claims: map[string]any{"sub": "not-the-actor", "scope_app_id": "not-a-filter"}}
-	fn := handle(Deps{}, "test", true, func(ctx context.Context, _ struct{}, _ fc.Principal) (string, error) {
+	fn := handle(Deps{Security: testBoundary()}, "jobs.cancel", true, func(ctx context.Context, _ struct{}, _ fc.Principal) (string, error) {
 		got, ok := ctx.Deadline()
 		if !ok || !got.Equal(deadline) {
 			t.Fatalf("deadline = %v", got)
@@ -153,11 +153,11 @@ func TestHandleBoundsRequestsPreservesEarlierDeadlineAndSetsActor(t *testing.T) 
 	if err != nil || got != "operator" {
 		t.Fatalf("actor = %q, %v", got, err)
 	}
-	query := handle(Deps{}, "query", false, func(ctx context.Context, _ struct{}, _ fc.Principal) (bool, error) {
+	query := handle(Deps{Security: testBoundary()}, "jobs.counts", false, func(ctx context.Context, _ struct{}, _ fc.Principal) (bool, error) {
 		until, ok := ctx.Deadline()
 		return ok && time.Until(until) <= queryTimeout, nil
 	})
-	if bounded, err := query(context.Background(), struct{}{}, fc.Principal{}); err != nil || !bounded {
+	if bounded, err := query(context.Background(), struct{}{}, testPrincipal()); err != nil || !bounded {
 		t.Fatalf("unbounded query: %v", err)
 	}
 }

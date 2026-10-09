@@ -16,6 +16,7 @@ import (
 	"github.com/xraph/dispatch/engine"
 	"github.com/xraph/dispatch/id"
 	"github.com/xraph/dispatch/job"
+	"github.com/xraph/dispatch/security"
 	"github.com/xraph/dispatch/store/memory"
 )
 
@@ -42,7 +43,7 @@ func newFixture(t *testing.T, opts ...engine.Option) *fixture {
 	}
 	t.Cleanup(func() { _ = eng.Stop(context.Background()) })
 
-	return &fixture{eng: eng, s: s, h: api.New(eng, nil).Handler()}
+	return &fixture{eng: eng, s: s, h: api.New(eng, nil, testSecurity()).Handler()}
 }
 
 // do sends one request through the router. A non-empty body goes as JSON.
@@ -136,4 +137,10 @@ func storedJob(t *testing.T, f *fixture, jobID id.JobID) *job.Job {
 	}
 
 	return j
+}
+
+func testSecurity() api.Option {
+	return api.WithSecurity(security.AuthenticatorFunc(func(context.Context, *http.Request) (security.Principal, error) {
+		return security.Principal{Subject: "operator", Kind: "user"}, nil
+	}), security.Boundary{Resource: security.Resource{InstallationID: "test", PolicyTenant: "test"}, Authorizer: security.AuthorizerFunc(func(context.Context, security.Principal, string, security.Resource) error { return nil })})
 }

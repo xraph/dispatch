@@ -16,6 +16,7 @@ import (
 	"github.com/xraph/dispatch/engine"
 	"github.com/xraph/dispatch/id"
 	"github.com/xraph/dispatch/job"
+	"github.com/xraph/dispatch/security"
 	"github.com/xraph/dispatch/store/memory"
 	"github.com/xraph/dispatch/workflow"
 
@@ -54,7 +55,7 @@ func setupClientTest(t *testing.T) (*client.Client, *engine.Engine, *memory.Stor
 	// 2. Create DWP handler and server.
 	broker := eng.StreamBroker()
 	logger := testLogger()
-	handler := dwp.NewHandler(eng, broker, logger)
+	handler := dwp.NewHandler(eng, broker, logger, testOperatorBoundary())
 	dwpServer := dwp.NewServer(broker, handler,
 		dwp.WithAuth(dwp.NewAPIKeyAuthenticator(dwp.APIKeyEntry{
 			Token: "test-token",
@@ -129,7 +130,7 @@ func TestClient_DialAuthFailure(t *testing.T) {
 
 	broker := eng.StreamBroker()
 	logger := testLogger()
-	handler := dwp.NewHandler(eng, broker, logger)
+	handler := dwp.NewHandler(eng, broker, logger, testOperatorBoundary())
 	dwpServer := dwp.NewServer(broker, handler,
 		dwp.WithAuth(dwp.NewAPIKeyAuthenticator(dwp.APIKeyEntry{
 			Token: "valid-token",
@@ -583,4 +584,8 @@ func TestClient_WorkflowE2E(t *testing.T) {
 			t.Errorf("workflow state = %q, want %q", state, "completed")
 		}
 	}
+}
+
+func testOperatorBoundary() security.Boundary {
+	return security.Boundary{Resource: security.Resource{InstallationID: "test", PolicyTenant: "test"}, Authorizer: security.AuthorizerFunc(func(context.Context, security.Principal, string, security.Resource) error { return nil })}
 }

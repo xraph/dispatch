@@ -33,7 +33,7 @@ func runOperationalDomain(t *testing.T, s store.Store) {
 	defer lease.Release()
 	d := contractDeps(t, s, engine.WithResourceManager(manager), engine.WithQueueConfig(queue.Config{Name: "bounded", MaxConcurrency: 3, RateLimit: 10}))
 	ctx := context.Background()
-	p := fc.Principal{Claims: map[string]any{"scope_org_id": "not-the-seeded-org"}}
+	p := fc.Principal{User: testPrincipal().User, Claims: map[string]any{"scope_org_id": "not-the-seeded-org"}}
 	remote := &cluster.Worker{ID: id.NewWorkerID(), Hostname: "remote-host", Queues: []string{"remote", "bounded"}, Concurrency: 4, State: cluster.WorkerActive,
 		Capacity: resource.Set{resource.Memory: 200}, CreatedAt: time.Now().Add(-time.Hour), LastSeen: time.Now().Add(-10 * time.Minute)}
 	if err := s.RegisterWorker(ctx, remote); err != nil {
@@ -161,17 +161,17 @@ func TestWorkerProjectionUnknownClockSkewAndDetachedValues(t *testing.T) {
 	}
 }
 func TestWorkersDisabledCapabilityAndDefaultQueueManager(t *testing.T) {
-	disabled := Deps{Engine: &engine.Engine{}, Store: memory.New()}
-	page, err := workersListHandler(disabled)(context.Background(), EmptyInput{}, fc.Principal{})
+	disabled := Deps{Engine: &engine.Engine{}, Store: memory.New(), Security: testBoundary()}
+	page, err := workersListHandler(disabled)(context.Background(), EmptyInput{}, testPrincipal())
 	if err != nil || page.Enabled || page.Items == nil || page.LeaderID != nil || page.SilentAfter != nil {
 		t.Fatalf("disabled=%+v, %v", page, err)
 	}
-	detail, err := workersGetHandler(disabled)(context.Background(), IDInput{ID: id.NewWorkerID().String()}, fc.Principal{})
+	detail, err := workersGetHandler(disabled)(context.Background(), IDInput{ID: id.NewWorkerID().String()}, testPrincipal())
 	if err != nil || detail.Enabled || detail.Worker != nil || detail.Resources.Enabled || detail.Resources.Leases == nil {
 		t.Fatalf("disabled detail=%+v, %v", detail, err)
 	}
 	d := contractDeps(t, memory.New())
-	queues, err := queuesListHandler(d)(context.Background(), EmptyInput{}, fc.Principal{})
+	queues, err := queuesListHandler(d)(context.Background(), EmptyInput{}, testPrincipal())
 	if err != nil || len(queues.Items) != 1 || queues.Items[0].LocalSettings != nil || queues.Items[0].LocalActiveCount != nil {
 		t.Fatalf("default queues=%+v, %v", queues, err)
 	}
@@ -232,17 +232,17 @@ func TestOperationalReadFailuresRemainErrors(t *testing.T) {
 			s := &operationalReadFailure{Store: memory.New()}
 			d := contractDeps(t, s)
 			s.method = method
-			_, err := overviewSummaryHandler(d)(context.Background(), EmptyInput{}, fc.Principal{})
+			_, err := overviewSummaryHandler(d)(context.Background(), EmptyInput{}, testPrincipal())
 			if !errors.Is(err, fc.ErrInternal) || strings.Contains(err.Error(), "credential") || !s.deadline {
 				t.Fatalf("error=%v deadline=%v", err, s.deadline)
 			}
 			if method == "workers" || method == "jobs" {
-				if _, readErr := queuesListHandler(d)(context.Background(), EmptyInput{}, fc.Principal{}); !errors.Is(readErr, fc.ErrInternal) {
+				if _, readErr := queuesListHandler(d)(context.Background(), EmptyInput{}, testPrincipal()); !errors.Is(readErr, fc.ErrInternal) {
 					t.Fatalf("queues=%v", readErr)
 				}
 			}
 			if method == "workers" || method == "leader" {
-				if _, readErr := workersListHandler(d)(context.Background(), EmptyInput{}, fc.Principal{}); !errors.Is(readErr, fc.ErrInternal) {
+				if _, readErr := workersListHandler(d)(context.Background(), EmptyInput{}, testPrincipal()); !errors.Is(readErr, fc.ErrInternal) {
 					t.Fatalf("workers=%v", readErr)
 				}
 			}

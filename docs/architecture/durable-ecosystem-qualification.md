@@ -1,7 +1,8 @@
 # Durable execution in the Forge ecosystem
 
-Review date: 2026-10-09. Status: proposal for review, not implementation approval
-or production qualification.
+Review date: 2026-10-09. Status: implementation authorized for the full ecosystem
+program. The first slice secures existing remote operators and configures durable
+Forge workers. Production and ecosystem qualification remain pending.
 
 Dispatch should own execution history, deterministic decisions, task leases,
 receipts and recovery semantics. Forge hosts it. Authsome establishes identity,

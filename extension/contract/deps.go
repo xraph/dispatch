@@ -7,14 +7,16 @@ import (
 	"github.com/xraph/forge"
 
 	"github.com/xraph/dispatch/engine"
+	"github.com/xraph/dispatch/security"
 	"github.com/xraph/dispatch/store"
 )
 
 // Deps contains the running engine and the stores its intents inspect.
 type Deps struct {
-	Engine *engine.Engine
-	Store  store.Store
-	Logger forge.Logger
+	Security security.Boundary
+	Engine   *engine.Engine
+	Store    store.Store
+	Logger   forge.Logger
 }
 
 func (d Deps) validate() error {

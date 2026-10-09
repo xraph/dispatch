@@ -6,7 +6,7 @@ import log "github.com/xraph/go-utils/log"
 type Option func(*Server)
 
 // WithAuth sets the authenticator for the DWP server.
-// If not set, NoopAuthenticator is used (development mode).
+// If not set, all requests are rejected.
 func WithAuth(auth Authenticator) Option {
 	return func(s *Server) { s.auth = auth }
 }

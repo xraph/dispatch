@@ -11,6 +11,8 @@ import (
 // Fields can be set programmatically via Option functions or loaded from
 // YAML configuration files (under "extensions.dispatch" or "dispatch" keys).
 type Config struct {
+	Security SecurityConfig `json:"security" yaml:"security" mapstructure:"security"`
+	Durable  DurableConfig  `json:"durable" yaml:"durable" mapstructure:"durable"`
 	// BasePath is the URL prefix for all dispatch API routes.
 	BasePath string `default:"/dispatch" json:"base_path" mapstructure:"base_path" yaml:"base_path"`
 

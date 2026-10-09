@@ -53,7 +53,7 @@ func contractDeps(t *testing.T, s store.Store, options ...engine.Option) Deps {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = eng.Stop(context.Background()) })
-	return Deps{Engine: eng, Store: s}
+	return Deps{Engine: eng, Store: s, Security: testBoundary()}
 }
 
 func seedJob(t *testing.T, d Deps, name string, state job.State, app, org, queue string) *job.Job {
@@ -80,7 +80,7 @@ func runJobDomain(t *testing.T, s store.Store) {
 		seedJob(t, d, "report.a", job.StateCompleted, "app-a", "org-a", "reports"),
 		seedJob(t, d, "mail.c", job.StateRetrying, "", "", "mail"),
 	}
-	principal := fc.Principal{Claims: map[string]any{"scope_app_id": "app-a", "scope_org_id": "org-a"}}
+	principal := fc.Principal{User: testPrincipal().User, Claims: map[string]any{"scope_app_id": "app-a", "scope_org_id": "org-a"}}
 	list := jobsListHandler(d)
 	var got []string
 	cursor := ""
@@ -232,7 +232,7 @@ func (s incompleteJobsStore) ListJobs(ctx context.Context, _ job.ListJobsOpts) (
 func TestJobListPreservesIncompleteSearch(t *testing.T) {
 	d := contractDeps(t, memory.New())
 	d.Store = incompleteJobsStore{d.Store}
-	page, err := jobsListHandler(d)(context.Background(), JobsListInput{}, fc.Principal{})
+	page, err := jobsListHandler(d)(context.Background(), JobsListInput{}, testPrincipal())
 	if err != nil || page.Complete || page.NextCursor == nil || page.Items == nil {
 		t.Fatalf("incomplete page = %+v, %v", page, err)
 	}

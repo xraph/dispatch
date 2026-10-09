@@ -62,7 +62,7 @@ func TestArtifactReadsPropagateFailureAndIncompletePages(t *testing.T) {
 	owner := seedJob(t, d, "owner", job.StateCompleted, "", "", "default")
 	input := IDInput{ID: id.NewArtifactID().String()}
 	ctx := context.Background()
-	p := fc.Principal{}
+	p := testPrincipal()
 	reads := map[string]func() error{
 		"list":    func() error { _, err := artifactsListHandler(d)(ctx, ArtifactsListInput{}, p); return err },
 		"get":     func() error { _, err := artifactsGetHandler(d)(ctx, input, p); return err },

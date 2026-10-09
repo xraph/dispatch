@@ -47,7 +47,7 @@ func runWorkflowDomain(t *testing.T, s store.Store) {
 		seedWorkflow(t, d, "report", workflow.RunStateRunning, "app-a", "org-a", nil),
 		seedWorkflow(t, d, "order.c", workflow.RunStateCompleted, "", "", nil),
 	}
-	p := fc.Principal{Claims: map[string]any{"scope_app_id": "app-a", "scope_org_id": "org-a"}}
+	p := fc.Principal{User: testPrincipal().User, Claims: map[string]any{"scope_app_id": "app-a", "scope_org_id": "org-a"}}
 	var got []string
 	cursor := ""
 	for pages := 0; ; pages++ {
@@ -300,13 +300,13 @@ func TestWorkflowContractPreservesIncompletePagesAndReadFailures(t *testing.T) {
 			d := contractDeps(t, s)
 			run := seedWorkflow(t, d, "inspect", workflow.RunStateFailed, "", "", nil)
 			if operation == "page" {
-				page, err := workflowsListHandler(d)(context.Background(), WorkflowsListInput{}, fc.Principal{})
+				page, err := workflowsListHandler(d)(context.Background(), WorkflowsListInput{}, testPrincipal())
 				if err != nil || page.Complete || page.NextCursor == nil || *page.NextCursor != "continue" || page.Items == nil {
 					t.Fatalf("page=%+v, %v", page, err)
 				}
 				return
 			}
-			_, err := workflowsGetHandler(d)(context.Background(), IDInput{ID: run.ID.String()}, fc.Principal{})
+			_, err := workflowsGetHandler(d)(context.Background(), IDInput{ID: run.ID.String()}, testPrincipal())
 			if !errors.Is(err, fc.ErrInternal) || strings.Contains(err.Error(), "private-store-secret") || !s.bounded {
 				t.Fatalf("read failure=%v, bounded=%v", err, s.bounded)
 			}
@@ -324,7 +324,7 @@ func TestWorkflowReplayRefusals(t *testing.T) {
 	generation := int64(0)
 	for _, step := range []string{"target", "unreached"} {
 		input.FromStep = step
-		if _, err := workflowsReplayPreviewHandler(d)(ctx, input, fc.Principal{}); !errors.Is(err, fc.ErrConflict) {
+		if _, err := workflowsReplayPreviewHandler(d)(ctx, input, testPrincipal()); !errors.Is(err, fc.ErrConflict) {
 			t.Fatalf("preview refusal=%v", err)
 		}
 	}
@@ -334,7 +334,7 @@ func TestWorkflowReplayRefusals(t *testing.T) {
 	if err := d.Store.UpdateRun(ctx, run); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := workflowsReplayFromHandler(d)(ctx, WorkflowReplayCommandInput{WorkflowReplayInput: input, ExpectedGeneration: &generation}, fc.Principal{}); !errors.Is(err, fc.ErrConflict) {
+	if _, err := workflowsReplayFromHandler(d)(ctx, WorkflowReplayCommandInput{WorkflowReplayInput: input, ExpectedGeneration: &generation}, testPrincipal()); !errors.Is(err, fc.ErrConflict) {
 		t.Fatalf("running=%v", err)
 	}
 	run.State = workflow.RunStateFailed
@@ -344,7 +344,7 @@ func TestWorkflowReplayRefusals(t *testing.T) {
 	if err := d.Engine.Stop(ctx); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := workflowsReplayFromHandler(d)(ctx, WorkflowReplayCommandInput{WorkflowReplayInput: input, ExpectedGeneration: &generation}, fc.Principal{}); !errors.Is(err, fc.ErrUnavailable) {
+	if _, err := workflowsReplayFromHandler(d)(ctx, WorkflowReplayCommandInput{WorkflowReplayInput: input, ExpectedGeneration: &generation}, testPrincipal()); !errors.Is(err, fc.ErrUnavailable) {
 		t.Fatalf("stopped=%v", err)
 	}
 }

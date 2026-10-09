@@ -6,38 +6,38 @@ contributor:
 
 # Operator-wide. Scope fields are explicit filters, never principal claims.
 intents:
-  - { name: artifacts.list, kind: query, version: 1, capability: read }
-  - { name: artifacts.get, kind: query, version: 1, capability: read }
-  - { name: artifacts.forJob, kind: query, version: 1, capability: read }
-  - { name: artifacts.presign, kind: query, version: 1, capability: read }
-  - { name: workers.list, kind: query, version: 1, capability: read }
-  - { name: workers.get, kind: query, version: 1, capability: read }
-  - { name: queues.list, kind: query, version: 1, capability: read }
-  - { name: queues.get, kind: query, version: 1, capability: read }
-  - { name: handlers.list, kind: query, version: 1, capability: read }
-  - { name: handlers.get, kind: query, version: 1, capability: read }
-  - { name: engine.config, kind: query, version: 1, capability: read }
-  - { name: overview.summary, kind: query, version: 1, capability: read }
-  - { name: workflows.list, kind: query, version: 1, capability: read }
-  - { name: workflows.get, kind: query, version: 1, capability: read }
-  - { name: workflows.replayPreview, kind: query, version: 1, capability: read }
-  - { name: workflows.replayFrom, kind: command, version: 1, capability: write, invalidates: [workflows.list, workflows.get, workflows.replayPreview, overview.summary] }
-  - { name: jobs.list, kind: query, version: 1, capability: read }
-  - { name: jobs.get, kind: query, version: 1, capability: read }
-  - { name: jobs.counts, kind: query, version: 1, capability: read }
-  - { name: jobs.cancel, kind: command, version: 1, capability: write, invalidates: [jobs.list, jobs.get, jobs.counts, queues.list, queues.get, overview.summary] }
-  - { name: jobs.retry, kind: command, version: 1, capability: write, invalidates: [jobs.list, jobs.get, jobs.counts, queues.list, queues.get, overview.summary, dlq.list, dlq.get, dlq.counts] }
-  - { name: dlq.list, kind: query, version: 1, capability: read }
-  - { name: dlq.get, kind: query, version: 1, capability: read }
-  - { name: dlq.counts, kind: query, version: 1, capability: read }
-  - { name: dlq.purgePreview, kind: query, version: 1, capability: read }
-  - { name: dlq.replay, kind: command, version: 1, capability: write, invalidates: [dlq.list, dlq.get, dlq.counts, jobs.list, jobs.counts, queues.list, queues.get, overview.summary] }
-  - { name: dlq.replayAll, kind: command, version: 1, capability: write, invalidates: [dlq.list, dlq.get, dlq.counts, jobs.list, jobs.counts, queues.list, queues.get, overview.summary] }
-  - { name: dlq.delete, kind: command, version: 1, capability: write, invalidates: [dlq.list, dlq.get, dlq.counts, dlq.purgePreview, overview.summary] }
-  - { name: dlq.purge, kind: command, version: 1, capability: write, invalidates: [dlq.list, dlq.get, dlq.counts, dlq.purgePreview, overview.summary] }
-  - { name: crons.list, kind: query, version: 1, capability: read }
-  - { name: crons.get, kind: query, version: 1, capability: read }
-  - { name: crons.enable, kind: command, version: 1, capability: write, invalidates: [crons.list, crons.get, overview.summary] }
-  - { name: crons.disable, kind: command, version: 1, capability: write, invalidates: [crons.list, crons.get, overview.summary] }
-  - { name: crons.delete, kind: command, version: 1, capability: write, invalidates: [crons.list, crons.get, overview.summary] }
-  - { name: crons.runNow, kind: command, version: 1, capability: write, invalidates: [crons.get, jobs.list, jobs.counts, queues.list, queues.get, overview.summary] }
+  - { name: artifacts.list, kind: query, version: 1, requires: { warden: dispatchInstallationOperator }, capability: read }
+  - { name: artifacts.get, kind: query, version: 1, requires: { warden: dispatchInstallationOperator }, capability: read }
+  - { name: artifacts.forJob, kind: query, version: 1, requires: { warden: dispatchInstallationOperator }, capability: read }
+  - { name: artifacts.presign, kind: query, version: 1, requires: { warden: dispatchInstallationOperator }, capability: read }
+  - { name: workers.list, kind: query, version: 1, requires: { warden: dispatchInstallationOperator }, capability: read }
+  - { name: workers.get, kind: query, version: 1, requires: { warden: dispatchInstallationOperator }, capability: read }
+  - { name: queues.list, kind: query, version: 1, requires: { warden: dispatchInstallationOperator }, capability: read }
+  - { name: queues.get, kind: query, version: 1, requires: { warden: dispatchInstallationOperator }, capability: read }
+  - { name: handlers.list, kind: query, version: 1, requires: { warden: dispatchInstallationOperator }, capability: read }
+  - { name: handlers.get, kind: query, version: 1, requires: { warden: dispatchInstallationOperator }, capability: read }
+  - { name: engine.config, kind: query, version: 1, requires: { warden: dispatchInstallationOperator }, capability: read }
+  - { name: overview.summary, kind: query, version: 1, requires: { warden: dispatchInstallationOperator }, capability: read }
+  - { name: workflows.list, kind: query, version: 1, requires: { warden: dispatchInstallationOperator }, capability: read }
+  - { name: workflows.get, kind: query, version: 1, requires: { warden: dispatchInstallationOperator }, capability: read }
+  - { name: workflows.replayPreview, kind: query, version: 1, requires: { warden: dispatchInstallationOperator }, capability: read }
+  - { name: workflows.replayFrom, kind: command, version: 1, requires: { warden: dispatchInstallationOperator }, capability: write, invalidates: [workflows.list, workflows.get, workflows.replayPreview, overview.summary] }
+  - { name: jobs.list, kind: query, version: 1, requires: { warden: dispatchInstallationOperator }, capability: read }
+  - { name: jobs.get, kind: query, version: 1, requires: { warden: dispatchInstallationOperator }, capability: read }
+  - { name: jobs.counts, kind: query, version: 1, requires: { warden: dispatchInstallationOperator }, capability: read }
+  - { name: jobs.cancel, kind: command, version: 1, requires: { warden: dispatchInstallationOperator }, capability: write, invalidates: [jobs.list, jobs.get, jobs.counts, queues.list, queues.get, overview.summary] }
+  - { name: jobs.retry, kind: command, version: 1, requires: { warden: dispatchInstallationOperator }, capability: write, invalidates: [jobs.list, jobs.get, jobs.counts, queues.list, queues.get, overview.summary, dlq.list, dlq.get, dlq.counts] }
+  - { name: dlq.list, kind: query, version: 1, requires: { warden: dispatchInstallationOperator }, capability: read }
+  - { name: dlq.get, kind: query, version: 1, requires: { warden: dispatchInstallationOperator }, capability: read }
+  - { name: dlq.counts, kind: query, version: 1, requires: { warden: dispatchInstallationOperator }, capability: read }
+  - { name: dlq.purgePreview, kind: query, version: 1, requires: { warden: dispatchInstallationOperator }, capability: read }
+  - { name: dlq.replay, kind: command, version: 1, requires: { warden: dispatchInstallationOperator }, capability: write, invalidates: [dlq.list, dlq.get, dlq.counts, jobs.list, jobs.counts, queues.list, queues.get, overview.summary] }
+  - { name: dlq.replayAll, kind: command, version: 1, requires: { warden: dispatchInstallationOperator }, capability: write, invalidates: [dlq.list, dlq.get, dlq.counts, jobs.list, jobs.counts, queues.list, queues.get, overview.summary] }
+  - { name: dlq.delete, kind: command, version: 1, requires: { warden: dispatchInstallationOperator }, capability: write, invalidates: [dlq.list, dlq.get, dlq.counts, dlq.purgePreview, overview.summary] }
+  - { name: dlq.purge, kind: command, version: 1, requires: { warden: dispatchInstallationOperator }, capability: write, invalidates: [dlq.list, dlq.get, dlq.counts, dlq.purgePreview, overview.summary] }
+  - { name: crons.list, kind: query, version: 1, requires: { warden: dispatchInstallationOperator }, capability: read }
+  - { name: crons.get, kind: query, version: 1, requires: { warden: dispatchInstallationOperator }, capability: read }
+  - { name: crons.enable, kind: command, version: 1, requires: { warden: dispatchInstallationOperator }, capability: write, invalidates: [crons.list, crons.get, overview.summary] }
+  - { name: crons.disable, kind: command, version: 1, requires: { warden: dispatchInstallationOperator }, capability: write, invalidates: [crons.list, crons.get, overview.summary] }
+  - { name: crons.delete, kind: command, version: 1, requires: { warden: dispatchInstallationOperator }, capability: write, invalidates: [crons.list, crons.get, overview.summary] }
+  - { name: crons.runNow, kind: command, version: 1, requires: { warden: dispatchInstallationOperator }, capability: write, invalidates: [crons.get, jobs.list, jobs.counts, queues.list, queues.get, overview.summary] }

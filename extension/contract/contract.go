@@ -81,6 +81,9 @@ func Register(d *dispatcher.Dispatcher, reg fc.Registry, wreg fc.WardenRegistry,
 	if d == nil || reg == nil || wreg == nil {
 		return fmt.Errorf("dispatch/contract: dispatcher and registries are required")
 	}
+	if err := wreg.Register(WardenName, operatorWarden{deps: deps}); err != nil {
+		return err
+	}
 	manifest, err := loader.Load(bytes.NewReader(manifestYAML), "dispatch/contract/manifest.yaml")
 	if err != nil {
 		return fmt.Errorf("dispatch/contract: load manifest: %w", err)

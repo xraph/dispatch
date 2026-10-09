@@ -7,15 +7,18 @@ import (
 	log "github.com/xraph/go-utils/log"
 
 	"github.com/xraph/dispatch/engine"
+	"github.com/xraph/dispatch/ext"
 	"github.com/xraph/dispatch/id"
 	"github.com/xraph/dispatch/job"
 	"github.com/xraph/dispatch/scope"
+	"github.com/xraph/dispatch/security"
 	"github.com/xraph/dispatch/stream"
 	"github.com/xraph/dispatch/workflow"
 )
 
 // Handler dispatches DWP frames to engine operations.
 type Handler struct {
+	security   security.Boundary
 	eng        *engine.Engine
 	broker     *stream.Broker
 	federation *Federation
@@ -23,8 +26,12 @@ type Handler struct {
 }
 
 // NewHandler creates a new DWP method handler.
-func NewHandler(eng *engine.Engine, broker *stream.Broker, logger log.Logger) *Handler {
-	return &Handler{eng: eng, broker: broker, logger: logger}
+func NewHandler(eng *engine.Engine, broker *stream.Broker, logger log.Logger, boundaries ...security.Boundary) *Handler {
+	h := &Handler{eng: eng, broker: broker, logger: logger}
+	if len(boundaries) > 0 {
+		h.security = boundaries[0]
+	}
+	return h
 }
 
 // SetFederation attaches a federation manager for handling server-to-server methods.
@@ -34,6 +41,16 @@ func (h *Handler) SetFederation(f *Federation) {
 
 // Handle processes a single DWP request frame and returns a response.
 func (h *Handler) Handle(ctx context.Context, frame *Frame, conn *Connection) *Frame {
+	if frame == nil {
+		return NewErrorFrame("", ErrCodeBadRequest, "missing frame")
+	}
+	if conn == nil || conn.Identity == nil {
+		return NewErrorFrame(frame.ID, ErrCodeUnauthorized, "authentication required")
+	}
+	if err := h.authorize(ctx, conn.Identity, frame.Method); err != nil {
+		return NewErrorFrame(frame.ID, authorizationCode(err), "access unavailable or denied")
+	}
+	ctx = ext.WithActor(ctx, conn.Identity.Subject)
 	// Inject scope from connection identity.
 	if conn.Identity != nil {
 		ctx = scope.Restore(ctx, conn.Identity.AppID, conn.Identity.OrgID)

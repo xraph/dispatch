@@ -123,16 +123,16 @@ func TestCronInvalidStoredScheduleRemainsInspectableAndRemovable(t *testing.T) {
 		t.Run(schedule, func(t *testing.T) {
 			d := contractDeps(t, memory.New())
 			e := seedCron(t, d, "invalid", schedule, false)
-			detail, err := cronsGetHandler(d)(context.Background(), IDInput{ID: e.ID.String()}, fc.Principal{})
+			detail, err := cronsGetHandler(d)(context.Background(), IDInput{ID: e.ID.String()}, testPrincipal())
 			if err != nil || detail.ScheduleError == nil || detail.NextFires == nil || len(detail.NextFires) != 0 {
 				t.Fatalf("invalid record = %+v, %v", detail, err)
 			}
-			_, err = cronToggleHandler(d, true)(context.Background(), IDInput{ID: e.ID.String()}, fc.Principal{})
+			_, err = cronToggleHandler(d, true)(context.Background(), IDInput{ID: e.ID.String()}, testPrincipal())
 			var ce *fc.Error
 			if !errors.As(err, &ce) || ce.Code != fc.CodeConflict || ce.Details["state"] != "disabled" {
 				t.Fatalf("enable refusal = %v", err)
 			}
-			if _, deleteErr := cronsDeleteHandler(d)(context.Background(), IDInput{ID: e.ID.String()}, fc.Principal{}); deleteErr != nil {
+			if _, deleteErr := cronsDeleteHandler(d)(context.Background(), IDInput{ID: e.ID.String()}, testPrincipal()); deleteErr != nil {
 				t.Fatal(deleteErr)
 			}
 		})
@@ -149,7 +149,7 @@ func (s failingCronStore) ListCrons(ctx context.Context) ([]*cron.Entry, error) 
 }
 func TestCronReadFailureIsRedacted(t *testing.T) {
 	d := contractDeps(t, failingCronStore{Store: memory.New()})
-	_, err := cronsListHandler(d)(context.Background(), EmptyInput{}, fc.Principal{})
+	_, err := cronsListHandler(d)(context.Background(), EmptyInput{}, testPrincipal())
 	if !errors.Is(err, fc.ErrInternal) || strings.Contains(err.Error(), "private") {
 		t.Fatalf("read failure = %v", err)
 	}

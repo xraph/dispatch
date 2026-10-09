@@ -27,6 +27,10 @@ func handle[I, O any](deps Deps, intent string, command bool, fn func(context.Co
 		}
 		ctx, cancel := context.WithTimeout(ctx, timeout)
 		defer cancel()
+		if err := deps.authorize(ctx, principal, intent); err != nil {
+			var zero O
+			return zero, err
+		}
 		output, err := fn(ctx, input, principal)
 		return output, deps.mapError(intent, err)
 	}

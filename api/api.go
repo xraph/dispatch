@@ -13,21 +13,28 @@ import (
 	"github.com/xraph/dispatch/dlq"
 	"github.com/xraph/dispatch/engine"
 	"github.com/xraph/dispatch/job"
+	"github.com/xraph/dispatch/security"
 	"github.com/xraph/dispatch/workflow"
 )
 
 // API wires all Forge-style HTTP handlers together for the dispatch system.
 type API struct {
-	eng    *engine.Engine
-	router forge.Router
+	auth     security.Authenticator
+	boundary security.Boundary
+	eng      *engine.Engine
+	router   forge.Router
 
 	handlerOnce sync.Once
 	handler     http.Handler
 }
 
 // New creates an API from a dispatch Engine.
-func New(eng *engine.Engine, router forge.Router) *API {
-	return &API{eng: eng, router: router}
+func New(eng *engine.Engine, router forge.Router, opts ...Option) *API {
+	a := &API{eng: eng, router: router}
+	for _, opt := range opts {
+		opt(a)
+	}
+	return a
 }
 
 // Handler returns the fully assembled http.Handler with all routes. The
@@ -66,24 +73,28 @@ func (a *API) RegisterRoutes(router forge.Router) error {
 // routes registers one group's routes and keeps the error forge returns
 // for each, named by method and path.
 type routes struct {
+	a    *API
 	g    forge.Router
 	errs []error
 }
 
 // group starts a /v1 group with the given OpenAPI tag.
-func group(router forge.Router, tag string) *routes {
-	return &routes{g: router.Group("/v1", forge.WithGroupTags(tag))}
+func (a *API) group(router forge.Router, tag string) *routes {
+	return &routes{a: a, g: router.Group("/v1", forge.WithGroupTags(tag))}
 }
 
 func (r *routes) get(path string, handler any, opts ...forge.RouteOption) {
+	opts = append(opts, forge.WithMiddleware(r.a.guard(http.MethodGet, path)))
 	r.keep(http.MethodGet, path, r.g.GET(path, handler, opts...))
 }
 
 func (r *routes) post(path string, handler any, opts ...forge.RouteOption) {
+	opts = append(opts, forge.WithMiddleware(r.a.guard(http.MethodPost, path)))
 	r.keep(http.MethodPost, path, r.g.POST(path, handler, opts...))
 }
 
 func (r *routes) delete(path string, handler any, opts ...forge.RouteOption) {
+	opts = append(opts, forge.WithMiddleware(r.a.guard(http.MethodDelete, path)))
 	r.keep(http.MethodDelete, path, r.g.DELETE(path, handler, opts...))
 }
 
@@ -99,7 +110,7 @@ func (r *routes) err() error {
 
 // registerJobRoutes registers job management routes.
 func (a *API) registerJobRoutes(router forge.Router) error {
-	r := group(router, "jobs")
+	r := a.group(router, "jobs")
 
 	r.get("/jobs", a.listJobs,
 		forge.WithSummary("List jobs"),
@@ -152,7 +163,7 @@ func (a *API) registerJobRoutes(router forge.Router) error {
 
 // registerWorkflowRoutes registers workflow management routes.
 func (a *API) registerWorkflowRoutes(router forge.Router) error {
-	r := group(router, "workflows")
+	r := a.group(router, "workflows")
 
 	r.get("/workflows", a.listWorkflowNames,
 		forge.WithSummary("List workflows"),
@@ -206,7 +217,7 @@ func (a *API) registerWorkflowRoutes(router forge.Router) error {
 
 // registerDLQRoutes registers dead letter queue management routes.
 func (a *API) registerDLQRoutes(router forge.Router) error {
-	r := group(router, "dlq")
+	r := a.group(router, "dlq")
 
 	r.get("/dlq", a.listDLQ,
 		forge.WithSummary("List DLQ entries"),
@@ -276,7 +287,7 @@ func (a *API) registerDLQRoutes(router forge.Router) error {
 
 // registerCronRoutes registers cron management routes.
 func (a *API) registerCronRoutes(router forge.Router) error {
-	r := group(router, "crons")
+	r := a.group(router, "crons")
 
 	r.get("/crons", a.listCrons,
 		forge.WithSummary("List cron entries"),
@@ -345,7 +356,7 @@ func conflictResponse(description string) forge.RouteOption {
 
 // registerStatsRoutes registers aggregate statistics routes.
 func (a *API) registerStatsRoutes(router forge.Router) error {
-	r := group(router, "stats")
+	r := a.group(router, "stats")
 
 	r.get("/stats", a.stats,
 		forge.WithSummary("Dispatch stats"),

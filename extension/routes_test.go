@@ -27,8 +27,8 @@ func TestExtension_RoutesRegister(t *testing.T) {
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/dispatch/v1/jobs", nil)
 	fapp.Router().Handler().ServeHTTP(rec, req)
-	if rec.Code != http.StatusOK || strings.TrimSpace(rec.Body.String()) != "[]" {
-		t.Errorf("GET /dispatch/v1/jobs = %d %q, want 200 []", rec.Code, rec.Body.String())
+	if rec.Code != http.StatusUnauthorized || !strings.Contains(rec.Body.String(), "authentication required") {
+		t.Errorf("GET /dispatch/v1/jobs = %d %q, want 401 authentication required", rec.Code, rec.Body.String())
 	}
 
 	err := ext.RegisterRoutes(fapp.Router().Group("/dispatch"))

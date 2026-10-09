@@ -12,7 +12,7 @@ import (
 func TestHandler_HandleSubscribe(t *testing.T) {
 	t.Parallel()
 
-	h := &Handler{logger: testLogger()}
+	h := &Handler{logger: testLogger(), security: testBoundary()}
 
 	frame := &Frame{
 		ID:     "req-1",
@@ -48,7 +48,7 @@ func TestHandler_HandleSubscribe(t *testing.T) {
 func TestHandler_HandleUnsubscribe(t *testing.T) {
 	t.Parallel()
 
-	h := &Handler{logger: testLogger()}
+	h := &Handler{logger: testLogger(), security: testBoundary()}
 
 	frame := &Frame{
 		ID:     "req-2",
@@ -78,7 +78,7 @@ func TestHandler_HandleUnsubscribe(t *testing.T) {
 func TestHandler_HandleSubscribeInvalidTopic(t *testing.T) {
 	t.Parallel()
 
-	h := &Handler{logger: testLogger()}
+	h := &Handler{logger: testLogger(), security: testBoundary()}
 
 	frame := &Frame{
 		ID:     "req-3",
@@ -106,7 +106,7 @@ func TestHandler_HandleSubscribeInvalidTopic(t *testing.T) {
 func TestHandler_HandleUnknownMethod(t *testing.T) {
 	t.Parallel()
 
-	h := &Handler{logger: testLogger()}
+	h := &Handler{logger: testLogger(), security: testBoundary()}
 
 	frame := &Frame{
 		ID:     "req-4",
@@ -125,15 +125,15 @@ func TestHandler_HandleUnknownMethod(t *testing.T) {
 	if resp.Error == nil {
 		t.Fatal("expected error detail")
 	}
-	if resp.Error.Code != ErrCodeMethodNotFound {
-		t.Errorf("Error.Code = %d, want %d", resp.Error.Code, ErrCodeMethodNotFound)
+	if resp.Error.Code != ErrCodeForbidden {
+		t.Errorf("Error.Code = %d, want %d", resp.Error.Code, ErrCodeForbidden)
 	}
 }
 
 func TestHandler_HandleBadJSON(t *testing.T) {
 	t.Parallel()
 
-	h := &Handler{logger: testLogger()}
+	h := &Handler{logger: testLogger(), security: testBoundary()}
 
 	frame := &Frame{
 		ID:     "req-5",
@@ -155,7 +155,7 @@ func TestHandler_HandleBadJSON(t *testing.T) {
 func TestHandler_FederationNotEnabled(t *testing.T) {
 	t.Parallel()
 
-	h := &Handler{logger: testLogger()}
+	h := &Handler{logger: testLogger(), security: testBoundary()}
 
 	methods := []string{MethodFederationEnqueue, MethodFederationEvent, MethodFederationHeartbeat}
 	for _, method := range methods {
@@ -188,7 +188,7 @@ func TestHandler_FederationNotEnabled(t *testing.T) {
 func TestHandler_SetFederation(t *testing.T) {
 	t.Parallel()
 
-	h := &Handler{logger: testLogger()}
+	h := &Handler{logger: testLogger(), security: testBoundary()}
 
 	if h.federation != nil {
 		t.Fatal("expected nil federation initially")

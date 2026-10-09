@@ -28,11 +28,13 @@ import (
 	"github.com/xraph/dispatch/artifact/cache"
 	"github.com/xraph/dispatch/artifact/sweeper"
 	"github.com/xraph/dispatch/backoff"
+	"github.com/xraph/dispatch/durable/runtime"
 	"github.com/xraph/dispatch/dwp"
 	"github.com/xraph/dispatch/engine"
 	"github.com/xraph/dispatch/ext"
 	mw "github.com/xraph/dispatch/middleware"
 	"github.com/xraph/dispatch/resource"
+	"github.com/xraph/dispatch/security"
 	mongostore "github.com/xraph/dispatch/store/mongo"
 	pgstore "github.com/xraph/dispatch/store/postgres"
 	redisstore "github.com/xraph/dispatch/store/redis"
@@ -56,19 +58,23 @@ var _ forge.Extension = (*Extension)(nil)
 type Extension struct {
 	*forge.BaseExtension
 
-	config       Config
-	eng          *engine.Engine
-	apiHandler   *api.API
-	dwpServer    *dwp.Server
-	logger       log.Logger
-	dispatchOpts []dispatch.Option
-	exts         []ext.Extension
-	mws          []mw.Middleware
-	dwpOpts      []dwp.Option
-	bo           backoff.Strategy
-	useGrove     bool
-	useGroveKV   bool
-	enableDWP    bool
+	remoteAuth      security.Authenticator
+	boundary        *security.Boundary
+	durable         *runtime.Options
+	durableHandlers runtime.Options
+	config          Config
+	eng             *engine.Engine
+	apiHandler      *api.API
+	dwpServer       *dwp.Server
+	logger          log.Logger
+	dispatchOpts    []dispatch.Option
+	exts            []ext.Extension
+	mws             []mw.Middleware
+	dwpOpts         []dwp.Option
+	bo              backoff.Strategy
+	useGrove        bool
+	useGroveKV      bool
+	enableDWP       bool
 
 	// artifactBackend is an explicitly supplied backend, taking priority
 	// over anything discovered in the container.
@@ -262,13 +268,19 @@ func (e *Extension) init(fapp forge.App) error {
 		}
 	}
 
+	durableOptions, durableErr := e.durableOption()
+	if durableErr != nil {
+		return durableErr
+	}
+	engOpts = append(engOpts, durableOptions...)
 	e.eng, err = engine.Build(d, engOpts...)
 	if err != nil {
 		return fmt.Errorf("dispatch: build engine: %w", err)
 	}
 
 	// Create the API handler.
-	e.apiHandler = api.New(e.eng, fapp.Router())
+	e.configureSecurity()
+	e.apiHandler = api.New(e.eng, fapp.Router(), api.WithSecurity(e.remoteAuth, *e.boundary))
 
 	// Register HTTP routes unless disabled.
 	if !e.config.DisableRoutes {
@@ -284,13 +296,13 @@ func (e *Extension) init(fapp forge.App) error {
 	// Create DWP server if stream broker is available.
 	if e.eng.StreamBroker() != nil {
 		dwpOptList := make([]dwp.Option, 0, len(e.dwpOpts)+2)
-		dwpOptList = append(dwpOptList, dwp.WithLogger(logger))
+		dwpOptList = append(dwpOptList, dwp.WithLogger(logger), dwp.WithAuth(&dwp.ForgeAuthenticator{Auth: e.remoteAuth}), dwp.WithSecurity(*e.boundary))
 		if e.config.DWPBasePath != "" {
 			dwpOptList = append(dwpOptList, dwp.WithPath(e.config.DWPBasePath))
 		}
 		dwpOptList = append(dwpOptList, e.dwpOpts...)
 
-		handler := dwp.NewHandler(e.eng, e.eng.StreamBroker(), logger)
+		handler := dwp.NewHandler(e.eng, e.eng.StreamBroker(), logger, *e.boundary)
 		e.dwpServer = dwp.NewServer(e.eng.StreamBroker(), handler, dwpOptList...)
 
 		if !e.config.DisableRoutes {
@@ -434,12 +446,7 @@ func (e *Extension) Health(ctx context.Context) error {
 		return errors.New("dispatch: extension not initialized")
 	}
 
-	store := e.eng.Dispatcher().Store()
-	if store == nil {
-		return errors.New("dispatch: no store configured")
-	}
-
-	return store.Ping(ctx)
+	return e.eng.Health(ctx)
 }
 
 // Handler returns the HTTP handler for all API routes.
@@ -583,6 +590,42 @@ func (e *Extension) mergeWithDefaults(cfg Config) Config {
 // mergeConfigurations merges YAML config with programmatic options.
 // YAML config takes precedence for most fields; programmatic bool flags fill gaps.
 func (e *Extension) mergeConfigurations(yamlConfig, programmaticConfig Config) Config {
+	if yamlConfig.Security.InstallationID == "" {
+		yamlConfig.Security.InstallationID = programmaticConfig.Security.InstallationID
+	}
+	if yamlConfig.Security.PolicyTenant == "" {
+		yamlConfig.Security.PolicyTenant = programmaticConfig.Security.PolicyTenant
+	}
+	if len(yamlConfig.Security.Providers) == 0 {
+		yamlConfig.Security.Providers = append([]string(nil), programmaticConfig.Security.Providers...)
+	}
+	if programmaticConfig.Durable.Enabled {
+		yamlConfig.Durable.Enabled = true
+	}
+	if yamlConfig.Durable.Namespace == "" {
+		yamlConfig.Durable.Namespace = programmaticConfig.Durable.Namespace
+	}
+	if yamlConfig.Durable.Queue == "" {
+		yamlConfig.Durable.Queue = programmaticConfig.Durable.Queue
+	}
+	if yamlConfig.Durable.BuildID == "" {
+		yamlConfig.Durable.BuildID = programmaticConfig.Durable.BuildID
+	}
+	if yamlConfig.Durable.Owner == "" {
+		yamlConfig.Durable.Owner = programmaticConfig.Durable.Owner
+	}
+	if yamlConfig.Durable.LeaseDuration == 0 {
+		yamlConfig.Durable.LeaseDuration = programmaticConfig.Durable.LeaseDuration
+	}
+	if yamlConfig.Durable.PollInterval == 0 {
+		yamlConfig.Durable.PollInterval = programmaticConfig.Durable.PollInterval
+	}
+	if yamlConfig.Durable.StoreTimeout == 0 {
+		yamlConfig.Durable.StoreTimeout = programmaticConfig.Durable.StoreTimeout
+	}
+	if yamlConfig.Durable.Concurrency == 0 {
+		yamlConfig.Durable.Concurrency = programmaticConfig.Durable.Concurrency
+	}
 	// Programmatic bool flags override when true.
 	if programmaticConfig.DisableRoutes {
 		yamlConfig.DisableRoutes = true

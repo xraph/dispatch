@@ -225,7 +225,7 @@ func TestDLQBulkKeepsPartialProgressAndRedactsFailures(t *testing.T) {
 			d.Logger = logger
 			seedDLQ(t, d, "one", "mail", "", "", time.Now(), false)
 			seedDLQ(t, d, "two", "mail", "", "", time.Now(), false)
-			result, err := dlqReplayAllHandler(d)(context.Background(), DLQReplayAllInput{}, fc.Principal{})
+			result, err := dlqReplayAllHandler(d)(context.Background(), DLQReplayAllInput{}, testPrincipal())
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -254,7 +254,7 @@ func (s incompleteDLQStore) ListDLQPage(ctx context.Context, _ dlq.PageOpts) (dl
 }
 func TestDLQListPreservesIncompleteSearch(t *testing.T) {
 	d := contractDeps(t, incompleteDLQStore{Store: memory.New()})
-	page, err := dlqListHandler(d)(context.Background(), DLQListInput{}, fc.Principal{})
+	page, err := dlqListHandler(d)(context.Background(), DLQListInput{}, testPrincipal())
 	if err != nil || page.Items == nil || page.Complete || page.NextCursor == nil || *page.NextCursor != "next-window" {
 		t.Fatalf("page = %+v, %v", page, err)
 	}

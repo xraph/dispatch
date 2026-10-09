@@ -76,7 +76,7 @@ func runArtifactDomain(t *testing.T, s store.Store) {
 	if swept, err := s.SweepOrphans(ctx, time.Now(), 10); err != nil || len(swept) != 1 {
 		t.Fatalf("sweep=%v, %v", swept, err)
 	}
-	p := fc.Principal{Claims: map[string]any{"scope_app_id": "app-a", "scope_org_id": "org-a"}}
+	p := fc.Principal{User: testPrincipal().User, Claims: map[string]any{"scope_app_id": "app-a", "scope_org_id": "org-a"}}
 	cursor := ""
 	got := []string{}
 	for pages := 0; ; pages++ {
@@ -162,7 +162,7 @@ func TestArtifactDownloadCapabilityIsPerRecord(t *testing.T) {
 	for _, key := range []string{"signed", "unsigned"} {
 		seedArtifact(t, s, key, artifact.Durable, "", "")
 	}
-	page, err := artifactsListHandler(d)(ctx, ArtifactsListInput{}, fc.Principal{})
+	page, err := artifactsListHandler(d)(ctx, ArtifactsListInput{}, testPrincipal())
 	if err != nil || len(page.Items) != 2 {
 		t.Fatalf("page = %+v, %v", page, err)
 	}
@@ -171,11 +171,11 @@ func TestArtifactDownloadCapabilityIsPerRecord(t *testing.T) {
 		if row.DownloadAvailable != want {
 			t.Errorf("%s list availability = %t", row.Key, row.DownloadAvailable)
 		}
-		detail, readErr := artifactsGetHandler(d)(ctx, IDInput{ID: row.ID}, fc.Principal{})
+		detail, readErr := artifactsGetHandler(d)(ctx, IDInput{ID: row.ID}, testPrincipal())
 		if readErr != nil || detail.Artifact == nil || detail.Artifact.DownloadAvailable != want {
 			t.Fatalf("detail = %+v, %v", detail, readErr)
 		}
-		download, signErr := artifactsPresignHandler(d)(ctx, IDInput{ID: row.ID}, fc.Principal{})
+		download, signErr := artifactsPresignHandler(d)(ctx, IDInput{ID: row.ID}, testPrincipal())
 		if signErr != nil || download.Supported != want || (download.URL != nil) != want {
 			t.Errorf("download = %+v, %v", download, signErr)
 		}
@@ -190,11 +190,11 @@ func TestArtifactContractUsesConfiguredServiceStore(t *testing.T) {
 	d := contractDeps(t, engineStore, engine.WithArtifacts(artifact.NewService(artifactStore, signer), nil))
 	a := seedArtifact(t, artifactStore, "separate", artifact.Durable, "", "")
 	seedArtifact(t, engineStore, "wrong-store", artifact.Durable, "", "")
-	page, err := artifactsListHandler(d)(context.Background(), ArtifactsListInput{}, fc.Principal{})
+	page, err := artifactsListHandler(d)(context.Background(), ArtifactsListInput{}, testPrincipal())
 	if err != nil || len(page.Items) != 1 || page.Items[0].ID != a.ID.String() {
 		t.Fatalf("configured store=%+v, %v", page, err)
 	}
-	detail, err := artifactsGetHandler(d)(context.Background(), IDInput{ID: a.ID.String()}, fc.Principal{})
+	detail, err := artifactsGetHandler(d)(context.Background(), IDInput{ID: a.ID.String()}, testPrincipal())
 	if err != nil || detail.Artifact == nil || detail.Artifact.ScopeAppID != nil {
 		t.Fatalf("configured detail=%+v, %v", detail, err)
 	}
@@ -202,11 +202,11 @@ func TestArtifactContractUsesConfiguredServiceStore(t *testing.T) {
 	if linkErr := artifactStore.LinkArtifact(context.Background(), &artifact.Link{ArtifactID: a.ID, OwnerKind: artifact.OwnerJob, OwnerID: j.ID.String(), Role: artifact.RoleInput, Name: "input", CreatedAt: time.Now()}); linkErr != nil {
 		t.Fatal(linkErr)
 	}
-	links, err := artifactsForJobHandler(d)(context.Background(), IDInput{ID: j.ID.String()}, fc.Principal{})
+	links, err := artifactsForJobHandler(d)(context.Background(), IDInput{ID: j.ID.String()}, testPrincipal())
 	if err != nil || len(links.Links) != 1 || links.Links[0].ArtifactID != a.ID.String() {
 		t.Fatalf("configured links=%+v, %v", links, err)
 	}
-	download, err := artifactsPresignHandler(d)(context.Background(), IDInput{ID: a.ID.String()}, fc.Principal{})
+	download, err := artifactsPresignHandler(d)(context.Background(), IDInput{ID: a.ID.String()}, testPrincipal())
 	if err != nil || download.URL == nil || signer.last.ID != a.ID {
 		t.Fatalf("configured download=%+v, %v", download, err)
 	}
@@ -218,7 +218,7 @@ func TestArtifactPresignCapabilityFailuresAndTTL(t *testing.T) {
 	a := seedArtifact(t, s, "signed", artifact.Durable, "", "")
 	input := IDInput{ID: a.ID.String()}
 	ctx := context.Background()
-	p := fc.Principal{}
+	p := testPrincipal()
 	first, err := artifactsPresignHandler(d)(ctx, input, p)
 	if err != nil || !first.Enabled || !first.Supported || first.URL == nil || first.ExpiresAt == nil {
 		t.Fatalf("first=%+v, %v", first, err)
@@ -270,7 +270,7 @@ type artifactBaseOnly struct{ artifact.Store }
 
 func TestArtifactDisabledAndMissingInspectionCapabilities(t *testing.T) {
 	ctx := context.Background()
-	p := fc.Principal{}
+	p := testPrincipal()
 	d := contractDeps(t, memory.New())
 	input := IDInput{ID: id.NewArtifactID().String()}
 	page, err := artifactsListHandler(d)(ctx, ArtifactsListInput{}, p)
