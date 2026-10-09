@@ -808,3 +808,12 @@ keep the original workflow queue and recover the receipt after a new run starts.
 The development example at examples/durable-signals prints completed: approved.
 Queries, updates, selectors, remote authorization, operator pages and process/load
 qualification remain open. These checks do not establish full Temporal parity.
+
+2026-10-08: signal commits ccb9fa9 and e539fc0 passed make f, make l with zero
+issues, the full Go unit suite, engine/runtime/memory race checks and the full
+PostgreSQL durable race suite (74.976 seconds at the runtime checkpoint).
+A fresh independent review of both commits found no actionable defects and
+independently passed the focused signal race tests. No corrective pass was needed.
+The review does not qualify the open roadmap work or remove the current decision
+and history limits. PostgreSQL pool recovery remains distinct from process-kill,
+failover, load and disaster-recovery qualification.
