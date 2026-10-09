@@ -13,6 +13,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"sync"
 	"time"
 
 	"github.com/xraph/forge"
@@ -59,6 +60,10 @@ var _ forge.Extension = (*Extension)(nil)
 type Extension struct {
 	*forge.BaseExtension
 
+	lifecycleOnce         sync.Once
+	lifecycleGate         chan struct{}
+	stopping              bool
+	sweeperStopped        chan struct{}
 	deliveryConfig        *DeliveryConfig
 	publisher             *delivery.Publisher
 	memoryAuditForTesting bool
@@ -320,6 +325,16 @@ func (e *Extension) init(fapp forge.App) error {
 
 // Start begins job processing and runs auto-migration if enabled.
 func (e *Extension) Start(ctx context.Context) error {
+	if err := e.lockLifecycle(ctx); err != nil {
+		return err
+	}
+	defer e.unlockLifecycle()
+	if e.stopping {
+		return errors.New("dispatch: extension is stopping")
+	}
+	if e.IsStarted() {
+		return nil
+	}
 	if e.eng == nil {
 		return errors.New("dispatch: extension not initialized")
 	}
@@ -441,22 +456,55 @@ func (e *Extension) isClusterLeader() bool {
 
 // Stop gracefully shuts down the dispatch engine.
 func (e *Extension) Stop(ctx context.Context) error {
+	if err := e.lockLifecycle(ctx); err != nil {
+		return err
+	}
+	defer e.unlockLifecycle()
+	e.stopping = true
 	if e.eng == nil {
 		e.MarkStopped()
 		return nil
 	}
+	e.boundary.Audit.Deactivate()
 	if e.sweeper != nil {
-		if serr := e.sweeper.Stop(ctx); serr != nil {
-			e.Logger().Warn("dispatch: artifact sweeper did not stop cleanly",
-				forge.F("error", serr.Error()))
+		if e.sweeperStopped == nil {
+			e.sweeperStopped = make(chan struct{})
+			go func() {
+				if err := e.sweeper.Stop(context.Background()); err != nil {
+					e.Logger().Warn("dispatch: artifact sweeper stop failed", forge.F("error", err.Error()))
+				}
+				close(e.sweeperStopped)
+			}()
+		}
+		select {
+		case <-e.sweeperStopped:
+		case <-ctx.Done():
+			return ctx.Err()
 		}
 	}
 
-	e.boundary.Audit.Deactivate()
 	err := e.eng.Stop(ctx)
 	e.MarkStopped()
 	return err
 }
+
+func (e *Extension) lockLifecycle(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	e.lifecycleOnce.Do(func() { e.lifecycleGate = make(chan struct{}, 1) })
+	select {
+	case e.lifecycleGate <- struct{}{}:
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+	if err := ctx.Err(); err != nil {
+		e.unlockLifecycle()
+		return err
+	}
+	return nil
+}
+func (e *Extension) unlockLifecycle() { <-e.lifecycleGate }
 
 // Health implements [forge.Extension].
 func (e *Extension) Health(ctx context.Context) error {

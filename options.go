@@ -56,6 +56,8 @@ type Dispatcher struct {
 	// without repeating hooks or closing storage under active publisher calls.
 	stopOnce         sync.Once
 	stopErr          error
+	stopWorkDone     chan struct{}
+	stopWorkErr      error
 	beforeStoreClose []func(context.Context) error
 	stopGateOnce     sync.Once
 	stopGate         chan struct{}
@@ -105,6 +107,9 @@ func (d *Dispatcher) Start(ctx context.Context) error {
 
 // Stop gracefully shuts down the dispatcher.
 func (d *Dispatcher) Stop(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	d.stopGateOnce.Do(func() { d.stopGate = make(chan struct{}, 1) })
 	select {
 	case d.stopGate <- struct{}{}:
@@ -112,22 +117,40 @@ func (d *Dispatcher) Stop(ctx context.Context) error {
 	case <-ctx.Done():
 		return ctx.Err()
 	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	if d.storeClosed {
 		return d.stopErr
 	}
 	d.stopOnce.Do(func() {
-		if d.pool != nil && d.started {
-			d.stopErr = errors.Join(d.stopErr, d.pool.Stop(ctx))
-		}
-		if d.extensions != nil {
-			d.extensions.EmitShutdown(ctx)
-		}
+		d.stopWorkDone = make(chan struct{})
+		go func() {
+			if d.pool != nil && d.started {
+				d.stopWorkErr = d.pool.Stop(ctx)
+			}
+			if d.extensions != nil {
+				d.extensions.EmitShutdown(ctx)
+			}
+			close(d.stopWorkDone)
+		}()
 	})
+	select {
+	case <-d.stopWorkDone:
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	var drainErr error
 	for _, stop := range d.beforeStoreClose {
 		drainErr = errors.Join(drainErr, stop(ctx))
 	}
-	if err := errors.Join(d.stopErr, drainErr); err != nil {
+	if err := errors.Join(d.stopWorkErr, drainErr); err != nil {
+		return err
+	}
+	if err := ctx.Err(); err != nil {
 		return err
 	}
 	if d.store != nil {

@@ -130,6 +130,17 @@ fields. They contain no execution input/output, task progress, callback proof,
 raw claims, arbitrary provider metadata, obligations or provider error strings.
 The attempted target is descriptive metadata and does not select delivery scope.
 
+Remote audit actions retain the registered REST method and route template,
+contract intent or DWP method. These are separate from the installation permission
+passed to Warden. Targets identify validated typed resource IDs; bulk commands
+capture their effective queue, limit or UTC cutoff. A relative REST purge cutoff
+is captured once and passed to the handler. Creation commands record a typed input
+selector, such as job name and queue, because an output ID does not exist yet.
+Selectors are bounded and exclude payloads, inputs and credentials. Unknown or
+invalid targets use an explicit marker. The pre-execution attempt and captured
+outcome carry identical action and target fields, so you can find the legacy
+resource when an unresolved attempt needs reconciliation.
+
 Delivery identity hashes an unambiguous ordered identity tuple including source
 installation, destination and schema version. The fingerprint binds every immutable envelope
 field, including occurrence time and actor metadata. Times normalize to UTC
@@ -239,6 +250,14 @@ immutable fingerprint; transport success alone is insufficient. Sink panic or
 outage leaves accepted intents recoverable. A sink that ignores cancellation
 occupies its existing goroutine; the publisher never spawns replacements for it.
 Go cannot forcibly terminate arbitrary sink code.
+
+Public extension and engine Stop calls serialize with each caller's deadline.
+One shutdown task waits for actual durable-worker completion, stops the wake
+listener and heartbeat, and deregisters the worker once. A handler that ignores
+cancellation can keep this task alive, but callers return at their deadlines and
+storage stays open. Retry Stop with a fresh context after the handler exits.
+Final close requires confirmed worker and publisher completion and a live caller
+context; an already-expired context cannot authorize final close.
 
 The publisher stays alive while workers and legacy shutdown hooks drain.
 `Dispatcher.BeforeStoreClose` then drains it before closing storage. If a required

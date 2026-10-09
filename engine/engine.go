@@ -29,6 +29,7 @@ import (
 	"github.com/xraph/dispatch/cluster"
 	"github.com/xraph/dispatch/cron"
 	"github.com/xraph/dispatch/dlq"
+	"github.com/xraph/dispatch/durable"
 	"github.com/xraph/dispatch/event"
 	"github.com/xraph/dispatch/exec"
 	"github.com/xraph/dispatch/ext"
@@ -86,22 +87,15 @@ type Engine struct {
 	mws        []mw.Middleware
 	logger     log.Logger
 
-	// stopOnce guards the executor-close path in Stop against a double
-	// call. Stop's other steps tolerate being run twice: the cron
-	// scheduler and the dispatcher each hold their own sync.Once, and the
-	// worker pool checks a running flag. Close has no such guard of its
-	// own, and closing a rung's clients or child processes twice is not
-	// guaranteed safe the way a no-op Stop is.
-	//
-	// The scope is deliberately narrow rather than wrapping all of Stop.
-	// Every other step owns its own idempotence, at the layer that knows
-	// what repeating it costs, and this guard exists only for the one
-	// step that cannot. Widening it here would put that decision in the
-	// wrong place and hide from a reader that the subsystems already
-	// handle it. Note a second Stop returns nil rather than the first
-	// call's error, because the dispatcher's own Once reports nothing on
-	// a repeat call.
-	stopOnce sync.Once
+	// Public lifecycle calls share a deadline-aware gate. Quiescence runs once
+	// and retains its completion channel across timed-out Stop calls.
+	lifecycleOnce sync.Once
+	lifecycleGate chan struct{}
+	stopping      bool
+	quiesced      chan struct{}
+	quiesceErr    error
+	stopped       bool
+	stopErr       error
 
 	// Workflow subsystem.
 	durable    *durableEngine
@@ -739,6 +733,14 @@ func (eng *Engine) Health(ctx context.Context) error {
 // Start begins job processing by starting the worker pool and cron scheduler.
 // It also resumes any workflow runs left in "running" state (crash recovery).
 func (eng *Engine) Start(ctx context.Context) (startErr error) {
+	if err := eng.lockLifecycle(ctx); err != nil {
+		return err
+	}
+	defer eng.unlockLifecycle()
+	if eng.stopping {
+		return durable.ErrClosed
+	}
+
 	if err := eng.startDurable(ctx); err != nil {
 		return err
 	}
@@ -786,52 +788,74 @@ func (eng *Engine) Start(ctx context.Context) (startErr error) {
 	return nil
 }
 
-// Stop gracefully shuts down the engine.
+// Stop confirms worker quiescence before attempting publisher drain and storage
+// closure. A timed-out caller leaves one quiescence task running and can retry.
 func (eng *Engine) Stop(ctx context.Context) error {
+	if err := eng.lockLifecycle(ctx); err != nil {
+		return err
+	}
+	defer eng.unlockLifecycle()
+	if eng.stopped {
+		return eng.stopErr
+	}
+	eng.stopping = true
+	if eng.quiesced == nil {
+		eng.quiesced = make(chan struct{})
+		go func() { eng.quiesceErr = eng.quiesce(); close(eng.quiesced) }()
+	}
+	select {
+	case <-eng.quiesced:
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if err := eng.d.Stop(ctx); err != nil {
+		return errors.Join(eng.quiesceErr, err)
+	}
+	eng.closeExecutors()
+	eng.stopped = true
+	eng.stopErr = eng.quiesceErr
+	return eng.stopErr
+}
+func (eng *Engine) lockLifecycle(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	eng.lifecycleOnce.Do(func() { eng.lifecycleGate = make(chan struct{}, 1) })
+	select {
+	case eng.lifecycleGate <- struct{}{}:
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+	if err := ctx.Err(); err != nil {
+		eng.unlockLifecycle()
+		return err
+	}
+	return nil
+}
+func (eng *Engine) unlockLifecycle() { <-eng.lifecycleGate }
+
+// This single goroutine owns shutdown preamble state. No later Stop repeats
+// store operations after Close, and no caller deadline substitutes for worker
+// completion. Arbitrary uncooperative code may delay quiescence, not the caller.
+func (eng *Engine) quiesce() error {
+	ctx := context.Background()
 	durableErr := eng.stopDurable(ctx)
-	// Stop the store wake listener first; it only reduces poll latency.
 	if eng.wakeStop != nil {
 		eng.wakeStop()
 		eng.wakeStop = nil
 	}
-
-	// Stop the row heartbeat before deregistering. A beat that ran after
-	// the delete would find the row missing and register it again,
-	// leaving a stopped worker listed as live until the next sweep.
 	eng.stopHeartbeat(ctx)
-
-	// Deregister this worker from the cluster.
-	if err := eng.clusterStore.DeregisterWorker(ctx, eng.pool.WorkerID()); err != nil {
+	deregisterCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	if err := eng.clusterStore.DeregisterWorker(deregisterCtx, eng.pool.WorkerID()); err != nil {
 		eng.logger.Warn("failed to deregister worker", log.String("error", err.Error()))
 	}
-
-	// Stop the cron scheduler.
-	if err := eng.scheduler.Stop(ctx); err != nil {
-		eng.logger.Error("cron scheduler stop error", log.String("error", err.Error()))
-	}
-
-	// Let in-flight workflow replays finish before the dispatcher goes,
-	// up to ctx's deadline. Shutdown also refuses any replay asked for
-	// from here on. A replay still going when ctx expires is left to
-	// finish; if the process exits first, its run is still running in
-	// the store and the next Start resumes it, so this only logs.
-	if err := eng.wfRunner.Shutdown(ctx); err != nil {
-		eng.logger.Warn("workflow runner shutdown incomplete", log.String("error", err.Error()))
-	}
-
-	stopErr := eng.d.Stop(ctx)
-
-	// Close the executors last. The dispatcher stop above drains the worker
-	// pool, so no attempt is still running through a rung when its resources
-	// go away. In-process Close is a no-op; an out-of-process rung releases
-	// its clients and child processes here or leaks them.
-	//
-	// Guarded by stopOnce: a second Stop call must not close every executor
-	// again, since Close is newly reachable here and, unlike the rest of
-	// this method, is not itself idempotent.
-	eng.stopOnce.Do(eng.closeExecutors)
-
-	return errors.Join(stopErr, durableErr)
+	cancel()
+	schedulerErr := eng.scheduler.Stop(ctx)
+	workflowErr := eng.wfRunner.Shutdown(ctx)
+	return errors.Join(durableErr, schedulerErr, workflowErr)
 }
 
 // closeExecutors releases every configured executor's resources, logging
