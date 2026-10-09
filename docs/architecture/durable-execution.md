@@ -42,7 +42,7 @@ Store tests alone do not qualify a workflow runtime or a deployment.
 | Fenced task claims and durable timer deadlines | Store contract and renewable workers implemented; process-kill qualification open | Expiry, same-owner reclaim, concurrent claims, restart recovery |
 | Deterministic Go workflow runtime | Activity, timer and future replay implemented; SDK expansion open | Recorded-history replay with no repeated external effects, changed-command rejection |
 | Activity retries and timeout classes | Queue, attempt, overall and heartbeat deadlines, progress recovery, retry policies and asynchronous Go callbacks implemented; remote authorization and process qualification open | Queue, attempt, overall and heartbeat deadlines; heartbeat progress; asynchronous completion |
-| Signals, queries, updates and signal-with-start | Open | Namespace isolation, deduplication, atomic acceptance, update results, read-only queries |
+| Signals, queries, updates and signal-with-start | Atomic signal store acceptance and receipts implemented; runtime, queries and updates open | Namespace isolation, deduplication, atomic acceptance, update results, read-only queries |
 | Child workflows and cancellation | Open | Stable child identity, duplicate creation prevention, parent-close policies, cancellation propagation |
 | Compensation, pause, termination and reset | Open | Resumable compensation attempts, audited controls, immutable reset lineage |
 | Continue-as-new and run chains | Open | Bounded history, message handoff and version inheritance |
@@ -725,3 +725,63 @@ race suite passes in 61.243 seconds with no skipped tests, including lost handof
 response reconciliation before connection replacement. The example still prints
 completed: paid. Both Important findings are fixed with reproducing regressions;
 no deferred minor findings remain. There was no second independent review.
+
+## Durable signal contract
+
+Signals acknowledge durable acceptance, not completion of a handler. Queries are
+read-only and updates have tracked results; both remain separate requirements.
+This distinction follows the [Temporal message model](https://docs.temporal.io/encyclopedia/workflow-message-passing).
+The [Go signal channel guidance](https://docs.temporal.io/develop/go/workflows/message-passing)
+also makes buffering and explicit draining before closure the workflow author's
+responsibility. Dispatch will preserve received messages in history even when
+workflow code closes without consuming them.
+
+SignalExecution targets an explicit run or the current open run when RunID is
+empty. A new signal requires an open run and its pinned build. It appends a
+versioned workflow.signal_received event, advances the execution revision and
+inserts a workflow wakeup in one transaction. The wakeup uses the queue retained
+on workflow:1; a callback client's queue cannot change workflow routing.
+Names contain at most 200 bytes, request IDs and routing identifiers at most
+512 bytes, and signal input at most 1 MiB. These limits apply before acceptance.
+
+SignalWithStart atomically chooses the current open run or creates the proposed
+run and accepts its first signal. Start.RequestID identifies this whole operation;
+there is no separately accepted start request. Start.RunID proposes the identity
+only when creation is needed. An existing run retains its original type, input
+and queue, and must match the requested build. A closed proposed run cannot be
+reused if no open run exists. The receipt returns the actual run and whether this
+request created it. A new run begins at revision 1 with two history events and
+one initial workflow task. An existing run advances by one revision and event.
+
+Signal request IDs are unique across both signal operations within one namespace
+and workflow ID. A workflow-level receipt binds the full request and operation
+and records the actual target. An exact retry returns that receipt before current
+run selection or lifecycle checks, even if the target has closed and another run
+is now open. Changed content is a conflict. Retain these receipts at least as long
+as the target run history. PostgreSQL serializes signal requests for one workflow
+identity before taking the execution lock; ordinary starts still arbitrate through
+the unique open-run constraint. No synthetic task lease is used for acceptance.
+
+Workflow.ReceiveSignal(id, name) returns a deterministic future. Receives use
+stable command IDs and names; matching messages are assigned in received order.
+A consumed message is recorded with its receive command in the same transaction
+as the workflow decision. Repeated Get returns the same copied input. Replay
+reserves prior assignments, rejects duplicate or mismatched consumption and uses
+the message's recorded receive time for Now, so committing consumption later
+cannot move a timer's logical origin. Unconsumed signals remain buffered in
+history. The combined new commands, consumptions and final state event must fit
+the existing 1000-event transaction bound.
+
+Qualification covers signals before and after a workflow waits, multiple names,
+FIFO consumption, repeated Get, replay changes, concurrent acceptance and closure,
+wrong namespace/build, lost responses, retries after a later run starts, atomic
+signal-with-start, PostgreSQL rollback and connection replacement, engine calls
+and a runnable example. Queries, updates, selectors, run-chain routing, remote
+authorization, Dashboard messaging views and process/load qualification remain
+required work until separately implemented and verified.
+
+Signal store evidence: memory and PostgreSQL conformance cover receipt recovery
+across run replacement, queue retention, conflicting requests and closure races.
+PostgreSQL fault tests reject the final receipt insertion, reopen the pool after a
+lost response, retry migrations and reject downgrade with retained receipts.
+Runtime consumption remains unimplemented at this store checkpoint.

@@ -15,6 +15,15 @@ import (
 // Run exercises a store with unique namespaces so cases can share a database.
 func Run(t *testing.T, s durable.Store) {
 	t.Helper()
+	t.Run("signal_acceptance", func(t *testing.T) { signalAcceptance(t, s) })
+	t.Run("signal_ordering", func(t *testing.T) { signalOrdering(t, s) })
+	t.Run("signal_isolation_and_limits", func(t *testing.T) { signalIsolationAndLimits(t, s) })
+	t.Run("signal_with_start", func(t *testing.T) { signalWithStart(t, s) })
+	t.Run("signal_rejections", func(t *testing.T) { signalRejections(t, s) })
+	t.Run("signal_concurrent", func(t *testing.T) { signalConcurrent(t, s) })
+	t.Run("signal_start_race", func(t *testing.T) { signalStartRace(t, s) })
+	t.Run("signal_conflict_race", func(t *testing.T) { signalConflictRace(t, s) })
+	t.Run("signal_closure_race", func(t *testing.T) { signalClosureRace(t, s) })
 	t.Run("intent_receipts", func(t *testing.T) { intentReceipts(t, s) })
 	t.Run("intent_isolation", func(t *testing.T) { intentIsolation(t, s) })
 	t.Run("intent_async_retry", func(t *testing.T) { intentAsyncRetry(t, s) })

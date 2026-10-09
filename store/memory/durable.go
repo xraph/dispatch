@@ -54,15 +54,21 @@ func (m *Store) StartExecution(ctx context.Context, r durable.StartRequest) (dur
 	}
 	now := durable.Timestamp(time.Now())
 	receipt := durable.Receipt{Revision: 1, FirstSequence: 1, LastSequence: 1}
-	m.executions[r.Key] = &executionRecord{
+	record := newExecutionRecord(r, now)
+	record.receipts[r.RequestID] = durableReceipt{digest: digest, value: receipt}
+	m.executions[r.Key] = record
+	return receipt, nil
+}
+
+func newExecutionRecord(r durable.StartRequest, now time.Time) *executionRecord {
+	return &executionRecord{
 		execution: durable.Execution{Key: r.Key, WorkflowType: r.WorkflowType, BuildID: r.BuildID,
 			State: durable.StateRunning, Revision: 1, LastSequence: 1, Input: cloneBytes(r.Input), CreatedAt: now, UpdatedAt: now},
 		history: []durable.Event{{EventInput: durable.EventInput{Type: "execution.started", Payload: cloneBytes(r.Input)}, Sequence: 1, Time: now}},
 		tasks: map[string]*durableTask{"workflow:1": {Task: durable.Task{Key: r.Key, Version: 1,
 			TaskSpec: durable.TaskSpec{ID: "workflow:1", Kind: durable.TaskWorkflow, Queue: r.Queue, AvailableAt: now}}}},
-		receipts: map[string]durableReceipt{r.RequestID: {digest: digest, value: receipt}},
+		receipts: make(map[string]durableReceipt),
 	}
-	return receipt, nil
 }
 
 func replayReceipt(receipt durableReceipt, digest string) (durable.Receipt, error) {

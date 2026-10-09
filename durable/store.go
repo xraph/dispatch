@@ -28,6 +28,10 @@ var (
 // request to resolve that uncertainty through its receipt.
 type Store interface {
 	StartExecution(context.Context, StartRequest) (Receipt, error)
+	// Signal receipts are scoped by namespace/workflow across runs and survive
+	// target closure. Acceptance records history and runnable work atomically.
+	SignalExecution(context.Context, SignalRequest) (SignalReceipt, error)
+	SignalWithStart(context.Context, SignalWithStartRequest) (SignalReceipt, error)
 	GetExecution(context.Context, Key) (Execution, error)
 	// GetTask returns persisted state, including finished tasks, in one namespace.
 	GetTask(context.Context, Key, string) (Task, error)
