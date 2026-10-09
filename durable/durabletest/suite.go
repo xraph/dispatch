@@ -15,6 +15,16 @@ import (
 // Run exercises a store with unique namespaces so cases can share a database.
 func Run(t *testing.T, s durable.Store) {
 	t.Helper()
+	t.Run("continuation_atomic", func(t *testing.T) { continuationAtomic(t, s) })
+	t.Run("continuation_signals", func(t *testing.T) { continuationSignals(t, s) })
+	t.Run("continuation_children", func(t *testing.T) { continuationChildren(t, s) })
+	t.Run("continuation_child_close", func(t *testing.T) { continuationChildClose(t, s) })
+	t.Run("continuation_rejection", func(t *testing.T) { continuationRejection(t, s) })
+	t.Run("continuation_input_race", func(t *testing.T) { continuationInputRace(t, s) })
+	t.Run("continuation_parent_close", func(t *testing.T) { continuationParentClose(t, s) })
+	t.Run("continuation_child_cancellation", func(t *testing.T) { continuationChildCancellation(t, s) })
+	t.Run("continuation_child_unrelated_root", func(t *testing.T) { continuationChildUnrelatedRoot(t, s) })
+	t.Run("continuation_child_timeout", func(t *testing.T) { continuationChildTimeout(t, s) })
 	t.Run("run_chain_roots", func(t *testing.T) { runChainRoots(t, s) })
 	t.Run("execution_timeout_validation", func(t *testing.T) { executionTimeoutValidation(t, s) })
 	t.Run("execution_timeout_closure", func(t *testing.T) { executionTimeoutClosure(t, s) })

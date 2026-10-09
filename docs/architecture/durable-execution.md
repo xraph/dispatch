@@ -46,7 +46,7 @@ Store tests alone do not qualify a workflow runtime or a deployment.
 | Signals, queries, updates and signal-with-start | Atomic signals, signal-with-start, Go receive replay and explicit/current/latest queries implemented; tracked updates open | Namespace isolation, deduplication, atomic acceptance, update results, read-only queries |
 | Child workflows and cancellation | Individual future, whole-workflow and child cancellation plus child composition implemented; cooperative external-activity completion acknowledgment open | Stable child identity, duplicate creation prevention, parent-close policies, cancellation propagation |
 | Compensation, pause, termination and reset | Parent-close termination implemented; operator controls, compensation, pause and reset open | Resumable compensation attempts, audited controls, immutable reset lineage |
-| Continue-as-new and run chains | Root lineage and relative run-timeout persistence implemented; atomic successors, runtime continuation and retries open | Bounded history, message handoff and version inheritance |
+| Continue-as-new and run chains | Atomic store continuation, signal handoff and child-chain routing implemented; runtime continuation and retries open | Bounded history, message handoff and version inheritance |
 | Schedules | Open | Overlap, catch-up, backfill, timezones and unique scheduled occurrences |
 | Deployment versioning | Pinned build polling implemented; rollout and patch markers open | Pinned build routing, gradual rollout, patch markers, replay checks, drainage |
 | Distributed scheduling | Open | Partition ownership, long polling, fairness, fleet-wide quotas and backpressure under load |
@@ -1554,3 +1554,40 @@ The full durable PostgreSQL integration race suite passed in 186.828 seconds.
 Shared tests cover all three creation paths and projection copies. Database tests
 cover older inserts, immutable metadata, repeated migrations, rollback after an
 injected backfill failure, pool replacement and unchanged start receipts.
+
+## Atomic continuation storage checkpoint
+
+CommitRequest.Continuation closes the source and creates its successor in one
+transaction. The store preserves the original execution deadline, records both
+adjacent run IDs, fences source tasks, transfers unread signals with their original
+acceptance coordinates and saves the exact source receipt. Signals consumed in
+that decision are excluded from the handoff. Accepted cancellation prevents normal
+continuation. Competing starts and inputs use the same workflow identity lock.
+
+A child can continue without completing its parent's future. Its original Start
+remains immutable, while CurrentKey resolves to the latest member of that chain.
+Parent-close and cancellation messages follow that member even when its build or
+queue changes. Final child results carry the final run's identity and deadline
+metadata. A continuing parent applies its existing child-close policies; the new
+parent run does not adopt old child futures.
+
+PostgreSQL checks both sides of each link at commit and rejects changes to saved
+lineage. Migration retries preserve the handoff guard. A failed handoff rolls back
+its source events, projection, task fencing, receipt, successor, latest pointer,
+new history and task, and child-close outbox together.
+
+This store API does not yet provide the Go workflow continuation method or its
+replay/query support. Whole-workflow retries also remain open. Enable these new
+history shapes only with compatible readers; full rollout, authorization and
+production recovery qualification remain separate roadmap requirements.
+
+Qualification for this checkpoint: `make f`, `make l` with zero issues,
+`go test ./...`, and durable/runtime/engine/memory races passed. The full durable
+PostgreSQL integration race suite passed in 212.197 seconds. Twelve injected
+failure cases cover the persistence boundaries through transaction commit;
+the strengthened receipt-rollback assertions passed in a further 17.188-second run.
+Shared tests exercise competing inputs and starts, cancellation precedence,
+multi-run signal provenance, carry limits, child close/cancellation routing,
+unrelated roots and final-run timeout metadata. Database tests also cover expiry
+during row-lock waits, repeated migrations, pool replacement and receipt recovery
+while later executions are locked.

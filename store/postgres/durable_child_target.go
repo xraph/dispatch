@@ -45,7 +45,7 @@ func applyChildTarget(ctx context.Context, tx driver.Tx, target durable.Executio
 		}
 	}
 	if d.Kind == durable.ChildDeliveryCancel && d.Message.CancellationID != "" {
-		link, err := scanChildExecution(tx.QueryRow(ctx, `SELECT `+childColumns+childJoin+` WHERE c.namespace=$1 AND c.child_workflow_id=$2 AND c.child_run_id=$3`, d.Target.Namespace, d.Target.WorkflowID, d.Target.RunID))
+		link, err := scanChildExecution(tx.QueryRow(ctx, `SELECT `+childColumns+childJoin+` WHERE c.namespace=$1 AND c.child_workflow_id=$2 AND c.child_run_id=`+childRootSelector, d.Target.Namespace, d.Target.WorkflowID, d.Target.RunID))
 		if err != nil {
 			return durable.ChildDeliveryReceipt{}, err
 		}

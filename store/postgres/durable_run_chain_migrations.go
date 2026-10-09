@@ -21,7 +21,11 @@ func init() {
  UPDATE dispatch_executions SET first_run_id=run_id,first_started_at=created_at,
  run_timeout=CASE WHEN run_deadline_at IS NULL THEN 0 ELSE (EXTRACT(EPOCH FROM (run_deadline_at-created_at))*1000000000)::bigint END
  WHERE first_run_id='' AND first_started_at IS NULL;
+ DO $$ BEGIN IF EXISTS(SELECT 1 FROM pg_trigger WHERE tgrelid='dispatch_executions'::regclass AND tgname='dispatch_continuation_pair') THEN
+ SET CONSTRAINTS dispatch_continuation_pair IMMEDIATE; END IF; END $$;
  ALTER TABLE dispatch_executions ALTER COLUMN first_started_at SET NOT NULL;
+ DO $$ BEGIN IF EXISTS(SELECT 1 FROM pg_trigger WHERE tgrelid='dispatch_executions'::regclass AND tgname='dispatch_continuation_pair') THEN
+ SET CONSTRAINTS dispatch_continuation_pair DEFERRED; END IF; END $$;
  CREATE OR REPLACE FUNCTION dispatch_initialize_run_chain() RETURNS trigger LANGUAGE plpgsql AS $$
  BEGIN
  IF NEW.first_run_id='' THEN NEW.first_run_id:=NEW.run_id; END IF;
@@ -38,13 +42,7 @@ func init() {
  END $$;
  DROP TRIGGER IF EXISTS dispatch_execution_chain_insert ON dispatch_executions;
  CREATE TRIGGER dispatch_execution_chain_insert BEFORE INSERT ON dispatch_executions FOR EACH ROW EXECUTE FUNCTION dispatch_initialize_run_chain();
- CREATE OR REPLACE FUNCTION dispatch_guard_run_chain() RETURNS trigger LANGUAGE plpgsql AS $$
- BEGIN
- IF NEW.first_run_id IS DISTINCT FROM OLD.first_run_id OR NEW.previous_run_id IS DISTINCT FROM OLD.previous_run_id OR NEW.next_run_id IS DISTINCT FROM OLD.next_run_id OR
- NEW.run_number IS DISTINCT FROM OLD.run_number OR NEW.first_started_at IS DISTINCT FROM OLD.first_started_at OR NEW.run_timeout IS DISTINCT FROM OLD.run_timeout OR NEW.created_at IS DISTINCT FROM OLD.created_at THEN
- RAISE EXCEPTION USING ERRCODE='DX004',MESSAGE='run lineage is immutable'; END IF;
- RETURN NEW;
- END $$;
+`+runChainGuardSQL+`
  CREATE TRIGGER dispatch_execution_chain_update BEFORE UPDATE ON dispatch_executions FOR EACH ROW EXECUTE FUNCTION dispatch_guard_run_chain();
  CREATE TRIGGER dispatch_execution_deadline_update BEFORE UPDATE ON dispatch_executions FOR EACH ROW EXECUTE FUNCTION dispatch_guard_execution_deadline();
  CREATE INDEX IF NOT EXISTS idx_dispatch_execution_chain ON dispatch_executions(namespace,workflow_id,first_run_id,run_number)`)
@@ -66,3 +64,19 @@ func init() {
 		return err
 	}})
 }
+
+// Retrying the base migration preserves the optional atomic-handoff guard.
+const runChainGuardSQL = ` CREATE OR REPLACE FUNCTION dispatch_guard_run_chain() RETURNS trigger LANGUAGE plpgsql AS $$
+ DECLARE allowed boolean;
+ BEGIN
+ IF NEW.first_run_id IS DISTINCT FROM OLD.first_run_id OR NEW.previous_run_id IS DISTINCT FROM OLD.previous_run_id OR
+ NEW.run_number IS DISTINCT FROM OLD.run_number OR NEW.first_started_at IS DISTINCT FROM OLD.first_started_at OR NEW.run_timeout IS DISTINCT FROM OLD.run_timeout OR NEW.created_at IS DISTINCT FROM OLD.created_at THEN
+ RAISE EXCEPTION USING ERRCODE='DX004',MESSAGE='run lineage is immutable'; END IF;
+ IF NEW.next_run_id IS DISTINCT FROM OLD.next_run_id THEN
+ IF to_regprocedure('dispatch_continuation_link_allowed(dispatch_executions,dispatch_executions)') IS NOT NULL THEN
+ EXECUTE 'SELECT dispatch_continuation_link_allowed($1,$2)' INTO allowed USING OLD,NEW;
+ IF allowed THEN RETURN NEW; END IF; END IF;
+ RAISE EXCEPTION USING ERRCODE='DX004',MESSAGE='run successor is immutable'; END IF;
+ RETURN NEW;
+ END $$;
+`

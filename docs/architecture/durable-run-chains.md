@@ -1,7 +1,8 @@
 # Durable run chains
 
-Status: implementation contract. The current runtime supports single runs; the
-requirements below are not a claim that retries or continue-as-new already work.
+Status: the memory and PostgreSQL stores support atomic continuation through
+CommitRequest.Continuation. The current runtime still supports single runs;
+SDK continuation, historical replay and workflow retries remain required work.
 The full [durability roadmap](durable-execution.md#required-work-and-evidence)
 remains the completion gate.
 
@@ -50,6 +51,9 @@ concurrent signal must either enter the source before its handoff snapshot or
 enter the successor afterward; it must not disappear between runs. Consumption
 in the handoff decision counts before choosing carried signals. Reject an
 oversized carry batch without partial closure so the workflow can drain messages.
+The store accepts at most 998 carried signals and 4 MiB of encoded carry records,
+and requires a source history of at most 100000 events. Consumption in the same decision
+can bring a pending batch within those limits.
 Cancellation accepted before handoff prevents normal continuation and enters
 cleanup; a cancellation racing after handoff targets the successor under the
 same workflow identity lock. Exact older receipts still identify their original
@@ -61,6 +65,13 @@ and a validated current/final run identity. Parent-close commands resolve the
 current child run under the chain's identity lock and remain idempotent across
 handoffs. Final child timeout metadata must describe the final run while retaining
 the original chain's execution deadline and parent relationship.
+
+CurrentKey resolves from the saved chain. It does not replace Start.Key. Close and
+cancel delivery polling follows the current child's build; delivery records retain
+their original routing, and receipts identify the run that actually received the
+message. A later unrelated root with the same workflow ID cannot inherit it.
+Final results from a successor use version 2 child messages with FinalRun metadata.
+Version 1 messages remain valid for single-run children and cancellation acknowledgments.
 
 A parent that continues-as-new closes its own run. Apply each existing child's
 parent-close policy; the successor does not adopt those old child futures.

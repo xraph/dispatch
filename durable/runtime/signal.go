@@ -12,15 +12,11 @@ const CommandSignal durable.TaskKind = "signal"
 // Signal history separates durable acceptance from workflow consumption.
 const (
 	EventSignalReceived = durable.EventSignalReceived
-	EventSignalConsumed = "workflow.signal_consumed"
+	EventSignalConsumed = durable.EventSignalConsumed
 )
 
 // SignalConsumption binds one accepted message to a stable receive command.
-type SignalConsumption struct {
-	Version   int    `json:"version"`
-	CommandID string `json:"command_id"`
-	SignalID  string `json:"signal_id"`
-}
+type SignalConsumption = durable.SignalConsumption
 
 // ReceiveSignal waits for the oldest unconsumed message with this name.
 // Use a unique, stable command ID for each receive. Repeated Get on the same

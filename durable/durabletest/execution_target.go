@@ -26,7 +26,7 @@ func assertTarget(t *testing.T, s durable.Store, key durable.Key, selection dura
 }
 
 func executionTargets(t *testing.T, s durable.Store) {
-	for _, state := range []durable.State{durable.StateCompleted, durable.StateFailed, durable.StateCancelled, durable.StateTerminated, durable.StateTimedOut, durable.StateContinuedAsNew} {
+	for _, state := range []durable.State{durable.StateCompleted, durable.StateFailed, durable.StateCancelled, durable.StateTerminated, durable.StateTimedOut} {
 		t.Run(string(state), func(t *testing.T) {
 			first := start(t, s)
 			for _, selection := range []durable.RunSelection{durable.RunExplicit, durable.RunCurrent, durable.RunLatest} {

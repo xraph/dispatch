@@ -27,7 +27,8 @@ type ChildStartSpec struct {
 
 // ChildExecution combines the saved relationship with the child's current state.
 type ChildExecution struct {
-	Parent Key `json:"parent"`
+	Parent     Key `json:"parent"`
+	CurrentKey Key `json:"current_key"`
 	ChildStartSpec
 	State     State     `json:"state"`
 	CreatedAt time.Time `json:"created_at"`

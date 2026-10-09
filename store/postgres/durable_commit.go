@@ -116,10 +116,15 @@ func (s *Store) CommitTransition(ctx context.Context, r durable.CommitRequest) (
 	defer s.rollbackExecution(tx)
 	// A committed child decision is independent of later ownership of its child
 	// identities. Recover it before waiting on those identities again.
-	if len(r.Children) != 0 {
+	if len(r.Children) != 0 || r.Continuation != nil {
 		accepted, exists, receiptErr := readExecutionReceipt(ctx, tx, r.Key, r.RequestID, digest)
 		if receiptErr != nil || exists {
 			return accepted, receiptErr
+		}
+	}
+	if r.Continuation != nil {
+		if lockErr := lockSignalWorkflow(ctx, tx, r.Namespace, r.WorkflowID); lockErr != nil {
+			return durable.Receipt{}, lockErr
 		}
 	}
 	if lockErr := lockChildIdentities(ctx, tx, r.Children); lockErr != nil {
@@ -174,6 +179,13 @@ func (s *Store) CommitTransition(ctx context.Context, r durable.CommitRequest) (
 	if err != nil {
 		return durable.Receipt{}, err
 	}
+	batch, err := prepareContinuation(ctx, tx, current, *task, r, now)
+	if err != nil {
+		return durable.Receipt{}, err
+	}
+	if batch != nil {
+		next.NextRunID = batch.Execution.RunID
+	}
 	for _, condition := range r.Conditions {
 		target, exists := conditions[condition.TaskID]
 		if !exists || durable.CheckTaskCondition(target, condition, now) != nil {
@@ -202,6 +214,9 @@ func (s *Store) CommitTransition(ctx context.Context, r durable.CommitRequest) (
 		return durable.Receipt{}, eventErr
 	}
 	events := append(append([]durable.EventInput(nil), r.Events...), childEvents...)
+	if batch != nil {
+		events = append(events, batch.Terminal)
+	}
 	for i, input := range events {
 		if eventErr := insertExecutionEvent(ctx, tx, r.Key, durable.Event{
 			EventInput: input, Sequence: receipt.FirstSequence + int64(i), Time: now,
@@ -210,8 +225,8 @@ func (s *Store) CommitTransition(ctx context.Context, r durable.CommitRequest) (
 		}
 	}
 	_, err = tx.Exec(ctx, `UPDATE dispatch_executions SET state=$4, revision=$5,
-        last_sequence=$6, output=$7, updated_at=$8 WHERE namespace=$1 AND workflow_id=$2 AND run_id=$3`,
-		r.Namespace, r.WorkflowID, r.RunID, string(next.State), next.Revision, next.LastSequence, executionBytes(next.Output), next.UpdatedAt)
+        last_sequence=$6, output=$7, updated_at=$8, next_run_id=$9 WHERE namespace=$1 AND workflow_id=$2 AND run_id=$3`,
+		r.Namespace, r.WorkflowID, r.RunID, string(next.State), next.Revision, next.LastSequence, executionBytes(next.Output), next.UpdatedAt, next.NextRunID)
 	if err != nil {
 		return durable.Receipt{}, err
 	}
@@ -248,6 +263,9 @@ func (s *Store) CommitTransition(ctx context.Context, r durable.CommitRequest) (
 	}
 	if receiptErr := saveExecutionReceipt(ctx, tx, r.Key, r.RequestID, digest, r.IntentDigest, receipt); receiptErr != nil {
 		return durable.Receipt{}, receiptErr
+	}
+	if continuationErr := insertContinuation(ctx, tx, batch, r.Continuation); continuationErr != nil {
+		return durable.Receipt{}, continuationErr
 	}
 	if err = tx.Commit(); err != nil {
 		return durable.Receipt{}, fmt.Errorf(errPrefix+"commit execution transition: %w", err)

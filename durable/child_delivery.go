@@ -38,6 +38,7 @@ type ChildMessage struct {
 	Output         []byte            `json:"output,omitempty"`
 	CloseEvent     EventInput        `json:"close_event"`
 	Disposition    string            `json:"disposition,omitempty"`
+	FinalRun       *RunMetadata      `json:"final_run,omitempty"`
 }
 
 // ChildDelivery is retained independently of its source execution's lifecycle.
@@ -125,6 +126,10 @@ func (d ChildDelivery) CheckLease(r ChildDeliveryRequest, now time.Time) error {
 func (d ChildDelivery) Clone() ChildDelivery {
 	d.Message.Output = append([]byte(nil), d.Message.Output...)
 	d.Message.CloseEvent.Payload = append([]byte(nil), d.Message.CloseEvent.Payload...)
+	if d.Message.FinalRun != nil {
+		value := *d.Message.FinalRun
+		d.Message.FinalRun = &value
+	}
 	return d
 }
 
@@ -133,14 +138,23 @@ func (d ChildDelivery) Validate() error {
 	m := d.Message
 	if d.Source.Validate() != nil || d.Target.Validate() != nil || m.Parent.Validate() != nil || m.Child.Validate() != nil ||
 		d.Source.Namespace != d.Target.Namespace || m.Parent.Namespace != m.Child.Namespace || m.Parent.WorkflowID == m.Child.WorkflowID ||
-		!identifier(d.ID) || !identifier(d.TargetBuildID) || !identifier(d.TargetQueue) || m.Version != 1 || !identifier(m.CommandID) {
+		!identifier(d.ID) || !identifier(d.TargetBuildID) || !identifier(d.TargetQueue) || (m.Version != 1 && m.Version != 2) || !identifier(m.CommandID) {
 		return ErrInvalid
 	}
 	if m.Policy != ParentCloseTerminate && m.Policy != ParentCloseRequestCancel && m.Policy != ParentCloseAbandon {
 		return ErrInvalid
 	}
 	toParent := d.Kind == ChildDeliveryResult || d.Kind == ChildDeliveryCancelAck
-	if toParent && (d.Source != m.Child || d.Target != m.Parent) || !toParent && (d.Source != m.Parent || d.Target != m.Child) {
+	sourceChild := m.Child
+	if m.Version == 2 {
+		if d.Kind != ChildDeliveryResult || m.FinalRun == nil || m.FinalRun.Validate() != nil || m.FinalRun.RunNumber < 2 || m.FinalRun.Namespace != m.Child.Namespace || m.FinalRun.WorkflowID != m.Child.WorkflowID || m.FinalRun.FirstRunID != m.Child.RunID {
+			return ErrInvalid
+		}
+		sourceChild = m.FinalRun.Key
+	} else if m.FinalRun != nil {
+		return ErrInvalid
+	}
+	if toParent && (d.Source != sourceChild || d.Target != m.Parent) || !toParent && (d.Source != m.Parent || d.Target != m.Child) {
 		return ErrInvalid
 	}
 	switch d.Kind {
@@ -243,11 +257,15 @@ func PrepareChildDeliveries(b ChildDeliveryBatch, now time.Time) ([]ChildDeliver
 		}
 		return err
 	}
-	if b.Next.State != StateRunning && b.Parent != nil {
+	if b.Next.State != StateRunning && b.Next.NextRunID == "" && b.Parent != nil {
 		if len(b.Request.Events) == 0 {
 			return nil, ErrInvalid
 		}
 		msg := childMessage(*b.Parent)
+		if b.Next.RunNumber > 1 {
+			metadata := RunMetadataOf(b.Next)
+			msg.Version, msg.FinalRun = 2, &metadata
+		}
 		msg.State, msg.Output, msg.CloseEvent = b.Next.State, b.Next.Output, b.Request.Events[len(b.Request.Events)-1]
 		if err := add("result", ChildDeliveryResult, b.ParentBuildID, b.Parent.ParentQueue, msg); err != nil {
 			return nil, err
@@ -299,5 +317,5 @@ func (d ChildDelivery) CancellationAcknowledgment(build, queue, disposition stri
 	msg := d.Message
 	msg.Disposition = disposition
 	id := childDeliveryID(ChildDeliveryCancelAck, msg.Parent.Namespace, msg.Parent.WorkflowID, msg.Parent.RunID, msg.CancellationID)
-	return newChildDelivery(d.Target, id, ChildDeliveryCancelAck, build, queue, msg, now)
+	return newChildDelivery(msg.Child, id, ChildDeliveryCancelAck, build, queue, msg, now)
 }

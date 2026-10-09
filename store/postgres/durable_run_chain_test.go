@@ -126,16 +126,19 @@ func TestDurableRunChainMigrationRecovery(t *testing.T) {
 func TestDurableRunChainDowngradeGuard(t *testing.T) {
 	s := setupTestStore(t)
 	migration, exec := runChainMigration(t, s)
-	now := durable.Timestamp(time.Now())
-	_, err := pgdriver.Unwrap(s.DB()).Exec(t.Context(), `INSERT INTO dispatch_executions(namespace,workflow_id,run_id,workflow_type,build_id,state,revision,last_sequence,input,output,created_at,updated_at,next_run_id)
- VALUES($1,'order','first','order','v1','continued_as_new',1,1,'','',$2,$2,'next')`, t.Name(), now)
+	r := signalStartRequest(t)
+	if _, err := s.StartExecution(t.Context(), r); err != nil {
+		t.Fatal(err)
+	}
+	request := postgresContinueRequest(t, s, r, "next")
+	_, err := s.CommitTransition(t.Context(), request)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if err = migration.Down(t.Context(), exec); err == nil || !strings.Contains(err.Error(), "retained run chains") {
 		t.Fatalf("destructive lineage downgrade: %v", err)
 	}
-	if _, err = s.GetExecution(t.Context(), durable.Key{Namespace: t.Name(), WorkflowID: "order", RunID: "first"}); err != nil {
+	if _, err = s.GetExecution(t.Context(), r.Key); err != nil {
 		t.Fatalf("failed downgrade damaged schema: %v", err)
 	}
 }

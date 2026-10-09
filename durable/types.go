@@ -181,6 +181,7 @@ type CommitRequest struct {
 	Tasks            []TaskSpec              `json:"tasks,omitempty"`
 	Children         []ChildStartSpec        `json:"children,omitempty"`
 	CancelChildren   []ChildCancellationSpec `json:"cancel_children,omitempty"`
+	Continuation     *ContinueSpec           `json:"continuation,omitempty"`
 	State            State                   `json:"state,omitempty"`
 	Output           []byte                  `json:"output,omitempty"`
 	TaskUpdate       *TaskUpdate             `json:"task_update,omitempty"`

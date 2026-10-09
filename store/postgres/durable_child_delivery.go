@@ -80,7 +80,7 @@ func prepareChildDeliveries(ctx context.Context, tx driver.Tx, next durable.Exec
 	if rowsErr != nil {
 		return nil, rowsErr
 	}
-	parent, err := scanChildExecution(tx.QueryRow(ctx, `SELECT `+childColumns+childJoin+` WHERE c.namespace=$1 AND c.child_workflow_id=$2 AND c.child_run_id=$3`, next.Namespace, next.WorkflowID, next.RunID))
+	parent, err := scanChildExecution(tx.QueryRow(ctx, `SELECT `+childColumns+childJoin+` WHERE c.namespace=$1 AND c.child_workflow_id=$2 AND c.child_run_id=`+childRootSelector, next.Namespace, next.WorkflowID, next.RunID))
 	if err != nil && !errors.Is(err, durable.ErrNotFound) {
 		return nil, err
 	}
@@ -103,7 +103,7 @@ func (s *Store) ClaimChildDelivery(ctx context.Context, r durable.ChildDeliveryC
 		return nil, err
 	}
 	defer s.rollbackExecution(tx)
-	d, err := scanChildDelivery(tx.QueryRow(ctx, `SELECT `+childDeliveryColumns+` FROM dispatch_child_deliveries WHERE namespace=$1 AND ($2='' OR target_build_id=$2) AND NOT done AND available_at<=clock_timestamp() AND (lease_until IS NULL OR lease_until<=clock_timestamp()) ORDER BY available_at,delivery_id COLLATE "C" LIMIT 1 FOR UPDATE SKIP LOCKED`, r.Namespace, r.BuildID))
+	d, err := scanChildDelivery(tx.QueryRow(ctx, `SELECT `+childDeliveryColumns+` FROM dispatch_child_deliveries WHERE namespace=$1 AND ($2='' OR (kind NOT IN ('close','cancel') AND target_build_id=$2) OR (kind IN ('close','cancel') AND $2=(SELECT e.build_id FROM dispatch_executions e WHERE e.namespace=dispatch_child_deliveries.namespace AND e.workflow_id=dispatch_child_deliveries.target_workflow_id AND e.first_run_id=dispatch_child_deliveries.target_run_id ORDER BY e.run_number DESC LIMIT 1))) AND NOT done AND available_at<=clock_timestamp() AND (lease_until IS NULL OR lease_until<=clock_timestamp()) ORDER BY available_at,delivery_id COLLATE "C" LIMIT 1 FOR UPDATE SKIP LOCKED`, r.Namespace, r.BuildID))
 	if errors.Is(err, durable.ErrNotFound) {
 		return nil, nil
 	}
@@ -224,7 +224,18 @@ func (s *Store) ApplyChildDelivery(ctx context.Context, r durable.ChildDeliveryR
 	if lockErr := lockSignalWorkflow(ctx, tx, d.Target.Namespace, d.Target.WorkflowID); lockErr != nil {
 		return durable.ChildDeliveryReceipt{}, lockErr
 	}
-	target, err := scanExecution(tx.QueryRow(ctx, `SELECT `+executionColumns+` FROM dispatch_executions WHERE namespace=$1 AND workflow_id=$2 AND run_id=$3 FOR UPDATE`, d.Target.Namespace, d.Target.WorkflowID, d.Target.RunID))
+	resolved := d.Target
+	if d.Kind == durable.ChildDeliveryClose || d.Kind == durable.ChildDeliveryCancel {
+		link, linkErr := scanChildExecution(tx.QueryRow(ctx, `SELECT `+childColumns+childJoin+` WHERE c.namespace=$1 AND c.child_workflow_id=$2 AND c.child_run_id=$3`, d.Message.Child.Namespace, d.Message.Child.WorkflowID, d.Message.Child.RunID))
+		if linkErr != nil {
+			return durable.ChildDeliveryReceipt{}, linkErr
+		}
+		if link.Parent != d.Source || link.CommandID != d.Message.CommandID {
+			return durable.ChildDeliveryReceipt{}, durable.ErrInvalid
+		}
+		resolved = link.CurrentKey
+	}
+	target, err := scanExecution(tx.QueryRow(ctx, `SELECT `+executionColumns+` FROM dispatch_executions WHERE namespace=$1 AND workflow_id=$2 AND run_id=$3 FOR UPDATE`, resolved.Namespace, resolved.WorkflowID, resolved.RunID))
 	if err != nil {
 		return durable.ChildDeliveryReceipt{}, err
 	}
@@ -235,6 +246,12 @@ func (s *Store) ApplyChildDelivery(ctx context.Context, r durable.ChildDeliveryR
 	prior, found, err = readChildDeliveryReceipt(ctx, tx, r, digest)
 	if err != nil || found {
 		return prior, err
+	}
+	if d.Kind == durable.ChildDeliveryClose || d.Kind == durable.ChildDeliveryCancel {
+		d.Target, d.TargetBuildID = resolved, target.BuildID
+		if queueErr := tx.QueryRow(ctx, `SELECT queue FROM dispatch_execution_tasks WHERE namespace=$1 AND workflow_id=$2 AND run_id=$3 AND task_id='workflow:1'`, resolved.Namespace, resolved.WorkflowID, resolved.RunID).Scan(&d.TargetQueue); queueErr != nil {
+			return durable.ChildDeliveryReceipt{}, queueErr
+		}
 	}
 	if d.Kind == durable.ChildDeliveryClose && d.Message.Policy == durable.ParentCloseTerminate {
 		_, err = tx.Exec(ctx, `SELECT 1 FROM dispatch_execution_tasks WHERE namespace=$1 AND workflow_id=$2 AND run_id=$3 AND NOT done FOR UPDATE`, d.Target.Namespace, d.Target.WorkflowID, d.Target.RunID)

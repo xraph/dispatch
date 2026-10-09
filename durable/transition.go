@@ -110,6 +110,9 @@ func (r CommitRequest) Validate() error {
 	if err := validateChildCancellations(r); err != nil {
 		return err
 	}
+	if err := validateContinuation(r); err != nil {
+		return err
+	}
 	return validateTaskControl(r)
 }
 
@@ -186,6 +189,9 @@ func Advance(current Execution, task Task, r CommitRequest, now time.Time) (Exec
 		return Execution{}, Receipt{}, ErrRevisionConflict
 	}
 	eventCount := int64(len(r.Events) + len(r.Children))
+	if r.Continuation != nil {
+		eventCount++
+	}
 	if current.Revision == math.MaxInt64 || current.LastSequence > math.MaxInt64-eventCount {
 		return Execution{}, Receipt{}, fmt.Errorf("%w: execution sequence exhausted", ErrInvalid)
 	}

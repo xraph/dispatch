@@ -297,6 +297,17 @@ func (m *Store) CommitTransition(ctx context.Context, r durable.CommitRequest) (
 	if err != nil {
 		return durable.Receipt{}, err
 	}
+	batch, err := durable.PrepareContinuation(record.execution, task.Task, r, record.history, now)
+	if err != nil {
+		return durable.Receipt{}, err
+	}
+	successor, err := m.prepareContinuationRecord(batch, r.Continuation)
+	if err != nil {
+		return durable.Receipt{}, err
+	}
+	if successor != nil {
+		next.NextRunID = successor.execution.RunID
+	}
 	for _, condition := range r.Conditions {
 		target, found := record.tasks[condition.TaskID]
 		if !found || durable.CheckTaskCondition(target.Task, condition, now) != nil {
@@ -356,6 +367,9 @@ func (m *Store) CommitTransition(ctx context.Context, r durable.CommitRequest) (
 		changes[spec.ID] = created
 	}
 	events := append(append([]durable.EventInput(nil), r.Events...), childEvents...)
+	if batch != nil {
+		events = append(events, batch.Terminal)
+	}
 	for i, evt := range events {
 		evt.Payload = cloneBytes(evt.Payload)
 		record.history = append(record.history, durable.Event{EventInput: evt, Sequence: receipt.FirstSequence + int64(i), Time: now})
@@ -371,6 +385,9 @@ func (m *Store) CommitTransition(ctx context.Context, r durable.CommitRequest) (
 	}
 	m.saveChildDeliveries(deliveries)
 	record.execution = next
+	if successor != nil {
+		m.installExecution(successor)
+	}
 	record.receipts[r.RequestID] = durableReceipt{digest: digest, intent: r.IntentDigest, value: receipt}
 	return receipt, nil
 }

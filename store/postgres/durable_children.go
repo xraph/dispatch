@@ -56,14 +56,15 @@ func insertChildExecutions(ctx context.Context, tx driver.Tx, parent durable.Key
 	return nil
 }
 
-const childColumns = `c.namespace,c.parent_workflow_id,c.parent_run_id,c.command_id,c.start_request,c.parent_queue,c.parent_close_policy,c.created_at,e.state,e.updated_at,e.workflow_id,e.run_id`
-const childJoin = ` FROM dispatch_child_executions c JOIN dispatch_executions e ON e.namespace=c.namespace AND e.workflow_id=c.child_workflow_id AND e.run_id=c.child_run_id`
+const childColumns = `c.namespace,c.parent_workflow_id,c.parent_run_id,c.command_id,c.start_request,c.parent_queue,c.parent_close_policy,c.created_at,e.state,e.updated_at,e.workflow_id,e.run_id,c.child_run_id,e.first_run_id`
+const childJoin = ` FROM dispatch_child_executions c JOIN LATERAL (SELECT * FROM dispatch_executions x WHERE x.namespace=c.namespace AND x.workflow_id=c.child_workflow_id AND x.first_run_id=c.child_run_id ORDER BY x.run_number DESC LIMIT 1) e ON true`
+const childRootSelector = `(SELECT first_run_id FROM dispatch_executions WHERE namespace=$1 AND workflow_id=$2 AND run_id=$3)`
 
 func scanChildExecution(row driver.Row) (durable.ChildExecution, error) {
 	var child durable.ChildExecution
 	var payload []byte
-	var workflowID, runID string
-	err := row.Scan(&child.Parent.Namespace, &child.Parent.WorkflowID, &child.Parent.RunID, &child.CommandID, &payload, &child.ParentQueue, &child.ParentClosePolicy, &child.CreatedAt, &child.State, &child.UpdatedAt, &workflowID, &runID)
+	var workflowID, runID, rootID, firstID string
+	err := row.Scan(&child.Parent.Namespace, &child.Parent.WorkflowID, &child.Parent.RunID, &child.CommandID, &payload, &child.ParentQueue, &child.ParentClosePolicy, &child.CreatedAt, &child.State, &child.UpdatedAt, &workflowID, &runID, &rootID, &firstID)
 	if isNoRows(err) {
 		return durable.ChildExecution{}, durable.ErrNotFound
 	}
@@ -73,9 +74,10 @@ func scanChildExecution(row driver.Row) (durable.ChildExecution, error) {
 	if decodeErr := json.Unmarshal(payload, &child.Start); decodeErr != nil {
 		return durable.ChildExecution{}, decodeErr
 	}
-	if child.Start.Namespace != child.Parent.Namespace || child.Start.WorkflowID != workflowID || child.Start.RunID != runID || child.Validate(child.Parent) != nil {
+	if child.Start.Namespace != child.Parent.Namespace || child.Start.WorkflowID != workflowID || child.Start.RunID != rootID || rootID != firstID || child.Validate(child.Parent) != nil {
 		return durable.ChildExecution{}, fmt.Errorf("%w: invalid stored child relationship", durable.ErrInvalid)
 	}
+	child.CurrentKey = durable.Key{Namespace: child.Parent.Namespace, WorkflowID: workflowID, RunID: runID}
 	return child, nil
 }
 
@@ -95,7 +97,7 @@ func (s *Store) GetParentExecution(ctx context.Context, child durable.Key) (dura
 	if err := child.Validate(); err != nil {
 		return durable.ChildExecution{}, err
 	}
-	return scanChildExecution(s.pgdb.QueryRow(ctx, `SELECT `+childColumns+childJoin+` WHERE c.namespace=$1 AND c.child_workflow_id=$2 AND c.child_run_id=$3`, child.Namespace, child.WorkflowID, child.RunID))
+	return scanChildExecution(s.pgdb.QueryRow(ctx, `SELECT `+childColumns+childJoin+` WHERE c.namespace=$1 AND c.child_workflow_id=$2 AND c.child_run_id=`+childRootSelector, child.Namespace, child.WorkflowID, child.RunID))
 }
 
 // ListChildExecutions pages by command ID, with an exclusive cursor.

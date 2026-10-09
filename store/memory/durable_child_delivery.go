@@ -29,7 +29,7 @@ func (m *Store) prepareChildDeliveries(next durable.Execution, r durable.CommitR
 	for _, key := range m.executions[next.Key].children {
 		b.Children = append(b.Children, m.childProjection(key))
 	}
-	if parent, ok := m.childParents[next.Key]; ok {
+	if parent, ok := m.childParents[m.childRoot(next.Key)]; ok {
 		b.Parent = &parent
 		b.ParentBuildID = m.executions[parent.Parent].execution.BuildID
 	}
@@ -74,7 +74,11 @@ func (m *Store) ClaimChildDelivery(ctx context.Context, r durable.ChildDeliveryC
 	now := durable.Timestamp(time.Now())
 	var selected *durable.ChildDelivery
 	for _, d := range m.childDeliveries {
-		if d.Source.Namespace != r.Namespace || d.Done || r.BuildID != "" && d.TargetBuildID != r.BuildID || d.AvailableAt.After(now) || d.LeaseUntil.After(now) {
+		build := d.TargetBuildID
+		if d.Kind == durable.ChildDeliveryClose || d.Kind == durable.ChildDeliveryCancel {
+			build = m.executions[m.currentChildKey(d.Message.Child)].execution.BuildID
+		}
+		if d.Source.Namespace != r.Namespace || d.Done || r.BuildID != "" && build != r.BuildID || d.AvailableAt.After(now) || d.LeaseUntil.After(now) {
 			continue
 		}
 		if selected == nil || d.AvailableAt.Before(selected.AvailableAt) {
@@ -190,6 +194,16 @@ func (m *Store) ApplyChildDelivery(ctx context.Context, r durable.ChildDeliveryR
 	if validationErr := d.Validate(); validationErr != nil {
 		return durable.ChildDeliveryReceipt{}, validationErr
 	}
+	original := d
+	if d.Kind == durable.ChildDeliveryClose || d.Kind == durable.ChildDeliveryCancel {
+		link, found := m.childParents[d.Message.Child]
+		if !found || link.Parent != d.Source || link.CommandID != d.Message.CommandID {
+			return durable.ChildDeliveryReceipt{}, durable.ErrInvalid
+		}
+		d.Target = m.currentChildKey(d.Message.Child)
+		target := m.executions[d.Target]
+		d.TargetBuildID, d.TargetQueue = target.execution.BuildID, target.tasks["workflow:1"].Queue
+	}
 	current, ok := m.executions[d.Target]
 	if !ok {
 		return durable.ChildDeliveryReceipt{}, durable.ErrNotFound
@@ -211,8 +225,8 @@ func (m *Store) ApplyChildDelivery(ctx context.Context, r durable.ChildDeliveryR
 		cr := d.CancellationRequest()
 		m.cancellationReceipts[signalReceiptKey{cr.Namespace, cr.WorkflowID, cr.RequestID}] = *cancelReceipt
 	}
-	d.Done, d.Disposition = true, receipt.Disposition
-	m.childDeliveries[key] = d
+	original.Done, original.Disposition = true, receipt.Disposition
+	m.childDeliveries[key] = original
 	m.childDeliveryReceipts[receiptKey] = childDeliveryReceiptRecord{digest, receipt}
 	return receipt, nil
 }
@@ -253,7 +267,7 @@ func (m *Store) applyChildTarget(target *executionRecord, d durable.ChildDeliver
 		}
 	}
 	if d.Kind == durable.ChildDeliveryCancel && d.Message.CancellationID != "" {
-		link, ok := m.childParents[d.Target]
+		link, ok := m.childParents[m.childRoot(d.Target)]
 		if !ok || link.Parent != d.Source || link.CommandID != d.Message.CommandID {
 			return durable.ChildDeliveryReceipt{}, nil, nil, durable.ErrInvalid
 		}

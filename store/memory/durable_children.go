@@ -31,8 +31,10 @@ func (m *Store) prepareChildren(parent *executionRecord, r durable.CommitRequest
 }
 
 func (m *Store) childProjection(key durable.Key) durable.ChildExecution {
-	link := m.childParents[key]
-	child := m.executions[key].execution
+	root := m.childRoot(key)
+	link := m.childParents[root]
+	link.CurrentKey = m.currentChildKey(root)
+	child := m.executions[link.CurrentKey].execution
 	link.State, link.UpdatedAt = child.State, child.UpdatedAt
 	link.Start.Input = cloneBytes(link.Start.Input)
 	return link
@@ -72,7 +74,7 @@ func (m *Store) GetParentExecution(ctx context.Context, child durable.Key) (dura
 	if err := ctx.Err(); err != nil {
 		return durable.ChildExecution{}, err
 	}
-	if _, exists := m.childParents[child]; !exists {
+	if _, exists := m.childParents[m.childRoot(child)]; !exists {
 		return durable.ChildExecution{}, durable.ErrNotFound
 	}
 	return m.childProjection(child), nil
