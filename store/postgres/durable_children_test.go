@@ -212,9 +212,7 @@ func TestDurableChildIdentityLockExpiry(t *testing.T) {
 		case <-time.After(5 * time.Millisecond):
 		}
 	}
-	if delay := time.Until(source.LeaseUntil) + 20*time.Millisecond; delay > 0 {
-		time.Sleep(delay)
-	}
+	waitDurableStoreTime(t, s, source.LeaseUntil)
 	if err = lock.Commit(); err != nil {
 		t.Fatal(err)
 	}

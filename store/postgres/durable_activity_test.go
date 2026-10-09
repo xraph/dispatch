@@ -97,7 +97,7 @@ func testDurableActivityRetryRecovery(t *testing.T, interrupted bool) {
 		t.Fatalf("task changed across reopen: %+v %+v %v", before, saved, err)
 	}
 	if interrupted {
-		time.Sleep(time.Until(saved.LeaseUntil) + 10*time.Millisecond)
+		waitDurableStoreTime(t, reopened, saved.LeaseUntil)
 		if worked, workErr := worker.RunOnce(t.Context(), durable.TaskActivity); workErr != nil || !worked {
 			t.Fatalf("adjudicate interruption: %t %v", worked, workErr)
 		}
@@ -115,7 +115,7 @@ func testDurableActivityRetryRecovery(t *testing.T, interrupted bool) {
 	if worked, workErr := worker.RunOnce(t.Context(), durable.TaskActivity); workErr != nil || worked {
 		t.Fatalf("retry delay lost after reopen: %t %v", worked, workErr)
 	}
-	time.Sleep(time.Until(saved.AvailableAt) + 10*time.Millisecond)
+	waitDurableStoreTime(t, reopened, saved.AvailableAt)
 	for _, kind := range []durable.TaskKind{durable.TaskActivity, durable.TaskWorkflow} {
 		if worked, workErr := worker.RunOnce(t.Context(), kind); workErr != nil || !worked {
 			t.Fatalf("replacement %s: %t %v", kind, worked, workErr)

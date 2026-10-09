@@ -32,7 +32,7 @@ func TestDurableTimeoutGrantReopen(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	time.Sleep(time.Until(queued.DeadlineAt) + 10*time.Millisecond)
+	waitDurableStoreTime(t, s, queued.DeadlineAt)
 	poll := durable.TimeoutClaimRequest{Namespace: key.Namespace, BuildID: "v1", Owner: "coordinator", LeaseDuration: time.Minute}
 	grant, err := s.ClaimTimeoutTask(t.Context(), poll)
 	if err != nil || grant == nil || grant.LeaseKind != durable.LeaseTimeout || grant.Attempt != 0 {

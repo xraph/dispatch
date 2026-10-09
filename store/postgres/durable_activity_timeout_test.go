@@ -97,7 +97,7 @@ func testDurableActivityTimeoutRecovery(t *testing.T, kind drt.ActivityTimeoutKi
 	if err != nil {
 		t.Fatal(err)
 	}
-	time.Sleep(time.Until(saved.DeadlineAt) + 10*time.Millisecond)
+	waitDurableStoreTime(t, reopened, saved.DeadlineAt)
 	if worked, workErr := coordinator.RunOnce(t.Context(), drt.TaskTimeout); workErr != nil || !worked {
 		t.Fatalf("timeout recovery: %t %v", worked, workErr)
 	}
@@ -111,7 +111,7 @@ func testDurableActivityTimeoutRecovery(t *testing.T, kind drt.ActivityTimeoutKi
 		if readErr != nil {
 			t.Fatal(readErr)
 		}
-		time.Sleep(time.Until(retry.AvailableAt) + 10*time.Millisecond)
+		waitDurableStoreTime(t, reopened, retry.AvailableAt)
 		if worked, workErr := worker.RunOnce(t.Context(), durable.TaskActivity); workErr != nil || !worked {
 			t.Fatalf("retry after timeout: %t %v", worked, workErr)
 		}

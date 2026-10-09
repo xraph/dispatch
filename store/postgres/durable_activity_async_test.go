@@ -213,7 +213,7 @@ func testDurableActivityAsyncRecovery(t *testing.T, mode string) {
 				t.Fatal(err)
 			}
 		} else {
-			time.Sleep(time.Until(task.DeadlineAt) + 5*time.Millisecond)
+			waitDurableStoreTime(t, s, task.DeadlineAt)
 			if worked, workErr := callback.RunOnce(t.Context(), drt.TaskTimeout); workErr != nil || !worked {
 				t.Fatalf("timeout without handlers: %t %v", worked, workErr)
 			}
@@ -222,7 +222,7 @@ func testDurableActivityAsyncRecovery(t *testing.T, mode string) {
 		if err != nil || task.AsyncKeyHash != "" || task.LeaseKind != "" || string(task.Progress) != "external" {
 			t.Fatalf("retry did not revoke async grant or preserve progress: %+v %v", task, err)
 		}
-		time.Sleep(time.Until(task.AvailableAt) + 5*time.Millisecond)
+		waitDurableStoreTime(t, s, task.AvailableAt)
 		for _, kind := range []durable.TaskKind{durable.TaskActivity, durable.TaskWorkflow} {
 			if worked, workErr := worker.RunOnce(t.Context(), kind); workErr != nil || !worked {
 				t.Fatalf("resume %s: %t %v", kind, worked, workErr)
