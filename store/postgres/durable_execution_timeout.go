@@ -86,6 +86,9 @@ func (s *Store) ApplyExecutionTimeout(ctx context.Context, r durable.ExecutionTi
 		return durable.Receipt{}, err
 	}
 	defer s.rollbackExecution(tx)
+	if lockErr := lockAuditMutation(ctx, tx, r.Namespace); lockErr != nil {
+		return durable.Receipt{}, lockErr
+	}
 	if receipt, found, readErr := readExecutionReceipt(ctx, tx, r.Key, r.RequestID, digest); readErr != nil || found {
 		return receipt, readErr
 	}

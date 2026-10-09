@@ -29,6 +29,9 @@ func (s *Store) RequestCancelExecution(ctx context.Context, r durable.CancelExec
 		return durable.CancelExecutionReceipt{}, err
 	}
 	defer s.rollbackExecution(tx)
+	if lockErr := lockAuditMutation(ctx, tx, r.Namespace); lockErr != nil {
+		return durable.CancelExecutionReceipt{}, lockErr
+	}
 	if lockErr := lockSignalWorkflow(ctx, tx, r.Namespace, r.WorkflowID); lockErr != nil {
 		return durable.CancelExecutionReceipt{}, lockErr
 	}

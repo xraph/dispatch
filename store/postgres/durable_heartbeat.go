@@ -22,6 +22,9 @@ func (s *Store) RecordHeartbeat(ctx context.Context, r durable.HeartbeatRequest)
 		return durable.Receipt{}, err
 	}
 	defer s.rollbackExecution(tx)
+	if lockErr := lockAuditMutation(ctx, tx, r.Namespace); lockErr != nil {
+		return durable.Receipt{}, lockErr
+	}
 	execution, err := scanExecution(tx.QueryRow(ctx, `SELECT `+executionColumns+`
         FROM dispatch_executions WHERE namespace=$1 AND workflow_id=$2 AND run_id=$3 FOR UPDATE`, r.Namespace, r.WorkflowID, r.RunID))
 	if err != nil {

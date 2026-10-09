@@ -33,6 +33,9 @@ func (s *Store) SignalExecution(ctx context.Context, r durable.SignalRequest) (r
 		return durable.SignalReceipt{}, err
 	}
 	defer s.rollbackExecution(tx)
+	if lockErr := lockAuditMutation(ctx, tx, r.Namespace); lockErr != nil {
+		return durable.SignalReceipt{}, lockErr
+	}
 	if lockErr := lockSignalWorkflow(ctx, tx, r.Namespace, r.WorkflowID); lockErr != nil {
 		return durable.SignalReceipt{}, lockErr
 	}
@@ -77,6 +80,9 @@ func (s *Store) SignalWithStart(ctx context.Context, r durable.SignalWithStartRe
 		return durable.SignalReceipt{}, err
 	}
 	defer s.rollbackExecution(tx)
+	if lockErr := lockAuditMutation(ctx, tx, r.Start.Namespace); lockErr != nil {
+		return durable.SignalReceipt{}, lockErr
+	}
 	if lockErr := lockSignalWorkflow(ctx, tx, r.Start.Namespace, r.Start.WorkflowID); lockErr != nil {
 		return durable.SignalReceipt{}, lockErr
 	}

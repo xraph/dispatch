@@ -81,6 +81,9 @@ func (s *Store) StartExecution(ctx context.Context, r durable.StartRequest) (dur
 		return durable.Receipt{}, err
 	}
 	defer s.rollbackExecution(tx)
+	if lockErr := lockAuditMutation(ctx, tx, r.Namespace); lockErr != nil {
+		return durable.Receipt{}, lockErr
+	}
 	if lockErr := lockSignalWorkflow(ctx, tx, r.Namespace, r.WorkflowID); lockErr != nil {
 		return durable.Receipt{}, lockErr
 	}
@@ -120,6 +123,9 @@ func (s *Store) CommitTransition(ctx context.Context, r durable.CommitRequest) (
 		return durable.Receipt{}, err
 	}
 	defer s.rollbackExecution(tx)
+	if lockErr := lockAuditMutation(ctx, tx, r.Namespace); lockErr != nil {
+		return durable.Receipt{}, lockErr
+	}
 	// A committed child decision is independent of later ownership of its child
 	// identities. Recover it before waiting on those identities again.
 	if len(r.Children) != 0 || r.Continuation != nil || r.State == durable.StateFailed {

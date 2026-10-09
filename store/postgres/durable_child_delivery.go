@@ -216,6 +216,9 @@ func (s *Store) ApplyChildDelivery(ctx context.Context, r durable.ChildDeliveryR
 		return durable.ChildDeliveryReceipt{}, err
 	}
 	defer s.rollbackExecution(tx)
+	if lockErr := lockAuditMutation(ctx, tx, r.Source.Namespace); lockErr != nil {
+		return durable.ChildDeliveryReceipt{}, lockErr
+	}
 	prior, found, err := readChildDeliveryReceipt(ctx, tx, r, digest)
 	if err != nil || found {
 		return prior, err

@@ -80,8 +80,10 @@ external callbacks run from this candidate. Index copying costs O(store size),
 and execution copying costs O(affected namespace state). Use PostgreSQL for load.
 
 PostgreSQL writes history, command receipts and intents in the same transaction.
-New writers take a shared namespace advisory transaction lock before reading
-ownership and preparing each batch. Database triggers also take that shared lock
+New writers take a shared namespace advisory transaction lock before execution,
+workflow identity or task locks, ownership lookup and authoritative clock reads.
+A grant or deadline that expires while activation blocks admission is rejected.
+Database triggers also take that shared lock
 for older writers. Namespace registration takes the exclusive form in a dedicated
 catalog-only transaction. It never reads or locks execution rows, so a writer
 holding execution rows cannot form an inverse registration dependency. Children

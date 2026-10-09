@@ -79,8 +79,17 @@ func (s *Store) ListNamespaces(ctx context.Context, r durable.NamespaceList) ([]
 	}
 	return result, rows.Err()
 }
+
+// lockAuditMutation must precede execution/identity/task locks and authoritative
+// clock reads. Activation can wait long enough to expire a grant or deadline.
+// Registration touches only catalog rows, and child mutations stay in one
+// namespace. Helpers and database triggers retain the same lock as a fallback.
+func lockAuditMutation(ctx context.Context, tx driver.Tx, namespace string) error {
+	_, err := tx.Exec(ctx, `SELECT dispatch_audit_writer_lock($1)`, namespace)
+	return err
+}
 func lockedAuditNamespace(ctx context.Context, tx driver.Tx, namespace string) (durable.NamespaceRecord, bool, error) {
-	if _, err := tx.Exec(ctx, `SELECT dispatch_audit_writer_lock($1)`, namespace); err != nil {
+	if err := lockAuditMutation(ctx, tx, namespace); err != nil {
 		return durable.NamespaceRecord{}, false, err
 	}
 	n, err := scanNamespace(tx.QueryRow(ctx, `SELECT `+namespaceColumns+` FROM dispatch_durable_namespaces WHERE namespace=$1`, namespace))
