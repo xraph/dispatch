@@ -61,6 +61,14 @@ type Host struct {
 // New provisions real Authsome sessions and Warden grants for two namespaces.
 // The host closes the injected store. Credentials are private fixture material.
 func New(ctx context.Context, store Store) (host *Host, returnErr error) {
+	h := &Host{Store: store, Credentials: map[string]Credential{}}
+	defer func() {
+		if returnErr != nil {
+			cleanup, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			_ = h.Close(cleanup)
+		}
+	}()
 	if err := store.Migrate(ctx); err != nil {
 		return nil, err
 	}
@@ -91,15 +99,10 @@ func New(ctx context.Context, store Store) (host *Host, returnErr error) {
 	if err != nil {
 		return nil, err
 	}
+	h.Auth, h.Policies = authEngine, policies
 	if startErr := authEngine.Start(ctx); startErr != nil {
 		return nil, startErr
 	}
-	h := &Host{Store: store, Auth: authEngine, Policies: policies, Credentials: map[string]Credential{}}
-	defer func() {
-		if returnErr != nil {
-			_ = h.Close(context.Background())
-		}
-	}()
 	for _, role := range []string{"reader", "payload", "denied"} {
 		u := &user.User{ID: aid.NewUserID(), AppID: appID, Email: role + "@operator.example.test", EmailVerified: true, CreatedAt: now, UpdatedAt: now}
 		if createErr := authStore.CreateUser(ctx, u); createErr != nil {
@@ -189,9 +192,15 @@ func (contextUser) CheckAuth(ctx context.Context, _ *http.Request) (*dashauth.Us
 }
 func (h *Host) Close(ctx context.Context) error {
 	h.audit.Audit.Deactivate()
-	var engineErr error
+	var storeErr, authErr error
 	if h.engine != nil {
-		engineErr = h.engine.Stop(ctx)
+		storeErr = h.engine.Stop(ctx)
+	} else if h.Store != nil {
+		// Until Build succeeds, the partial host still owns store cleanup.
+		storeErr = h.Store.Close()
 	}
-	return errors.Join(engineErr, h.Auth.Stop(ctx))
+	if h.Auth != nil {
+		authErr = h.Auth.Stop(ctx)
+	}
+	return errors.Join(storeErr, authErr)
 }
