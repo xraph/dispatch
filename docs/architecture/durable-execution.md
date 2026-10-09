@@ -1378,4 +1378,12 @@ Operator transport, remote authorization and Dashboard flows remain required wor
 2026-10-08: runtime selection passed make f, make l, go test ./..., engine, runtime and
 memory race tests and the full durable PostgreSQL integration race suite (147.767
 seconds). Focused query checks also passed after the final lint edits. Independent
-review of the complete store and runtime change remains required.
+review through 4a44a4f found no actionable issues and independently passed runtime,
+engine and memory query races plus focused PostgreSQL migration, recovery,
+older-writer and query-target races (7.993 seconds).
+
+Separate migration/runtime database roles still need deployment qualification.
+Runtime grants must permit selected reads and atomic head writes. Retention and
+historical imports also need explicit contracts: protect retained latest identities
+and preserve intended creation order when importing historical runs. This checkpoint
+does not qualify those operations or the remaining lifecycle and operator roadmap.
