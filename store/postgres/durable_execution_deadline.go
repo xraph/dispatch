@@ -16,7 +16,7 @@ func normalizeExecutionError(err error) error {
 			return durable.ErrExecutionDeadline
 		case "DX003":
 			return durable.ErrLeaseLost
-		case "DX002":
+		case "DX002", "DX004":
 			return durable.ErrInvalid
 		}
 	}

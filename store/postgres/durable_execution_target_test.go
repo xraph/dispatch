@@ -43,11 +43,6 @@ func TestDurableExecutionTargetRecovery(t *testing.T) {
 	if _, err = s.StartExecution(t.Context(), next); err != nil {
 		t.Fatal(err)
 	}
-	pg := pgdriver.Unwrap(s.DB())
-	// Reverse timestamp order. Latest follows the committed pointer.
-	if _, err = pg.Exec(t.Context(), `UPDATE dispatch_executions SET created_at=created_at+interval '1 day' WHERE namespace=$1 AND run_id=$2`, first.Namespace, first.RunID); err != nil {
-		t.Fatal(err)
-	}
 	s = reopenAsyncStore(t, s, dsn)
 	if got, retryErr := s.StartExecution(t.Context(), first); retryErr != nil || got != receipt {
 		t.Fatalf("receipt: %+v %v", got, retryErr)
@@ -242,8 +237,9 @@ func TestDurableExecutionTargetOlderWriter(t *testing.T) {
 	next := first.Key
 	next.RunID = "older-writer"
 	// An older process knows the execution schema but not the new head table.
+	// Its clock is behind the first run. Latest must follow creation order.
 	_, err := pgdriver.Unwrap(s.DB()).Exec(t.Context(), `INSERT INTO dispatch_executions(namespace,workflow_id,run_id,workflow_type,build_id,state,revision,last_sequence,input,output,created_at,updated_at)
- SELECT namespace,workflow_id,$4,workflow_type,build_id,'running',1,1,input,''::bytea,clock_timestamp(),clock_timestamp()
+ SELECT namespace,workflow_id,$4,workflow_type,build_id,'running',1,1,input,''::bytea,created_at-interval '1 day',created_at-interval '1 day'
  FROM dispatch_executions WHERE namespace=$1 AND workflow_id=$2 AND run_id=$3`, first.Namespace, first.WorkflowID, first.RunID, next.RunID)
 	if err != nil {
 		t.Fatal(err)

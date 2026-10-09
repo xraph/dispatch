@@ -12,12 +12,12 @@ import (
 // insertStartedExecution requires the workflow identity lock and creates all
 // initial rows. A conflict never adopts an existing run.
 func insertStartedExecution(ctx context.Context, tx driver.Tx, r durable.StartRequest, digest string, now time.Time) (bool, error) {
-	run, execution, err := durable.ResolveExecutionDeadlines(r, now)
+	execution, err := durable.NewExecution(r, now)
 	if err != nil {
 		return false, err
 	}
 	result, err := tx.Exec(ctx, `INSERT INTO dispatch_executions (`+executionColumns+`)
- VALUES($1,$2,$3,$4,$5,'running',1,1,$6,$7,$8,$8,$9,$10) ON CONFLICT DO NOTHING`, r.Namespace, r.WorkflowID, r.RunID, r.WorkflowType, r.BuildID, executionBytes(r.Input), []byte{}, now, taskNullableTime(run), taskNullableTime(execution))
+ VALUES($1,$2,$3,$4,$5,'running',1,1,$6,$7,$8,$8,$9,$10,$3,'','',1,$8,$11) ON CONFLICT DO NOTHING`, r.Namespace, r.WorkflowID, r.RunID, r.WorkflowType, r.BuildID, executionBytes(r.Input), []byte{}, now, taskNullableTime(execution.RunDeadlineAt), taskNullableTime(execution.ExecutionDeadlineAt), int64(execution.RunTimeout))
 	if err != nil {
 		return false, err
 	}

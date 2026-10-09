@@ -46,7 +46,7 @@ Store tests alone do not qualify a workflow runtime or a deployment.
 | Signals, queries, updates and signal-with-start | Atomic signals, signal-with-start, Go receive replay and explicit/current/latest queries implemented; tracked updates open | Namespace isolation, deduplication, atomic acceptance, update results, read-only queries |
 | Child workflows and cancellation | Individual future, whole-workflow and child cancellation plus child composition implemented; cooperative external-activity completion acknowledgment open | Stable child identity, duplicate creation prevention, parent-close policies, cancellation propagation |
 | Compensation, pause, termination and reset | Parent-close termination implemented; operator controls, compensation, pause and reset open | Resumable compensation attempts, audited controls, immutable reset lineage |
-| Continue-as-new and run chains | Open | Bounded history, message handoff and version inheritance |
+| Continue-as-new and run chains | Root lineage and relative run-timeout persistence implemented; atomic successors, runtime continuation and retries open | Bounded history, message handoff and version inheritance |
 | Schedules | Open | Overlap, catch-up, backfill, timezones and unique scheduled occurrences |
 | Deployment versioning | Pinned build polling implemented; rollout and patch markers open | Pinned build routing, gradual rollout, patch markers, replay checks, drainage |
 | Distributed scheduling | Open | Partition ownership, long polling, fairness, fleet-wide quotas and backpressure under load |
@@ -1529,3 +1529,28 @@ transaction accepted before expiry can finish committing later; no commit or fsy
 deadline is promised. Privileged SQL and arbitrary Go side effects also remain
 trusted boundaries. The [deadline review record](durable-workflow-deadlines-review.md)
 lists the decisions and qualification limits for this change.
+
+## Run-chain metadata checkpoint
+
+Each execution now retains FirstRunID, PreviousRunID, NextRunID, RunNumber,
+FirstStartedAt and its relative RunTimeout. Ordinary starts, signal-with-start
+and child creation initialize independent roots. Existing runs become roots too;
+sharing a workflow ID does not invent a historical relationship.
+
+Memory and PostgreSQL preserve the exact duration supplied by new starts. The
+migration can recover only the microsecond duration represented by older saved
+deadlines. It leaves those absolute deadlines and original receipts unchanged.
+Schema guards make creation time and lineage immutable; older root inserts receive
+the missing metadata automatically. Populated chains prevent destructive downgrade.
+
+This is a storage checkpoint. You cannot yet continue or retry a workflow across
+runs through the runtime. The [run-chain contract](durable-run-chains.md) includes
+atomic successor creation, pending-message handoff, child-chain relationships,
+deterministic replay and inherited execution deadlines as required work.
+
+Qualification for this checkpoint: `make f`, `make l` with zero issues,
+`go test ./...`, and race checks for durable, runtime, engine and memory passed.
+The full durable PostgreSQL integration race suite passed in 186.828 seconds.
+Shared tests cover all three creation paths and projection copies. Database tests
+cover older inserts, immutable metadata, repeated migrations, rollback after an
+injected backfill failure, pool replacement and unchanged start receipts.

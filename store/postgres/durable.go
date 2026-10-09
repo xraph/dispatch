@@ -17,17 +17,22 @@ import (
 var _ durable.Store = (*Store)(nil)
 
 const executionColumns = `namespace, workflow_id, run_id, workflow_type, build_id,
-    state, revision, last_sequence, input, output, created_at, updated_at, run_deadline_at, execution_deadline_at`
+    state, revision, last_sequence, input, output, created_at, updated_at, run_deadline_at, execution_deadline_at,
+    first_run_id, previous_run_id, next_run_id, run_number, first_started_at, run_timeout`
 
 func scanExecution(row driver.Row) (durable.Execution, error) {
 	var e durable.Execution
 	var runDeadline, executionDeadline sql.NullTime
 	err := row.Scan(&e.Namespace, &e.WorkflowID, &e.RunID, &e.WorkflowType, &e.BuildID,
-		&e.State, &e.Revision, &e.LastSequence, &e.Input, &e.Output, &e.CreatedAt, &e.UpdatedAt, &runDeadline, &executionDeadline)
+		&e.State, &e.Revision, &e.LastSequence, &e.Input, &e.Output, &e.CreatedAt, &e.UpdatedAt, &runDeadline, &executionDeadline,
+		&e.FirstRunID, &e.PreviousRunID, &e.NextRunID, &e.RunNumber, &e.FirstStartedAt, &e.RunTimeout)
 	if isNoRows(err) {
 		return durable.Execution{}, durable.ErrNotFound
 	}
 	e.RunDeadlineAt, e.ExecutionDeadlineAt = runDeadline.Time, executionDeadline.Time
+	if err == nil && e.RunID != "" {
+		err = durable.ValidateRunMetadata(e)
+	}
 	return e, err
 }
 

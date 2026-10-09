@@ -39,6 +39,13 @@ type Execution struct {
 	UpdatedAt           time.Time `json:"updated_at"`
 	RunDeadlineAt       time.Time `json:"run_deadline_at,omitempty"`
 	ExecutionDeadlineAt time.Time `json:"execution_deadline_at,omitempty"`
+	// Each existing run is an independent root until an atomic handoff links it.
+	FirstRunID     string        `json:"first_run_id"`
+	PreviousRunID  string        `json:"previous_run_id,omitempty"`
+	NextRunID      string        `json:"next_run_id,omitempty"`
+	RunNumber      int64         `json:"run_number"`
+	FirstStartedAt time.Time     `json:"first_started_at"`
+	RunTimeout     time.Duration `json:"run_timeout,omitempty"`
 }
 
 // EventInput supplies an event's content. The store assigns sequence and time.

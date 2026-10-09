@@ -66,15 +66,13 @@ func (m *Store) StartExecution(ctx context.Context, r durable.StartRequest) (dur
 }
 
 func newExecutionRecord(r durable.StartRequest, now time.Time) (*executionRecord, error) {
-	run, execution, err := durable.ResolveExecutionDeadlines(r, now)
+	execution, err := durable.NewExecution(r, now)
 	if err != nil {
 		return nil, err
 	}
 	return &executionRecord{
-		execution: durable.Execution{Key: r.Key, WorkflowType: r.WorkflowType, BuildID: r.BuildID,
-			RunDeadlineAt: run, ExecutionDeadlineAt: execution,
-			State: durable.StateRunning, Revision: 1, LastSequence: 1, Input: cloneBytes(r.Input), CreatedAt: now, UpdatedAt: now},
-		history: []durable.Event{{EventInput: durable.EventInput{Type: "execution.started", Payload: cloneBytes(r.Input)}, Sequence: 1, Time: now}},
+		execution: execution,
+		history:   []durable.Event{{EventInput: durable.EventInput{Type: "execution.started", Payload: cloneBytes(r.Input)}, Sequence: 1, Time: now}},
 		tasks: map[string]*durableTask{"workflow:1": {Task: durable.Task{Key: r.Key, Version: 1,
 			TaskSpec: durable.TaskSpec{ID: "workflow:1", Kind: durable.TaskWorkflow, Queue: r.Queue, AvailableAt: now}}}},
 		receipts: make(map[string]durableReceipt),
