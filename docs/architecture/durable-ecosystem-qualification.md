@@ -183,6 +183,75 @@ flowchart LR
   FH --> R
 ```
 
+### Dependency direction and recovery independence
+
+Ctrlplane's reviewed `main` currently constructs its own periodic
+[worker scheduler](https://github.com/xraph/ctrlplane/blob/f98ccc9/worker/scheduler.go)
+in [app/controlplane.go](https://github.com/xraph/ctrlplane/blob/f98ccc9/app/controlplane.go).
+Its `github.com/xraph/ctrlplane/dispatch` package routes deployment sources to
+providers. It is separate from `github.com/xraph/dispatch`. The resolved module
+lists at review time contain neither a Ctrlplane dependency on Dispatch nor a
+Dispatch dependency on Ctrlplane.
+
+Ctrlplane may use Dispatch for durable background operations in the proposed
+integration. That must not introduce reverse imports, constructor cycles or a
+recovery path that requires the worker pool it is trying to recover.
+
+Put the integration adapter in the Forge host application. It can import both
+libraries, implement narrow interfaces owned by the consumer, and inject those
+implementations when composing extensions. Keep both core modules independent.
+If the adapter later needs reuse across hosts, extract it to an integration
+module that depends on both libraries; neither core imports that module.
+
+This diagram shows package dependencies, unlike the runtime-call diagram above:
+
+```mermaid
+flowchart TD
+  H[Forge host composition] --> A[Integration adapters]
+  A --> C[Ctrlplane and its consumer interfaces]
+  A --> D[Dispatch runtime and operator interfaces]
+```
+
+| Consumer need | Interface ownership | Adapter responsibility |
+| --- | --- | --- |
+| Ctrlplane submits durable background operations | Ctrlplane owns a narrow execution interface with its own request/result types | Translate to Dispatch starts, signals and authorized status reads; register operation handlers in host composition |
+| Ctrlplane needs worker status, drain or build-retirement evidence | Ctrlplane owns the lifecycle inspection/control interface it consumes | Call Dispatch's Forge-hosted operator service; preserve identity, namespace and observed revision |
+| Dispatch reports execution readiness and compatible builds | Dispatch exposes execution facts through its existing engine/extension boundary | Supply those facts to Ctrlplane without importing Ctrlplane deployment types into Dispatch |
+| The dashboard opens deployment controls | Each contributor owns its own contracts | Navigate to Ctrlplane through shared dashboard routing; authorize deployment actions on the Ctrlplane backend |
+
+These interfaces are proposed work, not APIs already present. Use existing Forge
+lifecycle interfaces where they fit. Keep domain request types, concrete engines
+and constructors out of a shared foundation package. Returning the other
+library's concrete types from an interface would reintroduce the dependency the
+adapter is meant to remove. A remote adapter uses versioned wire contracts and
+Authsome/Warden service authorization with the same boundaries.
+
+The runtime recovery requirement is separate. Ctrlplane's minimum bootstrap,
+worker provisioning, health and recovery controllers must remain runnable while
+the managed Dispatch pool is unavailable. Keep that small controller path under
+Forge/Ctrlplane lifecycle control with durable desired state and appropriate
+coordination. Longer-running Ctrlplane operations can use Dispatch. A separate
+queue in the same unavailable worker fleet is not an independent recovery path.
+
+Likewise, the required audit/hook outbox publisher must be able to drain pending
+intents without submitting itself to the managed Dispatch pool. Its storage and
+sink dependencies remain explicit. This does not promise progress during a
+database outage; it removes a dependency on workers that the publisher helps
+operators diagnose and recover.
+
+Construct and inject interfaces before starting consumers. Start the independent
+infrastructure and controller services before admitting Dispatch work. During
+shutdown, quiesce submissions and drain workers while the controller and required
+dependencies remain available, then stop those dependencies within bounded
+deadlines. No Dispatch constructor or startup hook resolves or starts Ctrlplane.
+
+Add package/module dependency checks and an assembled-host startup test when
+implementing the adapters. Build each module independently with `GOWORK=off` and
+released dependency pins, then build the composed host. Check for forbidden
+cross-imports and mutual module requirements explicitly. Finally, stop the
+managed Dispatch workers and prove that Ctrlplane can inspect, provision and
+recover them without scheduling a job on those workers.
+
 ### Identity and permissions
 
 Persist an explicit mapping from a durable namespace to its Forge app/tenant
@@ -298,7 +367,7 @@ describe planned ownership, not changes already made.
 | 2. Reliable audit and hooks | Dispatch durable store/runtime and new outbox adapter; Relay acceptance/fanout; Chronicle idempotent ingestion/receipt contract; Forge denial audit seam | Kill/fail at transition, publish, fanout and acknowledgement boundaries; no accepted required intent lost, no cross-scope delivery, duplicate requests recover the same outcome |
 | 3. Read contracts and pages | Dispatch durable projections/contract; Forge Dashboard `packages/plugin-dispatch` and fixtures | All read intents exercised over real HTTP with two tenants and PostgreSQL; scope-safe paging, payload denial, accurate snapshots; desktop and narrow browser checks |
 | 4. Authorized commands | Shared Dispatch operator service, contract/API adapters and React dialogs | Same authorization across transports; retry after lost reply; stale-run conflict; cancel accepted versus completed; Chronicle correlation and Relay status visible |
-| 5. Deployment compatibility | Forge lifecycle/configuration and Ctrlplane integration with Dispatch worker/read APIs | Mixed old/new builds, immutable pinning, drain, rollback, absent compatible workers, sleeping runs, late callbacks and schema upgrade/rollback qualification |
+| 5. Deployment compatibility | Forge lifecycle/configuration and host-owned Ctrlplane/Dispatch adapters using consumer-owned interfaces | Independent module builds; no reverse imports or startup cycle; recovery with the managed worker pool stopped; mixed builds, pinning, drain, rollback, sleeping runs, late callbacks and schema upgrade/rollback qualification |
 | 6. Security qualification | All exposed transports and installed ecosystem services | Identity/permission revocation, service credential rotation, expired callback proof, CSRF/origin, payload limits/redaction, replay limits, dependency and secret scans pass for the pinned build |
 | 7. Load qualification | Dispatch harness, metrics and shared CI; Ctrlplane scaling profile | Recorded workload and hardware; sustained and burst load within agreed SLOs; bounded backlog, policy/sink outage behavior, fairness and restart recovery measured |
 | 8. Recovery qualification | Dispatch fault harness; Ctrlplane environment; PostgreSQL and ecosystem recovery runbooks | Process kills, partitions, database promotion and backup restore meet stated RPO/RTO; receipt/history and external-effect reconciliation proven |
