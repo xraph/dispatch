@@ -66,6 +66,9 @@ func (s *strictLifecycleStore) ClaimReplay(arg0 context.Context, arg1 id.DLQID, 
 }
 func (s *strictLifecycleStore) ClaimTask(arg0 context.Context, arg1 durable.ClaimRequest) (*durable.Task, error) {
 	defer s.call("ClaimTask")()
+	if s.claimError != nil {
+		return nil, s.claimError
+	}
 	return s.base.ClaimTask(arg0, arg1)
 }
 func (s *strictLifecycleStore) ClaimTimeoutTask(arg0 context.Context, arg1 durable.TimeoutClaimRequest) (*durable.Task, error) {

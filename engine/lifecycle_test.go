@@ -23,6 +23,7 @@ type strictLifecycleStore struct {
 	base                                *memory.Store
 	mu                                  sync.Mutex
 	closed                              bool
+	claimError                          error
 	closes, late, wakeStarts, wakeStops int
 }
 
@@ -368,6 +369,43 @@ func TestStopWorkersKeepsPublisherAndStoreLive(t *testing.T) {
 	s.assertState(t, 1, 1)
 	if err = eng.StopWorkers(t.Context()); err != nil {
 		t.Fatal(err)
+	}
+	s.assertState(t, 1, 1)
+}
+
+func TestStopWorkersRetainsWorkerErrorAndFinalCleanup(t *testing.T) {
+	failure := errors.New("durable polling unavailable")
+	s := &strictLifecycleStore{base: memory.New(), claimError: failure}
+	d, err := dispatch.New(dispatch.WithStore(s), dispatch.WithConcurrency(1), dispatch.WithPollInterval(time.Millisecond))
+	if err != nil {
+		t.Fatal(err)
+	}
+	eng, err := engine.Build(d, engine.WithDurableWorkflows(drt.Options{Namespace: "worker-error", Queue: "work", BuildID: "v1", Owner: "worker", PollInterval: time.Millisecond, Workflows: map[string]drt.WorkflowFunc{"unused": func(*drt.Workflow, []byte) ([]byte, error) { return nil, nil }}}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = eng.Start(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(time.Second)
+	for eng.Health(t.Context()) == nil {
+		if time.Now().After(deadline) {
+			t.Fatal("worker error not visible")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	if err = eng.StopWorkers(t.Context()); !errors.Is(err, failure) {
+		t.Fatalf("worker error lost: %v", err)
+	}
+	s.assertState(t, 0, 1)
+	for range 2 {
+		if err = eng.Stop(t.Context()); !errors.Is(err, failure) {
+			t.Fatalf("final stop lost retained error: %v", err)
+		}
+	}
+	s.assertState(t, 1, 1)
+	if err = eng.StopWorkers(t.Context()); !errors.Is(err, failure) {
+		t.Fatalf("repeat lost retained error: %v", err)
 	}
 	s.assertState(t, 1, 1)
 }
