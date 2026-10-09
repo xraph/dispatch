@@ -42,7 +42,7 @@ Store tests alone do not qualify a workflow runtime or a deployment.
 | Fenced task claims and durable timer deadlines | Store contract and renewable workers implemented; process-kill qualification open | Expiry, same-owner reclaim, concurrent claims, restart recovery |
 | Deterministic Go workflow runtime | Activity, timer, signal, child and saved-winner selection replay implemented; coroutine and SDK expansion open | Recorded-history replay with no repeated external effects, changed-command rejection |
 | Activity retries and timeout classes | Queue, attempt, overall and heartbeat deadlines, progress recovery, retry policies and asynchronous Go callbacks implemented; remote authorization and process qualification open | Queue, attempt, overall and heartbeat deadlines; heartbeat progress; asynchronous completion |
-| Workflow deadlines and whole-workflow retries | Run/execution deadline persistence and fencing implemented; timeout closure, runtime polling and retries open | Expiry across lock waits, durable timeout closure, frozen replay, inherited execution deadlines across run chains |
+| Workflow deadlines and whole-workflow retries | Run/execution deadlines, fencing and atomic timeout closure implemented; runtime polling, replay and retries open | Expiry across lock waits, durable timeout closure, frozen replay, inherited execution deadlines across run chains |
 | Signals, queries, updates and signal-with-start | Atomic signals, signal-with-start, Go receive replay and explicit/current/latest queries implemented; tracked updates open | Namespace isolation, deduplication, atomic acceptance, update results, read-only queries |
 | Child workflows and cancellation | Individual future, whole-workflow and child cancellation plus child composition implemented; cooperative external-activity completion acknowledgment open | Stable child identity, duplicate creation prevention, parent-close policies, cancellation propagation |
 | Compensation, pause, termination and reset | Parent-close termination implemented; operator controls, compensation, pause and reset open | Resumable compensation attempts, audited controls, immutable reset lineage |
@@ -1432,3 +1432,36 @@ race tests and the full PostgreSQL durable race suite (154.797s). An earlier ful
 race run hit the existing activity-recovery test's 50 ms store timeout; that test
 then passed three isolated runs without changes before the full suite passed.
 The deadline plan's independent review follows its closure and runtime tasks.
+
+## Durable workflow timeout closure
+
+ClaimExecutionTimeout polls expired executions within one namespace. It uses an
+independent owner, epoch, attempt and lease, so the original workflow build does
+not need a worker. Concurrent processors skip owned rows. A replacement can claim
+an expired timeout lease, including with the same owner name, but receives a new
+epoch. Claims leave execution revision and history unchanged.
+
+ApplyExecutionTimeout accepts that grant and a stable request ID. It locks the
+execution and pending tasks, then checks store time. Closure atomically appends a
+workflow.timed_out event with its version, timeout kind and absolute deadline;
+updates the projection; fences pending tasks; publishes child results and
+parent-close deliveries; consumes the timeout grant; and saves a receipt. You can
+retry the identical request after losing the response, even after ownership ends.
+
+PostgreSQL rejects a closure whose lease expires during history insertion. Its
+schema guard requires explicit grant consumption, so an older worker cannot use
+another processor's live timeout grant. Retrying the earlier deadline migration
+preserves this exception for valid timeout operations. Downgrade refuses retained
+timeout grants.
+
+2026-10-09: focused memory and PostgreSQL tests cover concurrent grants and closure,
+same-owner reclaim, child results and all parent-close policies. Fault injection
+at history, projection, task, child-delivery and receipt writes verifies rollback.
+Memory also rejects task-version overflow before publishing any closure. Deadline
+and lease checks run after lock waits, and closure receipts survive pool replacement.
+Runtime polling, frozen timeout replay and child SDK options remain in progress;
+these store APIs alone do not qualify automatic workflow timeout processing.
+
+The timeout-closure store checkpoint passes make f, make l, go test ./...,
+engine/runtime/memory races and the full PostgreSQL durable race suite (198.902s).
+Its independent review remains scheduled after runtime integration.

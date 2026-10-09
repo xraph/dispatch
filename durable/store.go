@@ -54,6 +54,9 @@ type Store interface {
 	ClaimTask(context.Context, ClaimRequest) (*Task, error)
 	// ClaimTimeoutTask grants expired activity processing without consuming an execution attempt.
 	ClaimTimeoutTask(context.Context, TimeoutClaimRequest) (*Task, error)
+	// Execution expiry has independent ownership and needs no workflow build.
+	ClaimExecutionTimeout(context.Context, ExecutionTimeoutClaimRequest) (*ExecutionTimeoutTask, error)
+	ApplyExecutionTimeout(context.Context, ExecutionTimeoutRequest) (Receipt, error)
 	RenewTask(context.Context, Key, TaskToken, time.Duration) (time.Time, error)
 	// RecordHeartbeat changes task progress without appending workflow history.
 	RecordHeartbeat(context.Context, HeartbeatRequest) (Receipt, error)

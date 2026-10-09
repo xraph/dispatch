@@ -14,6 +14,8 @@ func normalizeExecutionError(err error) error {
 		switch state.SQLState() {
 		case "DX001":
 			return durable.ErrExecutionDeadline
+		case "DX003":
+			return durable.ErrLeaseLost
 		case "DX002":
 			return durable.ErrInvalid
 		}

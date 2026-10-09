@@ -15,14 +15,7 @@ func init() {
  ADD COLUMN IF NOT EXISTS execution_deadline_at TIMESTAMPTZ;
  CREATE INDEX IF NOT EXISTS idx_dispatch_execution_deadline ON dispatch_executions(namespace,LEAST(run_deadline_at,execution_deadline_at))
  WHERE state='running' AND (run_deadline_at IS NOT NULL OR execution_deadline_at IS NOT NULL);
- CREATE OR REPLACE FUNCTION dispatch_guard_execution_deadline() RETURNS trigger LANGUAGE plpgsql AS $$
- BEGIN
- IF NEW.run_deadline_at IS DISTINCT FROM OLD.run_deadline_at OR NEW.execution_deadline_at IS DISTINCT FROM OLD.execution_deadline_at THEN
- RAISE EXCEPTION USING ERRCODE='DX002',MESSAGE='workflow deadlines are immutable'; END IF;
- IF OLD.state='running' AND LEAST(OLD.run_deadline_at,OLD.execution_deadline_at)<=clock_timestamp() THEN
- RAISE EXCEPTION USING ERRCODE='DX001',MESSAGE='workflow deadline expired'; END IF;
- RETURN NEW;
- END $$;
+`+executionDeadlineGuardSQL+`
  DROP TRIGGER IF EXISTS dispatch_execution_deadline_update ON dispatch_executions;
  CREATE TRIGGER dispatch_execution_deadline_update BEFORE UPDATE ON dispatch_executions
  FOR EACH ROW EXECUTE FUNCTION dispatch_guard_execution_deadline();
@@ -54,3 +47,19 @@ func init() {
 			return err
 		}})
 }
+
+// Retry-safe base guard delegates only the narrow expired-row transitions owned by timeout processing.
+const executionDeadlineGuardSQL = ` CREATE OR REPLACE FUNCTION dispatch_guard_execution_deadline() RETURNS trigger LANGUAGE plpgsql AS $$
+ DECLARE allowed boolean;
+ BEGIN
+ IF NEW.run_deadline_at IS DISTINCT FROM OLD.run_deadline_at OR NEW.execution_deadline_at IS DISTINCT FROM OLD.execution_deadline_at THEN
+ RAISE EXCEPTION USING ERRCODE='DX002',MESSAGE='workflow deadlines are immutable'; END IF;
+ IF OLD.state='running' AND LEAST(OLD.run_deadline_at,OLD.execution_deadline_at)<=clock_timestamp() THEN
+ IF to_regprocedure('dispatch_execution_timeout_update_allowed(dispatch_executions,dispatch_executions)') IS NOT NULL THEN
+ EXECUTE 'SELECT dispatch_execution_timeout_update_allowed($1,$2)' INTO allowed USING OLD,NEW;
+ IF allowed THEN RETURN NEW; END IF;
+ END IF;
+ RAISE EXCEPTION USING ERRCODE='DX001',MESSAGE='workflow deadline expired'; END IF;
+ RETURN NEW;
+ END $$;
+`

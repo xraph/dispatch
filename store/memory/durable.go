@@ -11,6 +11,7 @@ import (
 var _ durable.Store = (*Store)(nil)
 
 type executionRecord struct {
+	timeout   durable.ExecutionTimeoutTask
 	execution durable.Execution
 	history   []durable.Event
 	tasks     map[string]*durableTask
