@@ -1060,3 +1060,11 @@ These checks qualify the scoped cancellation paths. They do not establish physic
 external interruption, cooperative completion acknowledgment, whole-workflow or
 child cancellation, process-kill recovery, fleet-scale behavior or disaster recovery.
 Those requirements remain open in the roadmap above.
+
+An independent review of the individual cancellation implementation found no
+critical, important or minor issues. Its cancellation, selection, signal and query
+race checks passed separately. The reviewer inspected the PostgreSQL tests and
+used the executor's passing PostgreSQL evidence; it did not rerun that suite.
+Physical interruption and cooperative completion acknowledgment, the remaining
+workflow/child lifecycle controls, process kills, fleet-scale behavior and disaster
+recovery remain outside this checkpoint's evidence and open in the full roadmap.
