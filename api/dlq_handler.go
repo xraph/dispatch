@@ -100,7 +100,11 @@ const defaultPurgeAge = 30 * 24 * time.Hour
 // purgeDLQ deletes the entries that failed before the cutoff, or with
 // dry_run counts them and deletes nothing.
 func (a *API) purgeDLQ(ctx forge.Context, req *PurgeDLQRequest) (*PurgeDLQResponse, error) {
-	before, err := purgeCutoff(req, time.Now().UTC())
+	before, ok := ctx.Context().Value(purgeAuditCutoffKey{}).(time.Time)
+	var err error
+	if !ok {
+		before, err = purgeCutoff(req, time.Now().UTC())
+	}
 	if err != nil {
 		return nil, err
 	}

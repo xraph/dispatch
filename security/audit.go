@@ -91,11 +91,14 @@ func (b Boundary) audit(ctx context.Context, p Principal, op Operation, outcome,
 			return ErrUnavailable
 		}
 	}
-	action := op.Action
+	action := op.auditAction()
 	if action == "" {
 		action = "dispatch.unknown"
 	}
-	target := namespace
+	target := op.Target
+	if target == "" {
+		target = namespace
+	}
 	if target != "" && !durable.DeliveryIdentifier(target) {
 		target = "invalid-target"
 	}
@@ -149,7 +152,7 @@ func (b Boundary) BeginCommand(ctx context.Context, p Principal, op Operation) (
 	}
 	ctx, cancel := context.WithTimeout(ctx, CheckTimeout)
 	defer cancel()
-	audit, err := durable.CaptureSecurityAudit(b.Resource.InstallationID, binding.namespace, op.Action, "attempted", "", Metadata(p))
+	audit, err := durable.CaptureSecurityAudit(b.Resource.InstallationID, binding.namespace, op.auditAction(), "attempted", op.Target, Metadata(p))
 	if err != nil {
 		return CommandAttempt{}, ErrUnavailable
 	}
@@ -207,4 +210,11 @@ func (a *AuditService) AcceptanceFailures() uint64 {
 		return 0
 	}
 	return a.failures.Load()
+}
+
+func (op Operation) auditAction() string {
+	if op.AuditAction != "" {
+		return op.AuditAction
+	}
+	return op.Action
 }

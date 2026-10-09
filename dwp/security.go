@@ -59,7 +59,7 @@ func (s *Server) authenticate(ctx context.Context, r *http.Request, token string
 		identity, err = s.auth.Authenticate(ctx, token)
 	}
 	if err != nil || identity == nil || identity.principal().Validate() != nil {
-		op := security.Operation{Action: security.Subscribe, Payload: true}
+		op := subscriptionOperation("")
 		if len(operations) > 0 {
 			op = operations[0]
 		}
@@ -80,8 +80,25 @@ func (id *Identity) principal() security.Principal {
 	}
 	return security.Principal{Subject: id.Subject, Kind: kind}
 }
-func (h *Handler) authorize(ctx context.Context, id *Identity, method string) error {
-	return h.security.Check(ctx, id.principal(), security.DWPOperation(method))
+func subscriptionOperation(channel string) security.Operation {
+	op := security.DWPOperation(MethodSubscribe)
+	op.Target = "installation"
+	if channel != "" {
+		if err := stream.ValidateTopic(channel); err != nil {
+			op.Target = "invalid-target"
+		} else {
+			target, err := security.CreationTarget("subscription-selector", channel, "")
+			if err != nil {
+				op.Target = "invalid-target"
+			} else {
+				op.Target = target
+			}
+		}
+	}
+	return op
+}
+func (h *Handler) authorizeSubscription(ctx context.Context, id *Identity, channel string) error {
+	return h.security.Check(ctx, id.principal(), subscriptionOperation(channel))
 }
 func authorizationCode(err error) int {
 	if errors.Is(err, security.ErrUnauthenticated) {
@@ -104,11 +121,11 @@ type sseIdentityKey struct{}
 // admitSSE runs before Forge commits the event-stream response headers.
 func (s *Server) admitSSE(next forge.Handler) forge.Handler {
 	return func(ctx forge.Context) error {
-		identity, err := s.authenticate(ctx.Context(), ctx.Request(), ctx.Header("Authorization"))
+		identity, err := s.authenticate(ctx.Context(), ctx.Request(), ctx.Header("Authorization"), subscriptionOperation(ctx.Query("channel")))
 		if err != nil {
 			return ctx.JSON(http.StatusUnauthorized, map[string]string{"error": "authentication required"})
 		}
-		if err := s.handler.authorize(ctx.Context(), identity, MethodSubscribe); err != nil {
+		if err := s.handler.authorizeSubscription(ctx.Context(), identity, ctx.Query("channel")); err != nil {
 			return ctx.JSON(authorizationCode(err), map[string]string{"error": "access unavailable or denied"})
 		}
 		if err := stream.ValidateTopic(ctx.Query("channel")); err != nil {

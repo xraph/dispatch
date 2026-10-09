@@ -22,9 +22,11 @@ func WithSecurity(auth security.Authenticator, boundary security.Boundary) Optio
 	return func(a *API) { a.auth = auth; a.boundary = boundary }
 }
 func (a *API) guard(method, path string) forge.Middleware {
-	op := security.RESTOperation(method, path)
 	return func(next forge.Handler) forge.Handler {
 		return func(ctx forge.Context) error {
+			op := security.RESTOperation(method, path)
+			target, targetErr := auditTarget(ctx, path)
+			op.Target = target
 			if a.auth == nil {
 				_ = a.boundary.AuthenticationDenied(ctx.Context(), op) //nolint:errcheck // The response remains unauthorized even if local audit fails.
 				return ctx.JSON(http.StatusUnauthorized, ErrorResponse{Error: "authentication required"})
@@ -49,6 +51,9 @@ func (a *API) guard(method, path string) forge.Middleware {
 					message = "access denied"
 				}
 				return ctx.JSON(code, ErrorResponse{Error: message})
+			}
+			if targetErr != nil {
+				return ctx.JSON(http.StatusBadRequest, ErrorResponse{Error: "invalid operation target"})
 			}
 			attempt, err := a.boundary.BeginCommand(ctx.Context(), p, op)
 			if err != nil {

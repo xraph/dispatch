@@ -45,14 +45,17 @@ func (h *Handler) Handle(ctx context.Context, frame *Frame, conn *Connection) (r
 	if frame == nil {
 		return NewErrorFrame("", ErrCodeBadRequest, "missing frame")
 	}
+	op, targetErr := auditOperation(frame)
 	if conn == nil || conn.Identity == nil {
-		_ = h.security.AuthenticationDenied(ctx, security.DWPOperation(frame.Method)) //nolint:errcheck // The frame remains unauthorized if local audit fails.
+		_ = h.security.AuthenticationDenied(ctx, op) //nolint:errcheck // The frame remains unauthorized if local audit fails.
 		return NewErrorFrame(frame.ID, ErrCodeUnauthorized, "authentication required")
 	}
-	if err := h.authorize(ctx, conn.Identity, frame.Method); err != nil {
+	if err := h.security.Check(ctx, conn.Identity.principal(), op); err != nil {
 		return NewErrorFrame(frame.ID, authorizationCode(err), "access unavailable or denied")
 	}
-	op := security.DWPOperation(frame.Method)
+	if targetErr != nil {
+		return NewErrorFrame(frame.ID, ErrCodeBadRequest, "invalid operation target")
+	}
 	attempt, err := h.security.BeginCommand(ctx, conn.Identity.principal(), op)
 	if err != nil {
 		return NewErrorFrame(frame.ID, 503, "audit acceptance unavailable")

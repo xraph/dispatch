@@ -125,48 +125,72 @@ const (
 type Operation struct {
 	Action  string
 	Payload bool
+	// AuditAction is the registered operation, separate from its Warden permission.
+	AuditAction string
+	Target      string
 }
 
 // RESTOperation uses the registered method and template, never a request label.
-func RESTOperation(method, path string) Operation {
+func RESTOperation(method, path string) (op Operation) {
+	defer func() {
+		if op.Action != "" {
+			op.AuditAction = "rest:" + method + " " + path
+		} else {
+			op.AuditAction = "unknown-operation"
+		}
+	}()
 	key := method + " " + path
 	switch key {
 	case "GET /jobs", "GET /jobs/:jobId", "GET /workflows/runs", "GET /workflows/runs/:runId", "GET /workflows/runs/:runId/replay", "GET /dlq", "GET /dlq/:entryId", "GET /crons", "GET /crons/:cronId":
-		return Operation{OperatorRead, true}
+		return Operation{Action: OperatorRead, Payload: true}
 	case "GET /jobs/counts", "GET /workflows", "GET /dlq/count", "GET /stats":
 		return Operation{Action: OperatorRead}
 	case "POST /jobs/:jobId/cancel", "POST /jobs/:jobId/retry", "DELETE /dlq/:entryId", "POST /dlq/replay-all", "POST /dlq/purge", "DELETE /crons/:cronId":
 		return Operation{Action: OperatorWrite}
 	case "POST /workflows/runs/:runId/replay", "POST /dlq/:entryId/replay", "POST /crons/:cronId/enable", "POST /crons/:cronId/disable", "POST /crons/:cronId/trigger":
-		return Operation{OperatorWrite, true}
+		return Operation{Action: OperatorWrite, Payload: true}
 	default:
 		return Operation{}
 	}
 }
-func ContractOperation(intent string) Operation {
+func ContractOperation(intent string) (op Operation) {
+	defer func() {
+		if op.Action != "" {
+			op.AuditAction = "contract:" + intent
+		} else {
+			op.AuditAction = "unknown-operation"
+		}
+	}()
 	switch intent {
 	case "artifacts.list", "artifacts.get", "artifacts.forJob", "workers.list", "workers.get", "queues.list", "queues.get", "handlers.list", "handlers.get", "overview.summary", "jobs.counts", "dlq.counts", "dlq.purgePreview":
 		return Operation{Action: OperatorRead}
 	case "artifacts.presign", "engine.config", "workflows.list", "workflows.get", "workflows.replayPreview", "jobs.list", "jobs.get", "dlq.list", "dlq.get", "crons.list", "crons.get":
-		return Operation{OperatorRead, true}
+		return Operation{Action: OperatorRead, Payload: true}
 	case "jobs.cancel", "jobs.retry", "dlq.replayAll", "dlq.delete", "dlq.purge", "crons.delete":
 		return Operation{Action: OperatorWrite}
 	case "workflows.replayFrom", "dlq.replay", "crons.enable", "crons.disable", "crons.runNow":
-		return Operation{OperatorWrite, true}
+		return Operation{Action: OperatorWrite, Payload: true}
 	default:
 		return Operation{}
 	}
 }
-func DWPOperation(method string) Operation {
+func DWPOperation(method string) (op Operation) {
+	defer func() {
+		if op.Action != "" {
+			op.AuditAction = "dwp:" + method
+		} else {
+			op.AuditAction = "unknown-operation"
+		}
+	}()
 	switch method {
 	case "job.get", "workflow.get", "workflow.timeline":
-		return Operation{OperatorRead, true}
+		return Operation{Action: OperatorRead, Payload: true}
 	case "stats":
 		return Operation{Action: OperatorRead}
 	case "job.enqueue", "job.cancel", "workflow.start", "workflow.event":
 		return Operation{Action: OperatorWrite}
 	case "subscribe", "unsubscribe":
-		return Operation{Subscribe, true}
+		return Operation{Action: Subscribe, Payload: true}
 	case "federation.enqueue", "federation.event", "federation.heartbeat":
 		return Operation{Action: Federation}
 	default:

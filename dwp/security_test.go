@@ -158,7 +158,7 @@ func TestDWPAnonymousAuditAndUnconfirmedOutcome(t *testing.T) {
 		t.Fatal(got, err)
 	}
 	pending, err := audit.UnresolvedLegacyAttempts(t.Context(), durable.LegacyAttemptList{InstallationID: "test", Namespace: "audit", Limit: 100})
-	if err != nil || len(pending) != 1 || pending[0].Attempt.Metadata.ActorKind != "service_acct" {
+	if err != nil || len(pending) != 1 || pending[0].Attempt.Metadata.ActorKind != "service_acct" || pending[0].Attempt.Action != "dwp:job.cancel" || pending[0].Attempt.Target != "job:"+j.ID.String() {
 		t.Fatal(pending, err)
 	}
 }
@@ -167,4 +167,64 @@ type failingOutcomeAudit struct{ *memory.Store }
 
 func (s *failingOutcomeAudit) CompleteLegacyAttempt(context.Context, durable.LegacyOutcome) error {
 	return errors.New("outcome persistence unavailable")
+}
+
+func TestDWPHTTPAuditSelectorsAndDeniedTarget(t *testing.T) {
+	eng, _ := setupTestEngine(t)
+	s := memory.New()
+	n := durable.NamespaceConfig{InstallationID: "test", Namespace: "audit", AppID: "test", TenantID: "test", RequireAudit: true, SchemaVersion: 1}
+	if _, err := s.RegisterNamespace(t.Context(), n); err != nil {
+		t.Fatal(err)
+	}
+	b := testBoundary()
+	b.Audit = &security.AuditService{}
+	if err := b.Audit.Activate(t.Context(), s, s, b.Resource, n.Namespace, false); err != nil {
+		t.Fatal(err)
+	}
+	h := NewHandler(eng, eng.StreamBroker(), testLogger(), b)
+	server := NewServer(eng.StreamBroker(), h, WithAuth(NewAPIKeyAuthenticator(APIKeyEntry{Token: "explicit", Identity: Identity{Subject: "operator"}})))
+	router := forge.NewRouter()
+	server.RegisterRoutes(router)
+	request := func(method string, data any, token string, want int) {
+		t.Helper()
+		frame := &Frame{ID: "request", Method: method, Data: mustJSON(data), Token: token}
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/dwp/rpc", strings.NewReader(string(mustJSON(frame))))
+		req.Header.Set("Content-Type", "application/json")
+		router.Handler().ServeHTTP(rec, req)
+		if rec.Code != want {
+			t.Fatal(rec.Code, rec.Body)
+		}
+	}
+	request(MethodJobEnqueue, JobEnqueueRequest{Name: "test", Queue: "mail", Payload: []byte(`{"secret":"never-audit-me"}`)}, "explicit", 200)
+	j, err := eng.EnqueueRaw(t.Context(), "test", []byte(`{}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	request(MethodJobCancel, JobCancelRequest{JobID: j.ID.String()}, "wrong-token", 401)
+	status, err := s.DeliveryStatus(t.Context(), durable.DeliveryStatusRequest{DeliveryScope: durable.DeliveryScope{InstallationID: n.InstallationID, Destination: durable.DestinationChronicle}, Limit: 100})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(status.Records) != 4 {
+		t.Fatal(status)
+	}
+	for _, r := range status.Records {
+		d := r.Delivery
+		switch d.Action {
+		case "dwp:job.enqueue":
+			if d.Target != `{"kind":"job-selector","name":"test","queue":"mail"}` {
+				t.Fatal(d)
+			}
+		case "dwp:job.cancel":
+			if d.Target != "job:"+j.ID.String() || d.Outcome != "unauthenticated" {
+				t.Fatal(d)
+			}
+		default:
+			t.Fatal("missing method", d)
+		}
+		if strings.Contains(string(mustJSON(d)), "never-audit-me") {
+			t.Fatal("payload in audit")
+		}
+	}
 }

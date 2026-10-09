@@ -9,6 +9,7 @@ import (
 	"github.com/xraph/forge"
 
 	"github.com/xraph/dispatch/durable"
+	"github.com/xraph/dispatch/id"
 	"github.com/xraph/dispatch/security"
 	"github.com/xraph/dispatch/store/memory"
 )
@@ -38,7 +39,7 @@ func TestResponseMarshalFailureDoesNotClaimRollback(t *testing.T) {
 		t.Fatal(err)
 	}
 	rec := httptest.NewRecorder()
-	router.Handler().ServeHTTP(rec, httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/jobs/id/cancel", nil))
+	router.Handler().ServeHTTP(rec, httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/jobs/"+id.NewJobID().String()+"/cancel", nil))
 	if rec.Code < 400 {
 		t.Fatal("serialization error returned success", rec.Code, rec.Body)
 	}

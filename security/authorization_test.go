@@ -23,7 +23,7 @@ func TestBoundaryFailClosed(t *testing.T) {
 		}
 		return nil
 	})}
-	if err := b.Check(context.Background(), p, Operation{OperatorRead, true}); !errors.Is(err, ErrForbidden) || calls != 2 {
+	if err := b.Check(context.Background(), p, Operation{Action: OperatorRead, Payload: true}); !errors.Is(err, ErrForbidden) || calls != 2 {
 		t.Fatalf("payload bypass: %v calls %d", err, calls)
 	}
 	for _, principal := range []Principal{{}, {Subject: "", Kind: "user"}, {Subject: "x", Kind: "agent"}, {Subject: "x", Kind: ""}} {

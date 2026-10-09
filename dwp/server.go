@@ -120,7 +120,7 @@ func (s *Server) handleWebSocket(ctx forge.Context, conn forge.Connection) error
 		return fmt.Errorf("dwp: auth failed: %w", authErr)
 	}
 
-	if err := s.handler.authorize(ctx.Context(), identity, MethodSubscribe); err != nil {
+	if err := s.handler.authorizeSubscription(ctx.Context(), identity, ""); err != nil {
 		if writeErr := conn.WriteJSON(NewErrorFrame(authFrame.ID, authorizationCode(err), "access denied")); writeErr != nil {
 			return writeErr
 		}
@@ -187,7 +187,7 @@ func (s *Server) handleWebSocket(ctx forge.Context, conn forge.Connection) error
 		}
 
 		if frame.Type == FramePing || frame.Credits > 0 {
-			if err := s.handler.authorize(ctx.Context(), identity, MethodSubscribe); err != nil {
+			if err := s.handler.authorizeSubscription(ctx.Context(), identity, ""); err != nil {
 				if writeErr := s.writeFrame(conn, codec, NewErrorFrame(frame.ID, authorizationCode(err), "access denied")); writeErr != nil {
 					return writeErr
 				}
@@ -249,7 +249,7 @@ func (s *Server) forwardEvents(ctx context.Context, identity *Identity, conn for
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			if err := s.handler.authorize(ctx, identity, MethodSubscribe); err != nil {
+			if err := s.handler.authorizeSubscription(ctx, identity, ""); err != nil {
 				_ = conn.Close()
 				return
 			}
@@ -257,7 +257,7 @@ func (s *Server) forwardEvents(ctx context.Context, identity *Identity, conn for
 			if !ok {
 				return
 			}
-			if err := s.handler.authorize(ctx, identity, MethodSubscribe); err != nil {
+			if err := s.handler.authorizeSubscription(ctx, identity, ""); err != nil {
 				_ = conn.Close()
 				return
 			}
@@ -291,7 +291,7 @@ func (s *Server) handleSSE(ctx forge.Context, sseStream forge.Stream) error {
 	identity, cached := ctx.Context().Value(sseIdentityKey{}).(*Identity)
 	if !cached || identity == nil {
 		var err error
-		identity, err = s.authenticate(ctx.Context(), ctx.Request(), token)
+		identity, err = s.authenticate(ctx.Context(), ctx.Request(), token, subscriptionOperation(ctx.Query("channel")))
 		if err != nil {
 			return ErrUnauthorized
 		}
@@ -303,7 +303,7 @@ func (s *Server) handleSSE(ctx forge.Context, sseStream forge.Stream) error {
 		return fmt.Errorf("dwp: SSE channel parameter required")
 	}
 
-	if err := s.handler.authorize(ctx.Context(), identity, MethodSubscribe); err != nil {
+	if err := s.handler.authorizeSubscription(ctx.Context(), identity, channel); err != nil {
 		return err
 	}
 	streamCtx, cancelStream := context.WithTimeout(sseStream.Context(), security.StreamLifetime)
@@ -317,11 +317,11 @@ func (s *Server) handleSSE(ctx forge.Context, sseStream forge.Stream) error {
 	for {
 		select {
 		case <-ticker.C:
-			if err := s.handler.authorize(streamCtx, identity, MethodSubscribe); err != nil {
+			if err := s.handler.authorizeSubscription(streamCtx, identity, channel); err != nil {
 				return err
 			}
 		case evt, ok := <-sub.C():
-			if err := s.handler.authorize(streamCtx, identity, MethodSubscribe); err != nil {
+			if err := s.handler.authorizeSubscription(streamCtx, identity, channel); err != nil {
 				return err
 			}
 			if !ok {
@@ -352,7 +352,11 @@ func (s *Server) handleHTTPRPC(ctx forge.Context) error {
 	if token == "" {
 		token = ctx.Header("Authorization")
 	}
-	identity, err := s.authenticate(ctx.Context(), ctx.Request(), token, security.DWPOperation(frame.Method))
+	op, targetErr := auditOperation(&frame)
+	if targetErr != nil {
+		op.Target = "invalid-target"
+	}
+	identity, err := s.authenticate(ctx.Context(), ctx.Request(), token, op)
 	if err != nil {
 		return ctx.Status(401).JSON(NewErrorFrame(frame.ID, ErrCodeUnauthorized, "unauthorized"))
 	}

@@ -30,16 +30,23 @@ func handle[I, O any](deps Deps, intent string, command bool, fn func(context.Co
 		}
 		ctx, cancel := context.WithTimeout(ctx, timeout)
 		defer cancel()
-		if err := deps.authorize(ctx, principal, intent); err != nil {
+		op := security.ContractOperation(intent)
+		target, targetErr := auditInputTarget(intent, input)
+		op.Target = target
+		if err := deps.authorizeOperation(ctx, principal, op); err != nil {
 			var zero O
 			return zero, err
+		}
+		if targetErr != nil && command {
+			var zero O
+			return zero, fc.ErrBadRequest
 		}
 		verified, identityErr := security.FromContract(principal)
 		if identityErr != nil {
 			var zero O
 			return zero, fc.ErrUnauthenticated
 		}
-		attempt, err := deps.Security.BeginCommand(ctx, verified, security.ContractOperation(intent))
+		attempt, err := deps.Security.BeginCommand(ctx, verified, op)
 		if err != nil {
 			var zero O
 			return zero, fc.ErrUnavailable
