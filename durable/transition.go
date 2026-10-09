@@ -107,6 +107,9 @@ func (r CommitRequest) Validate() error {
 	if err := validateChildren(r); err != nil {
 		return err
 	}
+	if err := validateChildCancellations(r); err != nil {
+		return err
+	}
 	return validateTaskControl(r)
 }
 

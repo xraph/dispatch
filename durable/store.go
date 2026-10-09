@@ -38,6 +38,10 @@ type Store interface {
 	GetChildExecution(context.Context, Key, string) (ChildExecution, error)
 	GetParentExecution(context.Context, Key) (ChildExecution, error)
 	ListChildExecutions(context.Context, Key, string, int) ([]ChildExecution, error)
+	ClaimChildDelivery(context.Context, ChildDeliveryClaimRequest) (*ChildDelivery, error)
+	ApplyChildDelivery(context.Context, ChildDeliveryRequest) (ChildDeliveryReceipt, error)
+	GetChildDelivery(context.Context, Key, string) (ChildDelivery, error)
+	ListChildDeliveries(context.Context, Key, string, int) ([]ChildDelivery, error)
 	// GetTask returns persisted state, including finished tasks, in one namespace.
 	GetTask(context.Context, Key, string) (Task, error)
 	// ReadHistory returns events after the exclusive cursor, in sequence order.

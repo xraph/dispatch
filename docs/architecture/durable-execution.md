@@ -43,7 +43,7 @@ Store tests alone do not qualify a workflow runtime or a deployment.
 | Deterministic Go workflow runtime | Activity, timer, signal and saved-winner selection replay implemented; coroutine and SDK expansion open | Recorded-history replay with no repeated external effects, changed-command rejection |
 | Activity retries and timeout classes | Queue, attempt, overall and heartbeat deadlines, progress recovery, retry policies and asynchronous Go callbacks implemented; remote authorization and process qualification open | Queue, attempt, overall and heartbeat deadlines; heartbeat progress; asynchronous completion |
 | Signals, queries, updates and signal-with-start | Atomic signals, signal-with-start, Go receive replay and explicit-run queries implemented; tracked updates and current/latest query selection open | Namespace isolation, deduplication, atomic acceptance, update results, read-only queries |
-| Child workflows and cancellation | Individual Go future and whole-workflow cancellation implemented; children and cooperative completion acknowledgment open | Stable child identity, duplicate creation prevention, parent-close policies, cancellation propagation |
+| Child workflows and cancellation | Individual Go future and whole-workflow cancellation implemented; child creation and lifecycle delivery stored; child runtime and cooperative completion acknowledgment open | Stable child identity, duplicate creation prevention, parent-close policies, cancellation propagation |
 | Compensation, pause, termination and reset | Open | Resumable compensation attempts, audited controls, immutable reset lineage |
 | Continue-as-new and run chains | Open | Bounded history, message handoff and version inheritance |
 | Schedules | Open | Overlap, catch-up, backfill, timezones and unique scheduled occurrences |
@@ -1236,6 +1236,32 @@ parent and reverse lookup, pagination, namespace/build isolation, source grant a
 queue checks, input copies and concurrent creators. PostgreSQL tests cover pool/run
 replacement, relationship and final receipt rollback, migration retry/protected
 downgrade, source expiry after identity-lock waits, and receipt recovery while child
-identity locks are held. Lifecycle deliveries, parent-close actions and Go child
-futures remain the next required tasks; this storage layer alone is not a usable
-child workflow runtime.
+identity locks are held.
+
+Lifecycle deliveries and parent-close policies are implemented in both stores. You
+can inspect pending and completed deliveries by source run. Claims route to the
+target build, and each application saves a receipt with its original target and
+an applied or ignored_closed disposition. Explicit child cancellation uses the
+existing cancellation receipt scope, then queues a separate acknowledgment for
+the parent. A cancellation fence excludes children created by the same cleanup
+decision.
+
+The delivery table references its source execution. It has no target foreign key:
+inserting that reference would lock the target while the source is closing, which
+can deadlock concurrent parent and child closures. The immutable relationship
+retains both identities. Any future retention implementation must preserve pending
+delivery targets before removing those relationships.
+
+Shared tests cover expired and reclaimed leases, duplicate applications, payload
+copies, routing, cancellation receipt conflicts, winning child completion and
+termination cascades. PostgreSQL fault tests reject source outbox writes, target
+events, delivery receipts, descendant results and cancellation acknowledgments;
+each failed transaction leaves its target unchanged and succeeds on retry. Pool
+replacement recovers delivery receipts after both runs close and a replacement run
+starts. Lock tests verify expiry after a target-row wait and closure without waiting
+on the other execution. Migration tests protect pending messages and saved receipts.
+
+Go child futures, replay, queries and the worker delivery poller remain required.
+The storage API alone does not provide a usable child workflow runtime. Operator
+transport, Dashboard flows and production failure/load qualification also remain
+open.

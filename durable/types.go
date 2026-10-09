@@ -163,17 +163,18 @@ type TimeoutClaimRequest struct {
 // and cannot schedule more tasks. RequestID is unique across mutations of a run.
 type CommitRequest struct {
 	Key
-	RequestID        string           `json:"request_id"`
-	ExpectedRevision int64            `json:"expected_revision"`
-	Token            TaskToken        `json:"token"`
-	Events           []EventInput     `json:"events"`
-	Tasks            []TaskSpec       `json:"tasks,omitempty"`
-	Children         []ChildStartSpec `json:"children,omitempty"`
-	State            State            `json:"state,omitempty"`
-	Output           []byte           `json:"output,omitempty"`
-	TaskUpdate       *TaskUpdate      `json:"task_update,omitempty"`
-	Conditions       []TaskCondition  `json:"conditions,omitempty"`
-	CancelTasks      []string         `json:"cancel_tasks,omitempty"`
+	RequestID        string                  `json:"request_id"`
+	ExpectedRevision int64                   `json:"expected_revision"`
+	Token            TaskToken               `json:"token"`
+	Events           []EventInput            `json:"events"`
+	Tasks            []TaskSpec              `json:"tasks,omitempty"`
+	Children         []ChildStartSpec        `json:"children,omitempty"`
+	CancelChildren   []ChildCancellationSpec `json:"cancel_children,omitempty"`
+	State            State                   `json:"state,omitempty"`
+	Output           []byte                  `json:"output,omitempty"`
+	TaskUpdate       *TaskUpdate             `json:"task_update,omitempty"`
+	Conditions       []TaskCondition         `json:"conditions,omitempty"`
+	CancelTasks      []string                `json:"cancel_tasks,omitempty"`
 	// CancelPendingTasks fences existing pending tasks before creating Tasks.
 	// The source must complete; new cleanup work remains runnable.
 	CancelPendingTasks bool `json:"cancel_pending_tasks,omitempty"`

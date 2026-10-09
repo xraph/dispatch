@@ -183,6 +183,16 @@ func (s *Store) CommitTransition(ctx context.Context, r durable.CommitRequest) (
 	if err != nil {
 		return durable.Receipt{}, err
 	}
+	if sourceErr := durable.ValidateChildCancellationSource(*task, r.CancelChildren); sourceErr != nil {
+		return durable.Receipt{}, sourceErr
+	}
+	deliveries, deliveryErr := prepareChildDeliveries(ctx, tx, next, r, now)
+	if deliveryErr != nil {
+		return durable.Receipt{}, deliveryErr
+	}
+	if deliveryErr := insertChildDeliveries(ctx, tx, deliveries); deliveryErr != nil {
+		return durable.Receipt{}, deliveryErr
+	}
 	if childErr := insertChildExecutions(ctx, tx, r.Key, r.Children, now); childErr != nil {
 		return durable.Receipt{}, childErr
 	}

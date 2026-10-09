@@ -296,6 +296,13 @@ func (m *Store) CommitTransition(ctx context.Context, r durable.CommitRequest) (
 	if sourceErr := durable.ValidateChildSource(task.Task, r.Children); sourceErr != nil {
 		return durable.Receipt{}, sourceErr
 	}
+	if sourceErr := durable.ValidateChildCancellationSource(task.Task, r.CancelChildren); sourceErr != nil {
+		return durable.Receipt{}, sourceErr
+	}
+	deliveries, deliveryErr := m.prepareChildDeliveries(next, r, now)
+	if deliveryErr != nil {
+		return durable.Receipt{}, deliveryErr
+	}
 	children, childErr := m.prepareChildren(record, r, now)
 	if childErr != nil {
 		return durable.Receipt{}, childErr
@@ -352,6 +359,7 @@ func (m *Store) CommitTransition(ctx context.Context, r durable.CommitRequest) (
 		m.childParents[child.Start.Key] = durable.ChildExecution{Parent: r.Key, ChildStartSpec: child, CreatedAt: now}
 		record.children[child.CommandID] = child.Start.Key
 	}
+	m.saveChildDeliveries(deliveries)
 	record.execution = next
 	record.receipts[r.RequestID] = durableReceipt{digest: digest, intent: r.IntentDigest, value: receipt}
 	return receipt, nil

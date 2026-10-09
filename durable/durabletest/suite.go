@@ -15,6 +15,17 @@ import (
 // Run exercises a store with unique namespaces so cases can share a database.
 func Run(t *testing.T, s durable.Store) {
 	t.Helper()
+	t.Run("child_cancellation_fence", func(t *testing.T) { childCancellationFence(t, s) })
+	t.Run("child_cancellation_at_creation", func(t *testing.T) { childCancellationAtCreation(t, s) })
+	t.Run("child_cancellation_conflict", func(t *testing.T) { childCancellationConflict(t, s) })
+	t.Run("child_cancellation_receipt_collision", func(t *testing.T) { childCancellationReceiptCollision(t, s) })
+	t.Run("child_winning_result", func(t *testing.T) { childWinningResult(t, s) })
+	t.Run("child_delivery_copies_concurrent_retry", func(t *testing.T) { childDeliveryCopiesAndConcurrentRetry(t, s) })
+	t.Run("child_delivery_cascade", func(t *testing.T) { childDeliveryCascade(t, s) })
+	t.Run("child_result_delivery", func(t *testing.T) { childResultDelivery(t, s) })
+	t.Run("child_parent_close_delivery", func(t *testing.T) { childParentCloseDelivery(t, s) })
+	t.Run("child_delivery_lease", func(t *testing.T) { childDeliveryLease(t, s) })
+	t.Run("child_explicit_cancellation", func(t *testing.T) { childExplicitCancellationDelivery(t, s) })
 	t.Run("child_source_guards", func(t *testing.T) { childSourceGuards(t, s) })
 	t.Run("child_concurrent_parents", func(t *testing.T) { childConcurrentParents(t, s) })
 	t.Run("child_namespace_reads", func(t *testing.T) { childNamespaceAndReadValidation(t, s) })
