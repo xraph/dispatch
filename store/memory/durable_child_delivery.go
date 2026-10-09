@@ -221,7 +221,9 @@ func (m *Store) applyChildTarget(target *executionRecord, d durable.ChildDeliver
 	receipt := durable.ChildDeliveryReceipt{Target: d.Target, Receipt: durable.Receipt{Revision: target.execution.Revision, LastSequence: target.execution.LastSequence}, Disposition: durable.ChildDeliveryIgnoredClosed}
 	var generated []durable.ChildDelivery
 	var cancelReceipt *cancellationReceiptRecord
-	if target.execution.State == durable.StateRunning {
+	if target.execution.State == durable.StateRunning && durable.CheckExecutionDeadline(target.execution, now) != nil {
+		receipt.Disposition = durable.ChildDeliveryIgnoredExpired
+	} else if target.execution.State == durable.StateRunning {
 		var err error
 		receipt.Disposition = durable.ChildDeliveryApplied
 		switch d.Kind {

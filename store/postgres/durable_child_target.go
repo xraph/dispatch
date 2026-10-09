@@ -13,7 +13,9 @@ import (
 
 func applyChildTarget(ctx context.Context, tx driver.Tx, target durable.Execution, d durable.ChildDelivery, now time.Time) (durable.ChildDeliveryReceipt, error) {
 	receipt := durable.ChildDeliveryReceipt{Target: d.Target, Receipt: durable.Receipt{Revision: target.Revision, LastSequence: target.LastSequence}, Disposition: durable.ChildDeliveryIgnoredClosed}
-	if target.State == durable.StateRunning {
+	if target.State == durable.StateRunning && durable.CheckExecutionDeadline(target, now) != nil {
+		receipt.Disposition = durable.ChildDeliveryIgnoredExpired
+	} else if target.State == durable.StateRunning {
 		receipt.Disposition = durable.ChildDeliveryApplied
 		var err error
 		switch d.Kind {

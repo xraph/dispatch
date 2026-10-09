@@ -199,7 +199,8 @@ func finishChildDelivery(ctx context.Context, tx driver.Tx, r durable.ChildDeliv
 }
 
 // ApplyChildDelivery serializes one target without locking the source execution.
-func (s *Store) ApplyChildDelivery(ctx context.Context, r durable.ChildDeliveryRequest) (durable.ChildDeliveryReceipt, error) {
+func (s *Store) ApplyChildDelivery(ctx context.Context, r durable.ChildDeliveryRequest) (result durable.ChildDeliveryReceipt, resultErr error) {
+	defer func() { resultErr = normalizeExecutionError(resultErr) }()
 	if err := r.Validate(); err != nil {
 		return durable.ChildDeliveryReceipt{}, err
 	}

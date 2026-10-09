@@ -8,15 +8,16 @@ import (
 
 // Store errors let the coordinator distinguish conflicts from transport failures.
 var (
-	ErrInvalid          = errors.New("durable: invalid request")
-	ErrNotFound         = errors.New("durable: execution not found")
-	ErrExists           = errors.New("durable: identity already exists")
-	ErrRequestConflict  = errors.New("durable: request ID reused with different content")
-	ErrRevisionConflict = errors.New("durable: execution revision changed")
-	ErrLeaseLost        = errors.New("durable: task lease lost")
-	ErrTaskConflict     = errors.New("durable: task observation changed")
-	ErrTaskDeadline     = errors.New("durable: task deadline expired")
-	ErrClosed           = errors.New("durable: execution closed")
+	ErrInvalid           = errors.New("durable: invalid request")
+	ErrNotFound          = errors.New("durable: execution not found")
+	ErrExists            = errors.New("durable: identity already exists")
+	ErrRequestConflict   = errors.New("durable: request ID reused with different content")
+	ErrRevisionConflict  = errors.New("durable: execution revision changed")
+	ErrLeaseLost         = errors.New("durable: task lease lost")
+	ErrTaskConflict      = errors.New("durable: task observation changed")
+	ErrExecutionDeadline = errors.New("durable: execution deadline expired")
+	ErrTaskDeadline      = errors.New("durable: task deadline expired")
+	ErrClosed            = errors.New("durable: execution closed")
 )
 
 // Store is an explicit backend capability. Implementations must provide atomic

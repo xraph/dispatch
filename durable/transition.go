@@ -31,7 +31,7 @@ func (r StartRequest) Validate() error {
 	if !identifier(r.RequestID) || !identifier(r.WorkflowType) || !identifier(r.BuildID) || !identifier(r.Queue) {
 		return fmt.Errorf("%w: request ID, workflow type, build ID and queue are required", ErrInvalid)
 	}
-	return nil
+	return validateExecutionTimeouts(r)
 }
 
 // Validate checks task routing and the requested lease duration.
@@ -172,6 +172,9 @@ func CheckLease(task Task, token TaskToken, now time.Time) error {
 func Advance(current Execution, task Task, r CommitRequest, now time.Time) (Execution, Receipt, error) {
 	if current.State != StateRunning {
 		return Execution{}, Receipt{}, ErrClosed
+	}
+	if err := CheckExecutionDeadline(current, now); err != nil {
+		return Execution{}, Receipt{}, err
 	}
 	if err := CheckLease(task, r.Token, now); err != nil {
 		return Execution{}, Receipt{}, err

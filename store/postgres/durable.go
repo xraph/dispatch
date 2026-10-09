@@ -17,15 +17,17 @@ import (
 var _ durable.Store = (*Store)(nil)
 
 const executionColumns = `namespace, workflow_id, run_id, workflow_type, build_id,
-    state, revision, last_sequence, input, output, created_at, updated_at`
+    state, revision, last_sequence, input, output, created_at, updated_at, run_deadline_at, execution_deadline_at`
 
 func scanExecution(row driver.Row) (durable.Execution, error) {
 	var e durable.Execution
+	var runDeadline, executionDeadline sql.NullTime
 	err := row.Scan(&e.Namespace, &e.WorkflowID, &e.RunID, &e.WorkflowType, &e.BuildID,
-		&e.State, &e.Revision, &e.LastSequence, &e.Input, &e.Output, &e.CreatedAt, &e.UpdatedAt)
+		&e.State, &e.Revision, &e.LastSequence, &e.Input, &e.Output, &e.CreatedAt, &e.UpdatedAt, &runDeadline, &executionDeadline)
 	if isNoRows(err) {
 		return durable.Execution{}, durable.ErrNotFound
 	}
+	e.RunDeadlineAt, e.ExecutionDeadlineAt = runDeadline.Time, executionDeadline.Time
 	return e, err
 }
 
@@ -92,7 +94,8 @@ func scanTask(row driver.Row) (*durable.Task, error) {
 }
 
 // ClaimTask atomically claims one eligible task, skipping other pollers' locks.
-func (s *Store) ClaimTask(ctx context.Context, r durable.ClaimRequest) (*durable.Task, error) {
+func (s *Store) ClaimTask(ctx context.Context, r durable.ClaimRequest) (result *durable.Task, resultErr error) {
+	defer func() { resultErr = normalizeExecutionError(resultErr) }()
 	if err := r.Validate(); err != nil {
 		return nil, err
 	}
@@ -101,7 +104,7 @@ func (s *Store) ClaimTask(ctx context.Context, r durable.ClaimRequest) (*durable
         FROM dispatch_execution_tasks t JOIN dispatch_executions e
           USING (namespace, workflow_id, run_id)
         WHERE t.namespace=$1 AND t.queue=$2 AND t.kind=$3 AND NOT t.done
-          AND e.state='running' AND ($6='' OR e.build_id=$6) AND t.available_at <= clock_timestamp()
+          AND e.state='running' AND (LEAST(e.run_deadline_at,e.execution_deadline_at) IS NULL OR LEAST(e.run_deadline_at,e.execution_deadline_at)>clock_timestamp()) AND ($6='' OR e.build_id=$6) AND t.available_at <= clock_timestamp()
           AND t.lease_kind <> 'async' AND (t.lease_until IS NULL OR t.lease_until <= clock_timestamp())
           AND (t.deadline_at IS NULL OR t.deadline_at > clock_timestamp())
         ORDER BY t.available_at, t.workflow_id, t.run_id, t.task_id
@@ -122,7 +125,8 @@ func (s *Store) ClaimTask(ctx context.Context, r durable.ClaimRequest) (*durable
 }
 
 // RenewTask extends a live grant without shortening its current deadline.
-func (s *Store) RenewTask(ctx context.Context, key durable.Key, token durable.TaskToken, ttl time.Duration) (time.Time, error) {
+func (s *Store) RenewTask(ctx context.Context, key durable.Key, token durable.TaskToken, ttl time.Duration) (result time.Time, resultErr error) {
+	defer func() { resultErr = normalizeExecutionError(resultErr) }()
 	if err := key.Validate(); err != nil {
 		return time.Time{}, err
 	}
@@ -163,6 +167,9 @@ func (s *Store) RenewTask(ctx context.Context, key durable.Key, token durable.Ta
 	now, err := executionTime(ctx, tx)
 	if err != nil {
 		return time.Time{}, err
+	}
+	if deadlineErr := durable.CheckExecutionDeadline(execution, now); deadlineErr != nil {
+		return time.Time{}, deadlineErr
 	}
 	if leaseErr := durable.CheckLease(*task, token, now); leaseErr != nil {
 		return time.Time{}, leaseErr

@@ -9,7 +9,8 @@ import (
 
 // ClaimTimeoutTask grants expired activity processing across queues. The timeout
 // lease is independent of the expired business deadline and fences older grants.
-func (s *Store) ClaimTimeoutTask(ctx context.Context, r durable.TimeoutClaimRequest) (*durable.Task, error) {
+func (s *Store) ClaimTimeoutTask(ctx context.Context, r durable.TimeoutClaimRequest) (result *durable.Task, resultErr error) {
+	defer func() { resultErr = normalizeExecutionError(resultErr) }()
 	if err := r.Validate(); err != nil {
 		return nil, err
 	}
@@ -17,7 +18,7 @@ func (s *Store) ClaimTimeoutTask(ctx context.Context, r durable.TimeoutClaimRequ
   SELECT t.namespace,t.workflow_id,t.run_id,t.task_id
   FROM dispatch_execution_tasks t JOIN dispatch_executions e USING(namespace,workflow_id,run_id)
   WHERE t.namespace=$1 AND t.kind='activity' AND NOT t.done
-   AND e.state='running' AND ($2='' OR e.build_id=$2)
+   AND e.state='running' AND (LEAST(e.run_deadline_at,e.execution_deadline_at) IS NULL OR LEAST(e.run_deadline_at,e.execution_deadline_at)>clock_timestamp()) AND ($2='' OR e.build_id=$2)
    AND t.deadline_at <= clock_timestamp()
    AND (t.lease_kind='' OR t.lease_until IS NULL OR t.lease_until <= clock_timestamp())
   ORDER BY t.deadline_at,t.workflow_id,t.run_id,t.task_id

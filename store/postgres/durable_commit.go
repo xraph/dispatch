@@ -100,7 +100,8 @@ func (s *Store) StartExecution(ctx context.Context, r durable.StartRequest) (dur
 }
 
 // CommitTransition serializes a run's mutations and fences task completion.
-func (s *Store) CommitTransition(ctx context.Context, r durable.CommitRequest) (durable.Receipt, error) {
+func (s *Store) CommitTransition(ctx context.Context, r durable.CommitRequest) (result durable.Receipt, resultErr error) {
+	defer func() { resultErr = normalizeExecutionError(resultErr) }()
 	if err := r.Validate(); err != nil {
 		return durable.Receipt{}, err
 	}

@@ -22,7 +22,7 @@ func (s *Store) ResolveExecution(ctx context.Context, r durable.ExecutionTarget)
 		execution, err := scanExecution(s.pgdb.QueryRow(ctx, `SELECT `+executionColumns+`
  FROM dispatch_executions WHERE namespace=$1 AND workflow_id=$2 AND run_id=(
  SELECT run_id FROM dispatch_execution_heads WHERE namespace=$1 AND workflow_id=$2)
- UNION ALL SELECT namespace,workflow_id,'','','','',0,0,''::bytea,''::bytea,'epoch'::timestamptz,'epoch'::timestamptz
+ UNION ALL SELECT namespace,workflow_id,'','','','',0,0,''::bytea,''::bytea,'epoch'::timestamptz,'epoch'::timestamptz,NULL::timestamptz,NULL::timestamptz
  FROM dispatch_execution_heads WHERE namespace=$1 AND workflow_id=$2 AND run_id IS NULL`, r.Namespace, r.WorkflowID))
 		if err == nil && execution.RunID == "" {
 			return durable.Execution{}, durable.ErrAmbiguousRun

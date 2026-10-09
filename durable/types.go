@@ -28,15 +28,17 @@ const (
 // Execution is the current state projected alongside its ordered history.
 type Execution struct {
 	Key
-	WorkflowType string    `json:"workflow_type"`
-	BuildID      string    `json:"build_id"`
-	State        State     `json:"state"`
-	Revision     int64     `json:"revision"`
-	LastSequence int64     `json:"last_sequence"`
-	Input        []byte    `json:"input,omitempty"`
-	Output       []byte    `json:"output,omitempty"`
-	CreatedAt    time.Time `json:"created_at"`
-	UpdatedAt    time.Time `json:"updated_at"`
+	WorkflowType        string    `json:"workflow_type"`
+	BuildID             string    `json:"build_id"`
+	State               State     `json:"state"`
+	Revision            int64     `json:"revision"`
+	LastSequence        int64     `json:"last_sequence"`
+	Input               []byte    `json:"input,omitempty"`
+	Output              []byte    `json:"output,omitempty"`
+	CreatedAt           time.Time `json:"created_at"`
+	UpdatedAt           time.Time `json:"updated_at"`
+	RunDeadlineAt       time.Time `json:"run_deadline_at,omitempty"`
+	ExecutionDeadlineAt time.Time `json:"execution_deadline_at,omitempty"`
 }
 
 // EventInput supplies an event's content. The store assigns sequence and time.
@@ -130,11 +132,13 @@ func (t Task) Token() TaskToken {
 // Reuse the entire request, including RunID, when retrying an unknown outcome.
 type StartRequest struct {
 	Key
-	RequestID    string `json:"request_id"`
-	WorkflowType string `json:"workflow_type"`
-	BuildID      string `json:"build_id"`
-	Queue        string `json:"queue"`
-	Input        []byte `json:"input,omitempty"`
+	RequestID        string        `json:"request_id"`
+	WorkflowType     string        `json:"workflow_type"`
+	BuildID          string        `json:"build_id"`
+	Queue            string        `json:"queue"`
+	Input            []byte        `json:"input,omitempty"`
+	RunTimeout       time.Duration `json:"run_timeout,omitempty"`
+	ExecutionTimeout time.Duration `json:"execution_timeout,omitempty"`
 }
 
 // ClaimRequest polls a single namespace, task kind and queue.

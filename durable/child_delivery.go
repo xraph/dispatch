@@ -19,6 +19,7 @@ const (
 	ChildDeliveryCancelAck             ChildDeliveryKind = "cancel_ack"
 	ChildDeliveryApplied                                 = "applied"
 	ChildDeliveryIgnoredClosed                           = "ignored_closed"
+	ChildDeliveryIgnoredExpired                          = "ignored_expired"
 	EventChildCompleted                                  = "workflow.child_completed"
 	EventChildCancellationAcknowledged                   = "workflow.child_cancellation_acknowledged"
 	EventWorkflowTerminated                              = "workflow.terminated"
@@ -156,7 +157,7 @@ func (d ChildDelivery) Validate() error {
 			return ErrInvalid
 		}
 	case ChildDeliveryCancelAck:
-		if !identifier(m.CancellationID) || (m.Disposition != ChildDeliveryApplied && m.Disposition != ChildDeliveryIgnoredClosed) {
+		if !identifier(m.CancellationID) || (m.Disposition != ChildDeliveryApplied && m.Disposition != ChildDeliveryIgnoredClosed && m.Disposition != ChildDeliveryIgnoredExpired) {
 			return ErrInvalid
 		}
 	default:

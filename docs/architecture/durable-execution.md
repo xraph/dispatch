@@ -42,6 +42,7 @@ Store tests alone do not qualify a workflow runtime or a deployment.
 | Fenced task claims and durable timer deadlines | Store contract and renewable workers implemented; process-kill qualification open | Expiry, same-owner reclaim, concurrent claims, restart recovery |
 | Deterministic Go workflow runtime | Activity, timer, signal, child and saved-winner selection replay implemented; coroutine and SDK expansion open | Recorded-history replay with no repeated external effects, changed-command rejection |
 | Activity retries and timeout classes | Queue, attempt, overall and heartbeat deadlines, progress recovery, retry policies and asynchronous Go callbacks implemented; remote authorization and process qualification open | Queue, attempt, overall and heartbeat deadlines; heartbeat progress; asynchronous completion |
+| Workflow deadlines and whole-workflow retries | Run/execution deadline persistence and fencing implemented; timeout closure, runtime polling and retries open | Expiry across lock waits, durable timeout closure, frozen replay, inherited execution deadlines across run chains |
 | Signals, queries, updates and signal-with-start | Atomic signals, signal-with-start, Go receive replay and explicit/current/latest queries implemented; tracked updates open | Namespace isolation, deduplication, atomic acceptance, update results, read-only queries |
 | Child workflows and cancellation | Individual future, whole-workflow and child cancellation plus child composition implemented; cooperative external-activity completion acknowledgment open | Stable child identity, duplicate creation prevention, parent-close policies, cancellation propagation |
 | Compensation, pause, termination and reset | Parent-close termination implemented; operator controls, compensation, pause and reset open | Resumable compensation attempts, audited controls, immutable reset lineage |
@@ -1387,3 +1388,47 @@ Runtime grants must permit selected reads and atomic head writes. Retention and
 historical imports also need explicit contracts: protect retained latest identities
 and preserve intended creation order when importing historical runs. This checkpoint
 does not qualify those operations or the remaining lifecycle and operator roadmap.
+
+## Workflow deadline contract
+
+RunTimeout limits one run. ExecutionTimeout sets the deadline that future retry
+and continue-as-new chains must inherit. Chain creation and inheritance remain
+separate roadmap work. Zero means unlimited; positive values must be at least one
+microsecond. The store resolves both against its creation timestamp and persists
+the absolute deadlines. The earlier deadline wins, with execution taking precedence
+on a tie. You cannot extend either deadline through a normal mutation.
+
+Once that deadline elapses, claims, lease renewals, heartbeats, signals,
+cancellation requests and transitions must reject new progress. An identical
+request with an existing receipt still returns its saved outcome. Input acceptance
+uses store time after ownership locks. PostgreSQL guards also fence older writers.
+A child delivery to an expired running target is acknowledged as ignored_expired;
+its timeout processor owns the terminal outcome.
+
+A separate namespace poller will claim expired executions without requiring their
+original workflow build or handler. Timeout closure must save its typed terminal
+event, projection, pending-task fencing, child lifecycle deliveries and receipt
+atomically. Queries will replay the saved prefix without generating more work.
+External activities can continue outside Dispatch until they observe cancellation;
+a rejected completion does not undo an external side effect.
+
+Implementation is in progress. Deadline persistence and enforcement, durable
+closure, and runtime polling have separate validation gates. This contract does
+not yet establish a usable workflow timeout service or run-chain support.
+
+2026-10-09: memory and PostgreSQL persist deadlines in ordinary starts,
+signal-with-start and child creation. The earliest deadline fences new progress;
+exact receipt retries retain their original result. Schema guards reject older
+worker updates and prevent deadline changes. Tests reproduce and reject late
+completion after history insertion crosses the deadline, and expiry while renewal,
+completion, signal and cancellation wait for locks. Tiny timeouts still allow
+atomic creation. Migration retries retain deadlines, populated downgrade fails,
+and deadlines survive connection-pool replacement. Child deliveries acknowledge
+expired targets without advancing their history. Automatic timeout closure and
+runtime replay remain the next implementation gates.
+
+This store checkpoint passes make f, make l, go test ./..., engine/runtime/memory
+race tests and the full PostgreSQL durable race suite (154.797s). An earlier full
+race run hit the existing activity-recovery test's 50 ms store timeout; that test
+then passed three isolated runs without changes before the full suite passed.
+The deadline plan's independent review follows its closure and runtime tasks.

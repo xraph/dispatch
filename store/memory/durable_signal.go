@@ -92,7 +92,10 @@ func (m *Store) SignalWithStart(ctx context.Context, r durable.SignalWithStartRe
 		if _, exists := m.executions[r.Start.Key]; exists {
 			return durable.SignalReceipt{}, durable.ErrExists
 		}
-		record := newExecutionRecord(r.Start, now)
+		record, createErr := newExecutionRecord(r.Start, now)
+		if createErr != nil {
+			return durable.SignalReceipt{}, createErr
+		}
 		record.execution.LastSequence = 2
 		record.history = append(record.history, durable.Event{EventInput: durable.EventInput{Type: durable.EventSignalReceived, Payload: payload}, Sequence: 2, Time: now})
 		receipt = durable.SignalReceipt{Key: r.Start.Key, Receipt: durable.Receipt{Revision: 1, FirstSequence: 1, LastSequence: 2}, Started: true}
@@ -127,6 +130,9 @@ func (m *Store) appendWorkflowInput(record *executionRecord, build string, paylo
 	current := record.execution
 	if current.State != durable.StateRunning {
 		return durable.SignalReceipt{}, durable.ErrClosed
+	}
+	if err := durable.CheckExecutionDeadline(current, now); err != nil {
+		return durable.SignalReceipt{}, err
 	}
 	if current.BuildID != build {
 		return durable.SignalReceipt{}, durable.ErrInvalid

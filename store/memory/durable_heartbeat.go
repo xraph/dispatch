@@ -35,7 +35,11 @@ func (m *Store) RecordHeartbeat(ctx context.Context, r durable.HeartbeatRequest)
 	if !exists {
 		return durable.Receipt{}, durable.ErrLeaseLost
 	}
-	next, err := durable.ApplyHeartbeat(task.Task, r, durable.Timestamp(time.Now()))
+	now := durable.Timestamp(time.Now())
+	if deadlineErr := durable.CheckExecutionDeadline(record.execution, now); deadlineErr != nil {
+		return durable.Receipt{}, deadlineErr
+	}
+	next, err := durable.ApplyHeartbeat(task.Task, r, now)
 	if err != nil {
 		return durable.Receipt{}, err
 	}

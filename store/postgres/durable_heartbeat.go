@@ -8,7 +8,8 @@ import (
 )
 
 // RecordHeartbeat commits task progress and its immutable request receipt.
-func (s *Store) RecordHeartbeat(ctx context.Context, r durable.HeartbeatRequest) (durable.Receipt, error) {
+func (s *Store) RecordHeartbeat(ctx context.Context, r durable.HeartbeatRequest) (result durable.Receipt, resultErr error) {
+	defer func() { resultErr = normalizeExecutionError(resultErr) }()
 	if err := r.Validate(); err != nil {
 		return durable.Receipt{}, err
 	}
@@ -45,6 +46,9 @@ func (s *Store) RecordHeartbeat(ctx context.Context, r durable.HeartbeatRequest)
 	now, err := executionTime(ctx, tx)
 	if err != nil {
 		return durable.Receipt{}, err
+	}
+	if deadlineErr := durable.CheckExecutionDeadline(execution, now); deadlineErr != nil {
+		return durable.Receipt{}, deadlineErr
 	}
 	next, err := durable.ApplyHeartbeat(*task, r, now)
 	if err != nil {

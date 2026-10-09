@@ -14,7 +14,8 @@ import (
 )
 
 // SignalExecution accepts a signal and workflow wakeup in one transaction.
-func (s *Store) SignalExecution(ctx context.Context, r durable.SignalRequest) (durable.SignalReceipt, error) {
+func (s *Store) SignalExecution(ctx context.Context, r durable.SignalRequest) (result durable.SignalReceipt, resultErr error) {
+	defer func() { resultErr = normalizeExecutionError(resultErr) }()
 	r.Input = bytes.Clone(r.Input)
 	if err := r.Validate(); err != nil {
 		return durable.SignalReceipt{}, err
@@ -57,7 +58,8 @@ func (s *Store) SignalExecution(ctx context.Context, r durable.SignalRequest) (d
 }
 
 // SignalWithStart resolves its workflow-scoped receipt before choosing a run.
-func (s *Store) SignalWithStart(ctx context.Context, r durable.SignalWithStartRequest) (durable.SignalReceipt, error) {
+func (s *Store) SignalWithStart(ctx context.Context, r durable.SignalWithStartRequest) (result durable.SignalReceipt, resultErr error) {
+	defer func() { resultErr = normalizeExecutionError(resultErr) }()
 	r.Input, r.Start.Input = bytes.Clone(r.Input), bytes.Clone(r.Start.Input)
 	if err := r.Validate(); err != nil {
 		return durable.SignalReceipt{}, err
@@ -195,6 +197,9 @@ func appendWorkflowInput(ctx context.Context, tx driver.Tx, current durable.Exec
 	if err != nil {
 		return durable.SignalReceipt{}, err
 	}
+	if deadlineErr := durable.CheckExecutionDeadline(current, now); deadlineErr != nil {
+		return durable.SignalReceipt{}, deadlineErr
+	}
 	receipt := durable.SignalReceipt{Key: current.Key, Receipt: durable.Receipt{Revision: current.Revision + 1, FirstSequence: current.LastSequence + 1, LastSequence: current.LastSequence + 1}}
 	if eventErr := insertExecutionEvent(ctx, tx, current.Key, durable.Event{EventInput: durable.EventInput{Type: eventType, Payload: payload}, Sequence: receipt.LastSequence, Time: now}); eventErr != nil {
 		return durable.SignalReceipt{}, eventErr
@@ -210,23 +215,21 @@ func appendWorkflowInput(ctx context.Context, tx driver.Tx, current durable.Exec
 }
 
 func createSignalRun(ctx context.Context, tx driver.Tx, r durable.StartRequest, payload []byte) (bool, error) {
+	now, err := executionTime(ctx, tx)
+	if err != nil {
+		return false, err
+	}
+	run, execution, err := durable.ResolveExecutionDeadlines(r, now)
+	if err != nil {
+		return false, err
+	}
 	result, err := tx.Exec(ctx, `INSERT INTO dispatch_executions (`+executionColumns+`)
- VALUES ($1,$2,$3,$4,$5,'running',1,2,$6,$7,clock_timestamp(),clock_timestamp()) ON CONFLICT DO NOTHING`, r.Namespace, r.WorkflowID, r.RunID, r.WorkflowType, r.BuildID, executionBytes(r.Input), []byte{})
+ VALUES ($1,$2,$3,$4,$5,'running',1,2,$6,$7,$8,$8,$9,$10) ON CONFLICT DO NOTHING`, r.Namespace, r.WorkflowID, r.RunID, r.WorkflowType, r.BuildID, executionBytes(r.Input), []byte{}, now, taskNullableTime(run), taskNullableTime(execution))
 	if err != nil {
 		return false, err
 	}
 	count, err := result.RowsAffected()
 	if err != nil || count == 0 {
-		return false, err
-	}
-	// Timestamp after uniqueness waits, while the newly inserted row remains
-	// private to this transaction, so start and message share the same clock.
-	now, err := executionTime(ctx, tx)
-	if err != nil {
-		return false, err
-	}
-	_, err = tx.Exec(ctx, `UPDATE dispatch_executions SET created_at=$4,updated_at=$4 WHERE namespace=$1 AND workflow_id=$2 AND run_id=$3`, r.Namespace, r.WorkflowID, r.RunID, now)
-	if err != nil {
 		return false, err
 	}
 	for i, event := range []durable.EventInput{{Type: "execution.started", Payload: r.Input}, {Type: durable.EventSignalReceived, Payload: payload}} {

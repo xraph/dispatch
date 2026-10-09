@@ -11,7 +11,8 @@ import (
 )
 
 // RequestCancelExecution deduplicates before choosing the explicit or open run.
-func (s *Store) RequestCancelExecution(ctx context.Context, r durable.CancelExecutionRequest) (durable.CancelExecutionReceipt, error) {
+func (s *Store) RequestCancelExecution(ctx context.Context, r durable.CancelExecutionRequest) (result durable.CancelExecutionReceipt, resultErr error) {
+	defer func() { resultErr = normalizeExecutionError(resultErr) }()
 	if err := r.Validate(); err != nil {
 		return durable.CancelExecutionReceipt{}, err
 	}
