@@ -17,8 +17,8 @@ func (m *Store) ListExecutions(ctx context.Context, r durable.ExecutionList) ([]
 	}
 	m.mu.RLock()
 	defer m.mu.RUnlock()
-	if err := ctx.Err(); err != nil {
-		return nil, "", err
+	if contextErr := ctx.Err(); contextErr != nil {
+		return nil, "", contextErr
 	}
 	rows := []durable.Execution{}
 	for _, record := range m.executions {
@@ -43,9 +43,9 @@ func (m *Store) ListExecutions(ctx context.Context, r durable.ExecutionList) ([]
 	next := ""
 	if len(rows) > r.Limit {
 		rows = rows[:r.Limit]
-		next = r.Next(rows[len(rows)-1])
+		next, err = r.Next(rows[len(rows)-1])
 	}
-	return rows, next, nil
+	return rows, next, err
 }
 func (m *Store) ListTasks(ctx context.Context, r durable.TaskList) ([]durable.Task, string, error) {
 	p, err := r.Position()
@@ -54,8 +54,8 @@ func (m *Store) ListTasks(ctx context.Context, r durable.TaskList) ([]durable.Ta
 	}
 	m.mu.RLock()
 	defer m.mu.RUnlock()
-	if err := ctx.Err(); err != nil {
-		return nil, "", err
+	if contextErr := ctx.Err(); contextErr != nil {
+		return nil, "", contextErr
 	}
 	record, ok := m.executions[r.Key]
 	if !ok {
@@ -74,13 +74,13 @@ func (m *Store) ListTasks(ctx context.Context, r durable.TaskList) ([]durable.Ta
 	next := ""
 	if len(rows) > r.Limit {
 		rows = rows[:r.Limit]
-		next = r.Next(rows[len(rows)-1])
+		next, err = r.Next(rows[len(rows)-1])
 	}
-	return rows, next, nil
+	return rows, next, err
 }
 func (m *Store) ReadBuildFacts(ctx context.Context, namespace, build string) (durable.BuildFacts, error) {
 	var out durable.BuildFacts
-	if !durable.DeliveryIdentifier(namespace) || !durable.DeliveryIdentifier(build) {
+	if durable.ValidateBuildRead(namespace, build) != nil {
 		return out, durable.ErrInvalid
 	}
 	m.mu.RLock()

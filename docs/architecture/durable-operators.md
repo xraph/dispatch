@@ -63,6 +63,14 @@ and page size, and expires after ten minutes. Preserve older key versions for
 that period when rotating. Changing a filter, principal or target rejects the
 cursor. Each operation has one fixed documented order; cursors confer no grants.
 
+Trusted execution, task and build reads accept the persisted 512-byte identifier
+contract. Catalog ownership and delivery identifiers retain their 256-byte
+limit. Cursor budgets account for six-byte JSON escaping, timestamp and binding
+fields, base64 expansion, all 32 captured namespace names, the key version and
+AES-GCM nonce/tag. Oversized state fails before encoding, and oversized input
+fails before decoding. The store cursor constructors return errors so a failed
+continuation cannot silently become an empty last page.
+
 Execution pages order by immutable `created_at`, workflow ID and run ID, newest
 first, using byte ordering for identity ties. Tasks order by immutable task ID
 within one exact run. Tasks have no historical creation timestamp; none is

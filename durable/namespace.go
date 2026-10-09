@@ -12,6 +12,9 @@ const DeliverySchemaVersion = 1
 const AuditWriterProtocol = 1
 const MaxDeliveryBatch = 100
 
+// MaxDeliveryIdentifierBytes bounds catalog ownership and delivery identifiers.
+const MaxDeliveryIdentifierBytes = 256
+
 // NamespaceConfig is immutable ownership within one physical store. Execution
 // keys omit installation, so two installations cannot own the same namespace.
 type NamespaceConfig struct {
@@ -57,7 +60,7 @@ func (c NamespaceConfig) Validate() error {
 // DeliveryIdentifier bounds catalog and metadata identifiers and rejects control
 // characters. Hosts must supply identifiers, never claims, credentials or errors.
 func DeliveryIdentifier(v string) bool {
-	return v != "" && len(v) <= 256 && utf8.ValidString(v) && strings.TrimSpace(v) == v && strings.IndexFunc(v, unicode.IsControl) < 0
+	return v != "" && len(v) <= MaxDeliveryIdentifierBytes && utf8.ValidString(v) && strings.TrimSpace(v) == v && strings.IndexFunc(v, unicode.IsControl) < 0
 }
 
 func (r NamespaceList) Validate() error {

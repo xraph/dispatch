@@ -284,3 +284,68 @@ func TestExecutionCursorScopeAndGrantChanges(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestDiscoveryWorstEscapingRoundTrip(t *testing.T) {
+	s, store, grants := fixture(t)
+	for i := 0; i < 33; i++ {
+		ns := strings.Repeat("<", 254) + fmt.Sprintf("%02d", i)
+		// Ownership values have their own 256-byte catalog bounds.
+		_, err := store.RegisterNamespace(t.Context(), durable.NamespaceConfig{InstallationID: "install", Namespace: ns, AppID: "app", TenantID: "tenant", RequireAudit: true, SchemaVersion: 1})
+		if err != nil {
+			t.Fatal(err)
+		}
+		(*grants)[ns] = true
+	}
+	s.authorizer = AuthorizerFunc(func(_ context.Context, _ security.Principal, _ string, r Resource) error {
+		if (*grants)[r.Namespace] {
+			return nil
+		}
+		return security.ErrForbidden
+	})
+	for _, check := range []struct{ limit, first, second int }{{0, 25, 9}, {100, 32, 2}} {
+		page, err := s.Namespaces(t.Context(), reader(), NamespaceInput{Limit: check.limit})
+		if err != nil || len(page.Items) != check.first || page.Cursor == "" || page.Complete {
+			t.Fatal("first discovery page", err)
+		}
+		next, err := s.Namespaces(t.Context(), reader(), NamespaceInput{Limit: check.limit, Cursor: page.Cursor})
+		if err != nil || len(next.Items) != check.second || !next.Complete {
+			t.Fatal("second discovery page", len(next.Items), err)
+		}
+	}
+}
+
+type rejectingReadAudit struct {
+	durable.OutboxStore
+	calls int
+}
+
+func (s *rejectingReadAudit) AppendSecurityAudit(context.Context, durable.SecurityAudit) (durable.Delivery, error) {
+	s.calls++
+	return durable.Delivery{}, errors.New("PRIVATE_PROVIDER_ERROR")
+}
+func TestPayloadAuditAcceptanceFailure(t *testing.T) {
+	s, store, _ := fixture(t)
+	key := seed(t, store, "allowed", "workflow")
+	s.authorizer = AuthorizerFunc(func(context.Context, security.Principal, string, Resource) error { return nil })
+	rejecting := &rejectingReadAudit{OutboxStore: store}
+	s.audit.Audit.Deactivate()
+	if err := s.audit.Audit.Activate(t.Context(), rejecting, store, s.audit.Resource, "audit", false); err != nil {
+		t.Fatal(err)
+	}
+	if !s.audit.DurableReadsReady() {
+		t.Fatal("audit did not activate")
+	}
+	payload, err := s.Payload(t.Context(), reader(), key)
+	if !errors.Is(err, security.ErrUnavailable) || err.Error() != security.ErrUnavailable.Error() || rejecting.calls != 1 || payload.State != "" || len(payload.Input) != 0 || len(payload.Output) != 0 {
+		t.Fatalf("payload escaped rejected acceptance: %+v %v calls=%d", payload, err, rejecting.calls)
+	}
+	status, err := store.ReadDeliveryStatus(t.Context(), durable.ScopedDeliveryStatus{Key: key, DeliveryStatusRequest: durable.DeliveryStatusRequest{DeliveryScope: durable.DeliveryScope{InstallationID: "install", Destination: durable.DestinationChronicle}, Limit: 100}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, record := range status.Records {
+		if record.Delivery.Action == ReadPayload {
+			t.Fatal("rejected reveal was accepted")
+		}
+	}
+}

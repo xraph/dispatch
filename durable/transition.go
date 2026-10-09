@@ -11,6 +11,9 @@ import (
 	"unicode/utf8"
 )
 
+// MaxIdentifierBytes is the persisted execution and task identifier byte limit.
+const MaxIdentifierBytes = 512
+
 // Validate checks an execution identity before any database access.
 func (k Key) Validate() error {
 	if !identifier(k.Namespace) || !identifier(k.WorkflowID) || !identifier(k.RunID) {
@@ -20,7 +23,7 @@ func (k Key) Validate() error {
 }
 
 func identifier(s string) bool {
-	return s != "" && len(s) <= 512 && strings.TrimSpace(s) == s && !strings.ContainsRune(s, 0) && utf8.ValidString(s)
+	return s != "" && len(s) <= MaxIdentifierBytes && strings.TrimSpace(s) == s && !strings.ContainsRune(s, 0) && utf8.ValidString(s)
 }
 
 // Validate checks the immutable start request.

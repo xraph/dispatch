@@ -30,15 +30,15 @@ func (s *Store) ListExecutions(ctx context.Context, r durable.ExecutionList) ([]
 		}
 		out = append(out, e)
 	}
-	if err := rows.Err(); err != nil {
-		return nil, "", err
+	if rowsErr := rows.Err(); rowsErr != nil {
+		return nil, "", rowsErr
 	}
 	next := ""
 	if len(out) > r.Limit {
 		out = out[:r.Limit]
-		next = r.Next(out[len(out)-1])
+		next, err = r.Next(out[len(out)-1])
 	}
-	return out, next, nil
+	return out, next, err
 }
 func (s *Store) ListTasks(ctx context.Context, r durable.TaskList) ([]durable.Task, string, error) {
 	p, err := r.Position()
@@ -61,19 +61,19 @@ func (s *Store) ListTasks(ctx context.Context, r durable.TaskList) ([]durable.Ta
 		}
 		out = append(out, *t)
 	}
-	if err := rows.Err(); err != nil {
-		return nil, "", err
+	if rowsErr := rows.Err(); rowsErr != nil {
+		return nil, "", rowsErr
 	}
 	next := ""
 	if len(out) > r.Limit {
 		out = out[:r.Limit]
-		next = r.Next(out[len(out)-1])
+		next, err = r.Next(out[len(out)-1])
 	}
-	return out, next, nil
+	return out, next, err
 }
 func (s *Store) ReadBuildFacts(ctx context.Context, namespace, build string) (durable.BuildFacts, error) {
 	var out durable.BuildFacts
-	if !durable.DeliveryIdentifier(namespace) || !durable.DeliveryIdentifier(build) {
+	if durable.ValidateBuildRead(namespace, build) != nil {
 		return out, durable.ErrInvalid
 	}
 	err := s.pgdb.QueryRow(ctx, `SELECT count(*),count(*) FILTER(WHERE state='running'),coalesce(sum((SELECT count(*) FROM dispatch_execution_tasks t WHERE t.namespace=e.namespace AND t.workflow_id=e.workflow_id AND t.run_id=e.run_id AND NOT t.done)),0) FROM dispatch_executions e WHERE namespace=$1 AND build_id=$2`, namespace, build).Scan(&out.Executions, &out.Running, &out.PendingTasks)

@@ -2,6 +2,8 @@ package durabletest
 
 import (
 	"errors"
+	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -19,6 +21,7 @@ type ReadBackend interface {
 func RunReads(t *testing.T, s ReadBackend, tie func([]durable.Key)) {
 	t.Helper()
 	ctx := t.Context()
+	t.Run("maximum_identifiers", func(t *testing.T) { readMaximumIdentifiers(t, s) })
 	keys := make([]durable.Key, 0, 6)
 	for _, ns := range []string{"read-allowed", "read-foreign"} {
 		if _, err := s.RegisterNamespace(ctx, durable.NamespaceConfig{InstallationID: "read-install", Namespace: ns, AppID: "read-app", TenantID: "read-tenant", RequireAudit: true, RequireHooks: true, SchemaVersion: 1}); err != nil {
@@ -128,5 +131,68 @@ func RunReads(t *testing.T, s ReadBackend, tie func([]durable.Key)) {
 	statusReq.Namespace = ""
 	if _, err = s.ReadDeliveryStatus(ctx, statusReq); !errors.Is(err, durable.ErrInvalid) {
 		t.Fatal(err)
+	}
+}
+
+// readMaximumIdentifiers uses the write API, so the fixtures cannot invent
+// identities that the durable execution and task contracts reject.
+func readMaximumIdentifiers(t *testing.T, s ReadBackend) {
+	ctx := t.Context()
+	for i, character := range []string{"x", "<", "\x01"} {
+		t.Run(fmt.Sprintf("encoding_%d", i), func(t *testing.T) {
+			namespace := fmt.Sprintf("max-read-%d", i) + strings.Repeat("n", 502)
+			id := "a" + strings.Repeat(character, 510) + "z"
+			keys := []durable.Key{}
+			for j := 0; j < 3; j++ {
+				key := durable.Key{Namespace: namespace, WorkflowID: id[:511] + fmt.Sprint(j), RunID: id}
+				r := durable.StartRequest{Key: key, RequestID: "start", WorkflowType: id, BuildID: id, Queue: namespace}
+				if _, err := s.StartExecution(ctx, r); err != nil {
+					t.Fatal(err)
+				}
+				keys = append(keys, key)
+				claimed := claim(t, s, r, time.Minute)
+				req := completion(r, claimed)
+				for k := 0; k < 3; k++ {
+					req.Tasks = append(req.Tasks, durable.TaskSpec{ID: id[:511] + fmt.Sprint(k), Kind: durable.TaskActivity, Queue: namespace})
+				}
+				if _, err := s.CommitTransition(ctx, req); err != nil {
+					t.Fatal(err)
+				}
+			}
+			list := durable.ExecutionList{Namespace: namespace, WorkflowType: id, BuildID: id, Limit: 1}
+			seen := map[durable.Key]bool{}
+			for page := 0; page < 3; page++ {
+				rows, next, err := s.ListExecutions(ctx, list)
+				if err != nil || len(rows) != 1 || seen[rows[0].Key] {
+					t.Fatalf("execution page %d: rows=%d err=%v", page, len(rows), err)
+				}
+				seen[rows[0].Key] = true
+				if (next == "") != (page == 2) {
+					t.Fatal("execution continuation coverage")
+				}
+				list.Cursor = next
+			}
+			list.WorkflowID, list.Cursor = keys[0].WorkflowID, ""
+			if rows, _, err := s.ListExecutions(ctx, list); err != nil || len(rows) != 1 {
+				t.Fatal("workflow filter", err)
+			}
+			facts, err := s.ReadBuildFacts(ctx, namespace, id)
+			if err != nil || facts.Executions != 3 {
+				t.Fatal("build filter", facts, err)
+			}
+			taskList := durable.TaskList{Key: keys[0], Kind: durable.TaskActivity, Limit: 1}
+			last := ""
+			for page := 0; page < 3; page++ {
+				rows, next, err := s.ListTasks(ctx, taskList)
+				if err != nil || len(rows) != 1 || rows[0].ID <= last {
+					t.Fatalf("task page %d: rows=%d err=%v", page, len(rows), err)
+				}
+				last = rows[0].ID
+				if (next == "") != (page == 2) {
+					t.Fatal("task continuation coverage")
+				}
+				taskList.Cursor = next
+			}
+		})
 	}
 }
