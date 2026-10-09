@@ -57,6 +57,9 @@ jobs:
         run: |
           go install golang.org/x/vuln/cmd/govulncheck@latest
           govulncheck -test ./...
+      - name: Qualify published durable operator HTTP and fixture
+        timeout-minutes: 10
+        run: make qualification-operator-check
       - name: Qualify independent PostgreSQL sink processes
         timeout-minutes: 15
         run: make qualification-process-check

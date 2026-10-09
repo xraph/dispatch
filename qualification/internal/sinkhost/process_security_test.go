@@ -56,14 +56,17 @@ func (r *processRig) securityMatrix() {
 			r.stop("dispatch", true)
 			d := r.pending(role)
 			body := r.body(role, d)
-			r.start(role, r.c)
 			receipts := r.count(role, "SELECT count(*) FROM "+role+"_acceptances")
 			events := r.count(role, "SELECT count(*) FROM "+role+"_events")
-			assertDenied := func(want int) {
-				r.post(role, "/accept", r.c.Credentials[role].Secret, body, want, nil)
+			assertNoEffects := func() {
 				r.equal(receipts, r.count(role, "SELECT count(*) FROM "+role+"_acceptances"), "denied receipt effects")
 				r.equal(events, r.count(role, "SELECT count(*) FROM "+role+"_events"), "denied event effects")
 				r.equal(1, r.count("dispatch", "SELECT count(*) FROM dispatch_durable_outbox WHERE id=$1 AND delivered_at IS NULL AND receipt IS NULL AND error_category<>'conflict'", d.ID), "denied source stays retryable and unacknowledged")
+			}
+			r.freshAuthority(role, "revoked-publisher", assertNoEffects)
+			assertDenied := func(want int) {
+				r.post(role, "/accept", r.c.Credentials[role].Secret, body, want, nil)
+				assertNoEffects()
 			}
 			for _, field := range []string{"producer", "org_id", "source_fingerprint"} {
 				r.run("forged-body-"+field, func(_ *testing.T) {
@@ -81,11 +84,20 @@ func (r *processRig) securityMatrix() {
 					r.equal(1, r.count("dispatch", "SELECT count(*) FROM dispatch_durable_outbox WHERE id=$1 AND delivered_at IS NULL AND receipt IS NULL", d.ID), "forged body source acknowledgement")
 				})
 			}
-			authDB, err := Open(r.ctx, r.c.DSNs["authsome"])
+			authDB, err := Open(r.ctx, r.authorityDSN(role))
 			if err != nil {
 				t.Fatal(err)
 			}
-			defer authDB.Close()
+			defer func() { _ = authDB.Close() }()
+			reopenAuthority := func() {
+				if e := authDB.Close(); e != nil {
+					r.t.Fatal(e)
+				}
+				authDB, err = Open(r.ctx, r.authorityDSN(role))
+				if err != nil {
+					r.t.Fatal(err)
+				}
+			}
 			st := apg.New(authDB)
 			key, err := st.GetAPIKey(r.ctx, r.c.Credentials[role].KeyID)
 			if err != nil {
@@ -95,13 +107,53 @@ func (r *processRig) securityMatrix() {
 			if err != nil {
 				t.Fatal(err)
 			}
+			r.run("revoked-publisher-recovery", func(t *testing.T) {
+				revoked := *key
+				revoked.Revoked = true
+				if e := st.UpdateAPIKey(r.ctx, &revoked); e != nil {
+					t.Fatal(e)
+				}
+				assertDenied(401)
+				beforeAttempts := r.count("dispatch", "SELECT attempts FROM dispatch_durable_outbox WHERE id=$1", d.ID)
+				r.start("dispatch", r.c)
+				r.eventually(func() bool {
+					return r.count("dispatch", "SELECT COALESCE(max(attempts),0) FROM dispatch_durable_outbox WHERE id=$1 AND error_category='unavailable' AND delivered_at IS NULL AND lease_until IS NULL AND owner=''", d.ID) > beforeAttempts
+				})
+				r.stop("dispatch", true)
+				assertNoEffects()
+				if e := st.UpdateAPIKey(r.ctx, key); e != nil {
+					t.Fatal(e)
+				}
+				// The default failure budget persists in the old authority store.
+				r.freshAuthority(role, "pending-recovery", assertNoEffects)
+				r.start("dispatch", r.c)
+				r.settled()
+				r.equal(1, r.count("dispatch", "SELECT count(*) FROM dispatch_durable_outbox WHERE id=$1 AND delivered_at IS NOT NULL AND receipt IS NOT NULL", d.ID), "original revoked source recovered")
+				r.verify()
+				t.Log("revoked publisher quiesced; replacement authority fixture accepted original pending source with verified receipt")
+			})
+			// The live rejection campaign owns its limiter state. Independent probes
+			// get a new command-created source and no background publisher requests.
+			r.stop(role, true)
+			r.command("security-independent-"+role, "operator", 202)
+			r.eventually(func() bool {
+				return r.count("dispatch", "SELECT count(*) FROM dispatch_durable_outbox WHERE destination=$1 AND delivered_at IS NULL", role) > 0
+			})
+			r.stop("dispatch", true)
+			d = r.pending(role)
+			body = r.body(role, d)
+			receipts = r.count(role, "SELECT count(*) FROM "+role+"_acceptances")
+			events = r.count(role, "SELECT count(*) FROM "+role+"_events")
+			r.freshAuthority(role, "independent-key-account", assertNoEffects)
+			reopenAuthority()
+			st = apg.New(authDB)
+			t.Log("independent authority phase: new command source pending; publisher stopped; replacement authority fixture")
 			expired := time.Now().Add(-time.Hour)
 			for _, tc := range []struct {
 				name   string
 				mutate func(*apikey.APIKey)
 				status int
 			}{
-				{"revoked", func(k *apikey.APIKey) { k.Revoked = true }, 401},
 				{"expired", func(k *apikey.APIKey) { k.ExpiresAt = &expired }, 401},
 				{"insufficient-scope", func(k *apikey.APIKey) { k.Scopes = nil }, 403},
 				{"scope-growth", func(k *apikey.APIKey) { k.Scopes = append([]string{Scope(role)}, "ungranted") }, 401},
@@ -113,15 +165,6 @@ func (r *processRig) securityMatrix() {
 						r.t.Fatal(e)
 					}
 					assertDenied(tc.status)
-					if tc.name == "revoked" {
-						beforeAttempts := r.count("dispatch", "SELECT attempts FROM dispatch_durable_outbox WHERE id=$1", d.ID)
-						r.start("dispatch", r.c)
-						r.eventually(func() bool {
-							return r.count("dispatch", "SELECT COALESCE(max(attempts),0) FROM dispatch_durable_outbox WHERE id=$1 AND error_category='unavailable' AND delivered_at IS NULL", d.ID) > beforeAttempts
-						})
-						r.stop("dispatch", true)
-						assertDenied(tc.status)
-					}
 					if e := st.UpdateAPIKey(r.ctx, key); e != nil {
 						r.t.Fatal(e)
 					}
@@ -160,10 +203,17 @@ func (r *processRig) securityMatrix() {
 				}
 			})
 			r.run("resolver-unavailable", func(_ *testing.T) {
-				r.exec("authsome", "ALTER TABLE authsome_service_accounts RENAME TO unavailable_accounts")
+				r.execAuthority(role, "ALTER TABLE authsome_service_accounts RENAME TO unavailable_accounts")
 				assertDenied(401)
-				r.exec("authsome", "ALTER TABLE unavailable_accounts RENAME TO authsome_service_accounts")
+				r.execAuthority(role, "ALTER TABLE unavailable_accounts RENAME TO authsome_service_accounts")
 			})
+			// Resolver restoration and the policy matrix have an explicit process
+			// boundary. The valid no-effect probe must reach mapped-body validation.
+			r.stop(role, true)
+			r.start(role, r.c)
+			r.post(role, "/accept", r.c.Credentials[role].Secret, []byte(`{}`), 400, nil)
+			assertNoEffects()
+			r.defaultFailureBudget(role, assertNoEffects)
 			policyDB, err := Open(r.ctx, r.c.DSNs["warden"])
 			if err != nil {
 				t.Fatal(err)

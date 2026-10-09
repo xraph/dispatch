@@ -44,6 +44,10 @@ type processRig struct {
 	dir, binary    string
 	processes      map[string]*process
 	db             map[string]*pgx.Conn
+	authorityAdmin *pgx.Conn
+	authorityBase  string
+	authorityDSNs  map[string]string
+	authoritySeq   int
 	client         *http.Client
 }
 
@@ -114,6 +118,8 @@ func TestProcesses(t *testing.T) {
 	if bootstrapErr := Bootstrap(ctx, &r.c); bootstrapErr != nil {
 		t.Fatal(bootstrapErr)
 	}
+	r.authorityAdmin = admin
+	r.sealAuthorityBaseline()
 	for _, role := range []string{"receiver", "chronicle", "relay", "dispatch"} {
 		r.start(role, r.c)
 	}
@@ -200,6 +206,7 @@ func TestProcesses(t *testing.T) {
 	r.verifyNoSecrets()
 }
 func (r *processRig) start(role string, c Config) {
+	c = r.authorityConfig(role, c)
 	if role == "dispatch" {
 		r.workersStopped = false
 	}

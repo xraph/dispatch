@@ -263,3 +263,7 @@ qualification-check:
 .PHONY: qualification-process-check
 qualification-process-check:
 	bash qualification/process-check.sh
+
+.PHONY: qualification-operator-check
+qualification-operator-check:
+	bash qualification/operator-check.sh

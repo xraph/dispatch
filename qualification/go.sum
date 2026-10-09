@@ -390,10 +390,10 @@ github.com/xraph/chronicle v1.7.1-0.20261009182725-f75626bdff89 h1:sbQoA5T/m5oHf
 github.com/xraph/chronicle v1.7.1-0.20261009182725-f75626bdff89/go.mod h1:OZHmW29SZfNvsqDYUkh8U9r0jn10tdsQxmaUNmz2ioU=
 github.com/xraph/confy v1.0.3 h1:mY0kIo9+dU+XcGGN7cm4IfOhvk4SDj5TrnccpGi21fs=
 github.com/xraph/confy v1.0.3/go.mod h1:DcYB+N0yKpr3t1yhhkdIIiCfch30Kh5wW6GRntUMOGk=
-github.com/xraph/dispatch v1.7.1-0.20261009210414-82c93c165718 h1:K3yQlO4lPC+t1wucyqIb8h8VbKMS0isELka2KLTuv2g=
-github.com/xraph/dispatch v1.7.1-0.20261009210414-82c93c165718/go.mod h1:byeE6oIJMB9Drni5KJEM7ElwIS3ScsNp+bixV9UuujU=
-github.com/xraph/forge v1.12.3 h1:Ae3EZ6jjvyJMxdiTEZCFEDJvMf6HkSFSxy3Cni8fJp4=
-github.com/xraph/forge v1.12.3/go.mod h1:O1JOH9fxDhKRyvBbIl2UpZ+aFCjv7vO/IbNfAwnYSEI=
+github.com/xraph/dispatch v1.7.1-0.20261009222310-2aed320d06e4 h1:bSNnRaKr1a6/E44JDDA8Y1o+6X2rwq5jW8kw9FKTHaE=
+github.com/xraph/dispatch v1.7.1-0.20261009222310-2aed320d06e4/go.mod h1:byeE6oIJMB9Drni5KJEM7ElwIS3ScsNp+bixV9UuujU=
+github.com/xraph/forge v1.12.4-0.20261009221213-1f46924d22f7 h1:2c8ZIFkAStKtbChqeogtYsJTv8+yb7Ooopu+Rz1rahg=
+github.com/xraph/forge v1.12.4-0.20261009221213-1f46924d22f7/go.mod h1:O1JOH9fxDhKRyvBbIl2UpZ+aFCjv7vO/IbNfAwnYSEI=
 github.com/xraph/forge/extensions/auth v1.12.4-0.20261009184218-9ec7ce62855a h1:5LxuQsnKgSmWI2E3SIL7kUPrr6+WtOZiAM898OlrGkc=
 github.com/xraph/forge/extensions/auth v1.12.4-0.20261009184218-9ec7ce62855a/go.mod h1:r9LFtMkQF7OV/XWa4C9WGjL33fphALJ9t6d05KXRzQ8=
 github.com/xraph/go-utils v1.3.0 h1:bMZxwH9Xi/6UqhHSotKHB3a+/FnqnlUnEKf+aHZaw5c=
