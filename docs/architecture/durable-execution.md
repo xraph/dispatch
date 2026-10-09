@@ -1305,3 +1305,17 @@ Child result decoding includes timed_out, but workflow deadline scheduling and
 continue-as-new ownership remain separate open work. Operator transport, Dashboard
 flows, remote authorization and production failure/load qualification also remain
 open.
+
+2026-10-08: the complete child workflow change passed independent review through
+7683dbd with no blocking findings. The reviewer independently ran the focused child
+suites and checked the PostgreSQL fault and replacement evidence. Final author
+checks passed make f, make l, go test ./..., engine/runtime/memory race tests and
+the full durable PostgreSQL integration race suite (130.982 seconds). The runnable
+example completed both parent and child. The abandon example above still needs a
+wording clarification: it awaits completion instead of demonstrating detachment.
+
+This evidence does not qualify workflow deadlines, timed-out query reconstruction,
+run chains, operator transport, remote authorization, Dashboard flows, process kills,
+failover, fleet load, disaster recovery or physical interruption of external work.
+Future retention must preserve pending delivery targets before changing relationship
+retention. These remain required work in the roadmap.
