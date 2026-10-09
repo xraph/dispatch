@@ -18,6 +18,17 @@
 // command identity as an external idempotency key where the service supports it.
 // Completing a workflow without waiting for a future abandons that pending work.
 //
+// Return nil, w.ContinueAsNew(input, options) to close this run and atomically
+// start its successor. Return the intent directly and make no later SDK calls.
+// Empty routing options inherit the source; a nil RunTimeout inherits its saved
+// duration, while a pointer to zero removes the run limit. The chain retains its
+// absolute execution deadline. Unread signals follow the chain with their original
+// acceptance identities. Pending tasks are fenced and child-close policies apply.
+// The successor does not adopt the source's child futures. A child that continues
+// remains one invocation to its original parent until the chain finally closes.
+// Historical queries of a continued run reconstruct its saved decisions without
+// creating another successor. Whole-workflow failure retries are not implemented.
+//
 // A version 2 activity with a finite deadline can call ActivityInfo.DeferCompletion
 // before delivering its handle to an external service. A confirmed handoff stops
 // worker renewal and suppresses later handler results, including panics. Complete

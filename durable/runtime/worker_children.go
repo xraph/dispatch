@@ -120,7 +120,10 @@ func (w *Worker) runChildDelivery(ctx context.Context) (bool, error) {
 	if err != nil || delivery == nil {
 		return false, err
 	}
-	if delivery.Source.Namespace != w.options.Namespace || delivery.TargetBuildID != w.options.BuildID || delivery.Owner != w.options.Owner || delivery.Validate() != nil {
+	// Close/cancel claims follow the current child build. Their saved routing
+	// still identifies the original invocation, even after it continues.
+	toParent := delivery.Kind == durable.ChildDeliveryResult || delivery.Kind == durable.ChildDeliveryCancelAck
+	if delivery.Source.Namespace != w.options.Namespace || toParent && delivery.TargetBuildID != w.options.BuildID || delivery.Owner != w.options.Owner || delivery.Validate() != nil {
 		return true, fmt.Errorf("%w: delivery does not match worker routing", durable.ErrInvalid)
 	}
 	request := durable.ChildDeliveryRequest{Source: delivery.Source, DeliveryID: delivery.ID, RequestID: fmt.Sprintf("delivery:%d", delivery.Epoch), Owner: delivery.Owner, Epoch: delivery.Epoch}

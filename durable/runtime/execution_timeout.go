@@ -43,14 +43,25 @@ func decodeChildExecutionTimeout(event durable.EventInput, failure *ChildWorkflo
 	return nil
 }
 
-func validateChildExecutionTimeout(timeout durable.ExecutionTimeout, command Command, started, received time.Time) error {
+func validateChildExecutionTimeout(timeout durable.ExecutionTimeout, command Command, started, received time.Time, final *durable.RunMetadata) error {
 	run, execution, err := durable.ResolveExecutionDeadlines(durable.StartRequest{RunTimeout: command.Child.RunTimeout, ExecutionTimeout: command.Child.ExecutionTimeout}, started)
 	if err != nil {
 		return fmt.Errorf("%w: invalid child deadline options", ErrHistory)
 	}
+	if final != nil {
+		run, execution = final.RunDeadlineAt, final.ExecutionDeadlineAt
+	}
 	kind, deadline := (durable.Execution{RunDeadlineAt: run, ExecutionDeadlineAt: execution}).Deadline()
 	if timeout.Kind != kind || !timeout.DeadlineAt.Equal(deadline) || received.Before(deadline) {
 		return fmt.Errorf("%w: child timeout does not match recorded start", ErrHistory)
+	}
+	return nil
+}
+
+func validateChildFinalRun(final durable.RunMetadata, command Command, started, received time.Time) error {
+	_, execution, err := durable.ResolveExecutionDeadlines(durable.StartRequest{ExecutionTimeout: command.Child.ExecutionTimeout}, started)
+	if err != nil || final.Validate() != nil || final.RunNumber < 2 || final.FirstRunID != command.Child.Key.RunID || final.Namespace != command.Child.Key.Namespace || final.WorkflowID != command.Child.Key.WorkflowID || !final.FirstStartedAt.Equal(started) || !final.ExecutionDeadlineAt.Equal(execution) || final.CreatedAt.After(received) {
+		return fmt.Errorf("%w: child final run differs from original invocation", ErrHistory)
 	}
 	return nil
 }

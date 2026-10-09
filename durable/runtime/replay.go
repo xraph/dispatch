@@ -22,6 +22,7 @@ type recordedOutcome struct {
 }
 
 type replayHistory struct {
+	continuation          *Continuation
 	children              map[string]recordedChildStart
 	termination           *durable.ExecutionTermination
 	timeout               *durable.ExecutionTimeout
@@ -68,7 +69,7 @@ func evaluateWorkflow(execution durable.Execution, events []durable.Event, handl
 	if history.executionCancellation != nil {
 		return evaluateExecutionCancellation(execution, events, history, handler, false)
 	}
-	w = &Workflow{key: execution.Key, buildID: execution.BuildID, now: execution.CreatedAt, history: history, ids: make(map[string]bool)}
+	w = &Workflow{execution: execution, key: execution.Key, buildID: execution.BuildID, now: execution.CreatedAt, history: history, ids: make(map[string]bool)}
 	output, handlerErr := invoke(w, handler, bytes.Clone(execution.Input))
 	return finishEvaluation(w, output, handlerErr)
 }
@@ -76,6 +77,9 @@ func evaluateWorkflow(execution durable.Execution, events []durable.Event, handl
 func checkWorkflowReplay(w *Workflow) error {
 	if w.fault != nil {
 		return w.fault
+	}
+	if w.history.continuation != nil && w.continuation == nil {
+		return fmt.Errorf("%w: omitted continuation", ErrNondeterministic)
 	}
 	if w.cursor < len(w.history.commands) {
 		return fmt.Errorf("%w: omitted command %d", ErrNondeterministic, w.cursor+1)
@@ -88,6 +92,10 @@ func finishEvaluation(w *Workflow, output []byte, handlerErr error) (Decision, *
 		return Decision{}, nil, err
 	}
 	history := w.history
+	intent, isContinuation := handlerErr.(*continuationError) //nolint:errorlint // Only a direct SDK intent closes a run; wrapping or joining it is invalid.
+	if w.continuation != nil && (!isContinuation || len(output) != 0) || isContinuation && (intent == nil || intent.workflow != w || w.continuation == nil) {
+		return Decision{}, nil, fmt.Errorf("%w: continuation intent must be returned with no output", durable.ErrInvalid)
+	}
 	decision := Decision{Commands: w.commands, Signals: w.signals, Selections: w.selections, State: durable.StateCompleted, Output: bytes.Clone(output)}
 	switch {
 	case w.blocked:
@@ -96,6 +104,11 @@ func finishEvaluation(w *Workflow, output []byte, handlerErr error) (Decision, *
 		decision.State, decision.Output = durable.StateCancelled, nil
 		value := history.executionCancellation.value
 		decision.Cancelled = &value
+	case isContinuation:
+		decision.State, decision.Output = durable.StateContinuedAsNew, nil
+		if history.terminal == "" {
+			decision.Continuation = w.continuation
+		}
 	case handlerErr != nil:
 		decision.State, decision.Output = durable.StateFailed, nil
 		var failure *ApplicationError
@@ -137,7 +150,11 @@ func parseHistory(execution durable.Execution, events []durable.Event) (replayHi
 		!events[0].Time.Equal(execution.CreatedAt) || !bytes.Equal(events[0].Payload, execution.Input) {
 		return result, fmt.Errorf("%w: missing or inconsistent execution history", ErrHistory)
 	}
+	if execution.RunNumber > 1 && (len(events) < 2 || events[1].Type != durable.EventRunStarted) {
+		return result, fmt.Errorf("%w: successor lineage missing", ErrHistory)
+	}
 	commands := make(map[string]Command)
+	carryOpen, carryBytes, carryCount := false, 0, 0
 	for i, event := range events {
 		if event.Sequence != int64(i+1) || event.Time.IsZero() || result.terminal != "" {
 			return result, fmt.Errorf("%w: invalid event sequence %d", ErrHistory, event.Sequence)
@@ -145,7 +162,28 @@ func parseHistory(execution durable.Execution, events []durable.Event) (replayHi
 		if err := validateExecutionCancellationPhase(result, event.Type); err != nil {
 			return result, err
 		}
+		if event.Type != durable.EventRunStarted && event.Type != durable.EventSignalCarried {
+			carryOpen = false
+		}
 		switch event.Type {
+		case durable.EventRunStarted:
+			if err := parseRunStarted(execution, event); err != nil {
+				return result, err
+			}
+			carryOpen = true
+		case durable.EventSignalCarried:
+			carryCount++
+			carryBytes += len(event.Payload)
+			if !carryOpen || carryCount > 998 || carryBytes > 4<<20 {
+				return result, fmt.Errorf("%w: invalid signal carry position or size", ErrHistory)
+			}
+			if err := parseCarriedSignal(&result, execution, event); err != nil {
+				return result, err
+			}
+		case EventContinuationRequested, durable.EventWorkflowContinued:
+			if err := parseContinuation(&result, execution, event); err != nil {
+				return result, err
+			}
 		case EventStarted:
 			if i != 0 {
 				return result, fmt.Errorf("%w: repeated start event", ErrHistory)
@@ -237,6 +275,9 @@ func parseHistory(execution durable.Execution, events []durable.Event) (replayHi
 		default:
 			return result, fmt.Errorf("%w: unknown event %q", ErrHistory, event.Type)
 		}
+	}
+	if result.continuation != nil && result.terminal != durable.StateContinuedAsNew {
+		return result, fmt.Errorf("%w: continuation has no terminal handoff", ErrHistory)
 	}
 	for _, command := range result.commands {
 		if command.Kind == CommandChild && result.terminal == "" {

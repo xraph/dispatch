@@ -1543,8 +1543,8 @@ deadlines. It leaves those absolute deadlines and original receipts unchanged.
 Schema guards make creation time and lineage immutable; older root inserts receive
 the missing metadata automatically. Populated chains prevent destructive downgrade.
 
-This is a storage checkpoint. You cannot yet continue or retry a workflow across
-runs through the runtime. The [run-chain contract](durable-run-chains.md) includes
+This was the metadata storage checkpoint. The SDK checkpoint below adds
+continuation; workflow retries remain open. The [run-chain contract](durable-run-chains.md) includes
 atomic successor creation, pending-message handoff, child-chain relationships,
 deterministic replay and inherited execution deadlines as required work.
 
@@ -1576,8 +1576,8 @@ lineage. Migration retries preserve the handoff guard. A failed handoff rolls ba
 its source events, projection, task fencing, receipt, successor, latest pointer,
 new history and task, and child-close outbox together.
 
-This store API does not yet provide the Go workflow continuation method or its
-replay/query support. Whole-workflow retries also remain open. Enable these new
+The SDK checkpoint below adds the Go continuation method and replay/query
+support. Whole-workflow retries remain open. Enable these new
 history shapes only with compatible readers; full rollout, authorization and
 production recovery qualification remain separate roadmap requirements.
 
@@ -1591,3 +1591,35 @@ multi-run signal provenance, carry limits, child close/cancellation routing,
 unrelated roots and final-run timeout metadata. Database tests also cover expiry
 during row-lock waits, repeated migrations, pool replacement and receipt recovery
 while later executions are locked.
+
+## Continuation SDK checkpoint
+
+You can return `nil, w.ContinueAsNew(input, options)` from a Go workflow to end
+its current run and start a successor. Empty options inherit the source's type,
+build, queue and run timeout. A pointer to zero removes the run timeout; the
+absolute execution deadline still applies. The runtime captures your option
+choices, their resolved values and a deterministic successor ID. Changed input,
+routing, timeout or inherited-versus-explicit intent fails replay.
+
+Continued runs remain queryable with their original build. Replaying their
+terminal decision returns no new handoff. Successor histories validate saved
+lineage and carried signals; selectors order those signals by their new history
+positions while retaining original acceptance time. Logical time cannot move
+backward when a successor consumes an older message.
+
+Parents wait through child continuations. Final child messages validate their
+original invocation and final run, including changed run timeouts and the unchanged
+execution deadline. Close/cancel polling follows the current child's build, while
+the saved message and receipt retain their original identities.
+
+Runtime checks cover historical queries, changed decisions, copied inputs,
+event limits, malformed history, cancellation and signal races, lost commit
+responses, child completion/timeout and parent-close delivery after build changes.
+The engine test runs a child through two continuations. PostgreSQL tests replace
+connection pools between handoffs and delivery, and the runnable
+`examples/durable-continuation` demonstrates signal carry with memory storage.
+
+This checkpoint does not add workflow retries. Full deployment compatibility,
+operator APIs and dashboard controls, authorization, external-effect recovery,
+process-kill testing, database failover and production capacity qualification
+remain required work in the roadmap.

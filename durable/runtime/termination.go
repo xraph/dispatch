@@ -34,7 +34,7 @@ func evaluateForcedClosure(execution durable.Execution, events []durable.Event, 
 			return Decision{}, nil, err
 		}
 	} else {
-		w = &Workflow{key: execution.Key, buildID: execution.BuildID, now: execution.CreatedAt, history: history, ids: make(map[string]bool), freezeNormal: true}
+		w = &Workflow{execution: execution, key: execution.Key, buildID: execution.BuildID, now: execution.CreatedAt, history: history, ids: make(map[string]bool), freezeNormal: true}
 		_, _ = invoke(w, handler, bytes.Clone(execution.Input)) //nolint:errcheck // Forced closure replaces the application result; replay faults are checked below.
 		if replayErr := checkWorkflowReplay(w); replayErr != nil {
 			return Decision{}, nil, replayErr

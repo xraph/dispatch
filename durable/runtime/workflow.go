@@ -14,6 +14,8 @@ import (
 // Workflow provides replayable decision primitives. Use these methods only from
 // the handler's goroutine. Schedule multiple futures before Get for parallel work.
 type Workflow struct {
+	execution           durable.Execution
+	continuation        *Continuation
 	key                 durable.Key
 	buildID             string
 	now                 time.Time
@@ -83,6 +85,9 @@ func (w *Workflow) stop(err error) {
 func (w *Workflow) checkOperation() {
 	if w.querying {
 		w.stop(ErrQueryMutation)
+	}
+	if w.continuation != nil {
+		w.stop(fmt.Errorf("%w: workflow operations after continuation", durable.ErrInvalid))
 	}
 	if w.blocked || w.fault != nil {
 		w.stop(fmt.Errorf("%w: workflow continued after an unresolved future", durable.ErrInvalid))

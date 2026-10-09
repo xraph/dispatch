@@ -74,6 +74,7 @@ type Outcome struct {
 // Decision contains new commands, signal consumptions and selections. Running means a future is unresolved.
 // An evaluation error never returns a usable decision.
 type Decision struct {
+	Continuation      *Continuation
 	Commands          []Command
 	Signals           []SignalConsumption
 	Selections        []Selection

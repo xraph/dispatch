@@ -95,6 +95,20 @@ func decisionRequest(task durable.Task, execution durable.Execution, decision De
 	request.State, request.Output = decision.State, decision.Output
 	event := durable.EventInput{Type: EventWorkflowWaiting}
 	switch decision.State {
+	case durable.StateContinuedAsNew:
+		if decision.Continuation == nil {
+			return request, fmt.Errorf("%w: missing continuation decision", durable.ErrInvalid)
+		}
+		value := *decision.Continuation
+		if value.Next.Queue == "" {
+			value.Next.Queue = task.Queue
+		}
+		data, err := json.Marshal(value)
+		if err != nil {
+			return request, err
+		}
+		request.Continuation = &value.Next
+		event.Type, event.Payload = EventContinuationRequested, data
 	case durable.StateCompleted:
 		event.Type, event.Payload = EventWorkflowCompleted, decision.Output
 	case durable.StateCancelled:

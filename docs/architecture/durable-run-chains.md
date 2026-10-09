@@ -1,8 +1,8 @@
 # Durable run chains
 
 Status: the memory and PostgreSQL stores support atomic continuation through
-CommitRequest.Continuation. The current runtime still supports single runs;
-SDK continuation, historical replay and workflow retries remain required work.
+CommitRequest.Continuation. The Go runtime supports ContinueAsNew, replay of
+successor histories and historical queries. Whole-workflow retries remain open.
 The full [durability roadmap](durable-execution.md#required-work-and-evidence)
 remains the completion gate.
 
@@ -42,6 +42,27 @@ The deterministic SDK captures successor input, workflow type, pinned build,
 queue and run timeout. Defaults inherit the source. Changing a captured option
 fails replay. Continue-as-new reconstructs old queries without scheduling the
 successor again. New history starts with explicit lineage and a fresh sequence.
+
+You can end a handler with `return nil, w.ContinueAsNew(input, options)`. Return
+that intent directly, with no output or later SDK calls. A nil RunTimeout inherits
+the saved duration; a pointer to zero removes the run limit. Empty type, build and
+queue inherit their source values. The runtime resolves the queue from the polled
+workflow task, and captures both your options and their resolved values in
+workflow.continuation_requested before the store appends workflow.continued_as_new.
+Changing an inherited option to an explicit equivalent also fails replay.
+
+Successor IDs derive deterministically from the source namespace, workflow and
+run IDs. Exact commit retries reuse that identity and the complete request.
+The Go reader requires its captured request when replaying a continuation; raw
+store clients own their history format. Existing root starts and version 1 child
+results remain readable. Use at most 200 bytes for workflow types and queues so
+a Go worker can register the successor. A continuation decision reserves one
+event for its captured request and one for the store's terminal record.
+
+Run `go run ./examples/durable-continuation` to see an unread signal cross a
+handoff, a replacement worker finish the successor, and a query read the original
+run's state. The example uses memory. PostgreSQL runtime tests replace connection
+pools between runs and retry lost responses against persisted receipts.
 
 ## Messages and children
 

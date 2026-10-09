@@ -61,6 +61,9 @@ func parseChildDelivery(history *replayHistory, commands map[string]Command, par
 		kind, id = durable.ChildDeliveryCancelAck, message.CancellationID
 	}
 	d := durable.ChildDelivery{Source: message.Child, Target: parent.Key, ID: "event", Kind: kind, TargetBuildID: parent.BuildID, TargetQueue: "parent", Message: message}
+	if message.FinalRun != nil {
+		d.Source = message.FinalRun.Key
+	}
 	start, started := history.children[message.CommandID]
 	command, known := commands[id]
 	_, duplicate := history.outcomes[id]
@@ -76,12 +79,17 @@ func parseChildDelivery(history *replayHistory, commands map[string]Command, par
 		if command.Kind != CommandChild {
 			return fmt.Errorf("%w: child result command changed", ErrHistory)
 		}
+		if message.FinalRun != nil {
+			if err := validateChildFinalRun(*message.FinalRun, command, start.at, event.Time); err != nil {
+				return err
+			}
+		}
 		failure, err := childTerminalError(message)
 		if err != nil {
 			return err
 		}
 		if failure != nil && failure.Timeout != nil {
-			if err := validateChildExecutionTimeout(*failure.Timeout, command, start.at, event.Time); err != nil {
+			if err := validateChildExecutionTimeout(*failure.Timeout, command, start.at, event.Time, message.FinalRun); err != nil {
 				return err
 			}
 		}
