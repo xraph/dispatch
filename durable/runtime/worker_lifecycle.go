@@ -83,6 +83,7 @@ type drainOperation struct {
 	handle     DrainHandle
 	done       chan struct{}
 	ended      bool
+	complete   bool
 	expired    bool
 	incomplete bool
 }
@@ -219,7 +220,7 @@ func (w *Worker) drainResult() DrainResult {
 	l := &w.lifecycle
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	return DrainResult{Handle: l.drain.handle, Complete: l.drain.ended && !l.drain.incomplete && l.failure == "" && l.unknown == 0 && len(l.active) == 0,
+	return DrainResult{Handle: l.drain.handle, Complete: l.drain.complete,
 		DeadlineExpired: l.drain.expired, Quiescent: len(l.active) == 0, InFlight: int64(len(l.active)), UnknownClaims: l.unknown, ObservedAt: time.Now().UTC()}
 }
 
@@ -267,6 +268,7 @@ func (l *workerLifecycle) closeAdmission() {
 }
 func (l *workerLifecycle) endDrain() {
 	if l.drain != nil && !l.drain.ended {
+		l.drain.complete = !l.drain.incomplete && l.failure == "" && l.unknown == 0 && len(l.active) == 0
 		l.drain.ended = true
 		close(l.drain.done)
 	}
@@ -334,12 +336,16 @@ func (w *Worker) claimReturned(op *claimOperation, err error) {
 		l.unknown++
 	}
 }
-func (w *Worker) leaveClaim(op *claimOperation, err error) {
+func (w *Worker) leaveClaim(op *claimOperation, err error, failed bool) {
 	op.cancel(nil)
 	l := &w.lifecycle
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	if l.drain != nil && err != nil {
+	if failed {
+		l.state, l.failure = WorkerFailed, "processing_failed"
+		l.closeAdmission()
+	}
+	if l.drain != nil && !l.drain.ended && err != nil {
 		l.drain.incomplete = true
 	}
 	delete(l.active, op)

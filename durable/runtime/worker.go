@@ -148,7 +148,7 @@ func (w *Worker) Run(ctx context.Context) (result error) {
 		for range w.options.Concurrency {
 			group.Go(func() {
 				for workCtx.Err() == nil {
-					worked, err := w.RunOnce(workCtx, kind)
+					worked, err := w.runOnce(workCtx, kind, true)
 					if errors.Is(err, ErrWorkerDraining) || errors.Is(err, ErrDrainIncomplete) {
 						return
 					}
@@ -182,11 +182,20 @@ func (w *Worker) Run(ctx context.Context) (result error) {
 // RunOnce claims and processes at most one task. Worked is true after a claim,
 // including when processing fails. It is safe to call concurrently.
 func (w *Worker) RunOnce(ctx context.Context, kind durable.TaskKind) (worked bool, err error) {
+	return w.runOnce(ctx, kind, false)
+}
+
+func (w *Worker) runOnce(ctx context.Context, kind durable.TaskKind, runOwned bool) (worked bool, err error) {
 	ctx, operation, err := w.enterClaim(ctx, kind)
 	if err != nil {
 		return false, err
 	}
-	defer func() { w.leaveClaim(operation, err) }()
+	defer func() {
+		// Publish a supervisor-owned failure before dropping the final work
+		// registration. A drain may be accepted before Run sees this return value.
+		failed := runOwned && err != nil && ctx.Err() == nil && !normalContention(err)
+		w.leaveClaim(operation, err, failed)
+	}()
 	if kind == TaskExecutionTimeout {
 		return w.runExecutionTimeout(ctx, operation)
 	}
