@@ -208,5 +208,7 @@ malformed string-encoded counters and valid-shaped incorrect proofs. PostgreSQL
 fault injection checks that required intent failure leaves no receipt, execution
 mutation or new outbox entry. In the process gate, each stopped sink leaves
 callback acceptance pending locally; restart must deliver and acknowledge it.
-Private callback files are mode 0600 inside the task's mode 0700 directory and
-are removed with the fixture. Never include them in retained evidence.
+Private callback files are mode 0600 inside a separate mode 0700 test temporary
+directory, even when you retain process evidence. Cleanup joins the workers,
+collects any unread proofs for recursive evidence checks, then removes that
+private directory on success or failure. Never include proofs in retained evidence.

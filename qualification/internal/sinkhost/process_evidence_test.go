@@ -90,22 +90,14 @@ func (r *processRig) verifyNoSecrets() {
 	for _, credential := range r.c.Credentials {
 		secrets = append(secrets, credential.Secret)
 	}
-	files, err := os.ReadDir(r.dir)
-	if err != nil {
-		r.t.Fatal(err)
+	proofSecrets, proofFiles, proofErr := collectCallbackProofs(r.c.CallbackDirectory)
+	if proofErr != nil {
+		r.t.Error(proofErr)
 	}
-	for _, entry := range files {
-		if entry.IsDir() {
-			continue
-		}
-		raw, e := os.ReadFile(filepath.Join(r.dir, entry.Name()))
-		if e != nil {
-			r.t.Fatal(e)
-		}
-		for _, secret := range secrets {
-			if secret != "" && bytes.Contains(raw, []byte(secret)) {
-				r.t.Fatal("secret found in retained host evidence")
-			}
-		}
+	secrets = append(secrets, r.callbackSecrets...)
+	secrets = append(secrets, proofSecrets...)
+	proofFiles = append(proofFiles, r.callbackFiles...)
+	if err := checkEvidence(r.dir, secrets, proofFiles); err != nil {
+		r.t.Error(err)
 	}
 }

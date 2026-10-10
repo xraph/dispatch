@@ -36,19 +36,21 @@ type process struct {
 	peak   int64
 }
 type processRig struct {
-	workersStopped bool
-	seeded         map[string]int64
-	t              *testing.T
-	ctx            context.Context
-	c              Config
-	dir, binary    string
-	processes      map[string]*process
-	db             map[string]*pgx.Conn
-	authorityAdmin *pgx.Conn
-	authorityBase  string
-	authorityDSNs  map[string]string
-	authoritySeq   int
-	client         *http.Client
+	callbackSecrets []string
+	callbackFiles   []string
+	workersStopped  bool
+	seeded          map[string]int64
+	t               *testing.T
+	ctx             context.Context
+	c               Config
+	dir, binary     string
+	processes       map[string]*process
+	db              map[string]*pgx.Conn
+	authorityAdmin  *pgx.Conn
+	authorityBase   string
+	authorityDSNs   map[string]string
+	authoritySeq    int
+	client          *http.Client
 }
 
 func TestProcesses(t *testing.T) {
@@ -61,15 +63,17 @@ func TestProcesses(t *testing.T) {
 	}
 	ctx, cancel := context.WithTimeout(t.Context(), 4*time.Minute)
 	defer cancel()
-	dir := t.TempDir()
-	if evidence := os.Getenv("DISPATCH_SINK_EVIDENCE_DIR"); evidence != "" {
-		dir = evidence
-		if err := os.MkdirAll(dir, 0o700); err != nil {
-			t.Fatal(err)
+	r := &processRig{t: t, ctx: ctx, binary: binary, processes: map[string]*process{}, seeded: map[string]int64{}, db: map[string]*pgx.Conn{}, client: &http.Client{Timeout: 4 * time.Second}}
+	dir, callbacks := processFiles(t, os.Getenv("DISPATCH_SINK_EVIDENCE_DIR"), func() {
+		for role := range r.processes {
+			r.stop(role, true)
 		}
-	}
-	r := &processRig{t: t, ctx: ctx, dir: dir, binary: binary, processes: map[string]*process{}, seeded: map[string]int64{}, db: map[string]*pgx.Conn{}, client: &http.Client{Timeout: 4 * time.Second}}
-	r.c = Config{Binding: ecosystem.Binding{Producer: "dispatch-qualification", InstallationID: "process-installation", Namespace: "process-ns", OrgID: "process-org", TenantID: "process-tenant"}, PolicyTenant: "process-tenant", DSNs: map[string]string{}, Addresses: map[string]string{}}
+		for _, db := range r.db {
+			_ = db.Close(context.Background())
+		}
+	}, r.verifyNoSecrets)
+	r.dir = dir
+	r.c = Config{Binding: ecosystem.Binding{Producer: "dispatch-qualification", InstallationID: "process-installation", Namespace: "process-ns", OrgID: "process-org", TenantID: "process-tenant"}, PolicyTenant: "process-tenant", CallbackDirectory: callbacks, DSNs: map[string]string{}, Addresses: map[string]string{}}
 	for _, role := range []string{"dispatch", "relay", "chronicle", "receiver"} {
 		listener, err := (&net.ListenConfig{}).Listen(ctx, "tcp", "127.0.0.1:0")
 		if err != nil {
@@ -106,18 +110,6 @@ func TestProcesses(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-	}
-	t.Cleanup(func() {
-		for role := range r.processes {
-			r.stop(role, true)
-		}
-		for _, db := range r.db {
-			_ = db.Close(context.Background())
-		}
-	})
-	r.c.CallbackDirectory = filepath.Join(r.dir, "callback-handles")
-	if err = os.Mkdir(r.c.CallbackDirectory, 0700); err != nil {
-		t.Fatal(err)
 	}
 	if bootstrapErr := Bootstrap(ctx, &r.c); bootstrapErr != nil {
 		t.Fatal(bootstrapErr)

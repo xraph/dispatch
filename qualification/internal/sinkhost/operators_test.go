@@ -3,6 +3,7 @@ package sinkhost
 import (
 	"encoding/json"
 	"os"
+	"path/filepath"
 
 	"github.com/xraph/dispatch/durable"
 	drt "github.com/xraph/dispatch/durable/runtime"
@@ -26,6 +27,9 @@ func (r *processRig) callbackWhileSinkStopped(role string) {
 		handleRaw, e := os.ReadFile(callbackFile(r.c.CallbackDirectory, workflow))
 		return e == nil && json.Unmarshal(handleRaw, &handle) == nil
 	})
+	r.callbackSecrets = append(r.callbackSecrets, handle.Secret)
+	r.callbackFiles = append(r.callbackFiles, filepath.Base(callbackFile(r.c.CallbackDirectory, workflow)))
+	r.verifyNoSecrets()
 	wire := operator.CallbackHandle{Version: handle.Version, Key: handle.Key, BuildID: handle.BuildID, Secret: handle.Secret, InitialHeartbeatSequence: handle.InitialHeartbeatSequence, Token: operator.CallbackToken{TaskID: handle.Token.TaskID, Owner: handle.Token.Owner, Epoch: handle.Token.Epoch, LeaseKind: handle.Token.LeaseKind}}
 	before := r.count(role, "SELECT count(*) FROM "+role+"_acceptances")
 	heartbeat := operator.HeartbeatInput{Handle: wire, RequestID: "heartbeat", Sequence: handle.InitialHeartbeatSequence + 1, Details: []byte("qualification-payload-must-not-leak")}
