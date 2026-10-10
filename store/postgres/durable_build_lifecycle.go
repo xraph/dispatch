@@ -47,6 +47,10 @@ func checkRetirementEnrollment(ctx context.Context, tx driver.Tx, namespace stri
 }
 func (s *Store) RegisterBuild(ctx context.Context, r durable.RegisterBuildRequest) (result durable.LifecycleReceipt, resultErr error) {
 	defer func() { resultErr = normalizeExecutionError(resultErr) }()
+	if r.Identity != nil {
+		identity := *r.Identity
+		r.Identity = &identity
+	}
 	if err := r.Validate(); err != nil {
 		return result, err
 	}

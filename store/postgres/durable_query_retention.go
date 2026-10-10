@@ -121,7 +121,9 @@ func (s *Store) ListQueryRuntimes(ctx context.Context, r durable.QueryRuntimeLis
 	if checkErr := rows.Err(); checkErr != nil {
 		return page, checkErr
 	}
-	rows.Close()
+	if closeErr := rows.Close(); closeErr != nil {
+		return page, closeErr
+	}
 	if len(page.Items) > r.Limit {
 		page.Items = page.Items[:r.Limit]
 		page.Next = page.Items[len(page.Items)-1].RuntimeID

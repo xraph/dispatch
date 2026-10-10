@@ -10,6 +10,10 @@ import (
 var _ durable.LifecycleStore = (*Store)(nil)
 
 func (m *Store) RegisterBuild(ctx context.Context, r durable.RegisterBuildRequest) (durable.LifecycleReceipt, error) {
+	if r.Identity != nil {
+		identity := *r.Identity
+		r.Identity = &identity
+	}
 	if err := r.Validate(); err != nil {
 		return durable.LifecycleReceipt{}, err
 	}

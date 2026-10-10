@@ -181,16 +181,8 @@ func validLifecycleOperation(operation LifecycleOperation) bool {
 	return false
 }
 func (r LifecycleReceipt) validResult() bool {
-	if r.Operation == OperationAbortQueryRemoval {
-		if r.QueryAbort == nil || r.QueryRuntime == nil || r.QueryAbort.Fence.Candidate != r.QueryRuntime.QueryRuntimeIdentity || r.QueryAbort.Fence.CandidateStateVersion+1 != r.QueryRuntime.Version || r.QueryAbort.Fence.RemovalEpoch != r.QueryRuntime.RemovalEpoch || r.QueryRuntime.State != QueryRuntimeActive || r.QueryAbort.Settlement.Validate(r.QueryAbort.Fence, r.AcceptedAt) != nil || r.QueryRuntime.Verification.VerifiedAt.Before(r.QueryAbort.Settlement.SettledAt) || r.QueryRuntime.Verification.Validate(r.QueryRuntime.QueryRuntimeIdentity, r.AcceptedAt) != nil {
-			return false
-		}
-	} else if r.QueryAbort != nil {
-		return false
-	}
-
-	if r.QueryRuntime != nil {
-		return r.Enrollment == nil && r.Build == nil && r.QueryRuntime.Validate() == nil && r.QueryRuntime.NamespaceTarget == r.NamespaceTarget && (r.Operation == OperationRegisterQueryRuntime || r.Operation == OperationVerifyQueryRuntime || r.Operation == OperationBeginQueryRemoval || r.Operation == OperationFinishQueryRemoval || r.Operation == OperationAbortQueryRemoval)
+	if r.QueryRuntime != nil || r.QueryAbort != nil || queryLifecycleOperation(r.Operation) {
+		return r.validQueryResult()
 	}
 	if r.Operation == OperationEnrollRetirement {
 		return r.Enrollment != nil && r.Build == nil && r.Enrollment.Compatibility.NamespaceTarget == r.NamespaceTarget && r.Enrollment.Compatibility.Enrolled && r.Enrollment.Compatibility.WriterProtocol == RetirementWriterProtocol && r.Enrollment.Compatibility.SchemaVersion == RetirementSchemaVersion && r.Enrollment.HistoricalBuildCount >= 0 && len(r.Enrollment.HistoricalBuildDigest) == 64
