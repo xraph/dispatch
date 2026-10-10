@@ -59,3 +59,13 @@ intents:
   - { name: durable.cancel, kind: command, version: 1, requires: { warden: dispatchDurableOperator }, capability: write, invalidates: [durable.executions, durable.execution, durable.history, durable.tasks, durable.chain, durable.children, durable.audit, durable.hooks, durable.capabilities, durable.payload, durable.query] }
   - { name: durable.query, kind: query, version: 1, requires: { warden: dispatchDurableOperator }, capability: read }
   - { name: durable.capabilities, kind: query, version: 1, requires: { warden: dispatchDurableOperator }, capability: read }
+  - { name: durable.compatibility, kind: query, version: 1, requires: { warden: dispatchDurableOperator }, capability: read }
+  - { name: durable.build, kind: query, version: 1, requires: { warden: dispatchDurableOperator }, capability: read }
+  - { name: durable.retirementEnroll, kind: command, version: 1, requires: { warden: dispatchDurableOperator }, capability: write, invalidates: [durable.compatibility, durable.build, durable.workerStatus, durable.workerDrainReceipt, durable.audit] }
+  - { name: durable.buildRegister, kind: command, version: 1, requires: { warden: dispatchDurableOperator }, capability: write, invalidates: [durable.compatibility, durable.build, durable.workerStatus, durable.workerDrainReceipt, durable.audit] }
+  - { name: durable.buildRetire, kind: command, version: 1, requires: { warden: dispatchDurableOperator }, capability: write, invalidates: [durable.compatibility, durable.build, durable.workerStatus, durable.workerDrainReceipt, durable.audit] }
+  - { name: durable.buildFinalize, kind: command, version: 1, requires: { warden: dispatchDurableOperator }, capability: write, invalidates: [durable.compatibility, durable.build, durable.workerStatus, durable.workerDrainReceipt, durable.audit] }
+  - { name: durable.buildResume, kind: command, version: 1, requires: { warden: dispatchDurableOperator }, capability: write, invalidates: [durable.compatibility, durable.build, durable.workerStatus, durable.workerDrainReceipt, durable.audit] }
+  - { name: durable.workerStatus, kind: query, version: 1, requires: { warden: dispatchDurableOperator }, capability: read }
+  - { name: durable.workerDrain, kind: command, version: 1, requires: { warden: dispatchDurableOperator }, capability: write, invalidates: [durable.compatibility, durable.build, durable.workerStatus, durable.workerDrainReceipt, durable.audit] }
+  - { name: durable.workerDrainReceipt, kind: query, version: 1, requires: { warden: dispatchDurableOperator }, capability: read }

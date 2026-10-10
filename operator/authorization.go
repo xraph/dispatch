@@ -31,6 +31,9 @@ const (
 )
 
 func KnownAction(action string) bool {
+	if lifecycleAction(action) {
+		return true
+	}
 	switch action {
 	case Discover, ListExecutions, ReadExecution, ReadHistory, ReadTasks, ReadChain, ReadPayload, QueryWorkflow, ReadAudit, ReadHooks, StartWorkflow, SignalWorkflow, SignalStartWorkflow, CancelWorkflow, CompleteActivity, HeartbeatActivity:
 		return true
@@ -39,7 +42,7 @@ func KnownAction(action string) bool {
 	}
 }
 
-type Resource struct{ InstallationID, Namespace, AppID, TenantID, WorkflowID, RunID, WorkflowType, BuildID string }
+type Resource struct{ InstallationID, Namespace, AppID, TenantID, WorkflowID, RunID, WorkflowType, BuildID, RuntimeID, InstanceID, Queue string }
 type Authorizer interface {
 	Authorize(context.Context, security.Principal, string, Resource) error
 }
@@ -68,7 +71,7 @@ func (a *WardenAuthorizer) Authorize(ctx context.Context, p security.Principal, 
 		return security.ErrUnavailable
 	}
 	ctx = warden.WithNamespace(warden.WithTenant(ctx, r.AppID, r.TenantID), r.Namespace)
-	result, err := engine.Check(ctx, &warden.CheckRequest{TenantID: r.TenantID, Subject: warden.Subject{Kind: warden.SubjectKind(p.Kind), ID: p.Subject, Attributes: map[string]any{"principal_kind": p.Kind}}, Action: warden.Action{Name: action}, Resource: warden.Resource{Type: "dispatch_namespace", ID: r.Namespace, Attributes: map[string]any{"installation_id": r.InstallationID, "namespace": r.Namespace, "app_id": r.AppID, "tenant_id": r.TenantID, "workflow_id": r.WorkflowID, "run_id": r.RunID, "workflow_type": r.WorkflowType, "build_id": r.BuildID}}})
+	result, err := engine.Check(ctx, &warden.CheckRequest{TenantID: r.TenantID, Subject: warden.Subject{Kind: warden.SubjectKind(p.Kind), ID: p.Subject, Attributes: map[string]any{"principal_kind": p.Kind}}, Action: warden.Action{Name: action}, Resource: warden.Resource{Type: "dispatch_namespace", ID: r.Namespace, Attributes: map[string]any{"installation_id": r.InstallationID, "namespace": r.Namespace, "app_id": r.AppID, "tenant_id": r.TenantID, "workflow_id": r.WorkflowID, "run_id": r.RunID, "workflow_type": r.WorkflowType, "build_id": r.BuildID, "runtime_id": r.RuntimeID, "instance_id": r.InstanceID, "queue": r.Queue}}})
 	if err != nil {
 		return security.ErrUnavailable
 	}
@@ -81,6 +84,9 @@ func (s *Service) check(ctx context.Context, p security.Principal, action string
 	return s.checkFacts(ctx, p, action, key, "", "")
 }
 func (s *Service) checkFacts(ctx context.Context, p security.Principal, action string, key durable.Key, workflowType, build string) error {
+	return s.checkResourceFacts(ctx, p, action, key, workflowType, build, "", "", "")
+}
+func (s *Service) checkResourceFacts(ctx context.Context, p security.Principal, action string, key durable.Key, workflowType, build, runtimeID, instanceID, queue string) error {
 	if err := p.Validate(); err != nil {
 		return s.denied(ctx, p, action, err)
 	}
@@ -99,12 +105,12 @@ func (s *Service) checkFacts(ctx context.Context, p security.Principal, action s
 		}
 		return s.denied(ctx, p, action, err)
 	}
-	if action == StartWorkflow || action == SignalWorkflow || action == SignalStartWorkflow || action == CancelWorkflow || action == CompleteActivity || action == HeartbeatActivity {
+	if lifecycleAction(action) || action == StartWorkflow || action == SignalWorkflow || action == SignalStartWorkflow || action == CancelWorkflow || action == CompleteActivity || action == HeartbeatActivity {
 		if !n.RequireAudit {
 			return security.ErrUnavailable
 		}
 	}
-	err = s.authorizer.Authorize(ctx, p, action, Resource{InstallationID: n.InstallationID, Namespace: n.Namespace, AppID: n.AppID, TenantID: n.TenantID, WorkflowID: key.WorkflowID, RunID: key.RunID, WorkflowType: workflowType, BuildID: build})
+	err = s.authorizer.Authorize(ctx, p, action, Resource{InstallationID: n.InstallationID, Namespace: n.Namespace, AppID: n.AppID, TenantID: n.TenantID, WorkflowID: key.WorkflowID, RunID: key.RunID, WorkflowType: workflowType, BuildID: build, RuntimeID: runtimeID, InstanceID: instanceID, Queue: queue})
 	if err != nil {
 		if !errors.Is(err, security.ErrForbidden) {
 			err = security.ErrUnavailable

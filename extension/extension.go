@@ -71,6 +71,7 @@ type Extension struct {
 	remoteAuth            security.Authenticator
 	boundary              *security.Boundary
 	operatorOptions       *operator.Options
+	lifecycleHost         operator.LifecycleHost
 	operatorRuntime       func(string, string) (*runtime.Worker, error)
 	durable               *runtime.Options
 	durableHandlers       runtime.Options

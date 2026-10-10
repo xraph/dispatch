@@ -53,7 +53,7 @@ func commandError(err error) error {
 	if errors.Is(err, durable.ErrBuildMismatch) {
 		return ErrBuildMismatch
 	}
-	for _, known := range []error{ErrBuildMismatch, ErrRuntimeUnavailable, ErrHistoryIncompatible, durable.ErrRequestConflict, durable.ErrRevisionConflict, durable.ErrClosed, durable.ErrExists, durable.ErrLeaseLost, durable.ErrTaskDeadline, durable.ErrExecutionDeadline, drt.ErrQueryMutation, drt.ErrQueryNotFound} {
+	for _, known := range []error{durable.ErrWriterCompatibility, durable.ErrLifecycleBusy, durable.ErrBuildAdmission, durable.ErrRetirementBlocked, durable.ErrQueryRetention, durable.ErrQueryFence, ErrBuildMismatch, ErrRuntimeUnavailable, ErrHistoryIncompatible, durable.ErrRequestConflict, durable.ErrRevisionConflict, durable.ErrClosed, durable.ErrExists, durable.ErrLeaseLost, durable.ErrTaskDeadline, durable.ErrExecutionDeadline, drt.ErrQueryMutation, drt.ErrQueryNotFound} {
 		if errors.Is(err, known) {
 			return known
 		}

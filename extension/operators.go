@@ -42,6 +42,8 @@ func (e *Extension) operatorService() (*operator.Service, error) {
 	if opts.Authorizer == nil {
 		opts.Authorizer = &operator.WardenAuthorizer{Engine: func() (*warden.Engine, error) { return vessel.Inject[*warden.Engine](e.App().Container()) }}
 	}
+	opts.BuildIdentity = e.lifecycleHost.BuildIdentity
+	opts.WorkerControl = e.lifecycleHost.WorkerControl
 	opts.Runtime = e.operatorRuntime
 	if opts.Runtime == nil {
 		opts.Runtime = func(namespace, build string) (*drt.Worker, error) {
@@ -63,4 +65,10 @@ func (e *Extension) operatorService() (*operator.Service, error) {
 // Each returned worker must use this installation's store and the exact routing.
 func WithDurableOperatorRuntime(resolve func(namespace, build string) (*drt.Worker, error)) ExtOption {
 	return func(e *Extension) { e.operatorRuntime = resolve }
+}
+
+// WithDurableLifecycleHost supplies trusted artifact and process resolvers.
+// Configure it separately from authorization and the retained workflow resolver.
+func WithDurableLifecycleHost(host operator.LifecycleHost) ExtOption {
+	return func(e *Extension) { e.lifecycleHost = host }
 }

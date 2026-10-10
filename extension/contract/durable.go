@@ -17,6 +17,9 @@ const DurableWardenName = "dispatchDurableOperator"
 
 // DurableAction is a closed descriptor shared by admission and typed handlers.
 func DurableAction(intent string) string {
+	if action := lifecycleDurableAction(intent); action != "" {
+		return action
+	}
 	switch intent {
 	case "durable.start":
 		return operator.StartWorkflow
@@ -53,6 +56,9 @@ func DurableAction(intent string) string {
 	}
 }
 func durableKind(intent string) fc.Kind {
+	if kind := lifecycleDurableKind(intent); kind != "" {
+		return kind
+	}
 	switch intent {
 	case "durable.start", "durable.signal", "durable.signalStart", "durable.cancel":
 		return fc.KindCommand
@@ -75,7 +81,7 @@ func durableError(err error) error {
 		return badRequest("invalid durable scope, filter or continuation")
 	case errors.Is(err, operator.ErrRuntimeUnavailable):
 		return &fc.Error{Code: fc.CodeUnavailable, Message: "compatible runtime unavailable", Retryable: true}
-	case errors.Is(err, operator.ErrBuildMismatch), errors.Is(err, operator.ErrHistoryIncompatible), errors.Is(err, durable.ErrRequestConflict), errors.Is(err, durable.ErrClosed), errors.Is(err, durable.ErrExists), errors.Is(err, durable.ErrRevisionConflict):
+	case errors.Is(err, durable.ErrWriterCompatibility), errors.Is(err, durable.ErrLifecycleBusy), errors.Is(err, durable.ErrBuildAdmission), errors.Is(err, durable.ErrRetirementBlocked), errors.Is(err, durable.ErrQueryRetention), errors.Is(err, durable.ErrQueryFence), errors.Is(err, operator.ErrBuildMismatch), errors.Is(err, operator.ErrHistoryIncompatible), errors.Is(err, durable.ErrRequestConflict), errors.Is(err, durable.ErrClosed), errors.Is(err, durable.ErrExists), errors.Is(err, durable.ErrRevisionConflict):
 		return &fc.Error{Code: fc.CodeConflict, Message: err.Error()}
 	case errors.Is(err, drt.ErrQueryMutation):
 		return badRequest("workflow SDK mutation is forbidden in a query")
@@ -110,7 +116,7 @@ func durableHandle[I, O any](deps Deps, intent string, fn func(context.Context, 
 	}
 }
 func durableBindings(deps Deps) []binding {
-	return []binding{
+	return append([]binding{
 		query("durable.capabilities", durableHandle(deps, "durable.capabilities", func(c context.Context, s *operator.Service, p security.Principal, i operator.CapabilitiesInput) (operator.Capabilities, error) {
 			return s.Capabilities(c, p, i)
 		})),
@@ -155,7 +161,7 @@ func durableBindings(deps Deps) []binding {
 		})),
 		query("durable.audit", deliveryBinding(deps, "durable.audit", durable.DestinationChronicle)),
 		query("durable.hooks", deliveryBinding(deps, "durable.hooks", durable.DestinationRelay)),
-	}
+	}, lifecycleDurableBindings(deps)...)
 }
 func deliveryBinding(deps Deps, intent string, destination durable.Destination) func(context.Context, operator.RunInput, fc.Principal) (operator.Deliveries, error) {
 	return durableHandle(deps, intent, func(c context.Context, s *operator.Service, p security.Principal, i operator.RunInput) (operator.Deliveries, error) {

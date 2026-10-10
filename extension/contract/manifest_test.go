@@ -71,6 +71,9 @@ func TestManifestCommandInvalidations(t *testing.T) {
 	for _, name := range []string{"durable.start", "durable.signal", "durable.signalStart", "durable.cancel"} {
 		want[name] = []string{"durable.executions", "durable.execution", "durable.history", "durable.tasks", "durable.chain", "durable.children", "durable.audit", "durable.hooks", "durable.capabilities", "durable.payload", "durable.query"}
 	}
+	for _, name := range []string{"durable.retirementEnroll", "durable.buildRegister", "durable.buildRetire", "durable.buildFinalize", "durable.buildResume", "durable.workerDrain"} {
+		want[name] = []string{"durable.compatibility", "durable.build", "durable.workerStatus", "durable.workerDrainReceipt", "durable.audit"}
+	}
 	found := 0
 	for _, intent := range loadManifest(t).Intents {
 		if intent.Kind != fc.IntentKindCommand {
