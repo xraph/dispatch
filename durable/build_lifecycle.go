@@ -91,6 +91,7 @@ type BuildLifecycleFacts struct {
 }
 
 type LifecycleStore interface {
+	WorkerDrainStore
 	RetirementEnrollmentStore
 	RegisterBuild(context.Context, RegisterBuildRequest) (LifecycleReceipt, error)
 	InspectBuildLifecycle(context.Context, BuildTarget) (BuildLifecycleFacts, error)

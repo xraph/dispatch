@@ -63,3 +63,12 @@ func (eng *Engine) waitDurableDrain(ctx context.Context) error {
 	}
 	return err
 }
+
+// DurableReadiness reports polling and persisted deployment compatibility.
+func (eng *Engine) DurableReadiness(ctx context.Context) (drt.WorkerReadiness, error) {
+	worker := eng.DurableWorker()
+	if worker == nil {
+		return drt.WorkerReadiness{}, ErrDurableDisabled
+	}
+	return worker.Readiness(ctx)
+}

@@ -26,6 +26,10 @@ type DurableConfig struct {
 // WithDurableWorkflows captures immutable handler registrations immediately.
 // Programmatic options replace YAML worker routing and timing as one unit.
 func WithDurableWorkflows(options runtime.Options) ExtOption {
+	if options.Retirement != nil {
+		captured := *options.Retirement
+		options.Retirement = &captured
+	}
 	options.Workflows = maps.Clone(options.Workflows)
 	options.Activities = maps.Clone(options.Activities)
 	return func(e *Extension) {

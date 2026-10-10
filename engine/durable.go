@@ -31,6 +31,10 @@ type durableEngine struct {
 // WithDurableWorkflows enables the history-based runtime alongside the existing
 // checkpoint workflow API. Its store must explicitly implement durable.Store.
 func WithDurableWorkflows(options drt.Options) Option {
+	if options.Retirement != nil {
+		captured := *options.Retirement
+		options.Retirement = &captured
+	}
 	return func(eng *Engine) { eng.durable = &durableEngine{options: options} }
 }
 

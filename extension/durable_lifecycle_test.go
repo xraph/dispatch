@@ -89,6 +89,9 @@ func TestExtensionDrainKeepsAuthorizedAuditAndPublisherAvailable(t *testing.T) {
 	if status, e2 := e.DurableStatus(); e2 != nil || status.Ready || status.State != drt.WorkerDraining {
 		t.Fatalf("readiness during drain: %+v %v", status, e2)
 	}
+	if readiness, readErr := e.DurableReadiness(t.Context()); readErr != nil || readiness.Ready || readiness.Worker.State != drt.WorkerDraining || readiness.RetirementStatus != "unenrolled" {
+		t.Fatalf("extension readiness during drain: %+v %v", readiness, readErr)
+	}
 	close(release)
 	if result, e2 := e.WaitDurableDrain(t.Context(), h); e2 != nil || !result.Complete {
 		t.Fatalf("graceful drain: %+v %v", result, e2)

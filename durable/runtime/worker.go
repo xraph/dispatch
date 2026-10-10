@@ -44,10 +44,11 @@ func (a ActivityInfo) IdempotencyKey() string {
 // Options pin a worker to a namespace, queue and build. Register all handlers
 // before construction; NewWorker copies the maps. Concurrency is per task kind.
 type Options struct {
-	Namespace string
-	Queue     string
-	BuildID   string
-	Owner     string
+	Retirement *RetirementOptions
+	Namespace  string
+	Queue      string
+	BuildID    string
+	Owner      string
 	// RuntimeID names one process incarnation. A replacement must use a new ID.
 	RuntimeID     string
 	InstanceID    string
@@ -71,6 +72,17 @@ func NewWorker(store durable.Store, options Options) (*Worker, error) {
 	if store == nil {
 		return nil, fmt.Errorf("%w: execution store is required", durable.ErrInvalid)
 	}
+	if options.Retirement != nil {
+		captured := *options.Retirement
+		options.Retirement = &captured
+		if !durable.DeliveryIdentifier(captured.InstallationID) {
+			return nil, durable.ErrInvalid
+		}
+		if captured.WriterProtocol != durable.RetirementWriterProtocol || !retirementCapabilities(store) {
+			return nil, durable.ErrWriterCompatibility
+		}
+	}
+
 	if options.LeaseDuration == 0 {
 		options.LeaseDuration = 30 * time.Second
 	}
@@ -196,6 +208,10 @@ func (w *Worker) runOnce(ctx context.Context, kind durable.TaskKind, runOwned bo
 		failed := runOwned && err != nil && ctx.Err() == nil && !normalContention(err)
 		w.leaveClaim(operation, err, failed)
 	}()
+	if compatibilityErr := w.checkRetirement(ctx); compatibilityErr != nil {
+		return false, compatibilityErr
+	}
+
 	if kind == TaskExecutionTimeout {
 		return w.runExecutionTimeout(ctx, operation)
 	}

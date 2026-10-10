@@ -38,6 +38,7 @@ func (t BuildTarget) Validate() error {
 }
 
 type CompatibilityFacts struct {
+	WorkerDrainSchemaVersion int `json:",omitempty"`
 	// QueryRetentionSchemaVersion describes current store capability only. It is
 	// not proof that a host artifact or controller is query-retention qualified.
 	QueryRetentionSchemaVersion int `json:",omitempty"`
@@ -80,6 +81,7 @@ const OperationEnrollRetirement LifecycleOperation = "namespace.retirement.enrol
 // LifecycleReceipt is the immutable accepted response, including derived facts.
 // A receipt proves persistence, not a later process or infrastructure effect.
 type LifecycleReceipt struct {
+	WorkerDrain *WorkerDrainRequest `json:",omitempty"`
 	NamespaceTarget
 	Operation       LifecycleOperation
 	RequestID       string
@@ -131,6 +133,10 @@ func LifecycleDeliverySource(ctx context.Context, receipt LifecycleReceipt) Deli
 }
 
 func (r LifecycleReceipt) Clone() LifecycleReceipt {
+	if r.WorkerDrain != nil {
+		v := *r.WorkerDrain
+		r.WorkerDrain = &v
+	}
 	if r.QueryAbort != nil {
 		v := *r.QueryAbort
 		r.QueryAbort = &v
@@ -175,12 +181,19 @@ type BuildAdmission struct {
 
 func validLifecycleOperation(operation LifecycleOperation) bool {
 	switch operation {
-	case OperationRegisterQueryRuntime, OperationVerifyQueryRuntime, OperationBeginQueryRemoval, OperationFinishQueryRemoval, OperationAbortQueryRemoval, OperationEnrollRetirement, OperationRegisterBuild, OperationBeginRetirement, OperationFinalizeRetirement, OperationAbortRetirement:
+	case OperationRequestWorkerDrain, OperationRegisterQueryRuntime, OperationVerifyQueryRuntime, OperationBeginQueryRemoval, OperationFinishQueryRemoval, OperationAbortQueryRemoval, OperationEnrollRetirement, OperationRegisterBuild, OperationBeginRetirement, OperationFinalizeRetirement, OperationAbortRetirement:
 		return true
 	}
 	return false
 }
 func (r LifecycleReceipt) validResult() bool {
+	if r.Operation == OperationRequestWorkerDrain {
+		return r.validWorkerDrainResult()
+	}
+	if r.WorkerDrain != nil {
+		return false
+	}
+
 	if r.QueryRuntime != nil || r.QueryAbort != nil || queryLifecycleOperation(r.Operation) {
 		return r.validQueryResult()
 	}
@@ -193,6 +206,8 @@ func (r LifecycleReceipt) validResult() bool {
 // LifecycleAction is the closed authorization and Chronicle action mapping.
 func LifecycleAction(operation LifecycleOperation) string {
 	switch operation {
+	case OperationRequestWorkerDrain:
+		return "dispatch.worker.drain.request"
 	case OperationRegisterQueryRuntime:
 		return "dispatch.query_runtime.register"
 	case OperationVerifyQueryRuntime:

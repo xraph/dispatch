@@ -88,3 +88,8 @@ func (s *strictLifecycleStore) AbortQueryRuntimeRemoval(ctx context.Context, r d
 	defer s.call("AbortQueryRuntimeRemoval")()
 	return s.base.AbortQueryRuntimeRemoval(ctx, r)
 }
+
+func (s *strictLifecycleStore) RequestWorkerDrain(ctx context.Context, r durable.WorkerDrainRequest) (durable.LifecycleReceipt, error) {
+	defer s.call("RequestWorkerDrain")()
+	return s.base.RequestWorkerDrain(ctx, r)
+}

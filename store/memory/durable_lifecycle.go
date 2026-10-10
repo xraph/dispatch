@@ -31,6 +31,7 @@ func (m *Store) InspectCompatibility(ctx context.Context, target durable.Namespa
 	f := m.retirementNamespaces[target.Namespace]
 	f.NamespaceTarget = target
 	f.QueryRetentionSchemaVersion = durable.QueryRetentionSchemaVersion
+	f.WorkerDrainSchemaVersion = durable.WorkerDrainSchemaVersion
 	f.ObservedAt = durable.Timestamp(time.Now())
 	return f, nil
 }

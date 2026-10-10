@@ -38,6 +38,9 @@ func TestTerminalStopObservesActiveDrainWithoutCancellingWork(t *testing.T) {
 	if status, e := eng.DurableStatus(); e != nil || status.Ready || status.State != drt.WorkerNotStarted {
 		t.Fatalf("pre-start readiness: %+v %v", status, e)
 	}
+	if readiness, readErr := eng.DurableReadiness(t.Context()); readErr != nil || readiness.Ready || readiness.RetirementEnabled || readiness.RetirementStatus != "unenrolled" {
+		t.Fatalf("engine readiness: %+v %v", readiness, readErr)
+	}
 	key := durable.Key{Namespace: o.Namespace, WorkflowID: "order", RunID: "run"}
 	if _, err = eng.StartDurableWorkflow(t.Context(), durable.StartRequest{Key: key, RequestID: "start", WorkflowType: "order", BuildID: o.BuildID, Queue: o.Queue}); err != nil {
 		t.Fatal(err)

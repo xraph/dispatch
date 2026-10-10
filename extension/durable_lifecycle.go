@@ -35,3 +35,11 @@ func (e *Extension) WaitDurableDrain(ctx context.Context, handle runtime.DrainHa
 	}
 	return e.eng.WaitDurableDrain(ctx, handle)
 }
+
+// DurableReadiness leaves database liveness and trusted host qualification separate.
+func (e *Extension) DurableReadiness(ctx context.Context) (runtime.WorkerReadiness, error) {
+	if e.eng == nil {
+		return runtime.WorkerReadiness{}, engine.ErrDurableDisabled
+	}
+	return e.eng.DurableReadiness(ctx)
+}
