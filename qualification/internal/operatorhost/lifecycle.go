@@ -19,11 +19,12 @@ import (
 // LifecycleOptions comes from trusted local configuration, never request fields.
 // StartupPolicy is the physical-instance enrollment hook for a deployment host.
 type LifecycleOptions struct {
-	DrainObserver      DrainObserver
-	InstanceID         string
-	RegistrationPolicy operator.QueryRegistrationPolicy
-	StartupPolicy      func(context.Context, durable.WorkerProcessIdentity) error
-	Probes             map[string][]HistoricalProbe
+	SkipSampleExecutions bool
+	DrainObserver        DrainObserver
+	InstanceID           string
+	RegistrationPolicy   operator.QueryRegistrationPolicy
+	StartupPolicy        func(context.Context, durable.WorkerProcessIdentity) error
+	Probes               map[string][]HistoricalProbe
 }
 
 // HistoricalProbe names an explicit retained run and the expected query output.

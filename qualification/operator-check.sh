@@ -15,9 +15,13 @@ operator_replacements=$(go list -m -f '{{if .Replace}}{{.Path}}{{end}}' all)
 if [ -n "$operator_replacements" ]; then echo "Operator qualification refuses replacements" >&2; exit 1; fi
 go build -o "$operator_dir/operatorhost" ./cmd/operatorhost
 go version -m "$operator_dir/operatorhost"
+go build -o "$operator_dir/sinkhost" ./cmd/sinkhost
+go version -m "$operator_dir/sinkhost"
 govulncheck -test ./...
 govulncheck ./cmd/operatorhost
 govulncheck -mode=binary "$operator_dir/operatorhost"
+govulncheck ./cmd/sinkhost
+govulncheck -mode=binary "$operator_dir/sinkhost"
 docker run -d --name "$operator_container" --memory=512m --memory-swap=512m --cpus=1 --pids-limit=128 \
   -p 127.0.0.1::5432 -e POSTGRES_HOST_AUTH_METHOD=trust postgres:17-alpine \
   -c max_connections=40 -c shared_buffers=64MB >/dev/null
@@ -29,6 +33,7 @@ done
 operator_address=$(docker port "$operator_container" 5432/tcp)
 export DISPATCH_OPERATOR_DSN="postgres://postgres@$operator_address/postgres?sslmode=disable"
 export DISPATCH_OPERATOR_BINARY="$operator_dir/operatorhost"
+export DISPATCH_SINK_HOST_BINARY="$operator_dir/sinkhost"
 export DISPATCH_OPERATOR_REQUIRED=1
 export GOMEMLIMIT=128MiB
 go test -race -count=1 -timeout=3m -v ./internal/operatorhost

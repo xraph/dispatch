@@ -272,8 +272,9 @@ a native PostgreSQL restart. The native restart kills the original process and
 checks that its accepted drain stays unknown while replacement admission stays
 open. Native fault barriers also cover loss after receipt persistence and after
 process invocation. The surviving original reconciles the accepted request; a
-replacement reports the original outcome as unknown. Live lifecycle Chronicle
-delivery and browser verification remain separate qualification work.
+replacement reports the original outcome as unknown. The native Chronicle scenario
+also qualifies lifecycle audit delivery through a sink outage. Browser verification
+remains separate qualification work.
 Keep private state files out of evidence and remove them after a killed fixture;
 normal termination removes its state file automatically.
 
@@ -342,3 +343,35 @@ new path. These local qualification controls do not accept remote configuration.
 The receipt already exists at either barrier. Required lifecycle intent failure
 is tested separately: a PostgreSQL trigger rejects retirement and drain audit
 intents, and neither the receipt, build mutation nor process drain is accepted.
+
+
+### Lifecycle audit delivery with native Chronicle
+
+Pass `--chronicle-config=/private/sink.json` with lifecycle mode to start the
+independent audit publisher. Use a private configuration produced by the existing
+`sinkhost.Bootstrap` API, with the production namespace owned by `operator-host`.
+The configured application and tenant must match the persisted namespace. The
+sink uses its persisted Authsome service account and Warden policy; credentials
+and the Chronicle HMAC key stay in that mode 0600 configuration file.
+
+This opt-in profile skips sample executions. Default hosts still seed the normal
+production and foreign examples for authorization checks. Both profiles retain
+the same namespace ownership rules. The Chronicle adapter serves one configured
+namespace and tenant, so this scenario qualifies that binding only.
+
+`make qualification-operator-check` now builds both native executables and runs
+`TestNativeLifecycleChronicleOutage` against PostgreSQL. The test first delivers
+retirement enrollment, build registration and exact runtime registration intents.
+It starts both workers, kills Chronicle, then accepts retirement and worker drain
+requests while audit delivery stays pending. An identical retry preserves the
+accepted receipt. After Chronicle restarts, publication recovers while both workers
+remain drained, and an explicit build resume also reaches the sink.
+
+The test compares each lifecycle source ID, action and actor with its persisted
+Chronicle acknowledgement, checks the mapped fingerprint and verifies the live
+HMAC chain. It covers enrollment, build registration, runtime registration,
+retirement, drain and resume. The isolated profile reaches zero remaining outbox
+entries and shuts its publisher down cleanly before closing the store. Sink
+outage does not become completed delivery just because a lifecycle command was
+accepted locally. The fixture does not establish multi-tenant sink routing or
+provider deletion.

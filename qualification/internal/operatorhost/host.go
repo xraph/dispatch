@@ -224,8 +224,10 @@ func newHost(ctx context.Context, store Store, options *LifecycleOptions) (host 
 		}
 	}
 	h.Handler = router.Handler()
-	if seedErr := seed(ctx, store); seedErr != nil {
-		return nil, seedErr
+	if options == nil || !options.SkipSampleExecutions {
+		if seedErr := seed(ctx, store); seedErr != nil {
+			return nil, seedErr
+		}
 	}
 	return h, nil
 }

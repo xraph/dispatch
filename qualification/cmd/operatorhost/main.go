@@ -19,6 +19,7 @@ import (
 
 	"github.com/xraph/dispatch/durable"
 	"github.com/xraph/dispatch/qualification/internal/operatorhost"
+	"github.com/xraph/dispatch/qualification/internal/sinkhost"
 	"github.com/xraph/dispatch/store/memory"
 	pgstore "github.com/xraph/dispatch/store/postgres"
 )
@@ -37,7 +38,11 @@ func run() (returnErr error) {
 	activation := flag.String("activation-file", "", "private local file whose creation releases registered workers to start")
 	pauseBefore := flag.String("drain-pause-before-file", "", "private marker that pauses the first drain before process invocation")
 	pauseAfter := flag.String("drain-pause-after-file", "", "private marker that pauses the first drain after process invocation")
+	chroniclePath := flag.String("chronicle-config", "", "private native Chronicle config; starts a lifecycle host without sample executions")
 	flag.Parse()
+	if *chroniclePath != "" && *instance == "" {
+		return errors.New("native Chronicle qualification requires lifecycle mode")
+	}
 	if (*pauseBefore != "" && *pauseAfter != "") || ((*pauseBefore != "" || *pauseAfter != "") && *instance == "") {
 		return errors.New("one lifecycle drain barrier required")
 	}
@@ -67,7 +72,7 @@ func run() (returnErr error) {
 	if *instance == "" {
 		host, err = operatorhost.New(ctx, store)
 	} else {
-		host, err = operatorhost.NewWithLifecycle(ctx, store, operatorhost.LifecycleOptions{InstanceID: *instance, DrainObserver: fileDrainObserver{before: *pauseBefore, after: *pauseAfter}})
+		host, err = operatorhost.NewWithLifecycle(ctx, store, operatorhost.LifecycleOptions{InstanceID: *instance, SkipSampleExecutions: *chroniclePath != "", DrainObserver: fileDrainObserver{before: *pauseBefore, after: *pauseAfter}})
 	}
 	if err != nil {
 		return err
@@ -77,6 +82,21 @@ func run() (returnErr error) {
 		defer cancel()
 		_ = host.Close(closeCtx)
 	}()
+	if *chroniclePath != "" {
+		config, loadErr := sinkhost.Load(*chroniclePath)
+		if loadErr != nil {
+			return loadErr
+		}
+		stopPublisher, startErr := host.StartChroniclePublisher(ctx, config.Binding, "http://"+config.Addresses["chronicle"]+"/accept", config.Credentials["chronicle"].Secret)
+		if startErr != nil {
+			return startErr
+		}
+		defer func() {
+			shutdown, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			returnErr = errors.Join(returnErr, stopPublisher(shutdown))
+		}()
+	}
 	if *runWorkers {
 		stopWorkers := startWorkers(ctx, host, *activation)
 		defer func() { returnErr = errors.Join(returnErr, stopWorkers()) }()
