@@ -5,21 +5,8 @@ import (
 	"time"
 )
 
-// TestBusyRetryDelayIsJitteredAroundTheBase covers the two properties the
-// retry backoff depends on, both of which a plain constant would break.
-//
-// SQLite takes one write lock for the whole database, so of N writers that
-// collide exactly one wins and the rest retry. With a fixed delay those
-// losers sleep the identical interval and wake together to collide again,
-// staying in lockstep for as long as it takes them to drain one at a time.
-// Spreading the wake-ups is the entire point, so a delay that is always
-// the same value is the bug this guards against.
-//
-// The bound matters just as much in the other direction: the jitter is
-// centred on leaseBusyRetryDelay rather than added to it, so that
-// maxLeaseBusyRetries attempts still take about as long as they did
-// before. A jitter that only ever extended the delay would quietly double
-// how long a caller waits before a busy database is reported as an error.
+// The base jitter must spread concurrent writers while staying bounded before
+// exponential scaling. A fixed delay would repeatedly wake writers together.
 func TestBusyRetryDelayIsJitteredAroundTheBase(t *testing.T) {
 	const (
 		samples = 200
@@ -58,6 +45,6 @@ func TestBusyRetryDelayIsJitteredAroundTheBase(t *testing.T) {
 	}
 	if drift > leaseBusyRetryDelay/4 {
 		t.Errorf("mean delay %v drifted from base %v: the retry budget is no "+
-			"longer what maxLeaseBusyRetries was tuned for", mean, leaseBusyRetryDelay)
+			"longer centred on the documented base", mean, leaseBusyRetryDelay)
 	}
 }

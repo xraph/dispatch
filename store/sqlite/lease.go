@@ -12,44 +12,17 @@ import (
 	"github.com/xraph/dispatch/job"
 )
 
-// maxLeaseBusyRetries bounds how many times a lease write retries after
-// SQLITE_BUSY before giving up.
-//
-// Grove's sqlitedriver configures WAL mode but no busy_timeout, and does
-// not expose the underlying *sql.DB for this package to configure one
-// itself. Two connections attempting a write at the same instant therefore
-// have the loser fail immediately with SQLITE_BUSY instead of blocking.
-// SQLite still serializes writes at the engine level — retrying closes the
-// gap between "not grantable this instant" and "will succeed shortly" that
-// ReclaimExpiredLeases's atomicity guarantee depends on under concurrency.
-const maxLeaseBusyRetries = 100
-
-// leaseBusyRetryDelay is the mean pause between retries. It is small
-// because a write against this schema completes in well under a
-// millisecond; the retry exists to ride out a burst of contention, not to
-// wait out something the caller should instead be timed out for.
+// Retry issuance is bounded independently of the driver's busy_timeout. A
+// synchronous call can outlast this window; its accepted result stays truthful.
+const sqliteBusyRetryWindow = 5 * time.Second
 const leaseBusyRetryDelay = time.Millisecond
+const maxBusyBackoffMultiplier = 32
 
-// busyRetryDelay returns the next pause, jittered across half to one and a
-// half times leaseBusyRetryDelay.
-//
-// A fixed delay is what makes contention here self-sustaining rather than
-// self-clearing. SQLite takes one write lock, so of N writers that collide
-// exactly one wins and the other N-1 all sleep the identical interval and
-// wake together to collide again. The loser set stays in lockstep for as
-// long as it takes one of them to win each round, which is the worst
-// possible shape for a backoff. Spreading the wake-ups decorrelates them
-// after the first collision.
-//
-// The jitter is centred on the old constant rather than added to it, so
-// the expected time to exhaust maxLeaseBusyRetries is unchanged and this
-// cannot quietly turn a fast failure into a slow one. Non-crypto rand is
-// the right tool, as it is for backoff.Jitter.
+// busyRetryDelay spreads writers across half to one and a half milliseconds.
+// Capped exponential scaling below keeps the largest pause below 48ms.
 func busyRetryDelay() time.Duration {
 	half := leaseBusyRetryDelay / 2
-
-	// #nosec G404 -- retry jitter only needs to spread contention, not resist
-	// prediction, so math/rand is the right tool here.
+	// #nosec G404 -- retry jitter spreads contention; it is not a security token.
 	return half + time.Duration(rand.Float64()*float64(leaseBusyRetryDelay))
 }
 
@@ -60,23 +33,42 @@ func isSQLiteBusy(err error) bool {
 	return err != nil && strings.Contains(err.Error(), "SQLITE_BUSY")
 }
 
-// withBusyRetry runs fn, retrying while it returns SQLITE_BUSY, up to
-// maxLeaseBusyRetries times or until ctx is done.
+// withBusyRetry retries SQLITE_BUSY for up to five seconds. Earlier caller
+// cancellation prevents further calls. The last busy error survives internal
+// budget exhaustion; a successful synchronous call is never changed to timeout.
 func withBusyRetry(ctx context.Context, fn func() error) error {
-	var err error
-	for range maxLeaseBusyRetries {
-		err = fn()
+	deadline := time.Now().Add(sqliteBusyRetryWindow)
+	multiplier := time.Duration(1)
+	var lastBusy error
+	for {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if lastBusy != nil && !time.Now().Before(deadline) {
+			return lastBusy
+		}
+		err := fn()
 		if err == nil || !isSQLiteBusy(err) {
 			return err
 		}
+		lastBusy = err
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			return lastBusy
+		}
+		delay := min(busyRetryDelay()*multiplier, remaining)
+		timer := time.NewTimer(delay)
 		select {
 		case <-ctx.Done():
+			timer.Stop()
 			return ctx.Err()
-		case <-time.After(busyRetryDelay()):
+		case <-timer.C:
 		}
+		multiplier = min(multiplier*2, maxBusyBackoffMultiplier)
 	}
-
-	return err
 }
 
 // The compile-time check that this store provides the lease capability

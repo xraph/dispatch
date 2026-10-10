@@ -1,50 +1,56 @@
-// Package sqlite implements store.Store using the grove ORM with SQLite
-// dialect. Suitable for embedded/edge deployments, CLI tools, and standalone
-// applications.
+// Package sqlite implements store.Store using the Grove ORM with SQLite.
+// You can use it for embedded applications, CLI tools and standalone services.
+// The caller owns the *grove.DB lifecycle; sqlite never closes it.
 //
-// The caller owns the *grove.DB lifecycle -- sqlite never closes it. Pass the
-// db handle through the constructor:
+// Construct the driver before passing the database to the store. Check errors
+// from Open and Migrate in your application:
 //
 //	import (
 //	    "github.com/xraph/grove"
+//	    "github.com/xraph/grove/driver"
+//	    "github.com/xraph/grove/drivers/sqlitedriver"
 //	    "github.com/xraph/dispatch/store/sqlite"
 //	)
 //
-//	db, _ := grove.Open(ctx, "sqlite", dsn)
+//	drv := sqlitedriver.New()
+//	err := drv.Open(ctx, "file:dispatch.db", driver.WithPoolSize(10))
+//	// Handle err before continuing.
+//	db, err := grove.Open(drv)
+//	// Handle err before continuing.
 //	store := sqlite.New(db)
-//	store.Migrate(ctx)
+//	err = store.Migrate(ctx)
 //
 // # Write concurrency
 //
-// SQLite allows one writer at a time for the whole database, and this
-// store does more of its work through writes than a reader would expect:
-// claiming a job, renewing a lease and reclaiming an expired one are all
-// writes, and a busy pool performs them continuously.
+// SQLite permits one writer at a time per database. Job claims, lease renewals
+// and workflow reopens all compete for that writer, even within one process.
+// Grove's default SQLite profile enables WAL, uses up to ten pooled connections
+// and leaves busy_timeout at zero. A competing writer can therefore return
+// SQLITE_BUSY immediately.
 //
-// Two settings normally smooth that over, and neither is reachable from
-// here. Grove's sqlitedriver enables WAL but sets no busy_timeout, so a
-// writer that loses the race fails immediately with SQLITE_BUSY rather
-// than waiting for the lock, and the driver does not expose the underlying
-// *sql.DB, so this package cannot call SetMaxOpenConns to keep more than
-// one connection from trying at once. The store compensates in Go by
-// retrying SQLITE_BUSY with a jittered backoff (see withBusyRetry), which
-// is enough for ordinary contention.
+// Store operations that use withBusyRetry retry SQLITE_BUSY within a five-second
+// window. Jittered exponential backoff keeps each pause below 48 milliseconds.
+// Earlier caller cancellation prevents further retries. When the internal window
+// expires, the operation returns its last busy error. Non-busy errors propagate
+// without retry. This policy does not cover every database operation and does
+// not guarantee that a contended write will succeed.
 //
-// It is a mitigation, not a substitute. If a deployment is write-heavy
-// enough to see SQLITE_BUSY surface as an error after the retries are
-// exhausted, the fixes are, in order of preference:
+// The window bounds retry issuance and waits, not the duration of a synchronous
+// driver call. A call that ignores context can return later. If that call succeeds,
+// the store preserves the accepted result even when the deadline has passed.
 //
-//   - Open the database with busy_timeout set in the DSN, for example
-//     "file:dispatch.db?_pragma=busy_timeout(5000)", so SQLite itself
-//     blocks on the lock instead of failing fast. The exact parameter
-//     name depends on the driver build.
-//   - Constrain the pool to a single connection if the driver in use
-//     allows configuring it, which serialises writers before they reach
-//     SQLite rather than after.
-//   - Move to postgres. SQLite's single-writer model is a property of the
-//     engine, and a queue with several busy pools is the workload it
-//     suits least.
+// You can configure connection behavior when opening the driver, though Store
+// does not expose the underlying sql.DB. driver.WithPoolSize sets the pool size.
+// With Grove's SQLite driver, this optional DSN sets a five-second busy timeout
+// on each connection:
 //
-// A single process with one worker pool, which is what embedded and CLI
-// deployments usually are, will not meaningfully encounter this.
+//	file:dispatch.db?_pragma=busy_timeout(5000)
+//
+// Dispatch does not add this option by default. A single PRAGMA executed through
+// a pooled handle only configures the connection that executes it. Use the DSN
+// when you need the setting on every connection. Driver-level waits can extend
+// a synchronous call beyond the store's retry window, so choose both settings
+// with your request deadlines in mind. Reducing the pool can reduce contention
+// within one handle; other handles and processes still compete for the writer.
+// For sustained concurrent writes, consider the PostgreSQL store.
 package sqlite
