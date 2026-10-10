@@ -30,6 +30,7 @@ func main() {
 }
 func run() (returnErr error) {
 	listen := flag.String("listen", "127.0.0.1:0", "numeric loopback listen address")
+	runWorkers := flag.Bool("run-workers", true, "run fixture workers; disable only to inspect accepted commands before execution")
 	statePath := flag.String("state-file", "", "new private state file containing URL and ephemeral credentials")
 	flag.Parse()
 	address, _, err := net.SplitHostPort(*listen)
@@ -63,8 +64,10 @@ func run() (returnErr error) {
 		defer cancel()
 		_ = host.Close(closeCtx)
 	}()
-	stopWorkers := host.StartWorkers(ctx)
-	defer func() { returnErr = errors.Join(returnErr, stopWorkers()) }()
+	if *runWorkers {
+		stopWorkers := host.StartWorkers(ctx)
+		defer func() { returnErr = errors.Join(returnErr, stopWorkers()) }()
+	}
 	listener, err := (&net.ListenConfig{}).Listen(ctx, "tcp", *listen)
 	if err != nil {
 		return err

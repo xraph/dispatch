@@ -124,6 +124,14 @@ GOWORK=off GOTOOLCHAIN=go1.26.9 go build -o "$operator_dir/operatorhost" ./cmd/o
 operator_pid=$!
 ```
 
+Pass `--run-workers=false` only when you need to inspect an accepted command before
+worker execution, such as cancellation requested on a nonterminal run. The default
+is true. Both modes register the same exact runtimes, authenticate and authorize
+commands, and serve queries. The disabled mode does not start worker loops; it
+does not qualify graceful drain, worker readiness or production lifecycle behavior.
+Stop either mode with SIGINT or SIGTERM and wait for process exit before removing
+its private temporary directory.
+
 The new state file is mode 0600. It contains the numeric-loopback `url` and
 `credentials.reader`, `credentials.payload`, `credentials.denied` and
 `credentials.commander`, each with an Authsome session `token` and subject.
