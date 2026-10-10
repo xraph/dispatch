@@ -113,10 +113,11 @@ func childDecisionWithFailures(queue string, original durable.CommitRequest, fai
 	return candidate, nil
 }
 
-func (w *Worker) runChildDelivery(ctx context.Context) (bool, error) {
+func (w *Worker) runChildDelivery(ctx context.Context, operation *claimOperation) (bool, error) {
 	delivery, err := storeCall(ctx, w, func(callCtx context.Context) (*durable.ChildDelivery, error) {
 		return w.store.ClaimChildDelivery(callCtx, durable.ChildDeliveryClaimRequest{Namespace: w.options.Namespace, BuildID: w.options.BuildID, Owner: w.options.Owner, LeaseDuration: w.options.LeaseDuration})
 	})
+	w.claimReturned(operation, err)
 	if err != nil || delivery == nil {
 		return false, err
 	}

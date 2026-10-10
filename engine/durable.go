@@ -172,12 +172,19 @@ func (eng *Engine) stopDurable(ctx context.Context) error {
 	}
 	done := d.done
 	d.mu.Unlock()
+	if err := d.worker.Stop(ctx); err != nil {
+		return err
+	}
+	var drainErr error
+	if status := d.worker.Status(); status.Drain != nil {
+		_, drainErr = d.worker.WaitDrain(ctx, *status.Drain)
+	}
 	if done == nil {
-		return nil
+		return drainErr
 	}
 	select {
 	case <-done:
-		return eng.durableError()
+		return errors.Join(eng.durableError(), drainErr)
 	case <-ctx.Done():
 		return ctx.Err()
 	}

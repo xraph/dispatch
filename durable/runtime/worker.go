@@ -2,6 +2,7 @@ package runtime
 
 import (
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
@@ -43,10 +44,13 @@ func (a ActivityInfo) IdempotencyKey() string {
 // Options pin a worker to a namespace, queue and build. Register all handlers
 // before construction; NewWorker copies the maps. Concurrency is per task kind.
 type Options struct {
-	Namespace     string
-	Queue         string
-	BuildID       string
-	Owner         string
+	Namespace string
+	Queue     string
+	BuildID   string
+	Owner     string
+	// RuntimeID names one process incarnation. A replacement must use a new ID.
+	RuntimeID     string
+	InstanceID    string
 	LeaseDuration time.Duration
 	PollInterval  time.Duration
 	StoreTimeout  time.Duration
@@ -57,8 +61,9 @@ type Options struct {
 
 // Worker claims durable tasks. Multiple workers may share a queue and store.
 type Worker struct {
-	store   durable.Store
-	options Options
+	store     durable.Store
+	options   Options
+	lifecycle workerLifecycle
 }
 
 // NewWorker validates routing and timing before any task can be claimed.
@@ -97,8 +102,18 @@ func NewWorker(store durable.Store, options Options) (*Worker, error) {
 			return nil, fmt.Errorf("%w: invalid activity registration", durable.ErrInvalid)
 		}
 	}
+	if options.RuntimeID == "" {
+		id := make([]byte, 16)
+		if _, err := rand.Read(id); err != nil {
+			return nil, err
+		}
+		options.RuntimeID = hex.EncodeToString(id)
+	}
+	if !validID(options.RuntimeID) || options.InstanceID != "" && !validID(options.InstanceID) {
+		return nil, durable.ErrInvalid
+	}
 	options.Workflows, options.Activities = maps.Clone(options.Workflows), maps.Clone(options.Activities)
-	return &Worker{store: store, options: options}, nil
+	return &Worker{store: store, options: options, lifecycle: newWorkerLifecycle()}, nil
 }
 
 // StartExecution validates the worker's namespace/build and persists its first
@@ -118,27 +133,37 @@ func (w *Worker) StartExecution(ctx context.Context, request durable.StartReques
 // Run polls each task kind until cancellation or the first processing error.
 // Processing errors are returned to the supervisor, never silently discarded.
 // Cancellation leaves unfinished tasks for replacement workers after expiry.
-func (w *Worker) Run(ctx context.Context) error {
+func (w *Worker) Run(ctx context.Context) (result error) {
+	if err := w.startRun(ctx); err != nil {
+		return err
+	}
+	defer func() { w.finishRun(result) }()
 	workCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
+	stopAdmission := context.AfterFunc(workCtx, func() { w.finishRun(nil) })
+	defer stopAdmission()
 	failures := make(chan error, 1)
 	var group sync.WaitGroup
-	for _, kind := range []durable.TaskKind{durable.TaskWorkflow, durable.TaskActivity, durable.TaskTimer, TaskTimeout, TaskChildDelivery, TaskExecutionTimeout} {
+	for _, kind := range claimKinds {
 		for range w.options.Concurrency {
 			group.Go(func() {
 				for workCtx.Err() == nil {
 					worked, err := w.RunOnce(workCtx, kind)
+					if errors.Is(err, ErrWorkerDraining) || errors.Is(err, ErrDrainIncomplete) {
+						return
+					}
 					if err != nil && !normalContention(err) {
 						if workCtx.Err() == nil {
 							select {
 							case failures <- err:
+								w.finishRun(err)
 							default:
 							}
 							cancel()
 						}
 						return
 					}
-					if !worked && wait(workCtx, w.options.PollInterval) != nil {
+					if !worked && w.pollWait(workCtx) != nil {
 						return
 					}
 				}
@@ -157,11 +182,16 @@ func (w *Worker) Run(ctx context.Context) error {
 // RunOnce claims and processes at most one task. Worked is true after a claim,
 // including when processing fails. It is safe to call concurrently.
 func (w *Worker) RunOnce(ctx context.Context, kind durable.TaskKind) (worked bool, err error) {
+	ctx, operation, err := w.enterClaim(ctx, kind)
+	if err != nil {
+		return false, err
+	}
+	defer func() { w.leaveClaim(operation, err) }()
 	if kind == TaskExecutionTimeout {
-		return w.runExecutionTimeout(ctx)
+		return w.runExecutionTimeout(ctx, operation)
 	}
 	if kind == TaskChildDelivery {
-		return w.runChildDelivery(ctx)
+		return w.runChildDelivery(ctx, operation)
 	}
 	task, err := storeCall(ctx, w, func(callCtx context.Context) (*durable.Task, error) {
 		if kind == TaskTimeout {
@@ -171,6 +201,7 @@ func (w *Worker) RunOnce(ctx context.Context, kind durable.TaskKind) (worked boo
 			Queue: w.options.Queue, BuildID: w.options.BuildID, Kind: kind, Owner: w.options.Owner,
 			LeaseDuration: w.options.LeaseDuration})
 	})
+	w.claimReturned(operation, err)
 	if err != nil || task == nil {
 		return false, err
 	}

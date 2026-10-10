@@ -8,10 +8,11 @@ import (
 	"github.com/xraph/dispatch/durable"
 )
 
-func (w *Worker) runExecutionTimeout(ctx context.Context) (bool, error) {
+func (w *Worker) runExecutionTimeout(ctx context.Context, operation *claimOperation) (bool, error) {
 	grant, err := storeCall(ctx, w, func(callCtx context.Context) (*durable.ExecutionTimeoutTask, error) {
 		return w.store.ClaimExecutionTimeout(callCtx, durable.ExecutionTimeoutClaimRequest{Namespace: w.options.Namespace, Owner: w.options.Owner, LeaseDuration: w.options.LeaseDuration})
 	})
+	w.claimReturned(operation, err)
 	if err != nil || grant == nil {
 		return false, err
 	}

@@ -794,6 +794,21 @@ func (eng *Engine) Stop(ctx context.Context) error {
 	if err := eng.lockLifecycle(ctx); err != nil {
 		return err
 	}
+	if eng.stopped {
+		err := eng.stopErr
+		eng.unlockLifecycle()
+		return err
+	}
+	eng.stopping = true
+	// An explicit force-stop may escalate while ordinary Stop observes drain.
+	// Neither waiter owns the accepted operation deadline.
+	eng.unlockLifecycle()
+	if err := eng.waitDurableDrain(ctx); err != nil {
+		return err
+	}
+	if err := eng.lockLifecycle(ctx); err != nil {
+		return err
+	}
 	defer eng.unlockLifecycle()
 	if eng.stopped {
 		return eng.stopErr

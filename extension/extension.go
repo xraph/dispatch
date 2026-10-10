@@ -476,7 +476,6 @@ func (e *Extension) Stop(ctx context.Context) error {
 		e.MarkStopped()
 		return nil
 	}
-	e.boundary.Audit.Deactivate()
 	if e.sweeper != nil {
 		if e.sweeperStopped == nil {
 			e.sweeperStopped = make(chan struct{})
@@ -497,7 +496,10 @@ func (e *Extension) Stop(ctx context.Context) error {
 	}
 
 	err := e.eng.Stop(ctx)
-	e.MarkStopped()
+	if err == nil {
+		// stopDelivery deactivates the boundary after worker quiescence.
+		e.MarkStopped()
+	}
 	return err
 }
 
