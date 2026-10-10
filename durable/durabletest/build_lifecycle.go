@@ -202,8 +202,9 @@ func RunRetirementLateChildBlocker(t *testing.T, s durable.Store) {
 	if _, err = s.ApplyChildDelivery(t.Context(), deliveryRequest(message)); err != nil {
 		t.Fatal(err)
 	}
+	final.ExpectedVersion = queryRetirementFixture(t, s, target, final.ExpectedVersion)
 	accepted, err := l.FinalizeBuildRetirement(t.Context(), final)
-	if err != nil || accepted.Build.State != durable.BuildRetired || accepted.Build.Version != 3 || accepted.Build.Epoch != 2 {
+	if err != nil || accepted.Build.State != durable.BuildRetired || accepted.Build.Version != 4 || accepted.Build.Epoch != 2 {
 		t.Fatalf("finalize: %+v %v", accepted, err)
 	}
 	verifyLifecycleDelivery(t, s, accepted)

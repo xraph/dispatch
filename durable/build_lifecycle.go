@@ -35,13 +35,15 @@ func (e *BuildAdmissionError) Error() string {
 func (e *BuildAdmissionError) Unwrap() error { return ErrBuildAdmission }
 
 type RegisterBuildRequest struct {
+	Identity      *BuildQueryIdentity `json:",omitempty"`
+	CommandDigest string              `json:",omitempty"`
 	BuildTarget
 	RequestID       string
 	ExpectedVersion int64
 }
 
 func (r RegisterBuildRequest) Validate() error {
-	if r.BuildTarget.Validate() != nil || !DeliveryIdentifier(r.RequestID) || r.ExpectedVersion < 0 {
+	if r.BuildTarget.Validate() != nil || !DeliveryIdentifier(r.RequestID) || r.ExpectedVersion < 0 || (r.Identity != nil && r.Identity.Validate() != nil) || (r.CommandDigest != "" && !validHex256(r.CommandDigest)) {
 		return ErrInvalid
 	}
 	return nil
@@ -82,6 +84,7 @@ type ObservationVersion struct {
 	ObservedAt           time.Time
 }
 type BuildLifecycleFacts struct {
+	QueryRetention     QueryRetentionFacts
 	Admission          BuildAdmission
 	Blockers           BuildBlockers
 	ObservationVersion ObservationVersion
@@ -153,5 +156,36 @@ func TransitionBuild(current BuildAdmission, r BuildRetirementRequest, operation
 	}
 	current.Version++
 	current.ChangedAt = now
+	return current, nil
+}
+
+// RegisterBuildIdentity fills an absent historical identity once, without
+// changing admission state or fabricating artifact facts during enrollment.
+func RegisterBuildIdentity(current BuildAdmission, exists bool, r RegisterBuildRequest, now time.Time) (BuildAdmission, error) {
+	if exists {
+		if current.Version != r.ExpectedVersion {
+			return current, ErrRevisionConflict
+		}
+		if r.Identity == nil {
+			return current, ErrRevisionConflict
+		}
+		if current.QueryIdentity != (BuildQueryIdentity{}) {
+			return current, ErrRequestConflict
+		}
+		if current.Version == math.MaxInt64 {
+			return current, ErrInvalid
+		}
+		current.QueryIdentity = *r.Identity
+		current.Version++
+		current.ChangedAt = now
+		return current, nil
+	}
+	if r.ExpectedVersion != 0 {
+		return current, ErrRevisionConflict
+	}
+	current = BuildAdmission{BuildTarget: r.BuildTarget, State: BuildAccepting, Epoch: 1, Version: 1, ChangedAt: now}
+	if r.Identity != nil {
+		current.QueryIdentity = *r.Identity
+	}
 	return current, nil
 }

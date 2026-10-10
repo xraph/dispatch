@@ -175,6 +175,15 @@ func RunWorkflowTaskDeferral(t *testing.T, s durable.Store) {
 					if deferErr != nil || second.DeferralCount != 2 || second.RetryAt.Sub(second.RecordedAt) != 2*time.Second {
 						t.Fatalf("backoff: %+v %v", second, deferErr)
 					}
+					request.TargetState = state
+					original, replayErr := store.DeferWorkflowTask(t.Context(), request)
+					if replayErr != nil || original != accepted {
+						t.Fatalf("first receipt changed after later deferral: %+v %v", original, replayErr)
+					}
+					latest, readErr := store.GetWorkflowTaskDeferral(t.Context(), start.Key, task.ID)
+					if readErr != nil || latest.RequestID != repeated.RequestID {
+						t.Fatalf("old receipt replaced current observation: %+v %v", latest, readErr)
+					}
 				}
 			})
 		}

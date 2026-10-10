@@ -125,6 +125,7 @@ func retirementCancellationAcknowledgment(t *testing.T, s durable.Store, childBu
 	if err != nil || !facts.Blockers.Empty() {
 		t.Fatalf("consumed acknowledgments still block: %+v %v", facts, err)
 	}
+	final.ExpectedVersion = queryRetirementFixture(t, s, target, final.ExpectedVersion)
 	accepted, err := life.FinalizeBuildRetirement(t.Context(), final)
 	if err != nil || accepted.Build.State != durable.BuildRetired {
 		t.Fatalf("final: %+v %v", accepted, err)

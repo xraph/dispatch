@@ -19,6 +19,8 @@ func normalizeExecutionError(err error) error {
 			return errors.Join(durable.ErrWriterCompatibility, err)
 		case "DL002":
 			return errors.Join(durable.ErrLifecycleBusy, err)
+		case "DL004":
+			return durable.ErrQueryRetention
 		case "DL003":
 			var native *pgconn.PgError
 			if errors.As(err, &native) {

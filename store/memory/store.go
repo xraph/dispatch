@@ -44,6 +44,7 @@ type Store struct {
 	outbox               map[string]durable.DeliveryRecord
 	retirementNamespaces map[string]durable.CompatibilityFacts
 	buildAdmissions      map[durable.BuildTarget]durable.BuildAdmission
+	queryRuntimes        map[queryRuntimeKey]durable.QueryRuntimeBinding
 	lifecycleReceipts    map[lifecycleReceiptKey]durable.LifecycleReceipt
 	// outboxPrepare injects preparation failure in package tests, before publication.
 	outboxPrepare func(durable.Delivery) error
@@ -79,6 +80,7 @@ func New() *Store {
 		namespaces:            make(map[string]durable.NamespaceRecord),
 		retirementNamespaces:  make(map[string]durable.CompatibilityFacts),
 		buildAdmissions:       make(map[durable.BuildTarget]durable.BuildAdmission),
+		queryRuntimes:         make(map[queryRuntimeKey]durable.QueryRuntimeBinding),
 		lifecycleReceipts:     make(map[lifecycleReceiptKey]durable.LifecycleReceipt),
 		outbox:                make(map[string]durable.DeliveryRecord),
 		jobs:                  make(map[string]*job.Job),

@@ -25,12 +25,13 @@ func (m *Store) RegisterBuild(ctx context.Context, r durable.RegisterBuildReques
 		if err := c.checkLifecycleTarget(r.NamespaceTarget); err != nil {
 			return durable.LifecycleReceipt{}, err
 		}
-		if _, exists := c.buildAdmissions[r.BuildTarget]; exists || r.ExpectedVersion != 0 {
-			return durable.LifecycleReceipt{}, durable.ErrRevisionConflict
+		prior, exists := c.buildAdmissions[r.BuildTarget]
+		build, registerErr := durable.RegisterBuildIdentity(prior, exists, r, durable.Timestamp(time.Now()))
+		if registerErr != nil {
+			return durable.LifecycleReceipt{}, registerErr
 		}
-		build := durable.BuildAdmission{BuildTarget: r.BuildTarget, State: durable.BuildAccepting, Epoch: 1, Version: 1, ChangedAt: durable.Timestamp(time.Now())}
 		c.buildAdmissions[r.BuildTarget] = build
-		return c.saveBuildReceipt(ctx, key, digest, build)
+		return c.saveBuildReceipt(ctx, key, digest, r.CommandDigest, build)
 	})
 }
 func (m *Store) checkLifecycleTarget(t durable.NamespaceTarget) error {
@@ -42,8 +43,8 @@ func (m *Store) checkLifecycleTarget(t durable.NamespaceTarget) error {
 	}
 	return nil
 }
-func (m *Store) saveBuildReceipt(ctx context.Context, key lifecycleReceiptKey, digest string, build durable.BuildAdmission) (durable.LifecycleReceipt, error) {
-	r := durable.LifecycleReceipt{NamespaceTarget: build.NamespaceTarget, Operation: key.operation, RequestID: key.requestID, RequestDigest: digest, ResponseVersion: 1, AcceptedAt: build.ChangedAt, Build: &build}
+func (m *Store) saveBuildReceipt(ctx context.Context, key lifecycleReceiptKey, digest, command string, build durable.BuildAdmission) (durable.LifecycleReceipt, error) {
+	r := durable.LifecycleReceipt{NamespaceTarget: build.NamespaceTarget, Operation: key.operation, RequestID: key.requestID, RequestDigest: digest, CommandDigest: command, ResponseVersion: 1, AcceptedAt: build.ChangedAt, Build: &build}
 	delivery, err := durable.NewDelivery(m.namespaces[key.namespace], durable.DestinationChronicle, durable.LifecycleDeliverySource(ctx, r))
 	if err != nil {
 		return r, err
@@ -126,6 +127,10 @@ func (m *Store) buildLifecycleFacts(target durable.BuildTarget, now time.Time) (
 			f.Blockers.ChildObligations++
 		}
 	}
+	retained, bindings := m.queryBindings(target)
+	now = durable.Timestamp(time.Now())
+	f.ObservationVersion.ObservedAt = now
+	f.QueryRetention = durable.QueryRetention(build, retained, bindings, now)
 	return f, nil
 }
 func (m *Store) BeginBuildRetirement(ctx context.Context, r durable.BuildRetirementRequest) (durable.LifecycleReceipt, error) {
@@ -158,12 +163,15 @@ func (m *Store) mutateBuildLifecycle(ctx context.Context, r durable.BuildRetirem
 		if readErr != nil {
 			return durable.LifecycleReceipt{}, readErr
 		}
+		if operation == durable.OperationFinalizeRetirement && f.Blockers.Empty() && f.QueryRetention.RetainedExecutions > 0 && f.QueryRetention.VerifiedBindings == 0 {
+			return durable.LifecycleReceipt{}, durable.ErrQueryRetention
+		}
 		build, transitionErr := durable.TransitionBuild(f.Admission, r, operation, f.Blockers, now)
 		if transitionErr != nil {
 			return durable.LifecycleReceipt{}, transitionErr
 		}
 		c.buildAdmissions[r.BuildTarget] = build
-		return c.saveBuildReceipt(ctx, key, digest, build)
+		return c.saveBuildReceipt(ctx, key, digest, "", build)
 	})
 }
 func (m *Store) admitExecution(execution, source *durable.Execution, kind, command string) error {

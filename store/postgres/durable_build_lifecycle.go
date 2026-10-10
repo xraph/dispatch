@@ -2,6 +2,7 @@ package postgres
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"time"
 
@@ -14,9 +15,13 @@ var _ durable.LifecycleStore = (*Store)(nil)
 
 func readBuildAdmission(ctx context.Context, tx driver.Tx, target durable.BuildTarget) (durable.BuildAdmission, error) {
 	b := durable.BuildAdmission{BuildTarget: target}
-	err := tx.QueryRow(ctx, `SELECT state,epoch,version,cutoff_epoch,changed_at FROM dispatch_build_lifecycle WHERE namespace=$1 AND build_id=$2`, target.Namespace, target.BuildID).Scan(&b.State, &b.Epoch, &b.Version, &b.CutoffEpoch, &b.ChangedAt)
+	var identity []byte
+	err := tx.QueryRow(ctx, `SELECT state,epoch,version,cutoff_epoch,changed_at,COALESCE(query_identity,'{}'::jsonb) FROM dispatch_build_lifecycle WHERE namespace=$1 AND build_id=$2`, target.Namespace, target.BuildID).Scan(&b.State, &b.Epoch, &b.Version, &b.CutoffEpoch, &b.ChangedAt, &identity)
 	if isNoRows(err) {
 		err = durable.ErrNotFound
+	}
+	if err == nil && (json.Unmarshal(identity, &b.QueryIdentity) != nil || (b.QueryIdentity != (durable.BuildQueryIdentity{}) && b.QueryIdentity.Validate() != nil)) {
+		return b, durable.ErrInvalid
 	}
 	return b, err
 }
@@ -65,24 +70,32 @@ func (s *Store) RegisterBuild(ctx context.Context, r durable.RegisterBuildReques
 	if checkErr := checkRetirementEnrollment(ctx, tx, r.Namespace); checkErr != nil {
 		return result, checkErr
 	}
-	if _, readErr := readBuildAdmission(ctx, tx, r.BuildTarget); !errors.Is(readErr, durable.ErrNotFound) {
-		if readErr != nil {
-			return result, readErr
-		}
-		return result, durable.ErrRevisionConflict
-	}
-	if r.ExpectedVersion != 0 {
-		return result, durable.ErrRevisionConflict
+
+	prior, readErr := readBuildAdmission(ctx, tx, r.BuildTarget)
+	exists := readErr == nil
+	if readErr != nil && !errors.Is(readErr, durable.ErrNotFound) {
+		return result, readErr
 	}
 	now, err := executionTime(ctx, tx)
 	if err != nil {
 		return result, err
 	}
-	b := durable.BuildAdmission{BuildTarget: r.BuildTarget, State: durable.BuildAccepting, Epoch: 1, Version: 1, ChangedAt: now}
-	if _, err = tx.Exec(ctx, `INSERT INTO dispatch_build_lifecycle(namespace,build_id,state,epoch,version,changed_at) VALUES($1,$2,'accepting',1,1,$3)`, r.Namespace, r.BuildID, now); err != nil {
+	b, err := durable.RegisterBuildIdentity(prior, exists, r, now)
+	if err != nil {
 		return result, err
 	}
-	result = durable.LifecycleReceipt{NamespaceTarget: r.NamespaceTarget, Operation: q.Operation, RequestID: r.RequestID, RequestDigest: digest, ResponseVersion: 1, AcceptedAt: now, Build: &b}
+	var identity []byte
+	if b.QueryIdentity != (durable.BuildQueryIdentity{}) {
+		identity, err = json.Marshal(b.QueryIdentity)
+		if err != nil {
+			return result, err
+		}
+	}
+	if _, err = tx.Exec(ctx, `INSERT INTO dispatch_build_lifecycle(namespace,build_id,state,epoch,version,changed_at,query_identity) VALUES($1,$2,$3,$4,$5,$6,$7) ON CONFLICT(namespace,build_id) DO UPDATE SET query_identity=EXCLUDED.query_identity,version=EXCLUDED.version,changed_at=EXCLUDED.changed_at`, r.Namespace, r.BuildID, b.State, b.Epoch, b.Version, b.ChangedAt, identity); err != nil {
+		return result, err
+	}
+
+	result = durable.LifecycleReceipt{NamespaceTarget: r.NamespaceTarget, Operation: q.Operation, RequestID: r.RequestID, RequestDigest: digest, CommandDigest: r.CommandDigest, ResponseVersion: 1, AcceptedAt: now, Build: &b}
 	if checkErr := saveLifecycleReceipt(ctx, tx, n, &result); checkErr != nil {
 		return durable.LifecycleReceipt{}, checkErr
 	}
@@ -133,7 +146,20 @@ func buildLifecycleFacts(ctx context.Context, tx driver.Tx, target durable.Build
  (SELECT count(*) FROM dispatch_child_deliveries d WHERE namespace=$1 AND NOT done AND CASE WHEN kind IN ('close','cancel') THEN (SELECT e.build_id FROM dispatch_executions e WHERE e.namespace=d.namespace AND e.workflow_id=d.target_workflow_id AND e.first_run_id=d.target_run_id ORDER BY e.run_number DESC LIMIT 1) ELSE target_build_id END=$2),
  (SELECT count(*) FROM dispatch_child_executions c JOIN dispatch_executions p ON (p.namespace,p.workflow_id,p.run_id)=(c.namespace,c.parent_workflow_id,c.parent_run_id) WHERE c.namespace=$1 AND p.build_id=$2 AND EXISTS(SELECT 1 FROM dispatch_executions e WHERE e.namespace=c.namespace AND e.workflow_id=c.child_workflow_id AND e.first_run_id=c.child_run_id AND e.state='running')) +
  (SELECT count(*) FROM dispatch_child_deliveries d JOIN dispatch_executions p ON (p.namespace,p.workflow_id,p.run_id)=(d.namespace,d.source_workflow_id,d.source_run_id) WHERE d.namespace=$1 AND p.build_id=$2 AND NOT d.done AND d.kind='cancel' AND COALESCE(d.message->>'cancellation_id','')<>'')`, target.Namespace, target.BuildID, now).Scan(&f.Blockers.OpenExecutions, &f.Blockers.PendingTasks, &f.Blockers.AsyncCallbacks, &f.Blockers.DelayedRuns, &f.Blockers.PendingChildDeliveries, &f.Blockers.ChildObligations)
-	return f, err
+	if err != nil {
+		return f, err
+	}
+	retained, bindings, err := queryBindings(ctx, tx, target)
+	if err != nil {
+		return f, err
+	}
+	now, err = executionTime(ctx, tx)
+	if err != nil {
+		return f, err
+	}
+	f.ObservationVersion.ObservedAt = now
+	f.QueryRetention = durable.QueryRetention(b, retained, bindings, now)
+	return f, nil
 }
 func (s *Store) BeginBuildRetirement(ctx context.Context, r durable.BuildRetirementRequest) (durable.LifecycleReceipt, error) {
 	return s.mutateBuildLifecycle(ctx, r, durable.OperationBeginRetirement)
@@ -176,6 +202,9 @@ func (s *Store) mutateBuildLifecycle(ctx context.Context, r durable.BuildRetirem
 	facts, err := buildLifecycleFacts(ctx, tx, r.BuildTarget, now)
 	if err != nil {
 		return result, err
+	}
+	if operation == durable.OperationFinalizeRetirement && facts.Blockers.Empty() && facts.QueryRetention.RetainedExecutions > 0 && facts.QueryRetention.VerifiedBindings == 0 {
+		return result, durable.ErrQueryRetention
 	}
 	b, err := durable.TransitionBuild(facts.Admission, r, operation, facts.Blockers, now)
 	if err != nil {

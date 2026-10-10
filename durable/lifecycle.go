@@ -38,6 +38,9 @@ func (t BuildTarget) Validate() error {
 }
 
 type CompatibilityFacts struct {
+	// QueryRetentionSchemaVersion describes current store capability only. It is
+	// not proof that a host artifact or controller is query-retention qualified.
+	QueryRetentionSchemaVersion int `json:",omitempty"`
 	NamespaceTarget
 	Enrolled       bool
 	SchemaVersion  int
@@ -86,6 +89,8 @@ type LifecycleReceipt struct {
 	AcceptedAt      time.Time
 	DeliveryID      string
 	Enrollment      *RetirementEnrollment
+	QueryRuntime    *QueryRuntimeBinding
+	QueryAbort      *QueryRemovalAbortEvidence `json:",omitempty"`
 	Build           *BuildAdmission
 }
 
@@ -126,6 +131,14 @@ func LifecycleDeliverySource(ctx context.Context, receipt LifecycleReceipt) Deli
 }
 
 func (r LifecycleReceipt) Clone() LifecycleReceipt {
+	if r.QueryAbort != nil {
+		v := *r.QueryAbort
+		r.QueryAbort = &v
+	}
+	if r.QueryRuntime != nil {
+		v := *r.QueryRuntime
+		r.QueryRuntime = &v
+	}
 	if r.Build != nil {
 		v := *r.Build
 		r.Build = &v
@@ -148,8 +161,10 @@ func (r LifecycleReceipt) Match(q LifecycleReceiptLookup) error {
 	return nil
 }
 
-// BuildAdmission records admission only. It supplies no artifact identity.
+// BuildAdmission records admission and optional trusted query identity.
+// Historical enrollment leaves QueryIdentity empty until explicit evidence arrives.
 type BuildAdmission struct {
+	QueryIdentity BuildQueryIdentity
 	BuildTarget
 	State       string
 	Epoch       int64
@@ -160,21 +175,42 @@ type BuildAdmission struct {
 
 func validLifecycleOperation(operation LifecycleOperation) bool {
 	switch operation {
-	case OperationEnrollRetirement, OperationRegisterBuild, OperationBeginRetirement, OperationFinalizeRetirement, OperationAbortRetirement:
+	case OperationRegisterQueryRuntime, OperationVerifyQueryRuntime, OperationBeginQueryRemoval, OperationFinishQueryRemoval, OperationAbortQueryRemoval, OperationEnrollRetirement, OperationRegisterBuild, OperationBeginRetirement, OperationFinalizeRetirement, OperationAbortRetirement:
 		return true
 	}
 	return false
 }
 func (r LifecycleReceipt) validResult() bool {
+	if r.Operation == OperationAbortQueryRemoval {
+		if r.QueryAbort == nil || r.QueryRuntime == nil || r.QueryAbort.Fence.Candidate != r.QueryRuntime.QueryRuntimeIdentity || r.QueryAbort.Fence.CandidateStateVersion+1 != r.QueryRuntime.Version || r.QueryAbort.Fence.RemovalEpoch != r.QueryRuntime.RemovalEpoch || r.QueryRuntime.State != QueryRuntimeActive || r.QueryAbort.Settlement.Validate(r.QueryAbort.Fence, r.AcceptedAt) != nil || r.QueryRuntime.Verification.VerifiedAt.Before(r.QueryAbort.Settlement.SettledAt) || r.QueryRuntime.Verification.Validate(r.QueryRuntime.QueryRuntimeIdentity, r.AcceptedAt) != nil {
+			return false
+		}
+	} else if r.QueryAbort != nil {
+		return false
+	}
+
+	if r.QueryRuntime != nil {
+		return r.Enrollment == nil && r.Build == nil && r.QueryRuntime.Validate() == nil && r.QueryRuntime.NamespaceTarget == r.NamespaceTarget && (r.Operation == OperationRegisterQueryRuntime || r.Operation == OperationVerifyQueryRuntime || r.Operation == OperationBeginQueryRemoval || r.Operation == OperationFinishQueryRemoval || r.Operation == OperationAbortQueryRemoval)
+	}
 	if r.Operation == OperationEnrollRetirement {
 		return r.Enrollment != nil && r.Build == nil && r.Enrollment.Compatibility.NamespaceTarget == r.NamespaceTarget && r.Enrollment.Compatibility.Enrolled && r.Enrollment.Compatibility.WriterProtocol == RetirementWriterProtocol && r.Enrollment.Compatibility.SchemaVersion == RetirementSchemaVersion && r.Enrollment.HistoricalBuildCount >= 0 && len(r.Enrollment.HistoricalBuildDigest) == 64
 	}
-	return validLifecycleOperation(r.Operation) && r.Build != nil && r.Enrollment == nil && r.Build.Validate() == nil && r.Build.NamespaceTarget == r.NamespaceTarget && r.Build.Epoch > 0 && r.Build.Version > 0 && (r.Build.State == BuildAccepting || r.Build.State == BuildRetiring || r.Build.State == BuildRetired)
+	return (r.Operation == OperationRegisterBuild || r.Operation == OperationBeginRetirement || r.Operation == OperationFinalizeRetirement || r.Operation == OperationAbortRetirement) && r.Build != nil && r.Enrollment == nil && r.Build.Validate() == nil && r.Build.NamespaceTarget == r.NamespaceTarget && r.Build.Epoch > 0 && r.Build.Version > 0 && (r.Build.State == BuildAccepting || r.Build.State == BuildRetiring || r.Build.State == BuildRetired)
 }
 
 // LifecycleAction is the closed authorization and Chronicle action mapping.
 func LifecycleAction(operation LifecycleOperation) string {
 	switch operation {
+	case OperationRegisterQueryRuntime:
+		return "dispatch.query_runtime.register"
+	case OperationVerifyQueryRuntime:
+		return "dispatch.query_runtime.verify"
+	case OperationBeginQueryRemoval:
+		return "dispatch.query_runtime.remove"
+	case OperationFinishQueryRemoval:
+		return "dispatch.query_runtime.finish"
+	case OperationAbortQueryRemoval:
+		return "dispatch.query_runtime.abort"
 	case OperationEnrollRetirement:
 		return "dispatch.retirement.enroll"
 	case OperationRegisterBuild:

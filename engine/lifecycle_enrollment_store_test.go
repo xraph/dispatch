@@ -48,3 +48,43 @@ func (s *strictLifecycleStore) GetWorkflowTaskDeferral(ctx context.Context, key 
 	defer s.call("GetWorkflowTaskDeferral")()
 	return s.base.GetWorkflowTaskDeferral(ctx, key, taskID)
 }
+
+func (s *strictLifecycleStore) RegisterQueryRuntime(ctx context.Context, r durable.RegisterQueryRuntimeRequest) (durable.LifecycleReceipt, error) {
+	defer s.call("RegisterQueryRuntime")()
+	return s.base.RegisterQueryRuntime(ctx, r)
+}
+
+func (s *strictLifecycleStore) RecordQueryRuntimeVerification(ctx context.Context, r durable.VerifyQueryRuntimeRequest) (durable.LifecycleReceipt, error) {
+	defer s.call("RecordQueryRuntimeVerification")()
+	return s.base.RecordQueryRuntimeVerification(ctx, r)
+}
+
+func (s *strictLifecycleStore) InspectQueryRetention(ctx context.Context, r durable.BuildTarget) (durable.QueryRetentionFacts, error) {
+	defer s.call("InspectQueryRetention")()
+	return s.base.InspectQueryRetention(ctx, r)
+}
+
+func (s *strictLifecycleStore) ListQueryRuntimes(ctx context.Context, r durable.QueryRuntimeList) (durable.QueryRuntimePage, error) {
+	defer s.call("ListQueryRuntimes")()
+	return s.base.ListQueryRuntimes(ctx, r)
+}
+
+func (s *strictLifecycleStore) BeginQueryRuntimeRemoval(ctx context.Context, r durable.BeginQueryRemovalRequest) (durable.LifecycleReceipt, error) {
+	defer s.call("BeginQueryRuntimeRemoval")()
+	return s.base.BeginQueryRuntimeRemoval(ctx, r)
+}
+
+func (s *strictLifecycleStore) CheckQueryRuntimeRemoval(ctx context.Context, r durable.QueryRemovalFence) (durable.QueryRemovalFacts, error) {
+	defer s.call("CheckQueryRuntimeRemoval")()
+	return s.base.CheckQueryRuntimeRemoval(ctx, r)
+}
+
+func (s *strictLifecycleStore) FinishQueryRuntimeRemoval(ctx context.Context, r durable.FinishQueryRemovalRequest) (durable.LifecycleReceipt, error) {
+	defer s.call("FinishQueryRuntimeRemoval")()
+	return s.base.FinishQueryRuntimeRemoval(ctx, r)
+}
+
+func (s *strictLifecycleStore) AbortQueryRuntimeRemoval(ctx context.Context, r durable.AbortQueryRemovalRequest) (durable.LifecycleReceipt, error) {
+	defer s.call("AbortQueryRuntimeRemoval")()
+	return s.base.AbortQueryRuntimeRemoval(ctx, r)
+}
