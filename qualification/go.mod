@@ -10,7 +10,7 @@ require (
 	github.com/jackc/pgx/v5 v5.11.0
 	github.com/xraph/authsome v1.7.3-0.20261009205819-7b694db1b80a
 	github.com/xraph/chronicle v1.7.1-0.20261009182725-f75626bdff89
-	github.com/xraph/dispatch v1.7.1-0.20261010014027-59002dcb8357
+	github.com/xraph/dispatch v1.7.1-0.20261010131509-3bf35669e07d
 	github.com/xraph/forge v1.12.5-0.20261010012931-217abffa75f0
 	github.com/xraph/forge/extensions/auth v1.12.4-0.20261009184218-9ec7ce62855a
 	github.com/xraph/go-utils v1.3.0

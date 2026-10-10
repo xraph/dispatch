@@ -220,3 +220,57 @@ Private callback files are mode 0600 inside a separate mode 0700 test temporary
 directory, even when you retain process evidence. Cleanup joins the workers,
 collects any unread proofs for recursive evidence checks, then removes that
 private directory on success or failure. Never include proofs in retained evidence.
+
+## Lifecycle control host
+
+Use `--lifecycle-instance=<trusted-instance-id>` to enable the deployment lifecycle
+contract. Keep that physical identity stable across a restart. The private state
+file also includes `runtimes`, with a fresh process RuntimeID for each build and
+the captured executable and configuration digests. A restart creates a new
+process incarnation. Retrying an old drain never targets it.
+
+You can hold worker startup while the control endpoint accepts enrollment:
+
+```sh
+"$operator_dir/operatorhost" --state-file "$operator_dir/state.json" \
+  --lifecycle-instance=local-host-a --activation-file="$operator_dir/activate" &
+```
+
+Enroll retirement, register the two builds and register each exact runtime through
+the authorized contract. Then create the private activation file. Startup checks
+for an active binding of that exact runtime, build and physical instance before
+polling; an injected `StartupPolicy` can enforce your deployment controller's
+physical-instance gate. `RegistrationPolicy` governs new registrations. Accepted
+registration replay still checks current authorization and does not issue a new
+registration. This local host does not implement a deployment instance registry.
+
+For query-only retention, pass `--run-workers=false`, register the runtime, and
+request its drain through `durable.workerDrain`. The prestart handle is real. A
+completed drain prevents a later worker start while queries remain available.
+`durable.workerStatus` separates process state and retirement compatibility;
+`host_qualification` remains `not_observed` there. Query binding verification is
+separate evidence.
+
+The default named probe for each build replays `status` on the explicit production
+run `lifecycle-history-operator-v1/run-1` or
+`lifecycle-history-operator-v2/run-1`. Create that run through `durable.start`, using
+workflow type `operator`, queue `operator` and input bytes `history`. Verification
+requires closed polling and no local or unknown claims. The evidence digest binds
+the exact runtime identity, probe name, sampled run, history revision and sequence,
+and output digest. The expected output is configured locally. Callers cannot
+supply artifact hashes, verifier URLs or favorable proof fields.
+
+The embedded local removal controller can close its own query route after checking
+an exact removal fence. Its abort path revokes future local issuance under the
+same lock before capturing fresh query proof. These operations qualify only this
+process's routing controller. They do not delete Docker or cloud instances, and
+a replacement process cannot settle an older incarnation's removal.
+
+Tests cover the published Dispatch consumer, actual Authsome/Warden authorization,
+named persisted-history probes, exact replay, prestart drain, local settlement and
+a native PostgreSQL restart. The native restart kills the original process and
+checks that its accepted drain stays unknown while replacement admission stays
+open. Receipt-before-invocation crash windows, live Chronicle delivery and the
+active/inactive deferral browser scenario remain separate qualification work.
+Keep private state files out of evidence and remove them after a killed fixture;
+normal termination removes its state file automatically.

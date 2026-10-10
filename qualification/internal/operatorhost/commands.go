@@ -29,7 +29,7 @@ type commandRuntime struct {
 func (h *Host) configureCommands(ctx context.Context, appID aid.AppID, registry auth.Registry) error {
 	h.runtime = commandRuntime{workers: map[string]*drt.Worker{}, handles: map[durable.Key][]drt.AsyncActivityHandle{}}
 	for _, build := range []string{"operator-v1", "operator-v2"} {
-		worker, err := drt.NewWorker(h.Store, drt.Options{Namespace: "production", BuildID: build, Queue: "operator", Owner: "operator-fixture", Workflows: map[string]drt.WorkflowFunc{
+		options := drt.Options{Namespace: "production", BuildID: build, Queue: "operator", Owner: "operator-fixture", Workflows: map[string]drt.WorkflowFunc{
 			"operator": func(w *drt.Workflow, input []byte) ([]byte, error) {
 				w.SetQueryHandler("status", func([]byte) ([]byte, error) { return input, nil })
 				w.SetQueryHandler("mutate", func([]byte) ([]byte, error) { w.Activity("forbidden", "forbidden", "", nil); return nil, nil })
@@ -51,7 +51,12 @@ func (h *Host) configureCommands(ctx context.Context, appID aid.AppID, registry 
 				h.runtime.mu.Unlock()
 			}
 			return nil, err
-		}}})
+		}}}
+		if h.lifecycle != nil {
+			options.InstanceID = h.lifecycle.options.InstanceID
+			options.Retirement = &drt.RetirementOptions{InstallationID: "operator-host", WriterProtocol: durable.RetirementWriterProtocol}
+		}
+		worker, err := drt.NewWorker(h.Store, options)
 		if err != nil {
 			return err
 		}
@@ -77,7 +82,11 @@ func (h *Host) configureCommands(ctx context.Context, appID aid.AppID, registry 
 		return err
 	}
 	h.CommandPolicies = map[string]wid.PolicyID{}
-	for _, action := range []string{operator.StartWorkflow, operator.SignalWorkflow, operator.SignalStartWorkflow, operator.CancelWorkflow, operator.QueryWorkflow, operator.CompleteActivity, operator.HeartbeatActivity} {
+	actions := []string{operator.StartWorkflow, operator.SignalWorkflow, operator.SignalStartWorkflow, operator.CancelWorkflow, operator.QueryWorkflow, operator.CompleteActivity, operator.HeartbeatActivity}
+	if h.lifecycle != nil {
+		actions = append(actions, lifecycleActions()...)
+	}
+	for _, action := range actions {
 		role, kind := "commander", "user"
 		if action == operator.CompleteActivity || action == operator.HeartbeatActivity {
 			role, kind = "machine", "service_acct"
@@ -111,6 +120,9 @@ func (h *Host) worker(namespace, build string) (*drt.Worker, error) {
 	if worker == nil {
 		return nil, errors.New("operator fixture: runtime unavailable")
 	}
+	if h.lifecycle != nil && h.lifecycle.removed(worker.Status().RuntimeID) {
+		return nil, errors.New("operator fixture: query runtime removed")
+	}
 	return worker, nil
 }
 
@@ -121,6 +133,12 @@ func (h *Host) StartWorkers(ctx context.Context) func() error {
 	failures := make(chan error, len(h.runtime.workers))
 	for _, worker := range h.runtime.workers {
 		group.Go(func() {
+			if h.lifecycle != nil {
+				if err := h.lifecycle.authorizeStartup(ctx, worker); err != nil {
+					failures <- err
+					return
+				}
+			}
 			if err := worker.Run(ctx); err != nil {
 				failures <- err
 			}

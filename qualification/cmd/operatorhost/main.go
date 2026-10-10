@@ -17,6 +17,7 @@ import (
 	"github.com/xraph/grove/drivers/pgdriver"
 	_ "github.com/xraph/grove/drivers/pgdriver/pgmigrate"
 
+	"github.com/xraph/dispatch/durable"
 	"github.com/xraph/dispatch/qualification/internal/operatorhost"
 	"github.com/xraph/dispatch/store/memory"
 	pgstore "github.com/xraph/dispatch/store/postgres"
@@ -32,6 +33,8 @@ func run() (returnErr error) {
 	listen := flag.String("listen", "127.0.0.1:0", "numeric loopback listen address")
 	runWorkers := flag.Bool("run-workers", true, "run fixture workers; disable only to inspect accepted commands before execution")
 	statePath := flag.String("state-file", "", "new private state file containing URL and ephemeral credentials")
+	instance := flag.String("lifecycle-instance", "", "trusted physical instance identity for lifecycle qualification")
+	activation := flag.String("activation-file", "", "private local file whose creation releases registered workers to start")
 	flag.Parse()
 	address, _, err := net.SplitHostPort(*listen)
 	if err != nil {
@@ -55,7 +58,12 @@ func run() (returnErr error) {
 		}
 		store = pgstore.New(db)
 	}
-	host, err := operatorhost.New(ctx, store)
+	var host *operatorhost.Host
+	if *instance == "" {
+		host, err = operatorhost.New(ctx, store)
+	} else {
+		host, err = operatorhost.NewWithLifecycle(ctx, store, operatorhost.LifecycleOptions{InstanceID: *instance})
+	}
 	if err != nil {
 		return err
 	}
@@ -65,7 +73,7 @@ func run() (returnErr error) {
 		_ = host.Close(closeCtx)
 	}()
 	if *runWorkers {
-		stopWorkers := host.StartWorkers(ctx)
+		stopWorkers := startWorkers(ctx, host, *activation)
 		defer func() { returnErr = errors.Join(returnErr, stopWorkers()) }()
 	}
 	listener, err := (&net.ListenConfig{}).Listen(ctx, "tcp", *listen)
@@ -82,7 +90,8 @@ func run() (returnErr error) {
 	err = json.NewEncoder(file).Encode(struct {
 		URL         string                             `json:"url"`
 		Credentials map[string]operatorhost.Credential `json:"credentials"`
-	}{url, host.Credentials})
+		Runtimes    []durable.QueryRuntimeIdentity     `json:"runtimes,omitempty"`
+	}{url, host.Credentials, host.RuntimeIdentities()})
 	closeErr := file.Close()
 	if err != nil {
 		return err
@@ -104,4 +113,31 @@ func run() (returnErr error) {
 	shutdown, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	return server.Shutdown(shutdown)
+}
+
+// startWorkers leaves the control endpoint available while enrollment is pending.
+func startWorkers(ctx context.Context, host *operatorhost.Host, activation string) func() error {
+	ctx, cancel := context.WithCancel(ctx)
+	stopped := make(chan error, 1)
+	go func() {
+		if activation != "" {
+			tick := time.NewTicker(25 * time.Millisecond)
+			defer tick.Stop()
+			for {
+				if info, err := os.Stat(activation); err == nil && info.Mode().IsRegular() {
+					break
+				}
+				select {
+				case <-ctx.Done():
+					stopped <- nil
+					return
+				case <-tick.C:
+				}
+			}
+		}
+		stop := host.StartWorkers(ctx)
+		<-ctx.Done()
+		stopped <- stop()
+	}()
+	return func() error { cancel(); return <-stopped }
 }

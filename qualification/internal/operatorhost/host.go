@@ -66,11 +66,22 @@ type Host struct {
 	runtime         commandRuntime
 	engine          *engine.Engine
 	audit           security.Boundary
+	lifecycle       *lifecycleHost
 }
 
 // New provisions real Authsome sessions and Warden grants for two namespaces.
 // The host closes the injected store. Credentials are private fixture material.
 func New(ctx context.Context, store Store) (host *Host, returnErr error) {
+	return newHost(ctx, store, nil)
+}
+
+// NewWithLifecycle enables trusted process and retained-query qualification.
+// The supplied policies and identity belong to the host, not an HTTP request.
+func NewWithLifecycle(ctx context.Context, store Store, options LifecycleOptions) (*Host, error) {
+	return newHost(ctx, store, &options)
+}
+
+func newHost(ctx context.Context, store Store, options *LifecycleOptions) (host *Host, returnErr error) {
 	h := &Host{Store: store, Credentials: map[string]Credential{}}
 	defer func() {
 		if returnErr != nil {
@@ -160,10 +171,23 @@ func New(ctx context.Context, store Store) (host *Host, returnErr error) {
 	if _, err = rand.Read(key); err != nil {
 		return nil, err
 	}
+	if options != nil {
+		h.lifecycle, err = newLifecycleHost(h, *options)
+		if err != nil {
+			return nil, err
+		}
+	}
 	if configureErr := h.configureCommands(ctx, appID, registry); configureErr != nil {
 		return nil, configureErr
 	}
-	operators, err := operator.New(operator.Options{Store: store, Reads: store, Catalog: store, InstallationID: "operator-host", Runtime: h.worker, Audit: h.audit, Authorizer: &operator.WardenAuthorizer{Engine: func() (*warden.Engine, error) { return w, nil }}, CursorKeys: operator.CursorKeys{Active: "fixture-v1", Keys: map[string][]byte{"fixture-v1": key}}})
+	operatorOptions := operator.Options{Store: store, Reads: store, Catalog: store, InstallationID: "operator-host", Runtime: h.worker, Audit: h.audit, Authorizer: &operator.WardenAuthorizer{Engine: func() (*warden.Engine, error) { return w, nil }}, CursorKeys: operator.CursorKeys{Active: "fixture-v1", Keys: map[string][]byte{"fixture-v1": key}}}
+	if h.lifecycle != nil {
+		operatorOptions.BuildIdentity = h.lifecycle.buildIdentity
+		operatorOptions.WorkerControl = h.lifecycle.workerControl
+		operatorOptions.QueryHost = h.lifecycle
+		operatorOptions.QueryRegistrationPolicy = h.lifecycle.options.RegistrationPolicy
+	}
+	operators, err := operator.New(operatorOptions)
 	if err != nil {
 		return nil, err
 	}

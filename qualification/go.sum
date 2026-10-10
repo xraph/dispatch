@@ -392,8 +392,8 @@ github.com/xraph/chronicle v1.7.1-0.20261009182725-f75626bdff89 h1:sbQoA5T/m5oHf
 github.com/xraph/chronicle v1.7.1-0.20261009182725-f75626bdff89/go.mod h1:OZHmW29SZfNvsqDYUkh8U9r0jn10tdsQxmaUNmz2ioU=
 github.com/xraph/confy v1.0.3 h1:mY0kIo9+dU+XcGGN7cm4IfOhvk4SDj5TrnccpGi21fs=
 github.com/xraph/confy v1.0.3/go.mod h1:DcYB+N0yKpr3t1yhhkdIIiCfch30Kh5wW6GRntUMOGk=
-github.com/xraph/dispatch v1.7.1-0.20261010014027-59002dcb8357 h1:ziMfXRA1nUjTvcVBTpJwbWMu4Gj0Lmoah/0J6h1dVPU=
-github.com/xraph/dispatch v1.7.1-0.20261010014027-59002dcb8357/go.mod h1:Bbizpxh7vG5Z/JNpN28Waf4G+fv8sVPPk0kxF306/Cw=
+github.com/xraph/dispatch v1.7.1-0.20261010131509-3bf35669e07d h1:ZhrOBqbQ87NnWyS0k+GHTIHFxQCPvabPKFOjm4Pzf2s=
+github.com/xraph/dispatch v1.7.1-0.20261010131509-3bf35669e07d/go.mod h1:Bbizpxh7vG5Z/JNpN28Waf4G+fv8sVPPk0kxF306/Cw=
 github.com/xraph/forge v1.12.5-0.20261010012931-217abffa75f0 h1:7Ao8Al6g78lTvJrPOd/hzfXlSBu7eeP2HNuFM++pqac=
 github.com/xraph/forge v1.12.5-0.20261010012931-217abffa75f0/go.mod h1:O1JOH9fxDhKRyvBbIl2UpZ+aFCjv7vO/IbNfAwnYSEI=
 github.com/xraph/forge/extensions/auth v1.12.4-0.20261009184218-9ec7ce62855a h1:5LxuQsnKgSmWI2E3SIL7kUPrr6+WtOZiAM898OlrGkc=

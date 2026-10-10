@@ -42,7 +42,12 @@ type commandClient struct {
 
 func newCommandClient(t *testing.T, store Store) *commandClient {
 	t.Helper()
-	h, err := New(t.Context(), store)
+	return newConfiguredCommandClient(t, store, nil)
+}
+
+func newConfiguredCommandClient(t *testing.T, store Store, options *LifecycleOptions) *commandClient {
+	t.Helper()
+	h, err := newHost(t.Context(), store, options)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -91,7 +96,7 @@ func (c *commandClient) request(method, path, token string, raw []byte) (int, []
 func (c *commandClient) envelope(intent string, payload any) []byte {
 	c.t.Helper()
 	kind := "command"
-	if intent == "durable.query" || intent == "durable.capabilities" {
+	if intent == "durable.query" || intent == "durable.capabilities" || intent == "durable.compatibility" || intent == "durable.build" || intent == "durable.workerStatus" || intent == "durable.workerDrainReceipt" || intent == "durable.queryRuntime" || intent == "durable.queryRuntimeRemovalCheck" {
 		kind = "query"
 	}
 	raw, err := json.Marshal(map[string]any{"envelope": "v1", "kind": kind, "contributor": "dispatch", "intent": intent, "intentVersion": 1, "idempotencyKey": "transport-" + intent, "csrf": c.csrf, "params": map[string]any{"namespace": "foreign"}, "payload": payload})
