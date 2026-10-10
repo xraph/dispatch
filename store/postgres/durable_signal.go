@@ -248,12 +248,15 @@ func createSignalRun(ctx context.Context, tx driver.Tx, r durable.StartRequest, 
 	if err != nil {
 		return false, err
 	}
+	if admissionErr := admitExecution(ctx, tx, &execution, nil, "root", ""); admissionErr != nil {
+		return false, admissionErr
+	}
 	policy, err := encodeWorkflowRetryPolicy(execution.RetryPolicy)
 	if err != nil {
 		return false, err
 	}
 	result, err := tx.Exec(ctx, `INSERT INTO dispatch_executions (`+executionColumns+`)
- VALUES ($1,$2,$3,$4,$5,'running',1,2,$6,$7,$8,$8,$9,$10,$3,'','',1,$8,$11,$12,1,$8) ON CONFLICT DO NOTHING`, r.Namespace, r.WorkflowID, r.RunID, r.WorkflowType, r.BuildID, executionBytes(r.Input), []byte{}, now, taskNullableTime(execution.RunDeadlineAt), taskNullableTime(execution.ExecutionDeadlineAt), int64(execution.RunTimeout), policy)
+ VALUES ($1,$2,$3,$4,$5,'running',1,2,$6,$7,$8,$8,$9,$10,$3,'','',1,$8,$11,$12,1,$8,$13) ON CONFLICT DO NOTHING`, r.Namespace, r.WorkflowID, r.RunID, r.WorkflowType, r.BuildID, executionBytes(r.Input), []byte{}, now, taskNullableTime(execution.RunDeadlineAt), taskNullableTime(execution.ExecutionDeadlineAt), int64(execution.RunTimeout), policy, execution.AdmissionEpoch)
 	if err != nil {
 		return false, err
 	}

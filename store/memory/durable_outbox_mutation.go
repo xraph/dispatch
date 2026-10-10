@@ -57,6 +57,9 @@ func mutateAudited[T any](ctx context.Context, m *Store, namespace string, fn fu
 	if err := ctx.Err(); err != nil {
 		return zero, err
 	}
+	m.retirementNamespaces = c.retirementNamespaces
+	m.buildAdmissions = c.buildAdmissions
+	m.lifecycleReceipts = c.lifecycleReceipts
 	m.executions = c.executions
 	m.executionHeads = c.executionHeads
 	m.childParents = c.childParents
@@ -71,7 +74,7 @@ func mutateAudited[T any](ctx context.Context, m *Store, namespace string, fn fu
 	return result, nil
 }
 func (m *Store) durableCandidate(namespace string) *Store {
-	c := &Store{executions: maps.Clone(m.executions), executionHeads: maps.Clone(m.executionHeads), childParents: maps.Clone(m.childParents), childDeliveries: maps.Clone(m.childDeliveries), childDeliveryReceipts: maps.Clone(m.childDeliveryReceipts), signalReceipts: maps.Clone(m.signalReceipts), cancellationReceipts: maps.Clone(m.cancellationReceipts)}
+	c := &Store{namespaces: m.namespaces, retirementNamespaces: maps.Clone(m.retirementNamespaces), buildAdmissions: maps.Clone(m.buildAdmissions), lifecycleReceipts: maps.Clone(m.lifecycleReceipts), executions: maps.Clone(m.executions), executionHeads: maps.Clone(m.executionHeads), childParents: maps.Clone(m.childParents), childDeliveries: maps.Clone(m.childDeliveries), childDeliveryReceipts: maps.Clone(m.childDeliveryReceipts), signalReceipts: maps.Clone(m.signalReceipts), cancellationReceipts: maps.Clone(m.cancellationReceipts)}
 	for key, r := range c.executions {
 		if key.Namespace != namespace {
 			continue
@@ -154,6 +157,13 @@ func (m *Store) newDeliverySources(ctx context.Context, c *Store, namespace stri
 		if key.source.Namespace == namespace {
 			if _, exists := m.childDeliveryReceipts[key]; !exists {
 				receipt(key.source, "child_receipt", durable.ReceiptSourceID(key.id, key.requestID), r.receipt.Disposition, "child.deliver")
+			}
+		}
+	}
+	for key, r := range c.lifecycleReceipts {
+		if key.namespace == namespace {
+			if _, exists := m.lifecycleReceipts[key]; !exists {
+				sources = append(sources, durable.LifecycleDeliverySource(ctx, r))
 			}
 		}
 	}

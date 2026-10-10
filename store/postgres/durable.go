@@ -18,7 +18,7 @@ var _ durable.Store = (*Store)(nil)
 
 const executionColumns = `namespace, workflow_id, run_id, workflow_type, build_id,
     state, revision, last_sequence, input, output, created_at, updated_at, run_deadline_at, execution_deadline_at,
-    first_run_id, previous_run_id, next_run_id, run_number, first_started_at, run_timeout, retry_policy, retry_attempt, run_available_at`
+    first_run_id, previous_run_id, next_run_id, run_number, first_started_at, run_timeout, retry_policy, retry_attempt, run_available_at, admission_epoch`
 
 func scanExecution(row driver.Row) (durable.Execution, error) {
 	var e durable.Execution
@@ -26,7 +26,7 @@ func scanExecution(row driver.Row) (durable.Execution, error) {
 	var retryPolicy []byte
 	err := row.Scan(&e.Namespace, &e.WorkflowID, &e.RunID, &e.WorkflowType, &e.BuildID,
 		&e.State, &e.Revision, &e.LastSequence, &e.Input, &e.Output, &e.CreatedAt, &e.UpdatedAt, &runDeadline, &executionDeadline,
-		&e.FirstRunID, &e.PreviousRunID, &e.NextRunID, &e.RunNumber, &e.FirstStartedAt, &e.RunTimeout, &retryPolicy, &e.RetryAttempt, &e.RunAvailableAt)
+		&e.FirstRunID, &e.PreviousRunID, &e.NextRunID, &e.RunNumber, &e.FirstStartedAt, &e.RunTimeout, &retryPolicy, &e.RetryAttempt, &e.RunAvailableAt, &e.AdmissionEpoch)
 	if isNoRows(err) {
 		return durable.Execution{}, durable.ErrNotFound
 	}
@@ -108,7 +108,15 @@ func (s *Store) ClaimTask(ctx context.Context, r durable.ClaimRequest) (result *
 	if err := r.Validate(); err != nil {
 		return nil, err
 	}
-	task, err := scanTask(s.pgdb.QueryRow(ctx, `WITH candidate AS (
+	tx, err := s.pgdb.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer s.rollbackExecution(tx)
+	if checkErr := lockAuditMutation(ctx, tx, r.Namespace); checkErr != nil {
+		return nil, checkErr
+	}
+	task, err := scanTask(tx.QueryRow(ctx, `WITH candidate AS (
         SELECT t.namespace, t.workflow_id, t.run_id, t.task_id
         FROM dispatch_execution_tasks t JOIN dispatch_executions e
           USING (namespace, workflow_id, run_id)
@@ -129,6 +137,9 @@ func (s *Store) ClaimTask(ctx context.Context, r durable.ClaimRequest) (result *
 	}
 	if err != nil {
 		return nil, fmt.Errorf(errPrefix+"claim execution task: %w", err)
+	}
+	if checkErr := tx.Commit(); checkErr != nil {
+		return nil, checkErr
 	}
 	return task, nil
 }
@@ -153,6 +164,9 @@ func (s *Store) RenewTask(ctx context.Context, key durable.Key, token durable.Ta
 		return time.Time{}, err
 	}
 	defer s.rollbackExecution(tx)
+	if checkErr := lockAuditMutation(ctx, tx, key.Namespace); checkErr != nil {
+		return time.Time{}, checkErr
+	}
 	// Match the completion lock order. An UPDATE predicate can be evaluated
 	// before a row-lock wait; expiry must be checked after both locks are held.
 	execution, err := scanExecution(tx.QueryRow(ctx, `SELECT `+executionColumns+`

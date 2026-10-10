@@ -36,7 +36,11 @@ func insertChildExecutions(ctx context.Context, tx driver.Tx, parent durable.Key
 		if err != nil {
 			return err
 		}
-		created, err := insertStartedExecution(ctx, tx, child.Start, digest, now)
+		source, readErr := scanExecution(tx.QueryRow(ctx, `SELECT `+executionColumns+` FROM dispatch_executions WHERE namespace=$1 AND workflow_id=$2 AND run_id=$3`, parent.Namespace, parent.WorkflowID, parent.RunID))
+		if readErr != nil {
+			return readErr
+		}
+		created, err := insertStartedExecution(ctx, tx, child.Start, digest, now, &source, "child", child.CommandID)
 		if err != nil {
 			return err
 		}

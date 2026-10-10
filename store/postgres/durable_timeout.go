@@ -14,7 +14,15 @@ func (s *Store) ClaimTimeoutTask(ctx context.Context, r durable.TimeoutClaimRequ
 	if err := r.Validate(); err != nil {
 		return nil, err
 	}
-	task, err := scanTask(s.pgdb.QueryRow(ctx, `WITH candidate AS (
+	tx, err := s.pgdb.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer s.rollbackExecution(tx)
+	if checkErr := lockAuditMutation(ctx, tx, r.Namespace); checkErr != nil {
+		return nil, checkErr
+	}
+	task, err := scanTask(tx.QueryRow(ctx, `WITH candidate AS (
   SELECT t.namespace,t.workflow_id,t.run_id,t.task_id
   FROM dispatch_execution_tasks t JOIN dispatch_executions e USING(namespace,workflow_id,run_id)
   WHERE t.namespace=$1 AND t.kind='activity' AND NOT t.done
@@ -33,6 +41,9 @@ func (s *Store) ClaimTimeoutTask(ctx context.Context, r durable.TimeoutClaimRequ
 	}
 	if err != nil {
 		return nil, fmt.Errorf(errPrefix+"claim activity timeout: %w", err)
+	}
+	if checkErr := tx.Commit(); checkErr != nil {
+		return nil, checkErr
 	}
 	return task, nil
 }

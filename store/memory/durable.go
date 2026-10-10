@@ -61,6 +61,9 @@ func (m *Store) startExecution(ctx context.Context, r durable.StartRequest) (dur
 	if err != nil {
 		return durable.Receipt{}, err
 	}
+	if checkErr := m.admitExecution(&record.execution, nil, "root", ""); checkErr != nil {
+		return durable.Receipt{}, checkErr
+	}
 	record.receipts[r.RequestID] = durableReceipt{action: "execution.start", digest: digest, value: receipt}
 	m.installExecution(record)
 	return receipt, nil

@@ -85,8 +85,8 @@ func (s *Store) ListNamespaces(ctx context.Context, r durable.NamespaceList) ([]
 // Registration touches only catalog rows, and child mutations stay in one
 // namespace. Helpers and database triggers retain the same lock as a fallback.
 func lockAuditMutation(ctx context.Context, tx driver.Tx, namespace string) error {
-	_, err := tx.Exec(ctx, `SELECT dispatch_audit_writer_lock($1)`, namespace)
-	return err
+	_, err := tx.Exec(ctx, `SELECT dispatch_retirement_writer_lock($1,1)`, namespace)
+	return normalizeExecutionError(err)
 }
 func lockedAuditNamespace(ctx context.Context, tx driver.Tx, namespace string) (durable.NamespaceRecord, bool, error) {
 	if err := lockAuditMutation(ctx, tx, namespace); err != nil {

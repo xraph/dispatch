@@ -103,6 +103,9 @@ func (s *Store) ClaimChildDelivery(ctx context.Context, r durable.ChildDeliveryC
 		return nil, err
 	}
 	defer s.rollbackExecution(tx)
+	if checkErr := lockAuditMutation(ctx, tx, r.Namespace); checkErr != nil {
+		return nil, checkErr
+	}
 	d, err := scanChildDelivery(tx.QueryRow(ctx, `SELECT `+childDeliveryColumns+` FROM dispatch_child_deliveries WHERE namespace=$1 AND ($2='' OR (kind NOT IN ('close','cancel') AND target_build_id=$2) OR (kind IN ('close','cancel') AND $2=(SELECT e.build_id FROM dispatch_executions e WHERE e.namespace=dispatch_child_deliveries.namespace AND e.workflow_id=dispatch_child_deliveries.target_workflow_id AND e.first_run_id=dispatch_child_deliveries.target_run_id ORDER BY e.run_number DESC LIMIT 1))) AND NOT done AND available_at<=clock_timestamp() AND (lease_until IS NULL OR lease_until<=clock_timestamp()) ORDER BY available_at,delivery_id COLLATE "C" LIMIT 1 FOR UPDATE SKIP LOCKED`, r.Namespace, r.BuildID))
 	if errors.Is(err, durable.ErrNotFound) {
 		return nil, nil

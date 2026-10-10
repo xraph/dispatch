@@ -36,6 +36,9 @@ func (s *Store) ClaimExecutionTimeout(ctx context.Context, r durable.ExecutionTi
 		return nil, err
 	}
 	defer s.rollbackExecution(tx)
+	if checkErr := lockAuditMutation(ctx, tx, r.Namespace); checkErr != nil {
+		return nil, checkErr
+	}
 	grant, err := scanExecutionTimeout(tx.QueryRow(ctx, `SELECT `+executionTimeoutColumns+` FROM dispatch_executions
  WHERE namespace=$1 AND state='running' AND LEAST(run_deadline_at,execution_deadline_at)<=clock_timestamp()
  AND (timeout_lease_until IS NULL OR timeout_lease_until<=clock_timestamp())

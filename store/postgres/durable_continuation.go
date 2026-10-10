@@ -48,12 +48,19 @@ func insertContinuation(ctx context.Context, tx driver.Tx, batch *durable.Contin
 	if spec == nil {
 		spec = &batch.Spec
 	}
+	source, readErr := scanExecution(tx.QueryRow(ctx, `SELECT `+executionColumns+` FROM dispatch_executions WHERE namespace=$1 AND workflow_id=$2 AND run_id=$3`, e.Namespace, e.WorkflowID, e.PreviousRunID))
+	if readErr != nil {
+		return readErr
+	}
+	if admissionErr := admitExecution(ctx, tx, &e, &source, "continuation", ""); admissionErr != nil {
+		return admissionErr
+	}
 	policy, err := encodeWorkflowRetryPolicy(e.RetryPolicy)
 	if err != nil {
 		return err
 	}
 	_, err = tx.Exec(ctx, `INSERT INTO dispatch_executions (`+executionColumns+`)
- VALUES($1,$2,$3,$4,$5,'running',1,$6,$7,$8,$9,$9,$10,$11,$12,$13,'',$14,$15,$16,$17,$18,$19)`, e.Namespace, e.WorkflowID, e.RunID, e.WorkflowType, e.BuildID, e.LastSequence, executionBytes(e.Input), []byte{}, e.CreatedAt, taskNullableTime(e.RunDeadlineAt), taskNullableTime(e.ExecutionDeadlineAt), e.FirstRunID, e.PreviousRunID, e.RunNumber, e.FirstStartedAt, int64(e.RunTimeout), policy, e.RetryAttempt, e.AvailableAt())
+ VALUES($1,$2,$3,$4,$5,'running',1,$6,$7,$8,$9,$9,$10,$11,$12,$13,'',$14,$15,$16,$17,$18,$19,$20)`, e.Namespace, e.WorkflowID, e.RunID, e.WorkflowType, e.BuildID, e.LastSequence, executionBytes(e.Input), []byte{}, e.CreatedAt, taskNullableTime(e.RunDeadlineAt), taskNullableTime(e.ExecutionDeadlineAt), e.FirstRunID, e.PreviousRunID, e.RunNumber, e.FirstStartedAt, int64(e.RunTimeout), policy, e.RetryAttempt, e.AvailableAt(), e.AdmissionEpoch)
 	if isDuplicateKey(err) {
 		return durable.ErrExists
 	}

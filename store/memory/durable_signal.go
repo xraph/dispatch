@@ -96,6 +96,9 @@ func (m *Store) signalWithStart(ctx context.Context, r durable.SignalWithStartRe
 		if createErr != nil {
 			return durable.SignalReceipt{}, createErr
 		}
+		if admissionErr := m.admitExecution(&record.execution, nil, "root", ""); admissionErr != nil {
+			return durable.SignalReceipt{}, admissionErr
+		}
 		record.execution.LastSequence = 2
 		record.history = append(record.history, durable.Event{EventInput: durable.EventInput{Type: durable.EventSignalReceived, Payload: payload}, Sequence: 2, Time: now})
 		receipt = durable.SignalReceipt{Key: r.Start.Key, Receipt: durable.Receipt{Revision: 1, FirstSequence: 1, LastSequence: 2}, Started: true}

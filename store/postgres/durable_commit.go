@@ -68,7 +68,8 @@ func insertExecutionTask(ctx context.Context, tx driver.Tx, key durable.Key, spe
 }
 
 // StartExecution persists a run, its first event, task and receipt together.
-func (s *Store) StartExecution(ctx context.Context, r durable.StartRequest) (durable.Receipt, error) {
+func (s *Store) StartExecution(ctx context.Context, r durable.StartRequest) (result durable.Receipt, resultErr error) {
+	defer func() { resultErr = normalizeExecutionError(resultErr) }()
 	if err := r.Validate(); err != nil {
 		return durable.Receipt{}, err
 	}
@@ -87,11 +88,14 @@ func (s *Store) StartExecution(ctx context.Context, r durable.StartRequest) (dur
 	if lockErr := lockSignalWorkflow(ctx, tx, r.Namespace, r.WorkflowID); lockErr != nil {
 		return durable.Receipt{}, lockErr
 	}
+	if receipt, found, readErr := readExecutionReceipt(ctx, tx, r.Key, r.RequestID, digest); readErr != nil || found {
+		return receipt, readErr
+	}
 	now, err := executionTime(ctx, tx)
 	if err != nil {
 		return durable.Receipt{}, err
 	}
-	created, err := insertStartedExecution(ctx, tx, r, digest, now)
+	created, err := insertStartedExecution(ctx, tx, r, digest, now, nil, "root", "")
 	if err != nil {
 		return durable.Receipt{}, err
 	}

@@ -30,6 +30,7 @@ type Execution struct {
 	Key
 	WorkflowType        string    `json:"workflow_type"`
 	BuildID             string    `json:"build_id"`
+	AdmissionEpoch      int64     `json:"admission_epoch"`
 	State               State     `json:"state"`
 	Revision            int64     `json:"revision"`
 	LastSequence        int64     `json:"last_sequence"`
