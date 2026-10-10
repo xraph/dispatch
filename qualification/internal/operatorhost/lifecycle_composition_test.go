@@ -74,6 +74,7 @@ func TestMemoryLifecycleHistoricalProbes(t *testing.T) {
 	testLifecycleHistoricalProbes(t, memory.New())
 }
 func TestPostgresLifecycleHistoricalProbes(t *testing.T) {
+	t.Setenv("DISPATCH_OPERATOR_DSN", isolatedPostgresScenario(t))
 	testLifecycleHistoricalProbes(t, postgresCommands(t))
 }
 

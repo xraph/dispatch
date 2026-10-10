@@ -109,6 +109,7 @@ func (n *nativeLifecycleHost) kill(t *testing.T) {
 }
 
 func TestNativeLifecycleRestartKeepsOriginalDrainUnknown(t *testing.T) {
+	t.Setenv("DISPATCH_OPERATOR_DSN", isolatedPostgresScenario(t))
 	first := startNativeLifecycle(t, "native-physical-instance")
 	c := first.client
 	c.command("durable.retirementEnroll", operator.EnrollmentInput{NamespaceLifecycleInput: operator.NamespaceLifecycleInput{Namespace: "production"}, RequestID: "native-enroll"}, 200)
