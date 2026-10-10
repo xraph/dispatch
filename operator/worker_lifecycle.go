@@ -13,6 +13,9 @@ import (
 
 // WorkerControl is a trusted handle for exactly one immutable process incarnation.
 // A host must never reconnect this handle to a replacement RuntimeID.
+// BeginDrain must atomically refuse first acceptance after the original deadline
+// with ErrDrainDeadline, without closing admission or cancelling work. Exact
+// accepted replay remains available. Remote hosts enforce this at the process.
 type WorkerControl interface {
 	Status(context.Context) (drt.WorkerStatus, error)
 	Readiness(context.Context) (drt.WorkerReadiness, error)
@@ -42,7 +45,7 @@ func (c LocalWorkerControl) BeginDrain(ctx context.Context, r drt.DrainRequest) 
 	if c.Worker == nil {
 		return drt.DrainHandle{}, ErrRuntimeUnavailable
 	}
-	return c.Worker.BeginDrain(ctx, r)
+	return c.Worker.BeginDrainBeforeDeadline(ctx, r)
 }
 func (c LocalWorkerControl) WaitDrain(ctx context.Context, h drt.DrainHandle) (drt.DrainResult, error) {
 	if c.Worker == nil {
@@ -282,26 +285,19 @@ func (s *Service) workerDrain(ctx context.Context, p security.Principal, in Work
 		return WorkerDrainAcceptance{}, security.ErrUnavailable
 	}
 	out := workerDrainAcceptance(receipt)
-	expired := !receipt.WorkerDrain.Deadline.After(time.Now())
-	if expired {
-		out.Process = "incomplete"
-		out.DeadlineExpired = true
-	}
+	out.DeadlineExpired = !receipt.WorkerDrain.Deadline.After(time.Now())
 	// Resolve again after acceptance, and reject a changed process or routing.
 	control, current, resolveErr := s.process(ctx, target)
+	out.DeadlineExpired = !receipt.WorkerDrain.Deadline.After(time.Now())
 	if resolveErr != nil || current != identity {
 		return out, nil
 	}
-	var handle drt.DrainHandle
-	var invokeErr error
-	if expired {
-		status, statusErr := control.Status(ctx)
-		if statusErr != nil || status.Drain == nil {
-			return out, nil
-		}
-		handle = *status.Drain
-	} else {
-		handle, invokeErr = control.BeginDrain(ctx, drt.DrainRequest{OperationID: receipt.WorkerDrain.OperationID, Deadline: receipt.WorkerDrain.Deadline})
+	handle, invokeErr := control.BeginDrain(ctx, drt.DrainRequest{OperationID: receipt.WorkerDrain.OperationID, Deadline: receipt.WorkerDrain.Deadline})
+	out.DeadlineExpired = !receipt.WorkerDrain.Deadline.After(time.Now())
+	if errors.Is(invokeErr, drt.ErrDrainDeadline) {
+		// The exact handle proves this request was never accepted before expiry.
+		out.Process = "incomplete"
+		return out, nil
 	}
 	if invokeErr != nil || handle.RuntimeID != identity.RuntimeID || handle.OperationID != receipt.WorkerDrain.OperationID || !handle.Deadline.Equal(receipt.WorkerDrain.Deadline) {
 		return out, nil

@@ -24,6 +24,7 @@ var (
 	ErrWorkerStarted   = errors.New("durable runtime: worker already started")
 	ErrWorkerDraining  = errors.New("durable runtime: worker claim admission closed")
 	ErrDrainIncomplete = errors.New("durable runtime: drain incomplete")
+	ErrDrainDeadline   = errors.New("durable runtime: first drain acceptance deadline passed")
 )
 
 // DrainRequest fixes the operation deadline independently of any observer.
@@ -139,6 +140,17 @@ func (w *Worker) Status() WorkerStatus {
 // BeginDrain closes claim admission permanently. Its context only governs
 // acceptance; the explicit operation deadline governs cancellation of work.
 func (w *Worker) BeginDrain(ctx context.Context, r DrainRequest) (DrainHandle, error) {
+	return w.beginDrain(ctx, r, false)
+}
+
+// BeginDrainBeforeDeadline refuses a first acceptance after the operation deadline.
+// The refusal is synchronized with claim admission and leaves work untouched.
+// An exact already accepted operation can still be recovered after its deadline.
+func (w *Worker) BeginDrainBeforeDeadline(ctx context.Context, r DrainRequest) (DrainHandle, error) {
+	return w.beginDrain(ctx, r, true)
+}
+
+func (w *Worker) beginDrain(ctx context.Context, r DrainRequest, requireFuture bool) (DrainHandle, error) {
 	if !validID(r.OperationID) || r.Deadline.IsZero() {
 		return DrainHandle{}, durable.ErrInvalid
 	}
@@ -153,6 +165,9 @@ func (w *Worker) BeginDrain(ctx context.Context, r DrainRequest) (DrainHandle, e
 			return l.drain.handle, durable.ErrRequestConflict
 		}
 		return l.drain.handle, nil
+	}
+	if requireFuture && !r.Deadline.After(time.Now()) {
+		return DrainHandle{}, ErrDrainDeadline
 	}
 	d := &drainOperation{handle: DrainHandle{RuntimeID: w.options.RuntimeID, DrainRequest: r}, done: make(chan struct{})}
 	l.drain = d
