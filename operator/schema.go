@@ -16,7 +16,7 @@ func RegisterNamespaceSchema(ctx context.Context, store resourcetype.Store, n du
 		return durable.ErrInvalid
 	}
 	permissions := []resourcetype.PermissionDef{}
-	for _, action := range []string{ReadBuild, EnrollRetirement, RegisterBuild, RetireBuild, FinalizeBuild, ResumeBuild, ReadWorker, DrainWorker, Discover, ListExecutions, ReadExecution, ReadHistory, ReadTasks, ReadChain, ReadPayload, QueryWorkflow, ReadAudit, ReadHooks, StartWorkflow, SignalWorkflow, SignalStartWorkflow, CancelWorkflow, CompleteActivity, HeartbeatActivity} {
+	for _, action := range []string{ReadQueryRuntime, RegisterQueryRuntime, VerifyQueryRuntime, RemoveQueryRuntime, FinishQueryRuntime, AbortQueryRuntime, ReadBuild, EnrollRetirement, RegisterBuild, RetireBuild, FinalizeBuild, ResumeBuild, ReadWorker, DrainWorker, Discover, ListExecutions, ReadExecution, ReadHistory, ReadTasks, ReadChain, ReadPayload, QueryWorkflow, ReadAudit, ReadHooks, StartWorkflow, SignalWorkflow, SignalStartWorkflow, CancelWorkflow, CompleteActivity, HeartbeatActivity} {
 		permissions = append(permissions, resourcetype.PermissionDef{Name: action, Expression: "operator"})
 	}
 	return store.CreateResourceType(ctx, &resourcetype.ResourceType{ID: id.NewResourceTypeID(), TenantID: n.TenantID, NamespacePath: n.Namespace, AppID: n.AppID, Name: "dispatch_namespace", Relations: []resourcetype.RelationDef{{Name: "operator", AllowedSubjects: []string{"user", "service", "api_key", "service_acct"}}}, Permissions: permissions})

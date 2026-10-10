@@ -11,6 +11,8 @@ import (
 )
 
 type Options struct {
+	QueryHost               QueryRuntimeHost
+	QueryRegistrationPolicy QueryRegistrationPolicy
 	// WorkerControl resolves an immutable trusted process handle.
 	WorkerControl func(context.Context, durable.QueryRuntimeTarget) (WorkerControl, error)
 	// BuildIdentity resolves actual deployed artifact evidence at the trusted host.
@@ -29,17 +31,19 @@ type Options struct {
 	Runtime func(namespace, build string) (*drt.Worker, error)
 }
 type Service struct {
-	workerControl    func(context.Context, durable.QueryRuntimeTarget) (WorkerControl, error)
-	buildIdentity    func(context.Context, durable.BuildTarget) (durable.BuildQueryIdentity, error)
-	store            durable.Store
-	reads            durable.ReadStore
-	catalog          durable.NamespaceStore
-	installation     string
-	authorizer       Authorizer
-	audit            security.Boundary
-	cursors          cursorCodec
-	runtimeAvailable func(string, string) bool
-	runtime          func(string, string) (*drt.Worker, error)
+	queryHost               QueryRuntimeHost
+	queryRegistrationPolicy QueryRegistrationPolicy
+	workerControl           func(context.Context, durable.QueryRuntimeTarget) (WorkerControl, error)
+	buildIdentity           func(context.Context, durable.BuildTarget) (durable.BuildQueryIdentity, error)
+	store                   durable.Store
+	reads                   durable.ReadStore
+	catalog                 durable.NamespaceStore
+	installation            string
+	authorizer              Authorizer
+	audit                   security.Boundary
+	cursors                 cursorCodec
+	runtimeAvailable        func(string, string) bool
+	runtime                 func(string, string) (*drt.Worker, error)
 }
 
 func New(o Options) (*Service, error) {
@@ -50,7 +54,7 @@ func New(o Options) (*Service, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Service{workerControl: o.WorkerControl, buildIdentity: o.BuildIdentity, store: o.Store, reads: o.Reads, catalog: o.Catalog, installation: o.InstallationID, authorizer: o.Authorizer, audit: o.Audit, cursors: c, runtimeAvailable: o.RuntimeAvailable, runtime: o.Runtime}, nil
+	return &Service{queryHost: o.QueryHost, queryRegistrationPolicy: o.QueryRegistrationPolicy, workerControl: o.WorkerControl, buildIdentity: o.BuildIdentity, store: o.Store, reads: o.Reads, catalog: o.Catalog, installation: o.InstallationID, authorizer: o.Authorizer, audit: o.Audit, cursors: c, runtimeAvailable: o.RuntimeAvailable, runtime: o.Runtime}, nil
 }
 func bounded(ctx context.Context) (context.Context, context.CancelFunc) {
 	return context.WithTimeout(ctx, 5*time.Second)

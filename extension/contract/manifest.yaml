@@ -567,3 +567,369 @@ intents:
     schema:
       input: *workerDrainInput
       output: *workerDrainOutput
+  - name: durable.queryRuntime
+    kind: query
+    version: 1
+    requires:
+      warden: dispatchDurableOperator
+    capability: read
+    schema:
+      input:
+        type: object
+        properties:
+          namespace: &queryid001
+            type: string
+            minLength: 1
+          build_id: *queryid001
+          runtime_id: *queryid001
+        required:
+        - namespace
+        - build_id
+        - runtime_id
+      output: &queryid004
+        type: object
+        properties:
+          namespace: *queryid001
+          build_id: *queryid001
+          runtime_id: *queryid001
+          instance_id: *queryid001
+          identity_version: &queryid002
+            type: string
+            pattern: ^[1-9][0-9]*$
+          state:
+            type: string
+            enum:
+            - active
+            - removing
+            - removed
+          version: *queryid002
+          removal_epoch: &queryid006
+            type: string
+            pattern: ^(0|[1-9][0-9]*)$
+          proof_id: *queryid001
+          probe_policy_id: *queryid001
+          probe_policy_version: *queryid002
+          verified_at: &queryid003
+            type: string
+            format: date-time
+          valid_until: *queryid003
+        required:
+        - namespace
+        - build_id
+        - runtime_id
+        - instance_id
+        - identity_version
+        - state
+        - version
+        - removal_epoch
+        - probe_policy_id
+        - probe_policy_version
+        - verified_at
+        - valid_until
+  - name: durable.queryRuntimeRegister
+    kind: command
+    version: 1
+    requires:
+      warden: dispatchDurableOperator
+    capability: write
+    invalidates:
+    - durable.queryRuntime
+    - durable.queryRuntimeRemovalCheck
+    - durable.build
+    - durable.audit
+    schema:
+      input:
+        type: object
+        properties:
+          namespace: *queryid001
+          build_id: *queryid001
+          runtime_id: *queryid001
+          request_id: *queryid001
+          expected_version:
+            type: string
+            enum:
+            - '0'
+        required:
+        - namespace
+        - build_id
+        - runtime_id
+        - request_id
+        - expected_version
+      output:
+        type: object
+        properties:
+          namespace: *queryid001
+          request_id: *queryid001
+          operation:
+            type: string
+            enum:
+            - query_runtime.register
+          status:
+            type: string
+            enum:
+            - accepted
+          accepted_at: *queryid003
+          binding: *queryid004
+        required:
+        - namespace
+        - request_id
+        - operation
+        - status
+        - accepted_at
+        - binding
+  - name: durable.queryRuntimeVerify
+    kind: command
+    version: 1
+    requires:
+      warden: dispatchDurableOperator
+    capability: write
+    invalidates:
+    - durable.queryRuntime
+    - durable.queryRuntimeRemovalCheck
+    - durable.build
+    - durable.audit
+    schema:
+      input:
+        type: object
+        properties: &queryid005
+          namespace: *queryid001
+          build_id: *queryid001
+          runtime_id: *queryid001
+          request_id: *queryid001
+          expected_version: *queryid002
+        required:
+        - namespace
+        - build_id
+        - runtime_id
+        - request_id
+        - expected_version
+      output:
+        type: object
+        properties:
+          namespace: *queryid001
+          request_id: *queryid001
+          operation:
+            type: string
+            enum:
+            - query_runtime.verify
+          status:
+            type: string
+            enum:
+            - accepted
+          accepted_at: *queryid003
+          binding: *queryid004
+        required:
+        - namespace
+        - request_id
+        - operation
+        - status
+        - accepted_at
+        - binding
+  - name: durable.queryRuntimeRemove
+    kind: command
+    version: 1
+    requires:
+      warden: dispatchDurableOperator
+    capability: write
+    invalidates:
+    - durable.queryRuntime
+    - durable.queryRuntimeRemovalCheck
+    - durable.build
+    - durable.audit
+    schema:
+      input:
+        type: object
+        properties: *queryid005
+        required:
+        - namespace
+        - build_id
+        - runtime_id
+        - request_id
+        - expected_version
+      output:
+        type: object
+        properties:
+          namespace: *queryid001
+          request_id: *queryid001
+          operation:
+            type: string
+            enum:
+            - query_runtime.remove
+          status:
+            type: string
+            enum:
+            - accepted
+          accepted_at: *queryid003
+          binding: *queryid004
+          fence: &queryid007
+            type: object
+            properties:
+              namespace: *queryid001
+              build_id: *queryid001
+              runtime_id: *queryid001
+              instance_id: *queryid001
+              candidate_version: *queryid002
+              survivor_runtime_id: *queryid001
+              survivor_instance_id: *queryid001
+              survivor_version: *queryid006
+              build_epoch: *queryid002
+              build_version: *queryid002
+              build_state:
+                type: string
+                enum:
+                - accepting
+                - retiring
+                - retired
+              removal_epoch: *queryid002
+              request_id: *queryid001
+              digest:
+                type: string
+                pattern: ^[0-9a-f]{64}$
+              accepted_at: *queryid003
+              valid_until: *queryid003
+            required:
+            - namespace
+            - build_id
+            - runtime_id
+            - instance_id
+            - candidate_version
+            - survivor_version
+            - build_epoch
+            - build_version
+            - build_state
+            - removal_epoch
+            - request_id
+            - digest
+            - accepted_at
+            - valid_until
+        required:
+        - namespace
+        - request_id
+        - operation
+        - status
+        - accepted_at
+        - binding
+        - fence
+  - name: durable.queryRuntimeRemovalCheck
+    kind: query
+    version: 1
+    requires:
+      warden: dispatchDurableOperator
+    capability: read
+    schema:
+      input:
+        type: object
+        properties:
+          namespace: *queryid001
+          build_id: *queryid001
+          runtime_id: *queryid001
+          reservation_request_id: *queryid001
+          reservation_version: *queryid002
+        required:
+        - namespace
+        - build_id
+        - runtime_id
+        - reservation_request_id
+        - reservation_version
+      output:
+        type: object
+        properties:
+          fence: *queryid007
+          checked_at: *queryid003
+        required:
+        - fence
+        - checked_at
+  - name: durable.queryRuntimeFinish
+    kind: command
+    version: 1
+    requires:
+      warden: dispatchDurableOperator
+    capability: write
+    invalidates:
+    - durable.queryRuntime
+    - durable.queryRuntimeRemovalCheck
+    - durable.build
+    - durable.audit
+    schema:
+      input:
+        type: object
+        properties: &queryid008
+          namespace: *queryid001
+          build_id: *queryid001
+          runtime_id: *queryid001
+          reservation_request_id: *queryid001
+          reservation_version: *queryid002
+          request_id: *queryid001
+        required:
+        - namespace
+        - build_id
+        - runtime_id
+        - reservation_request_id
+        - reservation_version
+        - request_id
+      output:
+        type: object
+        properties:
+          namespace: *queryid001
+          request_id: *queryid001
+          operation:
+            type: string
+            enum:
+            - query_runtime.finish
+          status:
+            type: string
+            enum:
+            - accepted
+          accepted_at: *queryid003
+          binding: *queryid004
+        required:
+        - namespace
+        - request_id
+        - operation
+        - status
+        - accepted_at
+        - binding
+  - name: durable.queryRuntimeAbort
+    kind: command
+    version: 1
+    requires:
+      warden: dispatchDurableOperator
+    capability: write
+    invalidates:
+    - durable.queryRuntime
+    - durable.queryRuntimeRemovalCheck
+    - durable.build
+    - durable.audit
+    schema:
+      input:
+        type: object
+        properties: *queryid008
+        required:
+        - namespace
+        - build_id
+        - runtime_id
+        - reservation_request_id
+        - reservation_version
+        - request_id
+      output:
+        type: object
+        properties:
+          namespace: *queryid001
+          request_id: *queryid001
+          operation:
+            type: string
+            enum:
+            - query_runtime.abort
+          status:
+            type: string
+            enum:
+            - accepted
+          accepted_at: *queryid003
+          binding: *queryid004
+        required:
+        - namespace
+        - request_id
+        - operation
+        - status
+        - accepted_at
+        - binding

@@ -13,8 +13,10 @@ import (
 // LifecycleHost keeps deployment evidence and process control inside the host.
 // Its resolvers must bind actual immutable resources, never caller-supplied proof.
 type LifecycleHost struct {
-	BuildIdentity func(context.Context, durable.BuildTarget) (durable.BuildQueryIdentity, error)
-	WorkerControl func(context.Context, durable.QueryRuntimeTarget) (WorkerControl, error)
+	QueryRuntime            QueryRuntimeHost
+	QueryRegistrationPolicy QueryRegistrationPolicy
+	BuildIdentity           func(context.Context, durable.BuildTarget) (durable.BuildQueryIdentity, error)
+	WorkerControl           func(context.Context, durable.QueryRuntimeTarget) (WorkerControl, error)
 }
 
 const (
@@ -29,6 +31,9 @@ const (
 )
 
 func lifecycleAction(action string) bool {
+	if queryLifecycleAction(action) {
+		return true
+	}
 	switch action {
 	case ReadBuild, EnrollRetirement, RegisterBuild, RetireBuild, FinalizeBuild, ResumeBuild, ReadWorker, DrainWorker:
 		return true

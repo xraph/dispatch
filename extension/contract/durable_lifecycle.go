@@ -10,6 +10,9 @@ import (
 )
 
 func lifecycleDurableAction(intent string) string {
+	if action := queryLifecycleDurableAction(intent); action != "" {
+		return action
+	}
 	switch intent {
 	case "durable.compatibility":
 		return operator.ReadBuild
@@ -35,6 +38,9 @@ func lifecycleDurableAction(intent string) string {
 	return ""
 }
 func lifecycleDurableKind(intent string) fc.Kind {
+	if kind := queryLifecycleDurableKind(intent); kind != "" {
+		return kind
+	}
 	switch intent {
 	case "durable.compatibility":
 		return fc.KindQuery
@@ -60,7 +66,7 @@ func lifecycleDurableKind(intent string) fc.Kind {
 	return ""
 }
 func lifecycleDurableBindings(deps Deps) []binding {
-	return []binding{
+	return append([]binding{
 		query("durable.compatibility", durableHandle(deps, "durable.compatibility", func(ctx context.Context, s *operator.Service, p security.Principal, in operator.NamespaceLifecycleInput) (operator.Compatibility, error) {
 			return s.Compatibility(ctx, p, in)
 		})),
@@ -91,5 +97,5 @@ func lifecycleDurableBindings(deps Deps) []binding {
 		query("durable.workerDrainReceipt", durableHandle(deps, "durable.workerDrainReceipt", func(ctx context.Context, s *operator.Service, p security.Principal, in operator.WorkerDrainInput) (operator.WorkerDrainAcceptance, error) {
 			return s.WorkerDrainReceipt(ctx, p, in)
 		})),
-	}
+	}, queryLifecycleDurableBindings(deps)...)
 }
