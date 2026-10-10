@@ -60,3 +60,8 @@ func TestRetirementExpansionConformance(t *testing.T) {
 	parsed.Path = name[1 : len(name)-1]
 	durabletest.Run(t, openWakeStore(t, parsed.String()))
 }
+
+func TestWorkflowTaskDeferral(t *testing.T) {
+	s, _, _, _ := retirementFixture(t)
+	durabletest.RunWorkflowTaskDeferral(t, s)
+}

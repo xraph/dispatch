@@ -38,3 +38,13 @@ func TestRetiringContinuationLineage(t *testing.T) {
 func TestRetirementLateChildBlocker(t *testing.T) {
 	durabletest.RunRetirementLateChildBlocker(t, New())
 }
+
+func TestWorkflowTaskDeferral(t *testing.T) { durabletest.RunWorkflowTaskDeferral(t, New()) }
+
+func TestWorkflowTaskDeferralIntentRollback(t *testing.T) {
+	s := New()
+	durabletest.RunWorkflowTaskDeferralIntentRollback(t, s, func() func() {
+		s.outboxPrepare = func(durable.Delivery) error { return errors.New("injected deferral intent failure") }
+		return func() { s.outboxPrepare = nil }
+	})
+}

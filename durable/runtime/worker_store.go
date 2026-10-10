@@ -101,7 +101,7 @@ func (w *Worker) persistReceiptWithSend(ctx context.Context, request durable.Com
 }
 
 func definitiveCommitError(err error) bool {
-	return errors.Is(err, durable.ErrBuildAdmission) || errors.Is(err, durable.ErrLifecycleBusy) || errors.Is(err, durable.ErrWriterCompatibility) || errors.Is(err, durable.ErrExecutionDeadline) || errors.Is(err, durable.ErrTaskDeadline) || errors.Is(err, durable.ErrTaskConflict) || errors.Is(err, durable.ErrInvalid) || errors.Is(err, durable.ErrLeaseLost) ||
+	return errors.Is(err, durable.ErrAdmissionChanged) || errors.Is(err, durable.ErrBuildAdmission) || errors.Is(err, durable.ErrLifecycleBusy) || errors.Is(err, durable.ErrWriterCompatibility) || errors.Is(err, durable.ErrExecutionDeadline) || errors.Is(err, durable.ErrTaskDeadline) || errors.Is(err, durable.ErrTaskConflict) || errors.Is(err, durable.ErrInvalid) || errors.Is(err, durable.ErrLeaseLost) ||
 		errors.Is(err, durable.ErrRevisionConflict) || errors.Is(err, durable.ErrClosed) ||
 		errors.Is(err, durable.ErrRequestConflict) || errors.Is(err, durable.ErrExists) || errors.Is(err, durable.ErrNotFound)
 }

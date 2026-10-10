@@ -27,6 +27,12 @@ func TestWireFixtures(t *testing.T) {
 		"deliveries_blocked":         Deliveries{Page: Page[Delivery]{Items: []Delivery{{ID: "source-record", State: "blocked", Attempts: "9007199254740993", AcceptedAt: now}}, Complete: true, AsOf: now, Observation: "current_page"}, Pending: "2", Blocked: "1", RemoteDelivery: "unavailable", ExternalAnchoring: "unavailable"},
 		"payload_reveal":             Payload{State: "revealed", Encoding: "base64", Input: []byte(`{"invoice":42}`), Output: nil, Revision: "9007199254740993"},
 	}
+
+	deferral := TaskDeferral{Active: true, Reason: "target_retiring", TargetBuildID: "next-build", TargetState: durable.DeferralRetiring, TargetRetirementEpoch: "9007199254740993", SourceEpoch: "9007199254740994", SourceRevision: "9007199254740995", TaskVersion: "9007199254740996", Count: "2", ReferenceKind: durable.DeferralChild, CommandID: "child:payment", RecordedAt: now, RetryAt: now.Add(2 * time.Second), PolicyVersion: "1"}
+	examples["tasks_deferred"] = Page[Task]{Items: []Task{{ID: "workflow:1", Kind: durable.TaskWorkflow, State: "pending", Attempt: "2", Version: deferral.TaskVersion, AvailableAt: deferral.RetryAt, Deferral: &deferral}}, Complete: true, AsOf: now, Observation: "current_page", Revision: deferral.SourceRevision}
+	retained := deferral
+	retained.Active = false
+	examples["tasks_deferral_retained"] = Page[Task]{Items: []Task{{ID: "workflow:1", Kind: durable.TaskWorkflow, State: "leased", Attempt: "3", Version: "9007199254740997", AvailableAt: deferral.RetryAt, LeaseUntil: &now, Deferral: &retained}}, Complete: true, AsOf: now, Observation: "current_page", Revision: deferral.SourceRevision}
 	envelopes := map[string]any{}
 	for name, data := range examples {
 		raw, err := json.Marshal(data)

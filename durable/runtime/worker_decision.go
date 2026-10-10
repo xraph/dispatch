@@ -15,7 +15,7 @@ type taskPayload struct {
 	WorkflowQueue string  `json:"workflow_queue"`
 }
 
-func (w *Worker) processWorkflow(ctx context.Context, task durable.Task) error {
+func (w *Worker) processWorkflow(ctx context.Context, task durable.Task, lease *taskLease) error {
 	var conflict error
 	for range 16 {
 		execution, events, err := w.snapshot(ctx, task.Key)
@@ -37,6 +37,14 @@ func (w *Worker) processWorkflow(ctx context.Context, task durable.Task) error {
 		err = w.prepareCancellations(ctx, task, execution, events, decision, &request)
 		if err == nil {
 			err = w.persistChildDecision(ctx, task, events, request)
+		}
+		var refusal *durable.BuildAdmissionError
+		if errors.As(err, &refusal) {
+			err = w.deferWorkflow(ctx, task, execution.Revision, refusal, lease)
+		}
+		if errors.Is(err, durable.ErrAdmissionChanged) {
+			conflict = err
+			continue
 		}
 		if !errors.Is(err, durable.ErrRevisionConflict) && !errors.Is(err, durable.ErrTaskConflict) {
 			return err

@@ -11,6 +11,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/xraph/dispatch/durable"
+	"github.com/xraph/dispatch/durable/durabletest"
 	pgstore "github.com/xraph/dispatch/store/postgres"
 )
 
@@ -303,4 +304,23 @@ func TestRetirementBuildIntentRollback(t *testing.T) {
 	if _, err = s.FinalizeBuildRetirement(t.Context(), final); err != nil {
 		t.Fatal(err)
 	}
+}
+
+func TestWorkflowTaskDeferralIntentRollback(t *testing.T) {
+	s, dsn, _, _ := retirementFixture(t)
+	c := retirementConn(t, dsn)
+	remove := func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if _, err := c.Exec(ctx, `DROP TRIGGER IF EXISTS dispatch_test_deferral_intent_failure ON dispatch_durable_outbox; DROP FUNCTION IF EXISTS dispatch_test_deferral_intent_failure()`); err != nil {
+			t.Error(err)
+		}
+	}
+	t.Cleanup(remove)
+	durabletest.RunWorkflowTaskDeferralIntentRollback(t, s, func() func() {
+		if _, err := c.Exec(t.Context(), `CREATE FUNCTION dispatch_test_deferral_intent_failure() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF NEW.envelope->>'Action'='workflow.task_deferred' THEN RAISE EXCEPTION 'injected deferral intent failure'; END IF; RETURN NEW; END $$; CREATE TRIGGER dispatch_test_deferral_intent_failure BEFORE INSERT ON dispatch_durable_outbox FOR EACH ROW EXECUTE FUNCTION dispatch_test_deferral_intent_failure()`); err != nil {
+			t.Fatal(err)
+		}
+		return remove
+	})
 }

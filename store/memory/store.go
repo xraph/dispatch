@@ -36,6 +36,8 @@ var (
 // Store is a fully in-memory implementation of store.Store.
 // Safe for concurrent access. Intended for unit testing and development.
 type Store struct {
+	taskDeferrals        map[taskDeferralKey]durable.WorkflowTaskDeferral
+	taskDeferralReceipts map[taskDeferralKey]durable.WorkflowTaskDeferral
 	mu                   sync.RWMutex
 	legacyAttempts       map[string]durable.LegacyAttempt
 	namespaces           map[string]durable.NamespaceRecord
@@ -72,6 +74,8 @@ type Store struct {
 // New returns a new empty Store.
 func New() *Store {
 	return &Store{
+		taskDeferrals:         make(map[taskDeferralKey]durable.WorkflowTaskDeferral),
+		taskDeferralReceipts:  make(map[taskDeferralKey]durable.WorkflowTaskDeferral),
 		namespaces:            make(map[string]durable.NamespaceRecord),
 		retirementNamespaces:  make(map[string]durable.CompatibilityFacts),
 		buildAdmissions:       make(map[durable.BuildTarget]durable.BuildAdmission),

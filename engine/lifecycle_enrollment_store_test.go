@@ -39,3 +39,12 @@ func (s *strictLifecycleStore) AbortBuildRetirement(ctx context.Context, r durab
 	defer s.call("AbortBuildRetirement")()
 	return s.base.AbortBuildRetirement(ctx, r)
 }
+
+func (s *strictLifecycleStore) DeferWorkflowTask(ctx context.Context, r durable.WorkflowTaskDeferralRequest) (durable.WorkflowTaskDeferralReceipt, error) {
+	defer s.call("DeferWorkflowTask")()
+	return s.base.DeferWorkflowTask(ctx, r)
+}
+func (s *strictLifecycleStore) GetWorkflowTaskDeferral(ctx context.Context, key durable.Key, taskID string) (durable.WorkflowTaskDeferral, error) {
+	defer s.call("GetWorkflowTaskDeferral")()
+	return s.base.GetWorkflowTaskDeferral(ctx, key, taskID)
+}

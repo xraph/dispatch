@@ -263,6 +263,7 @@ func (s *Service) History(ctx context.Context, p security.Principal, in RunInput
 }
 
 type Task struct {
+	Deferral    *TaskDeferral    `json:"deferral"`
 	ID          string           `json:"id"`
 	Kind        durable.TaskKind `json:"kind"`
 	State       string           `json:"state"`
@@ -309,7 +310,11 @@ func (s *Service) Tasks(ctx context.Context, p security.Principal, in durable.Ta
 		case t.LeaseUntil.After(out.AsOf):
 			status = "leased"
 		}
-		out.Items = append(out.Items, Task{ID: t.ID, Kind: t.Kind, State: status, Attempt: strconv.FormatInt(t.Attempt, 10), Version: strconv.FormatInt(t.Version, 10), AvailableAt: t.AvailableAt, LeaseUntil: optionalTime(t.LeaseUntil), DeadlineAt: optionalTime(t.DeadlineAt), HeartbeatAt: optionalTime(t.HeartbeatAt)})
+		deferral, readErr := s.taskDeferral(ctx, in.Key, t.ID)
+		if readErr != nil {
+			return out, readErr
+		}
+		out.Items = append(out.Items, Task{Deferral: deferral, ID: t.ID, Kind: t.Kind, State: status, Attempt: strconv.FormatInt(t.Attempt, 10), Version: strconv.FormatInt(t.Version, 10), AvailableAt: t.AvailableAt, LeaseUntil: optionalTime(t.LeaseUntil), DeadlineAt: optionalTime(t.DeadlineAt), HeartbeatAt: optionalTime(t.HeartbeatAt)})
 	}
 	out.Revision = strconv.FormatInt(e.Revision, 10)
 	out.Complete = next == ""

@@ -254,6 +254,7 @@
     "data": {
       "items": [
         {
+          "deferral": null,
           "id": "activity:payment",
           "kind": "activity",
           "state": "awaiting_callback",
@@ -270,6 +271,94 @@
       "observation": "current_page",
       "total": null,
       "revision": "9007199254740993"
+    },
+    "meta": {
+      "intentVersion": 1
+    }
+  },
+  "tasks_deferral_retained": {
+    "ok": true,
+    "envelope": "v1",
+    "kind": "query",
+    "data": {
+      "items": [
+        {
+          "deferral": {
+            "active": false,
+            "reason": "target_retiring",
+            "target_build_id": "next-build",
+            "target_state": "retiring",
+            "target_retirement_epoch": "9007199254740993",
+            "source_epoch": "9007199254740994",
+            "source_revision": "9007199254740995",
+            "task_version": "9007199254740996",
+            "count": "2",
+            "reference_kind": "child",
+            "command_id": "child:payment",
+            "recorded_at": "2026-10-09T12:00:00Z",
+            "retry_at": "2026-10-09T12:00:02Z",
+            "policy_version": "1"
+          },
+          "id": "workflow:1",
+          "kind": "workflow",
+          "state": "leased",
+          "attempt": "3",
+          "version": "9007199254740997",
+          "available_at": "2026-10-09T12:00:02Z",
+          "lease_until": "2026-10-09T12:00:00Z",
+          "deadline_at": null,
+          "heartbeat_at": null
+        }
+      ],
+      "complete": true,
+      "as_of": "2026-10-09T12:00:00Z",
+      "observation": "current_page",
+      "total": null,
+      "revision": "9007199254740995"
+    },
+    "meta": {
+      "intentVersion": 1
+    }
+  },
+  "tasks_deferred": {
+    "ok": true,
+    "envelope": "v1",
+    "kind": "query",
+    "data": {
+      "items": [
+        {
+          "deferral": {
+            "active": true,
+            "reason": "target_retiring",
+            "target_build_id": "next-build",
+            "target_state": "retiring",
+            "target_retirement_epoch": "9007199254740993",
+            "source_epoch": "9007199254740994",
+            "source_revision": "9007199254740995",
+            "task_version": "9007199254740996",
+            "count": "2",
+            "reference_kind": "child",
+            "command_id": "child:payment",
+            "recorded_at": "2026-10-09T12:00:00Z",
+            "retry_at": "2026-10-09T12:00:02Z",
+            "policy_version": "1"
+          },
+          "id": "workflow:1",
+          "kind": "workflow",
+          "state": "pending",
+          "attempt": "2",
+          "version": "9007199254740996",
+          "available_at": "2026-10-09T12:00:02Z",
+          "lease_until": null,
+          "deadline_at": null,
+          "heartbeat_at": null
+        }
+      ],
+      "complete": true,
+      "as_of": "2026-10-09T12:00:00Z",
+      "observation": "current_page",
+      "total": null,
+      "revision": "9007199254740995"
     },
     "meta": {
       "intentVersion": 1

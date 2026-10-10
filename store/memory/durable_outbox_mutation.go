@@ -57,6 +57,8 @@ func mutateAudited[T any](ctx context.Context, m *Store, namespace string, fn fu
 	if err := ctx.Err(); err != nil {
 		return zero, err
 	}
+	m.taskDeferrals = c.taskDeferrals
+	m.taskDeferralReceipts = c.taskDeferralReceipts
 	m.retirementNamespaces = c.retirementNamespaces
 	m.buildAdmissions = c.buildAdmissions
 	m.lifecycleReceipts = c.lifecycleReceipts
@@ -74,7 +76,7 @@ func mutateAudited[T any](ctx context.Context, m *Store, namespace string, fn fu
 	return result, nil
 }
 func (m *Store) durableCandidate(namespace string) *Store {
-	c := &Store{namespaces: m.namespaces, retirementNamespaces: maps.Clone(m.retirementNamespaces), buildAdmissions: maps.Clone(m.buildAdmissions), lifecycleReceipts: maps.Clone(m.lifecycleReceipts), executions: maps.Clone(m.executions), executionHeads: maps.Clone(m.executionHeads), childParents: maps.Clone(m.childParents), childDeliveries: maps.Clone(m.childDeliveries), childDeliveryReceipts: maps.Clone(m.childDeliveryReceipts), signalReceipts: maps.Clone(m.signalReceipts), cancellationReceipts: maps.Clone(m.cancellationReceipts)}
+	c := &Store{taskDeferrals: maps.Clone(m.taskDeferrals), taskDeferralReceipts: maps.Clone(m.taskDeferralReceipts), namespaces: m.namespaces, retirementNamespaces: maps.Clone(m.retirementNamespaces), buildAdmissions: maps.Clone(m.buildAdmissions), lifecycleReceipts: maps.Clone(m.lifecycleReceipts), executions: maps.Clone(m.executions), executionHeads: maps.Clone(m.executionHeads), childParents: maps.Clone(m.childParents), childDeliveries: maps.Clone(m.childDeliveries), childDeliveryReceipts: maps.Clone(m.childDeliveryReceipts), signalReceipts: maps.Clone(m.signalReceipts), cancellationReceipts: maps.Clone(m.cancellationReceipts)}
 	for key, r := range c.executions {
 		if key.Namespace != namespace {
 			continue
