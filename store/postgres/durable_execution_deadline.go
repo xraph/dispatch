@@ -20,7 +20,17 @@ func normalizeExecutionError(err error) error {
 		case "DL002":
 			return errors.Join(durable.ErrLifecycleBusy, err)
 		case "DL004":
-			return durable.ErrQueryRetention
+			reason := "database_guard"
+			var native *pgconn.PgError
+			if errors.As(err, &native) {
+				switch native.Message {
+				case "query runtime identity is immutable":
+					reason = "immutable_binding"
+				case "query runtime binding is inconsistent":
+					reason = "binding_row"
+				}
+			}
+			return durable.NewQueryRejection(durable.ErrQueryRetention, durable.QueryRejectionDiagnostic{Stage: "postgres_guard", Reason: reason, SQLState: state.SQLState()})
 		case "DL003":
 			var native *pgconn.PgError
 			if errors.As(err, &native) {

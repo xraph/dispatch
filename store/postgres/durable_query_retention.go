@@ -132,7 +132,29 @@ func (s *Store) ListQueryRuntimes(ctx context.Context, r durable.QueryRuntimeLis
 	return page, err
 }
 func (s *Store) mutateQueryRuntime(ctx context.Context, target durable.QueryRuntimeTarget, operation durable.LifecycleOperation, id, digest, command string, settlement *durable.QueryRemovalAbortEvidence, apply func(driver.Tx, durable.BuildAdmission, durable.QueryRuntimeBinding, bool, time.Time) (durable.QueryRuntimeBinding, error)) (result durable.LifecycleReceipt, resultErr error) {
-	defer func() { resultErr = normalizeExecutionError(resultErr) }()
+	return s.mutateQueryRuntimeAt(ctx, target, operation, id, digest, command, settlement, apply, executionTime)
+}
+
+type queryAcceptanceSample func(context.Context, driver.Tx) (time.Time, error)
+
+func (s *Store) mutateQueryRuntimeAt(ctx context.Context, target durable.QueryRuntimeTarget, operation durable.LifecycleOperation, id, digest, command string, settlement *durable.QueryRemovalAbortEvidence, apply func(driver.Tx, durable.BuildAdmission, durable.QueryRuntimeBinding, bool, time.Time) (durable.QueryRuntimeBinding, error), sample queryAcceptanceSample) (result durable.LifecycleReceipt, resultErr error) {
+	var observed time.Time
+	var priorSnapshot durable.QueryRuntimeBinding
+	var proofSnapshot durable.QueryRuntimeVerification
+	defer func() {
+		resultErr = normalizeExecutionError(resultErr)
+		if d, ok := durable.QueryRejectionDetails(resultErr); ok {
+			d.Target, d.RequestID, d.Operation = target, id, operation
+			d.BindingState, d.BindingVersion = priorSnapshot.State, priorSnapshot.Version
+			if !observed.IsZero() {
+				d.ObservedAt = observed
+			}
+			if d.VerifiedAt.IsZero() {
+				d.VerifiedAt, d.ValidUntil = proofSnapshot.VerifiedAt, proofSnapshot.ValidUntil
+			}
+			resultErr = durable.NewQueryRejection(resultErr, d)
+		}
+	}()
 	tx, err := s.pgdb.BeginTx(ctx, nil)
 	if err != nil {
 		return result, err
@@ -158,10 +180,12 @@ func (s *Store) mutateQueryRuntime(ctx context.Context, target durable.QueryRunt
 	if err != nil && !errors.Is(err, durable.ErrNotFound) {
 		return result, err
 	}
-	now, err := executionTime(ctx, tx)
+	priorSnapshot = prior
+	now, err := sample(ctx, tx)
 	if err != nil {
 		return result, err
 	}
+	observed = now
 	next, err := apply(tx, build, prior, exists, now)
 	if err != nil {
 		return result, err
@@ -169,6 +193,7 @@ func (s *Store) mutateQueryRuntime(ctx context.Context, target durable.QueryRunt
 	if checkErr := next.Validate(); checkErr != nil {
 		return result, checkErr
 	}
+	proofSnapshot = next.Verification
 	data, err := json.Marshal(next)
 	if err != nil {
 		return result, err
@@ -201,6 +226,9 @@ func (s *Store) RegisterQueryRuntime(ctx context.Context, r durable.RegisterQuer
 	})
 }
 func (s *Store) RecordQueryRuntimeVerification(ctx context.Context, r durable.VerifyQueryRuntimeRequest) (durable.LifecycleReceipt, error) {
+	return s.recordQueryRuntimeVerification(ctx, r, executionTime)
+}
+func (s *Store) recordQueryRuntimeVerification(ctx context.Context, r durable.VerifyQueryRuntimeRequest, sample queryAcceptanceSample) (durable.LifecycleReceipt, error) {
 	if checkErr := r.Validate(); checkErr != nil {
 		return durable.LifecycleReceipt{}, checkErr
 	}
@@ -209,14 +237,17 @@ func (s *Store) RecordQueryRuntimeVerification(ctx context.Context, r durable.Ve
 	if err != nil {
 		return durable.LifecycleReceipt{}, err
 	}
-	return s.mutateQueryRuntime(ctx, r.QueryRuntimeTarget, operation, r.RequestID, digest, r.CommandDigest, nil, func(_ driver.Tx, _ durable.BuildAdmission, b durable.QueryRuntimeBinding, exists bool, now time.Time) (durable.QueryRuntimeBinding, error) {
+	return s.mutateQueryRuntimeAt(ctx, r.QueryRuntimeTarget, operation, r.RequestID, digest, r.CommandDigest, nil, func(_ driver.Tx, _ durable.BuildAdmission, b durable.QueryRuntimeBinding, exists bool, now time.Time) (durable.QueryRuntimeBinding, error) {
 		if !exists {
 			return b, durable.ErrNotFound
 		}
 		return durable.VerifyQueryBinding(b, r, now)
-	})
+	}, sample)
 }
 func (s *Store) AbortQueryRuntimeRemoval(ctx context.Context, r durable.AbortQueryRemovalRequest) (durable.LifecycleReceipt, error) {
+	return s.abortQueryRuntimeRemoval(ctx, r, executionTime)
+}
+func (s *Store) abortQueryRuntimeRemoval(ctx context.Context, r durable.AbortQueryRemovalRequest, sample queryAcceptanceSample) (durable.LifecycleReceipt, error) {
 	if checkErr := r.Validate(); checkErr != nil {
 		return durable.LifecycleReceipt{}, checkErr
 	}
@@ -225,12 +256,12 @@ func (s *Store) AbortQueryRuntimeRemoval(ctx context.Context, r durable.AbortQue
 	if err != nil {
 		return durable.LifecycleReceipt{}, err
 	}
-	return s.mutateQueryRuntime(ctx, r.QueryRuntimeTarget, operation, r.RequestID, digest, r.CommandDigest, &durable.QueryRemovalAbortEvidence{Fence: r.Fence, Settlement: r.Settlement}, func(_ driver.Tx, _ durable.BuildAdmission, b durable.QueryRuntimeBinding, exists bool, now time.Time) (durable.QueryRuntimeBinding, error) {
+	return s.mutateQueryRuntimeAt(ctx, r.QueryRuntimeTarget, operation, r.RequestID, digest, r.CommandDigest, &durable.QueryRemovalAbortEvidence{Fence: r.Fence, Settlement: r.Settlement}, func(_ driver.Tx, _ durable.BuildAdmission, b durable.QueryRuntimeBinding, exists bool, now time.Time) (durable.QueryRuntimeBinding, error) {
 		if !exists {
 			return b, durable.ErrNotFound
 		}
 		return durable.AbortQueryRemoval(b, r, now)
-	})
+	}, sample)
 }
 func (s *Store) BeginQueryRuntimeRemoval(ctx context.Context, r durable.BeginQueryRemovalRequest) (durable.LifecycleReceipt, error) {
 	if checkErr := r.Validate(); checkErr != nil {

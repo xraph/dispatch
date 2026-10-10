@@ -226,6 +226,7 @@ func (s *Service) AbortQueryRuntimeRemoval(ctx context.Context, p security.Princ
 	}
 	settlement, proof, err := verifier.VerifyAbort(ctx, binding, fence)
 	if err != nil {
+		s.observeQueryRejection(ctx, target, in.RequestID, durable.OperationAbortQueryRemoval, err)
 		return QueryRuntimeAcceptance{}, commandError(err)
 	}
 	store, err := s.queryStore()
@@ -234,6 +235,7 @@ func (s *Service) AbortQueryRuntimeRemoval(ctx context.Context, p security.Princ
 	}
 	request := durable.AbortQueryRemovalRequest{VerifyQueryRuntimeRequest: durable.VerifyQueryRuntimeRequest{QueryRuntimeTarget: target, RequestID: in.RequestID, ExpectedVersion: fence.CandidateStateVersion, CommandDigest: digest, Verification: proof}, Fence: fence, Settlement: settlement}
 	receipt, err := store.AbortQueryRuntimeRemoval(commandContext(ctx, p, in.RequestID), request)
+	s.observeQueryRejection(ctx, target, in.RequestID, durable.OperationAbortQueryRemoval, err)
 	receipt, err = checkedQueryReceipt(receipt, err, target, durable.OperationAbortQueryRemoval, in.RequestID, request)
 	return queryAcceptance(receipt), commandError(err)
 }

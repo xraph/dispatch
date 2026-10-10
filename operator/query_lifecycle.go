@@ -286,6 +286,7 @@ func (s *Service) VerifyQueryRuntime(ctx context.Context, p security.Principal, 
 	}
 	proof, err := s.queryHost.Verify(ctx, binding)
 	if err != nil {
+		s.observeQueryRejection(ctx, target, in.RequestID, durable.OperationVerifyQueryRuntime, err)
 		return QueryRuntimeAcceptance{}, commandError(err)
 	}
 	store, err := s.queryStore()
@@ -294,6 +295,7 @@ func (s *Service) VerifyQueryRuntime(ctx context.Context, p security.Principal, 
 	}
 	request := durable.VerifyQueryRuntimeRequest{QueryRuntimeTarget: target, RequestID: in.RequestID, ExpectedVersion: version, CommandDigest: digest, Verification: proof}
 	receipt, err := store.RecordQueryRuntimeVerification(commandContext(ctx, p, in.RequestID), request)
+	s.observeQueryRejection(ctx, target, in.RequestID, durable.OperationVerifyQueryRuntime, err)
 	receipt, err = checkedQueryReceipt(receipt, err, target, durable.OperationVerifyQueryRuntime, in.RequestID, request)
 	return queryAcceptance(receipt), commandError(err)
 }

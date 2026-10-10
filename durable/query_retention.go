@@ -81,8 +81,27 @@ type QueryRuntimeVerification struct {
 }
 
 func (p QueryRuntimeVerification) Validate(identity QueryRuntimeIdentity, now time.Time) error {
-	if p.Identity != identity || identity.Validate() != nil || !DeliveryIdentifier(p.ProofID) || !validHex256(p.EvidenceDigest) || p.VerifierID != identity.BuildIdentity.VerifierID || p.ProbePolicyID != identity.BuildIdentity.ProbePolicyID || p.ProbePolicyVersion != identity.BuildIdentity.ProbePolicyVersion || p.VerifiedAt.IsZero() || p.VerifiedAt.After(now) || !p.ValidUntil.After(now) || !p.ValidUntil.After(p.VerifiedAt) || p.ValidUntil.Sub(p.VerifiedAt) > identity.BuildIdentity.MaximumProofValidity {
-		return ErrQueryRetention
+	switch {
+	case p.Identity != identity || identity.Validate() != nil:
+		return proofRejection("identity", p, now)
+	case !DeliveryIdentifier(p.ProofID):
+		return proofRejection("proof_id", p, now)
+	case !validHex256(p.EvidenceDigest):
+		return proofRejection("evidence_digest", p, now)
+	case p.VerifierID != identity.BuildIdentity.VerifierID:
+		return proofRejection("verifier", p, now)
+	case p.ProbePolicyID != identity.BuildIdentity.ProbePolicyID || p.ProbePolicyVersion != identity.BuildIdentity.ProbePolicyVersion:
+		return proofRejection("policy", p, now)
+	case p.VerifiedAt.IsZero():
+		return proofRejection("verified_zero", p, now)
+	case p.VerifiedAt.After(now):
+		return proofRejection("verified_future", p, now)
+	case !p.ValidUntil.After(now):
+		return proofRejection("expired", p, now)
+	case !p.ValidUntil.After(p.VerifiedAt):
+		return proofRejection("nonpositive_validity", p, now)
+	case p.ValidUntil.Sub(p.VerifiedAt) > identity.BuildIdentity.MaximumProofValidity:
+		return proofRejection("overlong_validity", p, now)
 	}
 	return nil
 }
@@ -282,16 +301,16 @@ type QueryRuntimeStore interface {
 // VerifyQueryBinding conditionally records trusted host evidence after locks.
 func VerifyQueryBinding(b QueryRuntimeBinding, r VerifyQueryRuntimeRequest, now time.Time) (QueryRuntimeBinding, error) {
 	if b.QueryRuntimeTarget != r.QueryRuntimeTarget || b.Version != r.ExpectedVersion {
-		return b, ErrRevisionConflict
+		return b, bindingRejection(ErrRevisionConflict, "version", b, now)
 	}
 	if b.State != QueryRuntimeActive {
-		return b, ErrRequestConflict
+		return b, bindingRejection(ErrRequestConflict, "state", b, now)
 	}
 	if b.Version == math.MaxInt64 {
-		return b, ErrInvalid
+		return b, bindingRejection(ErrInvalid, "version_exhausted", b, now)
 	}
 	if err := r.Verification.Validate(b.QueryRuntimeIdentity, now); err != nil {
-		return b, err
+		return b, queryBindingDiagnostic(err, b)
 	}
 	b.Version++
 	b.ChangedAt = now
@@ -310,7 +329,7 @@ func AbortQueryRemoval(b QueryRuntimeBinding, r AbortQueryRemovalRequest, now ti
 		return b, err
 	}
 	if r.Verification.VerifiedAt.Before(r.Settlement.SettledAt) {
-		return b, ErrQueryRetention
+		return b, NewQueryRejection(ErrQueryRetention, QueryRejectionDiagnostic{Stage: "settlement", Reason: "proof_before_settlement", VerifiedAt: r.Verification.VerifiedAt, ValidUntil: r.Verification.ValidUntil, ObservedAt: now, SettledAt: r.Settlement.SettledAt})
 	}
 	if b.Version == math.MaxInt64 {
 		return b, ErrInvalid

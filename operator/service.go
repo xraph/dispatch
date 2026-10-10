@@ -11,6 +11,9 @@ import (
 )
 
 type Options struct {
+	// QueryRejection observes private diagnostics after store locks are released.
+	// It must cooperate with caller deadlines; panic cannot change the command result.
+	QueryRejection          func(context.Context, durable.QueryRejectionDiagnostic)
 	QueryHost               QueryRuntimeHost
 	QueryRegistrationPolicy QueryRegistrationPolicy
 	// WorkerControl resolves an immutable trusted process handle.
@@ -31,6 +34,7 @@ type Options struct {
 	Runtime func(namespace, build string) (*drt.Worker, error)
 }
 type Service struct {
+	queryRejection          func(context.Context, durable.QueryRejectionDiagnostic)
 	queryHost               QueryRuntimeHost
 	queryRegistrationPolicy QueryRegistrationPolicy
 	workerControl           func(context.Context, durable.QueryRuntimeTarget) (WorkerControl, error)
@@ -54,7 +58,7 @@ func New(o Options) (*Service, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Service{queryHost: o.QueryHost, queryRegistrationPolicy: o.QueryRegistrationPolicy, workerControl: o.WorkerControl, buildIdentity: o.BuildIdentity, store: o.Store, reads: o.Reads, catalog: o.Catalog, installation: o.InstallationID, authorizer: o.Authorizer, audit: o.Audit, cursors: c, runtimeAvailable: o.RuntimeAvailable, runtime: o.Runtime}, nil
+	return &Service{queryRejection: o.QueryRejection, queryHost: o.QueryHost, queryRegistrationPolicy: o.QueryRegistrationPolicy, workerControl: o.WorkerControl, buildIdentity: o.BuildIdentity, store: o.Store, reads: o.Reads, catalog: o.Catalog, installation: o.InstallationID, authorizer: o.Authorizer, audit: o.Audit, cursors: c, runtimeAvailable: o.RuntimeAvailable, runtime: o.Runtime}, nil
 }
 func bounded(ctx context.Context) (context.Context, context.CancelFunc) {
 	return context.WithTimeout(ctx, 5*time.Second)
