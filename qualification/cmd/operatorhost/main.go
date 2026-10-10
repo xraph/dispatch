@@ -35,7 +35,12 @@ func run() (returnErr error) {
 	statePath := flag.String("state-file", "", "new private state file containing URL and ephemeral credentials")
 	instance := flag.String("lifecycle-instance", "", "trusted physical instance identity for lifecycle qualification")
 	activation := flag.String("activation-file", "", "private local file whose creation releases registered workers to start")
+	pauseBefore := flag.String("drain-pause-before-file", "", "private marker that pauses the first drain before process invocation")
+	pauseAfter := flag.String("drain-pause-after-file", "", "private marker that pauses the first drain after process invocation")
 	flag.Parse()
+	if (*pauseBefore != "" && *pauseAfter != "") || ((*pauseBefore != "" || *pauseAfter != "") && *instance == "") {
+		return errors.New("one lifecycle drain barrier required")
+	}
 	address, _, err := net.SplitHostPort(*listen)
 	if err != nil {
 		return err
@@ -62,7 +67,7 @@ func run() (returnErr error) {
 	if *instance == "" {
 		host, err = operatorhost.New(ctx, store)
 	} else {
-		host, err = operatorhost.NewWithLifecycle(ctx, store, operatorhost.LifecycleOptions{InstanceID: *instance})
+		host, err = operatorhost.NewWithLifecycle(ctx, store, operatorhost.LifecycleOptions{InstanceID: *instance, DrainObserver: fileDrainObserver{before: *pauseBefore, after: *pauseAfter}})
 	}
 	if err != nil {
 		return err

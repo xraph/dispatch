@@ -19,6 +19,7 @@ import (
 // LifecycleOptions comes from trusted local configuration, never request fields.
 // StartupPolicy is the physical-instance enrollment hook for a deployment host.
 type LifecycleOptions struct {
+	DrainObserver      DrainObserver
 	InstanceID         string
 	RegistrationPolicy operator.QueryRegistrationPolicy
 	StartupPolicy      func(context.Context, durable.WorkerProcessIdentity) error
@@ -140,7 +141,11 @@ func (h *lifecycleHost) workerControl(ctx context.Context, target durable.QueryR
 	if worker == nil || worker.Status().RuntimeID != target.RuntimeID {
 		return nil, operator.ErrRuntimeUnavailable
 	}
-	return operator.LocalWorkerControl{Worker: worker}, nil
+	var control operator.WorkerControl = operator.LocalWorkerControl{Worker: worker}
+	if h.options.DrainObserver != nil {
+		control = observedWorkerControl{WorkerControl: control, observer: h.options.DrainObserver}
+	}
+	return control, nil
 }
 
 func (h *lifecycleHost) ResolveBinding(ctx context.Context, target durable.QueryRuntimeTarget) (durable.QueryRuntimeIdentity, error) {

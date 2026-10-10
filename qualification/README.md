@@ -270,7 +270,75 @@ Tests cover the published Dispatch consumer, actual Authsome/Warden authorizatio
 named persisted-history probes, exact replay, prestart drain, local settlement and
 a native PostgreSQL restart. The native restart kills the original process and
 checks that its accepted drain stays unknown while replacement admission stays
-open. Receipt-before-invocation crash windows, live Chronicle delivery and the
-active/inactive deferral browser scenario remain separate qualification work.
+open. Native fault barriers also cover loss after receipt persistence and after
+process invocation. The surviving original reconciles the accepted request; a
+replacement reports the original outcome as unknown. Live lifecycle Chronicle
+delivery and browser verification remain separate qualification work.
 Keep private state files out of evidence and remove them after a killed fixture;
 normal termination removes its state file automatically.
+
+
+### Reproduce active and retained deferrals
+
+You can populate the secured host for a browser or API client without writing
+fixture rows. Build `cmd/operatorhost` from this module, then start a fresh host
+with a private state directory and delayed worker activation:
+
+```sh
+operator_dir=$(mktemp -d)
+GOWORK=off GOTOOLCHAIN=go1.26.9 go build -o "$operator_dir/operatorhost" ./cmd/operatorhost
+"$operator_dir/operatorhost" --state-file "$operator_dir/state.json" \
+  --lifecycle-instance=deferral-demo --activation-file="$operator_dir/activate" &
+operator_pid=$!
+python3 lifecycle-fixture.py prepare --state-file "$operator_dir/state.json" \
+  --activation-file "$operator_dir/activate"
+python3 lifecycle-fixture.py inspect --state-file "$operator_dir/state.json"
+```
+
+Run these commands from `qualification`. Python 3 uses its standard library only.
+By default the host uses memory. Set `DISPATCH_OPERATOR_DSN` to your dedicated
+PostgreSQL database before starting it if you need persisted state. The fixture
+requires a fresh namespace and uses stable request IDs for each accepted command.
+Its private state file contains credentials, so keep it out of logs and evidence.
+
+`prepare` enrolls retirement, registers both builds and their exact runtimes,
+retires `operator-v2`, then releases worker startup. It starts `deferred-child`
+and `deferred-continue` on `operator-v1` and signals their handoff. You can now read
+active deferrals through `durable.tasks` for namespace `production`, workflow IDs
+`deferred-child` and `deferred-continue`, run ID `run-1`. The child record has a
+command ID. The continuation record has no command ID; its reference kind carries
+that distinction. Epochs and counts remain decimal strings.
+
+Keep the host running while you inspect those rows. Then resume the target build:
+
+```sh
+python3 lifecycle-fixture.py resume --state-file "$operator_dir/state.json"
+python3 lifecycle-fixture.py inspect --state-file "$operator_dir/state.json"
+kill "$operator_pid"
+wait "$operator_pid"
+rm -rf "$operator_dir"
+```
+
+You should still see the records with `active: false`. The fixture waits for the
+actual secured task response before printing either state. It fetches a real
+session-bound CSRF token and uses the command contract for every mutation; it
+cannot inject deferral facts. Native PostgreSQL qualification runs this same
+script through prepare, inspect, resume and inspect. This establishes the runnable
+host fixture, not browser rendering or a Dashboard integration.
+
+Lifecycle mode also registers `sleep` and `retry`. They produce a one-hour timer
+and a ten-minute activity retry interval. Together with `async`, the tests verify
+that persisted open-run and callback obligations block finalization after a worker
+drain, while late signals and valid machine callbacks remain accepted. Resume
+preserves the writer protocol floor and leaves local process admission closed.
+A separate PostgreSQL scenario completes a real child on the active build after
+its parent worker drains. The resulting pending child delivery and open parent
+continue to block finalization.
+
+For private crash drills, `--drain-pause-before-file` or
+`--drain-pause-after-file` writes a mode 0600 marker at the selected invocation
+boundary and holds that first call until its context ends. Choose one flag and a
+new path. These local qualification controls do not accept remote configuration.
+The receipt already exists at either barrier. Required lifecycle intent failure
+is tested separately: a PostgreSQL trigger rejects retirement and drain audit
+intents, and neither the receipt, build mutation nor process drain is accepted.

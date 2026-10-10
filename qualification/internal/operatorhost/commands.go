@@ -53,6 +53,12 @@ func (h *Host) configureCommands(ctx context.Context, appID aid.AppID, registry 
 			return nil, err
 		}}}
 		if h.lifecycle != nil {
+			for name, workflow := range deploymentWorkflows() {
+				options.Workflows[name] = workflow
+			}
+			options.Activities["retry"] = func(context.Context, drt.ActivityInfo, []byte) ([]byte, error) {
+				return nil, errors.New("fixture retry")
+			}
 			options.InstanceID = h.lifecycle.options.InstanceID
 			options.Retirement = &drt.RetirementOptions{InstallationID: "operator-host", WriterProtocol: durable.RetirementWriterProtocol}
 		}
@@ -93,7 +99,11 @@ func (h *Host) configureCommands(ctx context.Context, appID aid.AppID, registry 
 		}
 		p := &policy.Policy{ID: wid.NewPolicyID(), AppID: appID.String(), TenantID: "tenant-production", NamespacePath: "production", Name: action, Effect: policy.EffectAllow, IsActive: true, Subjects: []policy.SubjectMatch{{Kind: kind, ID: h.Credentials[role].Subject}}, Actions: []string{action}, Resources: []string{"dispatch_namespace:production"}, Conditions: []policy.Condition{{Field: "resource.installation_id", Operator: policy.OpEquals, Value: "operator-host"}, {Field: "resource.app_id", Operator: policy.OpEquals, Value: appID.String()}, {Field: "resource.tenant_id", Operator: policy.OpEquals, Value: "tenant-production"}}}
 		if action == operator.StartWorkflow {
-			p.Conditions = append(p.Conditions, policy.Condition{Field: "resource.workflow_type", Operator: policy.OpIn, Value: []string{"operator", "continue", "async", "async-expiry"}})
+			types := []string{"operator", "continue", "async", "async-expiry"}
+			if h.lifecycle != nil {
+				types = append(types, "deferred-child", "deferred-continue", "sleep", "retry")
+			}
+			p.Conditions = append(p.Conditions, policy.Condition{Field: "resource.workflow_type", Operator: policy.OpIn, Value: types})
 		}
 		if err := h.Policies.CreatePolicy(ctx, p); err != nil {
 			return err

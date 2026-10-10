@@ -16,6 +16,7 @@ import (
 )
 
 type nativeLifecycleHost struct {
+	statePath  string
 	client     *commandClient
 	identities []durable.QueryRuntimeIdentity
 	command    *exec.Cmd
@@ -23,7 +24,7 @@ type nativeLifecycleHost struct {
 	stopped    bool
 }
 
-func startNativeLifecycle(t *testing.T, instance string) *nativeLifecycleHost {
+func startNativeLifecycle(t *testing.T, instance string, extra ...string) *nativeLifecycleHost {
 	t.Helper()
 	binary := os.Getenv("DISPATCH_OPERATOR_BINARY")
 	if binary == "" || os.Getenv("DISPATCH_OPERATOR_DSN") == "" {
@@ -33,14 +34,15 @@ func startNativeLifecycle(t *testing.T, instance string) *nativeLifecycleHost {
 		t.Skip("native binary and dedicated PostgreSQL required")
 	}
 	statePath := filepath.Join(t.TempDir(), "state.json")
-	command := exec.CommandContext(t.Context(), binary, "--state-file", statePath, "--lifecycle-instance", instance, "--run-workers=false")
+	args := append([]string{"--state-file", statePath, "--lifecycle-instance", instance, "--run-workers=false"}, extra...)
+	command := exec.CommandContext(t.Context(), binary, args...)
 	logs := new(bytes.Buffer)
 	command.Stdout = logs
 	command.Stderr = logs
 	if err := command.Start(); err != nil {
 		t.Fatal(err)
 	}
-	n := &nativeLifecycleHost{command: command, done: make(chan error, 1)}
+	n := &nativeLifecycleHost{statePath: statePath, command: command, done: make(chan error, 1)}
 	go func() { n.done <- command.Wait() }()
 	t.Cleanup(func() {
 		if !n.stopped {
