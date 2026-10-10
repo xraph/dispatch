@@ -104,6 +104,15 @@ func (m *Store) buildLifecycleFacts(target durable.BuildTarget, now time.Time) (
 		if buildID == target.BuildID {
 			f.Blockers.PendingChildDeliveries++
 		}
+		if d.Kind == durable.ChildDeliveryCancel && d.Message.CancellationID != "" {
+			parent := m.executions[d.Source]
+			if parent == nil {
+				return f, durable.ErrInvalid
+			}
+			if parent.execution.BuildID == target.BuildID {
+				f.Blockers.ChildObligations++
+			}
+		}
 	}
 	for child, link := range m.childParents {
 		if child.Namespace != target.Namespace {
