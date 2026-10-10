@@ -5,6 +5,7 @@ import (
 	"github.com/xraph/warden"
 
 	"github.com/xraph/dispatch/durable"
+	drt "github.com/xraph/dispatch/durable/runtime"
 	"github.com/xraph/dispatch/operator"
 )
 
@@ -41,7 +42,25 @@ func (e *Extension) operatorService() (*operator.Service, error) {
 	if opts.Authorizer == nil {
 		opts.Authorizer = &operator.WardenAuthorizer{Engine: func() (*warden.Engine, error) { return vessel.Inject[*warden.Engine](e.App().Container()) }}
 	}
-	// Inspection alone does not claim query runtime availability. A later command
-	// resolver must prove the persisted namespace/build is served before invocation.
+	opts.Runtime = e.operatorRuntime
+	if opts.Runtime == nil {
+		opts.Runtime = func(namespace, build string) (*drt.Worker, error) {
+			worker := e.eng.DurableWorker()
+			if !worker.ServesBuild(namespace, build) {
+				return nil, operator.ErrRuntimeUnavailable
+			}
+			return worker, nil
+		}
+	}
+	opts.RuntimeAvailable = func(namespace, build string) bool {
+		worker, err := opts.Runtime(namespace, build)
+		return err == nil && worker.ServesBuild(namespace, build)
+	}
 	return operator.New(opts)
+}
+
+// WithDurableOperatorRuntime resolves retained builds for commands and queries.
+// Each returned worker must use this installation's store and the exact routing.
+func WithDurableOperatorRuntime(resolve func(namespace, build string) (*drt.Worker, error)) ExtOption {
+	return func(e *Extension) { e.operatorRuntime = resolve }
 }

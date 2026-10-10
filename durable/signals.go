@@ -1,6 +1,9 @@
 package durable
 
-import "fmt"
+import (
+	"context"
+	"fmt"
+)
 
 // EventSignalReceived records an accepted signal independently of consumption.
 const EventSignalReceived = "workflow.signal_received"
@@ -63,4 +66,18 @@ func (r SignalWithStartRequest) Validate() error {
 		return err
 	}
 	return (Signal{Version: 1, ID: r.Start.RequestID, Name: r.Name, Input: r.Input}).Validate()
+}
+
+// SignalStartOutcome is trusted acceptance provenance. Recovered is determined
+// under the same lock/transaction as receipt lookup and acceptance. It is not
+// part of the persisted receipt, request fingerprint or public wire schema.
+type SignalStartOutcome struct {
+	Receipt   SignalReceipt
+	Recovered bool
+}
+
+// SignalStartOutcomeStore is required by remote signal-with-start adapters.
+// A lookup performed before a separate mutation cannot implement this contract.
+type SignalStartOutcomeStore interface {
+	SignalWithStartOutcome(context.Context, SignalWithStartRequest) (SignalStartOutcome, error)
 }

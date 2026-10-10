@@ -71,6 +71,7 @@ type Extension struct {
 	remoteAuth            security.Authenticator
 	boundary              *security.Boundary
 	operatorOptions       *operator.Options
+	operatorRuntime       func(string, string) (*runtime.Worker, error)
 	durable               *runtime.Options
 	durableHandlers       runtime.Options
 	config                Config
@@ -292,7 +293,15 @@ func (e *Extension) init(fapp forge.App) error {
 	// Create the API handler.
 	e.configureSecurity()
 	e.eng.Dispatcher().BeforeStoreClose(e.stopDelivery)
-	e.apiHandler = api.New(e.eng, fapp.Router(), api.WithSecurity(e.remoteAuth, *e.boundary))
+	operators, operatorErr := e.operatorService()
+	if operatorErr != nil {
+		return operatorErr
+	}
+	callbackAuth, stockCallbacks := e.remoteAuth.(*security.ForgeAuthenticator)
+	if !stockCallbacks {
+		callbackAuth = nil
+	}
+	e.apiHandler = api.New(e.eng, fapp.Router(), api.WithSecurity(e.remoteAuth, *e.boundary), api.WithDurableCallbacks(operators, callbackAuth))
 
 	// Register HTTP routes unless disabled.
 	if !e.config.DisableRoutes {

@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/xraph/dispatch/durable"
+	drt "github.com/xraph/dispatch/durable/runtime"
 	"github.com/xraph/dispatch/security"
 )
 
@@ -17,8 +18,11 @@ type Options struct {
 	Authorizer     Authorizer
 	Audit          security.Boundary
 	CursorKeys     CursorKeys
-	// RuntimeAvailable must check the exact persisted namespace and build.
+	// RuntimeAvailable reports read-only host availability when Runtime is absent.
+	// Runtime takes precedence and must resolve the exact namespace and build.
 	RuntimeAvailable func(namespace, build string) bool
+	// Runtime resolves only the requested immutable namespace/build.
+	Runtime func(namespace, build string) (*drt.Worker, error)
 }
 type Service struct {
 	store            durable.Store
@@ -29,6 +33,7 @@ type Service struct {
 	audit            security.Boundary
 	cursors          cursorCodec
 	runtimeAvailable func(string, string) bool
+	runtime          func(string, string) (*drt.Worker, error)
 }
 
 func New(o Options) (*Service, error) {
@@ -39,7 +44,7 @@ func New(o Options) (*Service, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Service{store: o.Store, reads: o.Reads, catalog: o.Catalog, installation: o.InstallationID, authorizer: o.Authorizer, audit: o.Audit, cursors: c, runtimeAvailable: o.RuntimeAvailable}, nil
+	return &Service{store: o.Store, reads: o.Reads, catalog: o.Catalog, installation: o.InstallationID, authorizer: o.Authorizer, audit: o.Audit, cursors: c, runtimeAvailable: o.RuntimeAvailable, runtime: o.Runtime}, nil
 }
 func bounded(ctx context.Context) (context.Context, context.CancelFunc) {
 	return context.WithTimeout(ctx, 5*time.Second)
@@ -78,4 +83,12 @@ type Page[T any] struct {
 
 func observed[T any](items []T) Page[T] {
 	return Page[T]{Items: items, Complete: true, AsOf: time.Now().UTC(), Observation: "current_page"}
+}
+
+func (s *Service) hasRuntime(namespace, build string) bool {
+	if s.runtime != nil {
+		_, err := s.worker(namespace, build)
+		return err == nil
+	}
+	return s.runtimeAvailable != nil && s.runtimeAvailable(namespace, build)
 }

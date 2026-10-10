@@ -207,3 +207,8 @@ func wait(ctx context.Context, duration time.Duration) error {
 func normalContention(err error) bool {
 	return errors.Is(err, durable.ErrExecutionDeadline) || errors.Is(err, durable.ErrTaskDeadline) || errors.Is(err, durable.ErrTaskConflict) || errors.Is(err, durable.ErrClosed) || errors.Is(err, durable.ErrLeaseLost) || errors.Is(err, durable.ErrRevisionConflict)
 }
+
+// ServesBuild checks immutable routing without starting work or replaying history.
+func (w *Worker) ServesBuild(namespace, build string) bool {
+	return w != nil && w.options.Namespace == namespace && w.options.BuildID == build
+}

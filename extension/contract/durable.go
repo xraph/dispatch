@@ -8,6 +8,7 @@ import (
 	fc "github.com/xraph/forge/extensions/dashboard/contract"
 
 	"github.com/xraph/dispatch/durable"
+	drt "github.com/xraph/dispatch/durable/runtime"
 	"github.com/xraph/dispatch/operator"
 	"github.com/xraph/dispatch/security"
 )
@@ -17,6 +18,18 @@ const DurableWardenName = "dispatchDurableOperator"
 // DurableAction is a closed descriptor shared by admission and typed handlers.
 func DurableAction(intent string) string {
 	switch intent {
+	case "durable.start":
+		return operator.StartWorkflow
+	case "durable.signal":
+		return operator.SignalWorkflow
+	case "durable.signalStart":
+		return operator.SignalStartWorkflow
+	case "durable.cancel":
+		return operator.CancelWorkflow
+	case "durable.query":
+		return operator.QueryWorkflow
+	case "durable.capabilities":
+		return operator.Discover
 	case "durable.namespaces":
 		return operator.Discover
 	case "durable.executions":
@@ -39,6 +52,17 @@ func DurableAction(intent string) string {
 		return ""
 	}
 }
+func durableKind(intent string) fc.Kind {
+	switch intent {
+	case "durable.start", "durable.signal", "durable.signalStart", "durable.cancel":
+		return fc.KindCommand
+	default:
+		if DurableAction(intent) != "" {
+			return fc.KindQuery
+		}
+		return ""
+	}
+}
 func durableError(err error) error {
 	switch {
 	case err == nil:
@@ -49,6 +73,14 @@ func durableError(err error) error {
 		return fc.ErrPermissionDenied
 	case errors.Is(err, durable.ErrInvalid):
 		return badRequest("invalid durable scope, filter or continuation")
+	case errors.Is(err, operator.ErrRuntimeUnavailable):
+		return &fc.Error{Code: fc.CodeUnavailable, Message: "compatible runtime unavailable", Retryable: true}
+	case errors.Is(err, operator.ErrBuildMismatch), errors.Is(err, operator.ErrHistoryIncompatible), errors.Is(err, durable.ErrRequestConflict), errors.Is(err, durable.ErrClosed), errors.Is(err, durable.ErrExists), errors.Is(err, durable.ErrRevisionConflict):
+		return &fc.Error{Code: fc.CodeConflict, Message: err.Error()}
+	case errors.Is(err, drt.ErrQueryMutation):
+		return badRequest("workflow SDK mutation is forbidden in a query")
+	case errors.Is(err, drt.ErrQueryNotFound):
+		return notFound("query handler unavailable at this snapshot")
 	case errors.Is(err, durable.ErrNotFound):
 		return notFound("durable resource not found")
 	default:
@@ -79,6 +111,24 @@ func durableHandle[I, O any](deps Deps, intent string, fn func(context.Context, 
 }
 func durableBindings(deps Deps) []binding {
 	return []binding{
+		query("durable.capabilities", durableHandle(deps, "durable.capabilities", func(c context.Context, s *operator.Service, p security.Principal, i operator.CapabilitiesInput) (operator.Capabilities, error) {
+			return s.Capabilities(c, p, i)
+		})),
+		command(deps, "durable.start", durableHandle(deps, "durable.start", func(c context.Context, s *operator.Service, p security.Principal, i operator.StartInput) (operator.Acceptance, error) {
+			return s.Start(c, p, i)
+		})),
+		command(deps, "durable.signal", durableHandle(deps, "durable.signal", func(c context.Context, s *operator.Service, p security.Principal, i durable.SignalRequest) (operator.Acceptance, error) {
+			return s.Signal(c, p, i)
+		})),
+		command(deps, "durable.signalStart", durableHandle(deps, "durable.signalStart", func(c context.Context, s *operator.Service, p security.Principal, i operator.SignalStartInput) (operator.Acceptance, error) {
+			return s.SignalStart(c, p, i)
+		})),
+		command(deps, "durable.cancel", durableHandle(deps, "durable.cancel", func(c context.Context, s *operator.Service, p security.Principal, i durable.CancelExecutionRequest) (operator.Acceptance, error) {
+			return s.Cancel(c, p, i)
+		})),
+		query("durable.query", durableHandle(deps, "durable.query", func(c context.Context, s *operator.Service, p security.Principal, i drt.QueryRequest) (operator.QueryResult, error) {
+			return s.Query(c, p, i)
+		})),
 		query("durable.namespaces", durableHandle(deps, "durable.namespaces", func(c context.Context, s *operator.Service, p security.Principal, i operator.NamespaceInput) (operator.Page[operator.Namespace], error) {
 			return s.Namespaces(c, p, i)
 		})),
@@ -117,7 +167,7 @@ type durableWarden struct{ deps Deps }
 
 func (w durableWarden) Authorize(ctx context.Context, p fc.Principal, a fc.Action) (fc.Decision, error) {
 	principal, err := security.FromContract(p)
-	if a.Contributor != ContributorName || a.Kind != fc.KindQuery || DurableAction(a.Intent) == "" {
+	if a.Contributor != ContributorName || a.Kind != durableKind(a.Intent) || DurableAction(a.Intent) == "" {
 		_ = w.deps.Security.RecordDurableRead(ctx, principal, "dispatch.unknown", "denied", "") //nolint:errcheck // Denial remains final when required audit acceptance fails.
 		return fc.Decision{}, fc.ErrPermissionDenied
 	}

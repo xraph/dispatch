@@ -53,3 +53,9 @@ intents:
   - { name: durable.payload, kind: query, version: 1, requires: { warden: dispatchDurableOperator }, capability: read }
   - { name: durable.audit, kind: query, version: 1, requires: { warden: dispatchDurableOperator }, capability: read }
   - { name: durable.hooks, kind: query, version: 1, requires: { warden: dispatchDurableOperator }, capability: read }
+  - { name: durable.start, kind: command, version: 1, requires: { warden: dispatchDurableOperator }, capability: write, invalidates: [durable.executions, durable.execution, durable.history, durable.tasks, durable.chain, durable.children, durable.audit, durable.hooks, durable.capabilities, durable.payload, durable.query] }
+  - { name: durable.signal, kind: command, version: 1, requires: { warden: dispatchDurableOperator }, capability: write, invalidates: [durable.executions, durable.execution, durable.history, durable.tasks, durable.chain, durable.children, durable.audit, durable.hooks, durable.capabilities, durable.payload, durable.query] }
+  - { name: durable.signalStart, kind: command, version: 1, requires: { warden: dispatchDurableOperator }, capability: write, invalidates: [durable.executions, durable.execution, durable.history, durable.tasks, durable.chain, durable.children, durable.audit, durable.hooks, durable.capabilities, durable.payload, durable.query] }
+  - { name: durable.cancel, kind: command, version: 1, requires: { warden: dispatchDurableOperator }, capability: write, invalidates: [durable.executions, durable.execution, durable.history, durable.tasks, durable.chain, durable.children, durable.audit, durable.hooks, durable.capabilities, durable.payload, durable.query] }
+  - { name: durable.query, kind: query, version: 1, requires: { warden: dispatchDurableOperator }, capability: read }
+  - { name: durable.capabilities, kind: query, version: 1, requires: { warden: dispatchDurableOperator }, capability: read }

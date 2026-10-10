@@ -99,8 +99,9 @@ original spelling. No durable presigned URL intent is exposed.
 
 Metadata inspection does not require a runtime. The extension reports
 `runtime: unavailable` until a host has supplied an exact namespace/build
-availability resolver to a directly composed service. No workflow query or
-command is advertised, and historical builds never execute through active code.
+availability resolver to a directly composed service. Historical builds never execute through active code. Command-capable hosts resolve
+the exact namespace/build through `WithDurableOperatorRuntime`; the extension can
+also serve its own pinned worker. A missing build remains unavailable.
 
 Delivery counts and pages use installation, destination, namespace and optional
 exact run predicates inside storage. `pending` includes `blocked`; a blocked
@@ -115,3 +116,78 @@ Authentication, permission, invalid input, not-found and unavailable errors use
 Forge's normal envelopes. Provider text is never returned. Denial audit failure
 keeps a denial denied. Sensitive-read audit failure returns unavailable before
 payload leaves the service. Every durable handler sets `Cache-Control: no-store`.
+
+## Commands and workflow queries
+
+The durable contract accepts `durable.start`, `durable.signal`,
+`durable.signalStart` and `durable.cancel` as commands. `durable.query` and
+`durable.capabilities` are queries. Every call rechecks current Warden permission;
+a capability response is only an observation. Command responses invalidate all
+durable run views, delivery observations and protected query intents.
+
+Send an explicit namespace, workflow ID and run ID for start, signal and cancel.
+The remote start accepts workflow type, build, queue and base64 input bytes; it
+uses the runtime's default retry/timeout policy. Query may select current/latest,
+but the service resolves that selector once and authorizes the resulting exact
+run. It returns base64 output and decimal-string revision and last sequence.
+Query handlers cannot invoke mutating workflow SDK operations. Go code can still
+perform external side effects or block; Dispatch cannot sandbox arbitrary Go.
+
+Keep the entire request unchanged after an uncertain response, including its
+request ID, target and input bytes. Same identity/content recovers the original
+acceptance. Changed content conflicts. Request IDs are bounded to 256 bytes so
+trusted audit metadata can retain them. The service checks current permission
+before recovery. A cancel response says `cancellation_requested`; the workflow
+can still be running while it processes cancellation and cleanup.
+
+Signal-with-start requires `dispatch.workflow.signal_start` and
+`dispatch.workflow.signal` on the workflow identity with an empty run/type/build,
+plus `dispatch.workflow.start` for the proposed type/build. These workflow-wide
+grants authorize either atomic branch. Run-only grants do not substitute. The
+optional `durable.SignalStartOutcomeStore` reports fresh versus recovered
+acceptance under the store lock/transaction. Recovered receipts additionally
+require grants for the original accepted run's persisted type/build, including
+when a successor is now current. Custom stores without that capability fail
+closed. Unknown-ack runtime retries retain recovery provenance.
+
+`dispatch.workflow.query`, `dispatch.workflow.cancel`, `dispatch.activity.complete`
+and `dispatch.activity.heartbeat` are distinct permissions. Persisted namespace
+ownership supplies installation, app and tenant. Run policy receives immutable
+workflow type and build. Trusted actor and request IDs accompany each mutation's
+transactional audit and required hook intents. The policy adapter does not invent
+policy decision IDs or versions that Warden has not supplied. Remote sink failure
+does not replace the requirement for successful local outbox acceptance.
+
+The Forge API mounts `POST /v1/durable/activities/complete` and `/heartbeat` through
+`api.WithDurableCallbacks(service, authenticator)`. The extension adds its base
+path, normally `/dispatch`. The authenticator must be a stock
+`security.ForgeAuthenticator` using explicit provider-attested Bearer/DPoP
+credentials. User sessions cannot call these endpoints. Verified `service`,
+`api_key` and `service_acct` identities still require the corresponding Warden
+grant and the runtime's saved attempt/secret proof. Human metadata permission
+does not confer callback authority. Callback epoch, initial heartbeat sequence
+and heartbeat sequence are decimal strings; callback bodies are bounded to
+2 MiB and individual byte payloads to 1 MiB. Treat handles as credentials and
+never put them in metadata, logs, browser forms or URLs.
+
+Completion and heartbeat acceptance use the existing durable receipt semantics.
+Exact authorized retries can recover receipts after expiry or closure; new or
+changed requests must satisfy the attempt's current proof and deadlines. All
+responses carry `Cache-Control: no-store` and sanitized errors. Build mismatch,
+history incompatibility and absent runtime remain explicit states. No operator
+reset, force termination, fork or history rewrite is exposed.
+
+
+Remote proposed start inputs, including `signalStart.start.input`, are limited to
+1 MiB of raw bytes by the operator service. This bound also applies to direct
+contract and service calls. Base64 expands the HTTP body, so a transport's JSON
+envelope limit can reject a smaller payload before it reaches the service.
+
+Durable commands bypass Forge's generic response cache. Persisted runtime receipts
+control retry conflicts and accepted-target recovery. Legacy commands retain
+Forge deduplication, with current decoded-target authorization before cache access.
+Their cache binding includes the full principal and request plus a versioned tuple
+of the trusted installation ID and policy tenant. Changed principal facts or a
+changed host scope can conflict with an earlier key; retrying must preserve the
+original request and current authority. A changed key is not an authorization
+workaround.

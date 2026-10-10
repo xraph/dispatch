@@ -201,6 +201,21 @@ func (m *Store) SignalWithStart(ctx context.Context, r durable.SignalWithStartRe
 	return mutateAudited(ctx, m, r.Start.Namespace, func(c *Store) (durable.SignalReceipt, error) { return c.signalWithStart(ctx, r) })
 }
 
+// SignalWithStartOutcome preserves acceptance provenance within the audited lock.
+func (m *Store) SignalWithStartOutcome(ctx context.Context, r durable.SignalWithStartRequest) (durable.SignalStartOutcome, error) {
+	if err := r.Validate(); err != nil {
+		return durable.SignalStartOutcome{}, err
+	}
+	return mutateAudited(ctx, m, r.Start.Namespace, func(c *Store) (durable.SignalStartOutcome, error) {
+		_, recovered := c.signalReceipts[signalReceiptKey{r.Start.Namespace, r.Start.WorkflowID, r.Start.RequestID}]
+		receipt, err := c.signalWithStart(ctx, r)
+		if err != nil {
+			return durable.SignalStartOutcome{}, err
+		}
+		return durable.SignalStartOutcome{Receipt: receipt, Recovered: recovered}, nil
+	})
+}
+
 func (m *Store) RequestCancelExecution(ctx context.Context, r durable.CancelExecutionRequest) (durable.CancelExecutionReceipt, error) {
 	if err := r.Validate(); err != nil {
 		return durable.CancelExecutionReceipt{}, err

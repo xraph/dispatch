@@ -12,28 +12,34 @@ import (
 )
 
 const (
-	Discover       = "dispatch.namespace.discover"
-	ListExecutions = "dispatch.execution.list"
-	ReadExecution  = "dispatch.execution.read"
-	ReadHistory    = "dispatch.history.read"
-	ReadTasks      = "dispatch.task.read"
-	ReadChain      = "dispatch.chain.read"
-	ReadPayload    = "dispatch.payload.read"
-	QueryWorkflow  = "dispatch.workflow.query"
-	ReadAudit      = "dispatch.audit.read"
-	ReadHooks      = "dispatch.hook.read"
+	Discover            = "dispatch.namespace.discover"
+	ListExecutions      = "dispatch.execution.list"
+	ReadExecution       = "dispatch.execution.read"
+	ReadHistory         = "dispatch.history.read"
+	ReadTasks           = "dispatch.task.read"
+	ReadChain           = "dispatch.chain.read"
+	ReadPayload         = "dispatch.payload.read"
+	QueryWorkflow       = "dispatch.workflow.query"
+	ReadAudit           = "dispatch.audit.read"
+	ReadHooks           = "dispatch.hook.read"
+	StartWorkflow       = "dispatch.workflow.start"
+	SignalWorkflow      = "dispatch.workflow.signal"
+	SignalStartWorkflow = "dispatch.workflow.signal_start"
+	CancelWorkflow      = "dispatch.workflow.cancel"
+	CompleteActivity    = "dispatch.activity.complete"
+	HeartbeatActivity   = "dispatch.activity.heartbeat"
 )
 
 func KnownAction(action string) bool {
 	switch action {
-	case Discover, ListExecutions, ReadExecution, ReadHistory, ReadTasks, ReadChain, ReadPayload, QueryWorkflow, ReadAudit, ReadHooks:
+	case Discover, ListExecutions, ReadExecution, ReadHistory, ReadTasks, ReadChain, ReadPayload, QueryWorkflow, ReadAudit, ReadHooks, StartWorkflow, SignalWorkflow, SignalStartWorkflow, CancelWorkflow, CompleteActivity, HeartbeatActivity:
 		return true
 	default:
 		return false
 	}
 }
 
-type Resource struct{ InstallationID, Namespace, AppID, TenantID, WorkflowID, RunID string }
+type Resource struct{ InstallationID, Namespace, AppID, TenantID, WorkflowID, RunID, WorkflowType, BuildID string }
 type Authorizer interface {
 	Authorize(context.Context, security.Principal, string, Resource) error
 }
@@ -62,7 +68,7 @@ func (a *WardenAuthorizer) Authorize(ctx context.Context, p security.Principal, 
 		return security.ErrUnavailable
 	}
 	ctx = warden.WithNamespace(warden.WithTenant(ctx, r.AppID, r.TenantID), r.Namespace)
-	result, err := engine.Check(ctx, &warden.CheckRequest{TenantID: r.TenantID, Subject: warden.Subject{Kind: warden.SubjectKind(p.Kind), ID: p.Subject, Attributes: map[string]any{"principal_kind": p.Kind}}, Action: warden.Action{Name: action}, Resource: warden.Resource{Type: "dispatch_namespace", ID: r.Namespace, Attributes: map[string]any{"installation_id": r.InstallationID, "namespace": r.Namespace, "app_id": r.AppID, "tenant_id": r.TenantID, "workflow_id": r.WorkflowID, "run_id": r.RunID}}})
+	result, err := engine.Check(ctx, &warden.CheckRequest{TenantID: r.TenantID, Subject: warden.Subject{Kind: warden.SubjectKind(p.Kind), ID: p.Subject, Attributes: map[string]any{"principal_kind": p.Kind}}, Action: warden.Action{Name: action}, Resource: warden.Resource{Type: "dispatch_namespace", ID: r.Namespace, Attributes: map[string]any{"installation_id": r.InstallationID, "namespace": r.Namespace, "app_id": r.AppID, "tenant_id": r.TenantID, "workflow_id": r.WorkflowID, "run_id": r.RunID, "workflow_type": r.WorkflowType, "build_id": r.BuildID}}})
 	if err != nil {
 		return security.ErrUnavailable
 	}
@@ -72,6 +78,9 @@ func (a *WardenAuthorizer) Authorize(ctx context.Context, p security.Principal, 
 	return nil
 }
 func (s *Service) check(ctx context.Context, p security.Principal, action string, key durable.Key) error {
+	return s.checkFacts(ctx, p, action, key, "", "")
+}
+func (s *Service) checkFacts(ctx context.Context, p security.Principal, action string, key durable.Key, workflowType, build string) error {
 	if err := p.Validate(); err != nil {
 		return s.denied(ctx, p, action, err)
 	}
@@ -90,7 +99,12 @@ func (s *Service) check(ctx context.Context, p security.Principal, action string
 		}
 		return s.denied(ctx, p, action, err)
 	}
-	err = s.authorizer.Authorize(ctx, p, action, Resource{InstallationID: n.InstallationID, Namespace: n.Namespace, AppID: n.AppID, TenantID: n.TenantID, WorkflowID: key.WorkflowID, RunID: key.RunID})
+	if action == StartWorkflow || action == SignalWorkflow || action == SignalStartWorkflow || action == CancelWorkflow || action == CompleteActivity || action == HeartbeatActivity {
+		if !n.RequireAudit {
+			return security.ErrUnavailable
+		}
+	}
+	err = s.authorizer.Authorize(ctx, p, action, Resource{InstallationID: n.InstallationID, Namespace: n.Namespace, AppID: n.AppID, TenantID: n.TenantID, WorkflowID: key.WorkflowID, RunID: key.RunID, WorkflowType: workflowType, BuildID: build})
 	if err != nil {
 		if !errors.Is(err, security.ErrForbidden) {
 			err = security.ErrUnavailable

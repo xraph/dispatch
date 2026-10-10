@@ -164,9 +164,10 @@ func TestContractDispatcherAuditRetainsConcreteActionsOnOutcomeFailure(t *testin
 				}
 				counts[a.Action]++
 			}
-			want := 3
+			// Pre-cache admission and handler admission each retain a concrete audit record.
+			want := 4
 			if fail {
-				want = 2
+				want = 3
 			}
 			if counts["contract:jobs.cancel"] != want || counts["contract:jobs.retry"] != want {
 				t.Fatal(counts)

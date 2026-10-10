@@ -3,12 +3,15 @@ package durable
 import (
 	"context"
 	"errors"
+	"fmt"
 	"time"
 )
 
 // Store errors let the coordinator distinguish conflicts from transport failures.
 var (
-	ErrInvalid           = errors.New("durable: invalid request")
+	ErrInvalid = errors.New("durable: invalid request")
+	// ErrBuildMismatch retains ErrInvalid compatibility for trusted store callers.
+	ErrBuildMismatch     = fmt.Errorf("%w: execution build mismatch", ErrInvalid)
 	ErrNotFound          = errors.New("durable: execution not found")
 	ErrExists            = errors.New("durable: identity already exists")
 	ErrRequestConflict   = errors.New("durable: request ID reused with different content")

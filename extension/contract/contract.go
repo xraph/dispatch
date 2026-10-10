@@ -4,7 +4,10 @@ import (
 	"bytes"
 	"context"
 	_ "embed"
+	"encoding/json"
 	"fmt"
+
+	"github.com/xraph/dispatch/security"
 
 	fc "github.com/xraph/forge/extensions/dashboard/contract"
 	"github.com/xraph/forge/extensions/dashboard/contract/dispatcher"
@@ -24,12 +27,43 @@ type binding struct {
 
 func query[I, O any](intent string, fn func(context.Context, I, fc.Principal) (O, error)) binding {
 	return binding{intent: intent, bind: func(d *dispatcher.Dispatcher) error {
-		return dispatcher.RegisterQuery(d, ContributorName, intent, 1, fn)
+		return dispatcher.RegisterQuery(d, ContributorName, intent, 1, fn, dispatcher.RequireKind(fc.KindQuery))
 	}}
 }
-func command[I, O any](intent string, fn func(context.Context, I, fc.Principal) (O, error)) binding {
+func command[I, O any](deps Deps, intent string, fn func(context.Context, I, fc.Principal) (O, error)) binding {
 	return binding{intent: intent, bind: func(d *dispatcher.Dispatcher) error {
-		return dispatcher.RegisterCommand(d, ContributorName, intent, 1, fn)
+		options := []dispatcher.RegisterOption{dispatcher.RequireKind(fc.KindCommand)}
+		if durableKind(intent) == fc.KindCommand {
+			options = append(options, dispatcher.BypassIdempotency())
+		} else {
+			options = append(options, dispatcher.BeforeDispatch(func(ctx context.Context, request fc.Request, principal fc.Principal) error {
+				var input I
+				if len(request.Params) > 0 {
+					raw, err := json.Marshal(request.Params)
+					if err != nil || json.Unmarshal(raw, &input) != nil {
+						return fc.ErrBadRequest
+					}
+				}
+				if len(request.Payload) > 0 && string(request.Payload) != "null" {
+					if json.Unmarshal(request.Payload, &input) != nil {
+						return fc.ErrBadRequest
+					}
+				}
+				op := security.ContractOperation(intent)
+				target, targetErr := auditInputTarget(intent, input)
+				op.Target = target
+				if err := deps.authorizeOperation(ctx, principal, op); err != nil {
+					return err
+				}
+				if targetErr != nil {
+					return fc.ErrBadRequest
+				}
+				return nil
+			}), dispatcher.IdempotencyScope(func(context.Context, fc.Request, fc.Principal) ([]byte, error) {
+				return json.Marshal([]string{"dispatch.installation.v1", deps.Security.Resource.InstallationID, deps.Security.Resource.PolicyTenant})
+			}))
+		}
+		return dispatcher.RegisterCommand(d, ContributorName, intent, 1, fn, options...)
 	}}
 }
 
@@ -50,26 +84,26 @@ func bindings(deps Deps) []binding {
 		query("workflows.list", workflowsListHandler(deps)),
 		query("workflows.get", workflowsGetHandler(deps)),
 		query("workflows.replayPreview", workflowsReplayPreviewHandler(deps)),
-		command("workflows.replayFrom", workflowsReplayFromHandler(deps)),
+		command(deps, "workflows.replayFrom", workflowsReplayFromHandler(deps)),
 		query("crons.list", cronsListHandler(deps)),
 		query("crons.get", cronsGetHandler(deps)),
-		command("crons.enable", cronToggleHandler(deps, true)),
-		command("crons.disable", cronToggleHandler(deps, false)),
-		command("crons.delete", cronsDeleteHandler(deps)),
-		command("crons.runNow", cronsRunNowHandler(deps)),
+		command(deps, "crons.enable", cronToggleHandler(deps, true)),
+		command(deps, "crons.disable", cronToggleHandler(deps, false)),
+		command(deps, "crons.delete", cronsDeleteHandler(deps)),
+		command(deps, "crons.runNow", cronsRunNowHandler(deps)),
 		query("dlq.list", dlqListHandler(deps)),
 		query("dlq.get", dlqGetHandler(deps)),
 		query("dlq.counts", dlqCountsHandler(deps)),
 		query("dlq.purgePreview", dlqPurgeHandler(deps, true)),
-		command("dlq.replay", dlqReplayHandler(deps)),
-		command("dlq.replayAll", dlqReplayAllHandler(deps)),
-		command("dlq.delete", dlqDeleteHandler(deps)),
-		command("dlq.purge", dlqPurgeHandler(deps, false)),
+		command(deps, "dlq.replay", dlqReplayHandler(deps)),
+		command(deps, "dlq.replayAll", dlqReplayAllHandler(deps)),
+		command(deps, "dlq.delete", dlqDeleteHandler(deps)),
+		command(deps, "dlq.purge", dlqPurgeHandler(deps, false)),
 		query("jobs.list", jobsListHandler(deps)),
 		query("jobs.get", jobsGetHandler(deps)),
 		query("jobs.counts", jobsCountsHandler(deps)),
-		command("jobs.cancel", jobActionHandler(deps, "jobs.cancel", deps.Engine.CancelJob)),
-		command("jobs.retry", jobActionHandler(deps, "jobs.retry", deps.Engine.RetryJob)),
+		command(deps, "jobs.cancel", jobActionHandler(deps, "jobs.cancel", deps.Engine.CancelJob)),
+		command(deps, "jobs.retry", jobActionHandler(deps, "jobs.retry", deps.Engine.RetryJob)),
 	}, durableBindings(deps)...)
 }
 

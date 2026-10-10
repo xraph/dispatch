@@ -16,6 +16,7 @@ import (
 	"github.com/xraph/forge/extensions/dashboard/contract/transport"
 
 	"github.com/xraph/dispatch/durable"
+	drt "github.com/xraph/dispatch/durable/runtime"
 	"github.com/xraph/dispatch/operator"
 	"github.com/xraph/dispatch/security"
 	ds "github.com/xraph/dispatch/store"
@@ -31,6 +32,9 @@ type durableContractStore interface {
 }
 
 func durableDeps(t *testing.T, store durableContractStore) Deps {
+	return durableDepsRuntime(t, store, nil)
+}
+func durableDepsRuntime(t *testing.T, store durableContractStore, resolve func(string, string) (*drt.Worker, error)) Deps {
 	t.Helper()
 	d := contractDeps(t, store)
 	d.Security.Authorizer = security.AuthorizerFunc(func(context.Context, security.Principal, string, security.Resource) error {
@@ -52,7 +56,7 @@ func durableDeps(t *testing.T, store durableContractStore) Deps {
 		t.Fatal(err)
 	}
 	var err error
-	d.Durable, err = operator.New(operator.Options{Store: store, Reads: store, Catalog: store, InstallationID: "test", Audit: d.Security, CursorKeys: operator.CursorKeys{Active: "v1", Keys: map[string][]byte{"v1": make([]byte, 32)}}, Authorizer: operator.AuthorizerFunc(func(_ context.Context, p security.Principal, a string, r operator.Resource) error {
+	d.Durable, err = operator.New(operator.Options{Runtime: resolve, Store: store, Reads: store, Catalog: store, InstallationID: "test", Audit: d.Security, CursorKeys: operator.CursorKeys{Active: "v1", Keys: map[string][]byte{"v1": make([]byte, 32)}}, Authorizer: operator.AuthorizerFunc(func(_ context.Context, p security.Principal, a string, r operator.Resource) error {
 		if r.Namespace == "contract-audit" {
 			return security.ErrForbidden
 		}

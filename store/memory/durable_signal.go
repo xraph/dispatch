@@ -135,7 +135,7 @@ func (m *Store) appendWorkflowInput(record *executionRecord, build string, paylo
 		return durable.SignalReceipt{}, err
 	}
 	if current.BuildID != build {
-		return durable.SignalReceipt{}, durable.ErrInvalid
+		return durable.SignalReceipt{}, durable.ErrBuildMismatch
 	}
 	if current.Revision == math.MaxInt64 || current.LastSequence == math.MaxInt64 {
 		return durable.SignalReceipt{}, durable.ErrInvalid

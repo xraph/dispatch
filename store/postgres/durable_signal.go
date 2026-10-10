@@ -61,7 +61,20 @@ func (s *Store) SignalExecution(ctx context.Context, r durable.SignalRequest) (r
 }
 
 // SignalWithStart resolves its workflow-scoped receipt before choosing a run.
-func (s *Store) SignalWithStart(ctx context.Context, r durable.SignalWithStartRequest) (result durable.SignalReceipt, resultErr error) {
+func (s *Store) SignalWithStart(ctx context.Context, r durable.SignalWithStartRequest) (durable.SignalReceipt, error) {
+	return s.signalWithStart(ctx, r, nil)
+}
+
+// SignalWithStartOutcome reports receipt recovery from the acceptance transaction.
+func (s *Store) SignalWithStartOutcome(ctx context.Context, r durable.SignalWithStartRequest) (durable.SignalStartOutcome, error) {
+	var recovered bool
+	receipt, err := s.signalWithStart(ctx, r, &recovered)
+	if err != nil {
+		return durable.SignalStartOutcome{}, err
+	}
+	return durable.SignalStartOutcome{Receipt: receipt, Recovered: recovered}, nil
+}
+func (s *Store) signalWithStart(ctx context.Context, r durable.SignalWithStartRequest, recovered *bool) (result durable.SignalReceipt, resultErr error) {
 	defer func() { resultErr = normalizeExecutionError(resultErr) }()
 	r.Input, r.Start = bytes.Clone(r.Input), r.Start.Clone()
 	if err := r.Validate(); err != nil {
@@ -87,6 +100,9 @@ func (s *Store) SignalWithStart(ctx context.Context, r durable.SignalWithStartRe
 		return durable.SignalReceipt{}, lockErr
 	}
 	prior, found, err := readSignalReceipt(ctx, tx, r.Start.Key, r.Start.RequestID, digest)
+	if recovered != nil {
+		*recovered = found && err == nil
+	}
 	if err != nil || found {
 		return prior, err
 	}
@@ -189,7 +205,7 @@ func appendWorkflowInput(ctx context.Context, tx driver.Tx, current durable.Exec
 		return durable.SignalReceipt{}, durable.ErrClosed
 	}
 	if current.BuildID != build {
-		return durable.SignalReceipt{}, durable.ErrInvalid
+		return durable.SignalReceipt{}, durable.ErrBuildMismatch
 	}
 	if current.Revision == math.MaxInt64 || current.LastSequence == math.MaxInt64 {
 		return durable.SignalReceipt{}, durable.ErrInvalid

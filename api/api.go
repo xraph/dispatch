@@ -13,16 +13,19 @@ import (
 	"github.com/xraph/dispatch/dlq"
 	"github.com/xraph/dispatch/engine"
 	"github.com/xraph/dispatch/job"
+	"github.com/xraph/dispatch/operator"
 	"github.com/xraph/dispatch/security"
 	"github.com/xraph/dispatch/workflow"
 )
 
 // API wires all Forge-style HTTP handlers together for the dispatch system.
 type API struct {
-	auth     security.Authenticator
-	boundary security.Boundary
-	eng      *engine.Engine
-	router   forge.Router
+	durable     *operator.Service
+	durableAuth *security.ForgeAuthenticator
+	auth        security.Authenticator
+	boundary    security.Boundary
+	eng         *engine.Engine
+	router      forge.Router
 
 	handlerOnce sync.Once
 	handler     http.Handler
@@ -67,6 +70,7 @@ func (a *API) RegisterRoutes(router forge.Router) error {
 		a.registerDLQRoutes(router),
 		a.registerCronRoutes(router),
 		a.registerStatsRoutes(router),
+		a.registerDurableRoutes(router),
 	)
 }
 

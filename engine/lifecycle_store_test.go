@@ -491,3 +491,8 @@ func (s *strictLifecycleStore) ReadDeliveryStatus(ctx context.Context, request d
 	defer s.call("ReadDeliveryStatus")()
 	return s.base.ReadDeliveryStatus(ctx, request)
 }
+
+func (s *strictLifecycleStore) SignalWithStartOutcome(ctx context.Context, request durable.SignalWithStartRequest) (durable.SignalStartOutcome, error) {
+	defer s.call("SignalWithStartOutcome")()
+	return s.base.SignalWithStartOutcome(ctx, request)
+}

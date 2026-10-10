@@ -108,7 +108,7 @@ func optionalTime(t time.Time) *time.Time {
 }
 func (s *Service) project(e durable.Execution) Execution {
 	runtime := "unavailable"
-	if s.runtimeAvailable != nil && s.runtimeAvailable(e.Namespace, e.BuildID) {
+	if s.hasRuntime(e.Namespace, e.BuildID) {
 		runtime = "available"
 	}
 	return Execution{Namespace: e.Namespace, WorkflowID: e.WorkflowID, RunID: e.RunID, WorkflowType: e.WorkflowType, BuildID: e.BuildID, State: e.State, Revision: strconv.FormatInt(e.Revision, 10), LastSequence: strconv.FormatInt(e.LastSequence, 10), RunNumber: strconv.FormatInt(e.RunNumber, 10), RetryAttempt: strconv.FormatInt(e.RetryAttempt, 10), CreatedAt: e.CreatedAt, UpdatedAt: e.UpdatedAt, RunDeadlineAt: optionalTime(e.RunDeadlineAt), ExecutionDeadlineAt: optionalTime(e.ExecutionDeadlineAt), RunAvailableAt: e.RunAvailableAt, Payload: "restricted", Runtime: runtime}
