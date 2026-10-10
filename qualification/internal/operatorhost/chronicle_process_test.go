@@ -3,6 +3,7 @@ package operatorhost
 import (
 	"bytes"
 	"context"
+	"errors"
 	"net"
 	"net/http"
 	"net/url"
@@ -22,6 +23,9 @@ type nativeChronicle struct {
 	command *exec.Cmd
 	done    chan error
 	stopped bool
+	exit    error
+	logs    *bytes.Buffer
+	config  sinkhost.Config
 }
 
 func startNativeChronicle(t *testing.T, config sinkhost.Config, path string) *nativeChronicle {
@@ -37,33 +41,41 @@ func startNativeChronicle(t *testing.T, config sinkhost.Config, path string) *na
 	logs := new(bytes.Buffer)
 	command.Stdout = logs
 	command.Stderr = logs
-	if err := command.Start(); err != nil {
-		t.Fatal(err)
-	}
-	n := &nativeChronicle{command: command, done: make(chan error, 1)}
-	go func() { n.done <- command.Wait() }()
+	n := &nativeChronicle{command: command, done: make(chan error, 1), logs: logs, config: config}
 	t.Cleanup(func() {
-		if !n.stopped {
-			n.kill(t)
-		}
-		for _, credential := range config.Credentials {
-			if bytes.Contains(logs.Bytes(), []byte(credential.Secret)) {
-				t.Error("sink credential in logs")
+		stopErr := n.stop()
+		if n.stopped {
+			for _, credential := range config.Credentials {
+				if credential.Secret != "" && bytes.Contains(logs.Bytes(), []byte(credential.Secret)) {
+					t.Error("sink credential in logs")
+				}
 			}
 		}
+		if t.Failed() || stopErr != nil {
+			t.Log(n.diagnostic("cleanup", stopErr))
+		}
+		if stopErr != nil {
+			t.Error("native Chronicle cleanup failed")
+		}
 	})
+	if err := command.Start(); err != nil {
+		n.stopped, n.exit = true, err
+		t.Fatal(n.diagnostic("start", err))
+	}
+	go func() { n.done <- command.Wait() }()
 	client := &http.Client{Timeout: time.Second}
 	until := time.Now().Add(10 * time.Second)
 	for time.Now().Before(until) {
 		select {
-		case <-n.done:
-			n.stopped = true
-			t.Fatal("native Chronicle stopped before readiness")
+		case err := <-n.done:
+			n.stopped, n.exit = true, err
+			t.Fatal(n.diagnostic("startup", errors.New("native Chronicle stopped before readiness")))
 		default:
 		}
 		request, err := http.NewRequestWithContext(t.Context(), http.MethodGet, "http://"+config.Addresses["chronicle"]+"/health", nil)
 		if err != nil {
-			t.Fatal(err)
+			stopErr := n.stop()
+			t.Fatal(n.diagnostic("request", errors.Join(err, stopErr)))
 		}
 		response, err := client.Do(request)
 		if err == nil {
@@ -74,16 +86,39 @@ func startNativeChronicle(t *testing.T, config sinkhost.Config, path string) *na
 		}
 		time.Sleep(25 * time.Millisecond)
 	}
-	t.Fatal("native Chronicle readiness unavailable")
+	stopErr := n.stop()
+	t.Fatal(n.diagnostic("readiness", errors.Join(errors.New("native Chronicle readiness unavailable"), stopErr)))
 	return nil
 }
 func (n *nativeChronicle) kill(t *testing.T) {
 	t.Helper()
-	if err := n.command.Process.Kill(); err != nil {
-		t.Fatal(err)
+	if err := n.stop(); err != nil {
+		t.Fatal(n.diagnostic("stop", err))
 	}
-	<-n.done
-	n.stopped = true
+}
+
+// Always attempt to reap the child, even when termination itself fails.
+func (n *nativeChronicle) stop() error {
+	if n.stopped {
+		return nil
+	}
+	if n.command.Process == nil {
+		n.stopped = true
+		return nil
+	}
+	killErr := n.command.Process.Kill()
+	if errors.Is(killErr, os.ErrProcessDone) {
+		killErr = nil
+	}
+	timer := time.NewTimer(5 * time.Second)
+	defer timer.Stop()
+	select {
+	case n.exit = <-n.done:
+		n.stopped = true
+		return killErr
+	case <-timer.C:
+		return errors.Join(killErr, errors.New("native Chronicle child join timed out"))
+	}
 }
 
 func lifecycleSinkConfig(t *testing.T) (sinkhost.Config, string, map[string]*pgx.Conn) {
