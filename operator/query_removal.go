@@ -69,28 +69,8 @@ func (s *Service) queryRequestLookup(ctx context.Context, p security.Principal, 
 	if err != nil {
 		return durable.LifecycleReceipt{}, durable.ErrInvalid
 	}
-	store, err := s.lifecycleStore()
-	if err != nil {
-		return durable.LifecycleReceipt{}, err
-	}
 	lookup := durable.LifecycleReceiptLookup{NamespaceTarget: target.NamespaceTarget, Operation: op, RequestID: id, RequestDigest: digest}
-	receipt, err := store.LookupLifecycleReceipt(ctx, lookup)
-	if err == nil {
-		if receipt.Match(lookup) != nil || receipt.QueryRuntime == nil || receipt.QueryRuntime.QueryRuntimeTarget != target {
-			return durable.LifecycleReceipt{}, security.ErrUnavailable
-		}
-		if authErr := s.authorizeQuery(ctx, p, action, receipt.QueryRuntime.QueryRuntimeIdentity); authErr != nil {
-			return durable.LifecycleReceipt{}, authErr
-		}
-		return receipt, nil
-	}
-	if errors.Is(err, durable.ErrNotFound) {
-		return durable.LifecycleReceipt{}, err
-	}
-	if authErr := s.checkResourceFacts(ctx, p, action, durable.Key{Namespace: target.Namespace}, "", target.BuildID, target.RuntimeID, "", ""); authErr != nil {
-		return durable.LifecycleReceipt{}, authErr
-	}
-	return durable.LifecycleReceipt{}, commandError(err)
+	return s.lookupQueryReceipt(ctx, p, action, target, lookup)
 }
 
 func (s *Service) reservation(ctx context.Context, p security.Principal, action string, in QueryReservationInput) (durable.QueryRemovalFence, error) {

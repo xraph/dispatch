@@ -112,11 +112,15 @@ func (s *Service) queryFailure(ctx context.Context, p security.Principal, action
 	return commandError(cause)
 }
 func (s *Service) queryLookup(ctx context.Context, p security.Principal, action string, target durable.QueryRuntimeTarget, operation durable.LifecycleOperation, requestID, digest string) (durable.LifecycleReceipt, error) {
+	lookup := durable.LifecycleReceiptLookup{NamespaceTarget: target.NamespaceTarget, Operation: operation, RequestID: requestID, CommandDigest: digest}
+	return s.lookupQueryReceipt(ctx, p, action, target, lookup)
+}
+
+func (s *Service) lookupQueryReceipt(ctx context.Context, p security.Principal, action string, target durable.QueryRuntimeTarget, lookup durable.LifecycleReceiptLookup) (durable.LifecycleReceipt, error) {
 	life, err := s.lifecycleStore()
 	if err != nil {
 		return durable.LifecycleReceipt{}, err
 	}
-	lookup := durable.LifecycleReceiptLookup{NamespaceTarget: target.NamespaceTarget, Operation: operation, RequestID: requestID, CommandDigest: digest}
 	receipt, err := life.LookupLifecycleReceipt(ctx, lookup)
 	if err == nil {
 		if receipt.Match(lookup) != nil || receipt.QueryRuntime == nil || receipt.QueryRuntime.QueryRuntimeTarget != target {
