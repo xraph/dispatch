@@ -28,7 +28,7 @@ func main() {
 		os.Exit(1)
 	}
 }
-func run() error {
+func run() (returnErr error) {
 	listen := flag.String("listen", "127.0.0.1:0", "numeric loopback listen address")
 	statePath := flag.String("state-file", "", "new private state file containing URL and ephemeral credentials")
 	flag.Parse()
@@ -63,6 +63,8 @@ func run() error {
 		defer cancel()
 		_ = host.Close(closeCtx)
 	}()
+	stopWorkers := host.StartWorkers(ctx)
+	defer func() { returnErr = errors.Join(returnErr, stopWorkers()) }()
 	listener, err := (&net.ListenConfig{}).Listen(ctx, "tcp", *listen)
 	if err != nil {
 		return err

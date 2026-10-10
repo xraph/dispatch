@@ -15,9 +15,12 @@ import (
 	authmem "github.com/xraph/authsome/store/memory"
 	"github.com/xraph/authsome/user"
 	"github.com/xraph/forge"
+	"github.com/xraph/forge/extensions/auth"
+	"github.com/xraph/forge/extensions/dashboard"
 	dashauth "github.com/xraph/forge/extensions/dashboard/auth"
 	fc "github.com/xraph/forge/extensions/dashboard/contract"
 	"github.com/xraph/forge/extensions/dashboard/contract/dispatcher"
+	"github.com/xraph/forge/extensions/dashboard/contract/idempotency"
 	"github.com/xraph/forge/extensions/dashboard/contract/transport"
 	dashsecurity "github.com/xraph/forge/extensions/dashboard/security"
 	"github.com/xraph/warden"
@@ -26,6 +29,7 @@ import (
 	wmem "github.com/xraph/warden/store/memory"
 
 	"github.com/xraph/dispatch"
+	"github.com/xraph/dispatch/api"
 	"github.com/xraph/dispatch/durable"
 	"github.com/xraph/dispatch/engine"
 	dc "github.com/xraph/dispatch/extension/contract"
@@ -48,14 +52,20 @@ type Credential struct {
 	Token   string `json:"token"`
 }
 type Host struct {
-	Handler      http.Handler
-	Credentials  map[string]Credential
-	Store        Store
-	Auth         *authsome.Engine
-	Policies     *wmem.Store
-	ReaderPolicy wid.PolicyID
-	engine       *engine.Engine
-	audit        security.Boundary
+	LegacyPolicy    wid.PolicyID
+	authStore       *authmem.Store
+	machineProvider *authority.Provider
+	Handler         http.Handler
+	Credentials     map[string]Credential
+	Store           Store
+	Auth            *authsome.Engine
+	Policies        *wmem.Store
+	ReaderPolicy    wid.PolicyID
+	CommandPolicies map[string]wid.PolicyID
+	Machine         authority.Credential
+	runtime         commandRuntime
+	engine          *engine.Engine
+	audit           security.Boundary
 }
 
 // New provisions real Authsome sessions and Warden grants for two namespaces.
@@ -82,6 +92,7 @@ func New(ctx context.Context, store Store) (host *Host, returnErr error) {
 		return nil, err
 	}
 	authStore := authmem.New()
+	h.authStore = authStore
 	now := time.Now().UTC()
 	if err := authStore.CreateApp(ctx, &app.App{ID: appID, Name: "Operator qualification", Slug: "operator-host", IsPlatform: true, CreatedAt: now, UpdatedAt: now}); err != nil {
 		return nil, err
@@ -95,7 +106,8 @@ func New(ctx context.Context, store Store) (host *Host, returnErr error) {
 	if _, keyErr := rand.Read(encryptionKey); keyErr != nil {
 		return nil, keyErr
 	}
-	authEngine, err := authority.NewEncrypted(authStore, w, appID.String(), nil, encryptionKey)
+	registry := auth.NewRegistry(nil, forge.NewNoopLogger())
+	authEngine, err := authority.NewEncrypted(authStore, w, appID.String(), registry, encryptionKey)
 	if err != nil {
 		return nil, err
 	}
@@ -103,7 +115,7 @@ func New(ctx context.Context, store Store) (host *Host, returnErr error) {
 	if startErr := authEngine.Start(ctx); startErr != nil {
 		return nil, startErr
 	}
-	for _, role := range []string{"reader", "payload", "denied"} {
+	for _, role := range []string{"reader", "payload", "denied", "commander"} {
 		u := &user.User{ID: aid.NewUserID(), AppID: appID, Email: role + "@operator.example.test", EmailVerified: true, CreatedAt: now, UpdatedAt: now}
 		if createErr := authStore.CreateUser(ctx, u); createErr != nil {
 			return nil, createErr
@@ -120,7 +132,7 @@ func New(ctx context.Context, store Store) (host *Host, returnErr error) {
 			continue
 		}
 		actions := []string{operator.Discover, operator.ListExecutions, operator.ReadExecution, operator.ReadHistory, operator.ReadTasks, operator.ReadChain, operator.ReadAudit, operator.ReadHooks}
-		if role == "payload" {
+		if role == "payload" || role == "commander" {
 			actions = append(actions, operator.ReadPayload)
 		}
 		p := &policy.Policy{ID: wid.NewPolicyID(), TenantID: "tenant-production", NamespacePath: "production", AppID: appID.String(), Name: role, IsActive: true, Effect: policy.EffectAllow, Subjects: []policy.SubjectMatch{{Kind: "user", ID: u.ID.String()}}, Actions: actions, Resources: []string{"dispatch_namespace:production"}, Conditions: []policy.Condition{{Field: "resource.installation_id", Operator: policy.OpEquals, Value: "operator-host"}, {Field: "resource.app_id", Operator: policy.OpEquals, Value: appID.String()}, {Field: "resource.tenant_id", Operator: policy.OpEquals, Value: "tenant-production"}}}
@@ -148,7 +160,10 @@ func New(ctx context.Context, store Store) (host *Host, returnErr error) {
 	if _, err = rand.Read(key); err != nil {
 		return nil, err
 	}
-	operators, err := operator.New(operator.Options{Store: store, Reads: store, Catalog: store, InstallationID: "operator-host", Audit: h.audit, Authorizer: &operator.WardenAuthorizer{Engine: func() (*warden.Engine, error) { return w, nil }}, CursorKeys: operator.CursorKeys{Active: "fixture-v1", Keys: map[string][]byte{"fixture-v1": key}}})
+	if configureErr := h.configureCommands(ctx, appID, registry); configureErr != nil {
+		return nil, configureErr
+	}
+	operators, err := operator.New(operator.Options{Store: store, Reads: store, Catalog: store, InstallationID: "operator-host", Runtime: h.worker, Audit: h.audit, Authorizer: &operator.WardenAuthorizer{Engine: func() (*warden.Engine, error) { return w, nil }}, CursorKeys: operator.CursorKeys{Active: "fixture-v1", Keys: map[string][]byte{"fixture-v1": key}}})
 	if err != nil {
 		return nil, err
 	}
@@ -161,16 +176,28 @@ func New(ctx context.Context, store Store) (host *Host, returnErr error) {
 		return nil, err
 	}
 	reg, wreg := fc.NewRegistry(), fc.NewWardenRegistry()
-	contractDispatcher := dispatcher.New(nil)
+	contractDispatcher := dispatcher.NewWithOptions(nil, dispatcher.WithIdempotencyStore(dashboard.AdaptIdempotencyStore(idempotency.NewInMemoryStore())))
 	if registerErr := dc.Register(contractDispatcher, reg, wreg, dc.Deps{Engine: h.engine, Store: store, Security: h.audit, Durable: operators}); registerErr != nil {
 		return nil, registerErr
 	}
-	contract := transport.NewHandlerWithCSRF(reg, wreg, contractDispatcher, nil, dashsecurity.NewCSRFManager())
+	csrf := dashsecurity.NewCSRFManager()
+	contract := transport.NewHandlerWithCSRF(reg, wreg, contractDispatcher, nil, csrf)
 	router := forge.NewRouter()
 	router.Use(authEngine.AuthMiddleware())
 	router.Use(dashauth.ForgeMiddleware(contextUser{}))
+	csrfHandler := transport.NewCSRFTokenHandler(csrf, 10*time.Minute)
+	if err := router.GET("/api/dashboard/v1/csrf", func(c forge.Context) error { csrfHandler.ServeHTTP(c.Response(), c.Request()); return nil }); err != nil {
+		return nil, err
+	}
 	if routeErr := router.POST("/api/dashboard/v1", func(c forge.Context) error { contract.ServeHTTP(c.Response(), c.Request()); return nil }); routeErr != nil {
 		return nil, routeErr
+	}
+	authenticator := security.NewForgeAuthenticator(func() (auth.Registry, error) { return registry, nil }, "session", authority.ProviderName)
+	callbacks := api.New(h.engine, nil, api.WithSecurity(authenticator, h.audit), api.WithDurableCallbacks(operators, authenticator)).Handler()
+	for _, path := range []string{"/v1/durable/activities/complete", "/v1/durable/activities/heartbeat"} {
+		if routeErr := router.POST(path, func(c forge.Context) error { callbacks.ServeHTTP(c.Response(), c.Request()); return nil }); routeErr != nil {
+			return nil, routeErr
+		}
 	}
 	h.Handler = router.Handler()
 	if seedErr := seed(ctx, store); seedErr != nil {

@@ -19,7 +19,9 @@ import (
 	"github.com/xraph/warden/policy"
 	wpg "github.com/xraph/warden/store/postgres"
 
+	"github.com/xraph/dispatch/durable"
 	"github.com/xraph/dispatch/durable/delivery/ecosystem"
+	"github.com/xraph/dispatch/operator"
 	"github.com/xraph/dispatch/qualification/internal/authority"
 	"github.com/xraph/dispatch/security"
 	dpg "github.com/xraph/dispatch/store/postgres"
@@ -99,6 +101,12 @@ func Bootstrap(ctx context.Context, c *Config) error {
 		if role == "operator" {
 			pol.AppID = ""
 		} // Dispatch's operator boundary uses its policy tenant with an empty app.
+		if role == "operator" {
+			durablePolicy := &policy.Policy{ID: wid.NewPolicyID(), AppID: c.Binding.AppID, TenantID: c.Binding.TenantID, NamespacePath: c.Binding.Namespace, Name: "durable-callback", IsActive: true, Effect: policy.EffectAllow, Subjects: []policy.SubjectMatch{{Kind: "service_acct", ID: account.ID.String()}}, Actions: []string{operator.StartWorkflow, operator.CompleteActivity, operator.HeartbeatActivity}, Resources: []string{"dispatch_namespace:" + c.Binding.Namespace}, Conditions: []policy.Condition{{Field: "resource.installation_id", Operator: policy.OpEquals, Value: c.Binding.InstallationID}, {Field: "resource.app_id", Operator: policy.OpEquals, Value: c.Binding.AppID}, {Field: "resource.tenant_id", Operator: policy.OpEquals, Value: c.Binding.TenantID}}}
+			if e := policies.CreatePolicy(ctx, durablePolicy); e != nil {
+				return e
+			}
+		}
 		if e := policies.CreatePolicy(ctx, pol); e != nil {
 			return e
 		}
@@ -118,6 +126,13 @@ func Bootstrap(ctx context.Context, c *Config) error {
 	}
 	if setupErr := dpg.New(db).Migrate(ctx); setupErr != nil {
 		return setupErr
+	}
+	record, namespaceErr := dpg.New(db).RegisterNamespace(ctx, durable.NamespaceConfig{InstallationID: c.Binding.InstallationID, Namespace: c.Binding.Namespace, AppID: c.Binding.AppID, TenantID: c.Binding.TenantID, RequireAudit: true, RequireHooks: true, SchemaVersion: 1})
+	if namespaceErr != nil {
+		return namespaceErr
+	}
+	if schemaErr := operator.RegisterNamespaceSchema(ctx, policies, record); schemaErr != nil {
+		return schemaErr
 	}
 	if setupErr := db.Close(); setupErr != nil {
 		return setupErr

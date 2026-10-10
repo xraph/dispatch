@@ -125,8 +125,9 @@ operator_pid=$!
 ```
 
 The new state file is mode 0600. It contains the numeric-loopback `url` and
-`credentials.reader`, `credentials.payload` and `credentials.denied`, each with
-an Authsome session `token` and subject. Keep this file private. Do not commit,
+`credentials.reader`, `credentials.payload`, `credentials.denied` and
+`credentials.commander`, each with an Authsome session `token` and subject.
+`credentials.machine` holds the environment-bound service account key. Keep this file private. Do not commit,
 print or copy it into screenshots, browser URLs, client bundles or evidence.
 Your local dashboard proxy can read the reader token server-side and forward it
 as `Authorization: Bearer <token>` to `/api/dashboard/v1`. The host also accepts
@@ -141,7 +142,8 @@ records. Restart keeps that Dispatch state but issues new identities and cursor
 keys. The fixture seeds production and foreign tenants, 35 denied discovery
 candidates, invoice runs `run-1`/`run-2`, an approval workflow and deliberate
 source conflicts. These conflicts test the read projection; no sink acceptance
-or external delivery is fabricated. Historical runtime availability is false.
+or external delivery is fabricated. The seeded `historical-v1` build is unavailable.
+The running host registers `operator-v1` and `operator-v2` exactly.
 
 The first `durable.namespaces` response has zero visible items and
 `complete: false`. Follow its cursor to reach `production`. Read
@@ -173,3 +175,38 @@ DTO serialization. The published Forge transport preserves canonical errors:
 invalid read input; 404/NOT_FOUND for an absent authorized resource; and
 503/UNAVAILABLE when required audit acceptance is unavailable. Tests assert
 both status and envelope code. The fixture does not rewrite transport responses.
+
+The commander can start, signal, signal-with-start, request cancellation and query
+production runs through the shared contract. Fetch `/api/dashboard/v1/csrf` with
+the same session before sending commands. Each action has a separate Warden
+grant. Use the `operator` workflow on queue `operator`: its `status` query returns
+the original input bytes and its `finish` signal completes the run. The `continue`
+workflow produces a successor; `async` and `async-expiry` obtain genuine deferred
+activity handles. You cannot obtain those proofs through dashboard metadata.
+
+Send explicit machine tokens to `/v1/durable/activities/complete` and
+`/v1/durable/activities/heartbeat`. The registered provider invokes Authsome's
+actual API-key strategy and checks persisted ownership before the stock Dispatch
+authenticator and Warden command service run. Human sessions are denied on these
+routes. This Authsome version issues `service_account`; Dispatch maps it to
+`service_acct`. The compatibility aliases `service` and `api_key` are not separate
+issued identities here. Agent/workload tests seed fresh account records with
+those original kinds, then call the real key issuer and strategy. The unchanged
+service-account provider rejects them. These fixtures do not qualify public
+agent/workload onboarding or Dispatch's later kind gate for those identities.
+
+The HTTP tests use the default claiming response cache for legacy commands and
+check authorization again on cached retries. Durable commands recover persisted
+receipts, compare exact content and authorize the accepted target. The suite
+also drops an HTTP response after a committed signal or completion, then retries
+the same request. Query outputs retain their bytes; the runtime rejects mutation
+through its query SDK, but it cannot sandbox arbitrary Go side effects.
+
+Callback coverage includes genuine expiry and rotated attempts, conflicting and
+identical completion/heartbeat retries, revoked accepted retries, foreign targets,
+malformed string-encoded counters and valid-shaped incorrect proofs. PostgreSQL
+fault injection checks that required intent failure leaves no receipt, execution
+mutation or new outbox entry. In the process gate, each stopped sink leaves
+callback acceptance pending locally; restart must deliver and acknowledge it.
+Private callback files are mode 0600 inside the task's mode 0700 directory and
+are removed with the fixture. Never include them in retained evidence.

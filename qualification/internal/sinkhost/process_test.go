@@ -115,6 +115,10 @@ func TestProcesses(t *testing.T) {
 			_ = db.Close(context.Background())
 		}
 	})
+	r.c.CallbackDirectory = filepath.Join(r.dir, "callback-handles")
+	if err = os.Mkdir(r.c.CallbackDirectory, 0700); err != nil {
+		t.Fatal(err)
+	}
 	if bootstrapErr := Bootstrap(ctx, &r.c); bootstrapErr != nil {
 		t.Fatal(bootstrapErr)
 	}
@@ -136,6 +140,7 @@ func TestProcesses(t *testing.T) {
 			})
 			r.equal(before, r.count(role, "SELECT count(*) FROM "+role+"_acceptances"), "stopped sink receipt count")
 			t.Logf("%s stopped: pending=%d PostgreSQL healthy", role, r.count("dispatch", "SELECT count(*) FROM dispatch_durable_outbox WHERE destination=$1 AND delivered_at IS NULL", role))
+			r.callbackWhileSinkStopped(role)
 			r.start(role, r.c)
 			r.settled()
 			r.verify()

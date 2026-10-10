@@ -104,6 +104,11 @@ func serveDispatch(ctx context.Context, app forge.App, registry auth.Registry, w
 	if err := boundary.Audit.Activate(ctx, store, store, boundary.Resource, n.Namespace, false); err != nil {
 		return err
 	}
+	stopCallbacks, setupErr := operatorRoutes(ctx, app.Router(), registry, w, store, boundary, c)
+	if setupErr != nil {
+		return setupErr
+	}
+	defer func() { returnErr = errors.Join(returnErr, stopCallbacks()) }()
 	guard := func(handler forge.Handler) forge.Handler {
 		return registry.MiddlewareWithRequirement(auth.Requirement{Providers: []string{provider.Name()}, Scopes: []string{security.OperatorWrite}})(handler)
 	}

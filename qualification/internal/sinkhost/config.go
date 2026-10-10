@@ -21,6 +21,7 @@ import (
 )
 
 type Config struct {
+	CallbackDirectory  string                          `json:"callback_directory,omitempty"`
 	Binding            ecosystem.Binding               `json:"binding"`
 	EnvironmentID      string                          `json:"environment_id"`
 	PolicyTenant       string                          `json:"policy_tenant"`
