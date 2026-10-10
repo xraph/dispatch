@@ -60,6 +60,7 @@ type Host struct {
 	Store           Store
 	Auth            *authsome.Engine
 	Policies        *wmem.Store
+	warden          *warden.Engine
 	ReaderPolicy    wid.PolicyID
 	CommandPolicies map[string]wid.PolicyID
 	Machine         authority.Credential
@@ -113,6 +114,7 @@ func newHost(ctx context.Context, store Store, options *LifecycleOptions) (host 
 	if err != nil {
 		return nil, err
 	}
+	h.warden = w
 	encryptionKey := make([]byte, 32)
 	if _, keyErr := rand.Read(encryptionKey); keyErr != nil {
 		return nil, keyErr
@@ -185,6 +187,7 @@ func newHost(ctx context.Context, store Store, options *LifecycleOptions) (host 
 		operatorOptions.BuildIdentity = h.lifecycle.buildIdentity
 		operatorOptions.WorkerControl = h.lifecycle.workerControl
 		operatorOptions.QueryHost = h.lifecycle
+		operatorOptions.QueryRejection = h.lifecycle.observeQueryRejection
 		operatorOptions.QueryRegistrationPolicy = h.lifecycle.options.RegistrationPolicy
 	}
 	operators, err := operator.New(operatorOptions)
@@ -245,7 +248,7 @@ func (contextUser) CheckAuth(ctx context.Context, _ *http.Request) (*dashauth.Us
 }
 func (h *Host) Close(ctx context.Context) error {
 	h.audit.Audit.Deactivate()
-	var storeErr, authErr error
+	var storeErr, authErr, policyErr error
 	if h.engine != nil {
 		storeErr = h.engine.Stop(ctx)
 	} else if h.Store != nil {
@@ -255,5 +258,8 @@ func (h *Host) Close(ctx context.Context) error {
 	if h.Auth != nil {
 		authErr = h.Auth.Stop(ctx)
 	}
-	return errors.Join(storeErr, authErr)
+	if h.warden != nil {
+		policyErr = h.warden.Stop(ctx)
+	}
+	return errors.Join(storeErr, authErr, policyErr)
 }

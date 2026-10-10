@@ -52,6 +52,11 @@ func newConfiguredCommandClient(t *testing.T, store Store, options *LifecycleOpt
 		t.Fatal(err)
 	}
 	t.Cleanup(func() {
+		if t.Failed() && h.lifecycle != nil {
+			for _, line := range h.lifecycle.queryDiagnosticSnapshot() {
+				t.Log(line)
+			}
+		}
 		if err := h.Close(context.Background()); err != nil {
 			t.Error(err)
 		}

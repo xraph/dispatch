@@ -375,3 +375,34 @@ entries and shuts its publisher down cleanly before closing the store. Sink
 outage does not become completed delivery just because a lifecycle command was
 accepted locally. The fixture does not establish multi-tenant sink routing or
 provider deletion.
+
+### Query proof clocks and private diagnostics
+
+The lifecycle host takes each new proof timestamp from
+`InspectQueryRetention(...).ObservedAt` after the retained query succeeds. Abort
+first revokes local removal issuance under the existing mutex, takes a settlement
+sample from that store, then queries and takes a fresh proof sample. Read failures,
+wrong targets and missing samples refuse the operation. Revocation stays in place.
+Accepted requests still recover their original receipt before any new probe.
+
+This adds a coordinated store read for each new proof, plus one for abort
+settlement. There is no clock tolerance. A store clock rollback can make a proof
+future at acceptance or earlier than settlement, and a forward jump can expire it.
+Both remain refusals. Local removal and fence deadlines still depend on the host
+clock. We have not unified provider clocks or qualified external deletion here.
+
+You can inspect private `dispatch-query-rejection` JSON records on the native
+host's standard error. They retain the failing stage, bounded reason and relevant
+proof times or digests. They exclude query payloads, credentials and raw database
+messages. HTTP responses keep their existing status and public error text. The
+host keeps the latest 32 records for an in-process test failure; native tests join
+the child before retaining sanitized records from a failed run. Each JSON record
+is limited to 4096 bytes. The trusted local writer must return promptly, and
+arbitrary Service observers have the same cooperative latency requirement.
+Diagnostics never determine audit acceptance.
+
+The clock regression advances only a Go test clock before constructing its host
+and pool. It verifies the default sampler against the unchanged PostgreSQL clock,
+with explicit cleanup inside that test and an independent test timeout. A separate
+rollback fixture checks that settlement ordering remains strict. These tests do
+not identify the cause of the earlier retained historical-query HTTP 409.

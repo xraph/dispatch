@@ -86,7 +86,10 @@ func (h *lifecycleHost) VerifyAbort(ctx context.Context, binding durable.QueryRu
 	// This assignment and local issuance use the same lock. A failed fresh probe
 	// keeps issuance revoked but does not release the persisted reservation.
 	h.revokedOperations[digest] = true
-	now := durable.Timestamp(time.Now())
+	now, err := h.queryTime(ctx, binding.QueryRuntimeTarget)
+	if err != nil {
+		return durable.QueryRemovalSettlement{}, durable.QueryRuntimeVerification{}, err
+	}
 	evidence, err := durable.Fingerprint("operator_host.local_issuance_revoked.v1", struct {
 		Fence   string
 		Runtime string

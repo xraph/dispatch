@@ -72,7 +72,7 @@ func run() (returnErr error) {
 	if *instance == "" {
 		host, err = operatorhost.New(ctx, store)
 	} else {
-		host, err = operatorhost.NewWithLifecycle(ctx, store, operatorhost.LifecycleOptions{InstanceID: *instance, SkipSampleExecutions: *chroniclePath != "", DrainObserver: fileDrainObserver{before: *pauseBefore, after: *pauseAfter}})
+		host, err = operatorhost.NewWithLifecycle(ctx, store, operatorhost.LifecycleOptions{DiagnosticWriter: os.Stderr, InstanceID: *instance, SkipSampleExecutions: *chroniclePath != "", DrainObserver: fileDrainObserver{before: *pauseBefore, after: *pauseAfter}})
 	}
 	if err != nil {
 		return err

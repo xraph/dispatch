@@ -19,6 +19,8 @@ import (
 // LifecycleOptions comes from trusted local configuration, never request fields.
 // StartupPolicy is the physical-instance enrollment hook for a deployment host.
 type LifecycleOptions struct {
+	// DiagnosticWriter is a trusted local sink. Writes must return promptly.
+	DiagnosticWriter     io.Writer
 	SkipSampleExecutions bool
 	DrainObserver        DrainObserver
 	InstanceID           string
@@ -51,6 +53,7 @@ type lifecycleHost struct {
 	mu                sync.Mutex
 	removedRuntimes   map[string]string
 	revokedOperations map[string]bool
+	diagnostics       queryDiagnostics
 }
 
 func lifecycleActions() []string {
@@ -210,24 +213,34 @@ func (h *lifecycleHost) Verify(ctx context.Context, binding durable.QueryRuntime
 
 func (h *lifecycleHost) verify(ctx context.Context, binding durable.QueryRuntimeBinding) (durable.QueryRuntimeVerification, error) {
 	identity, err := h.ResolveBinding(ctx, binding.QueryRuntimeTarget)
-	if err != nil || identity != binding.QueryRuntimeIdentity || h.removedRuntimes[identity.RuntimeID] != "" {
-		return durable.QueryRuntimeVerification{}, durable.ErrQueryRetention
+	if err != nil || identity != binding.QueryRuntimeIdentity {
+		return durable.QueryRuntimeVerification{}, durable.NewQueryRejection(durable.ErrQueryRetention, durable.QueryRejectionDiagnostic{Stage: "host_identity", Reason: "identity", Target: binding.QueryRuntimeTarget})
+	}
+	if h.removedRuntimes[identity.RuntimeID] != "" {
+		return durable.QueryRuntimeVerification{}, durable.NewQueryRejection(durable.ErrQueryRetention, durable.QueryRejectionDiagnostic{Stage: "host_identity", Reason: "removed", Target: binding.QueryRuntimeTarget, IdentityMatches: true, Removed: true})
 	}
 	worker := h.host.runtime.workers[identity.BuildID]
 	status := worker.Status()
 	if !status.AdmissionClosed || status.InFlight != 0 || status.UnknownClaims != 0 {
-		return durable.QueryRuntimeVerification{}, durable.ErrQueryRetention
+		reason := "admission"
+		if status.AdmissionClosed {
+			reason = "in_flight"
+			if status.InFlight == 0 {
+				reason = "unknown_claims"
+			}
+		}
+		return durable.QueryRuntimeVerification{}, durable.NewQueryRejection(durable.ErrQueryRetention, durable.QueryRejectionDiagnostic{Stage: "host_drain", Reason: reason, Target: binding.QueryRuntimeTarget, AdmissionClosed: status.AdmissionClosed, InFlight: status.InFlight, UnknownClaims: status.UnknownClaims})
 	}
 	samples := make([]probeSample, 0, len(h.options.Probes[identity.BuildID]))
 	for _, probe := range h.options.Probes[identity.BuildID] {
 		result, queryErr := worker.QueryExecution(ctx, drt.QueryRequest{Key: probe.Key, Selection: durable.RunExplicit, BuildID: identity.BuildID, Name: probe.Query})
 		if queryErr != nil {
-			return durable.QueryRuntimeVerification{}, queryErr
+			return durable.QueryRuntimeVerification{}, durable.NewQueryRejection(queryErr, durable.QueryRejectionDiagnostic{Stage: "host_probe", Reason: "query_read", Target: binding.QueryRuntimeTarget})
 		}
 		sum := sha256.Sum256(result.Output)
 		digest := hex.EncodeToString(sum[:])
 		if digest != probe.ExpectedDigest {
-			return durable.QueryRuntimeVerification{}, durable.ErrQueryRetention
+			return durable.QueryRuntimeVerification{}, durable.NewQueryRejection(durable.ErrQueryRetention, durable.QueryRejectionDiagnostic{Stage: "host_probe", Reason: "digest", Target: binding.QueryRuntimeTarget, ExpectedDigest: probe.ExpectedDigest, ActualDigest: digest})
 		}
 		samples = append(samples, probeSample{Name: probe.Name, Key: result.Key, Query: probe.Query, Revision: result.Revision, LastSequence: result.LastSequence, OutputDigest: digest})
 	}
@@ -238,7 +251,10 @@ func (h *lifecycleHost) verify(ctx context.Context, binding durable.QueryRuntime
 	if err != nil {
 		return durable.QueryRuntimeVerification{}, err
 	}
-	now := durable.Timestamp(time.Now())
+	now, err := h.queryTime(ctx, binding.QueryRuntimeTarget)
+	if err != nil {
+		return durable.QueryRuntimeVerification{}, err
+	}
 	proofID, err := durable.Fingerprint("operator_host.proof.v1", struct {
 		Digest string
 		At     time.Time
