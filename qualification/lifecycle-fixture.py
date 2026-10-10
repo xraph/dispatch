@@ -79,7 +79,10 @@ def main():
         for kind in kinds:
             page = call("durable.tasks", {"namespace": "production", "workflow_id": kind, "run_id": "run-1", "limit": 100}, True)
             output[kind] = [task["deferral"] for task in page["items"] if task.get("deferral")]
-        if args.action == "inspect" or all(any(row["active"] == (args.action == "prepare") for row in rows) for rows in output.values()):
+        ready = all(rows and (any(row["active"] for row in rows) if args.action == "prepare"
+                             else all(not row["active"] for row in rows))
+                    for rows in output.values())
+        if args.action == "inspect" or ready:
             print(json.dumps(output, indent=2))
             return
         if time.monotonic() >= until:

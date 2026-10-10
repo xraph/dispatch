@@ -74,6 +74,22 @@ func TestNativeDrainLossWindows(t *testing.T) {
 					if replay.Process != "unknown" || replay.Complete || replay.RuntimeID != identity.RuntimeID || !replay.Deadline.Equal(in.Deadline) {
 						t.Fatal("lost original process was retargeted or inferred complete")
 					}
+					var currentRuntime string
+					for _, current := range replacement.identities {
+						if current.BuildID == identity.BuildID {
+							currentRuntime = current.RuntimeID
+						}
+					}
+					if currentRuntime == "" || currentRuntime == identity.RuntimeID {
+						t.Fatal("replacement did not create a fresh runtime")
+					}
+					current := in.WorkerInput
+					current.RuntimeID = currentRuntime
+					currentStatus := data[operator.WorkerObservation](t, replacement.client.command("durable.workerStatus", current, 200))
+					if currentStatus.RuntimeID != currentRuntime || currentStatus.AdmissionClosed || currentStatus.State != "not_started" {
+						t.Fatalf("old drain mutated replacement: %+v", currentStatus)
+					}
+					t.Logf("replacement=%s admission_closed=%t state=%s", currentRuntime, currentStatus.AdmissionClosed, currentStatus.State)
 					replacement.kill(t)
 				} else {
 					replay := data[operator.WorkerDrainAcceptance](t, c.command("durable.workerDrain", in, 200))
