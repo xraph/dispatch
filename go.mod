@@ -13,19 +13,19 @@ require (
 	github.com/testcontainers/testcontainers-go/modules/postgres v0.44.0
 	github.com/testcontainers/testcontainers-go/modules/redis v0.44.0
 	github.com/vmihailenco/msgpack/v5 v5.4.1
-	github.com/xraph/chronicle v1.7.1-0.20261009182725-f75626bdff89
-	github.com/xraph/forge v1.12.5-0.20261010012931-217abffa75f0
-	github.com/xraph/forge/extensions/auth v1.12.4-0.20261009184218-9ec7ce62855a
-	github.com/xraph/grove v1.7.1
-	github.com/xraph/grove/drivers/mongodriver v1.7.1
-	github.com/xraph/grove/drivers/pgdriver v1.7.1
-	github.com/xraph/grove/drivers/sqlitedriver v1.7.1
-	github.com/xraph/grove/kv v1.7.1
-	github.com/xraph/grove/kv/drivers/redisdriver v1.7.1
-	github.com/xraph/relay v1.7.1-0.20261009182245-e91c9e295315
+	github.com/xraph/chronicle v1.8.0
+	github.com/xraph/forge v1.12.7
+	github.com/xraph/forge/extensions/auth v1.12.7
+	github.com/xraph/grove v1.7.3
+	github.com/xraph/grove/drivers/mongodriver v1.7.3
+	github.com/xraph/grove/drivers/pgdriver v1.7.3
+	github.com/xraph/grove/drivers/sqlitedriver v1.7.3
+	github.com/xraph/grove/kv v1.7.3
+	github.com/xraph/grove/kv/drivers/redisdriver v1.7.3
+	github.com/xraph/relay v1.7.2
 	github.com/xraph/trove v1.7.0
 	github.com/xraph/vessel v1.0.4
-	github.com/xraph/warden v1.7.0
+	github.com/xraph/warden v1.7.1
 	github.com/zeebo/blake3 v0.2.4
 	go.jetify.com/typeid/v2 v2.0.0-alpha.3
 	go.mongodb.org/mongo-driver/v2 v2.9.1
