@@ -26,7 +26,8 @@ When using the Forge extension, routes are registered automatically under the co
 |--------|------|-------------|
 | `GET` | `/v1/jobs` | List jobs |
 | `GET` | `/v1/jobs/:jobId` | Get job by ID |
-| `POST` | `/v1/jobs/:jobId/cancel` | Cancel a pending job |
+| `POST` | `/v1/jobs/:jobId/cancel` | Cancel a pending, retrying or running job |
+| `POST` | `/v1/jobs/:jobId/retry` | Retry a failed job |
 | `GET` | `/v1/jobs/counts` | Job counts by state |
 
 ### Workflows
@@ -36,6 +37,8 @@ When using the Forge extension, routes are registered automatically under the co
 | `GET` | `/v1/workflows` | List workflow definitions |
 | `GET` | `/v1/workflows/runs` | List workflow runs |
 | `GET` | `/v1/workflows/runs/:runId` | Get a workflow run |
+| `GET` | `/v1/workflows/runs/:runId/replay?step=` | Plan a replay from a step |
+| `POST` | `/v1/workflows/runs/:runId/replay` | Replay a run from a step |
 
 ### Crons
 
@@ -46,6 +49,7 @@ When using the Forge extension, routes are registered automatically under the co
 | `POST` | `/v1/crons/:cronId/enable` | Enable a cron entry |
 | `POST` | `/v1/crons/:cronId/disable` | Disable a cron entry |
 | `DELETE` | `/v1/crons/:cronId` | Delete a cron entry |
+| `POST` | `/v1/crons/:cronId/trigger` | Enqueue the entry's job now |
 
 ### DLQ
 
@@ -54,7 +58,9 @@ When using the Forge extension, routes are registered automatically under the co
 | `GET` | `/v1/dlq` | List DLQ entries |
 | `GET` | `/v1/dlq/:entryId` | Get a DLQ entry |
 | `POST` | `/v1/dlq/:entryId/replay` | Replay a single entry |
-| `POST` | `/v1/dlq/purge` | Purge all DLQ entries |
+| `DELETE` | `/v1/dlq/:entryId` | Delete a single entry |
+| `POST` | `/v1/dlq/replay-all` | Replay every unreplayed entry |
+| `POST` | `/v1/dlq/purge` | Purge entries older than a cutoff |
 | `GET` | `/v1/dlq/count` | DLQ entry count |
 
 ### Stats

@@ -29,6 +29,7 @@ import (
 	"github.com/xraph/dispatch/cluster"
 	"github.com/xraph/dispatch/cron"
 	"github.com/xraph/dispatch/dlq"
+	"github.com/xraph/dispatch/durable"
 	"github.com/xraph/dispatch/event"
 	"github.com/xraph/dispatch/exec"
 	"github.com/xraph/dispatch/ext"
@@ -86,24 +87,18 @@ type Engine struct {
 	mws        []mw.Middleware
 	logger     log.Logger
 
-	// stopOnce guards the executor-close path in Stop against a double
-	// call. Stop's other steps tolerate being run twice: the cron
-	// scheduler and the dispatcher each hold their own sync.Once, and the
-	// worker pool checks a running flag. Close has no such guard of its
-	// own, and closing a rung's clients or child processes twice is not
-	// guaranteed safe the way a no-op Stop is.
-	//
-	// The scope is deliberately narrow rather than wrapping all of Stop.
-	// Every other step owns its own idempotence, at the layer that knows
-	// what repeating it costs, and this guard exists only for the one
-	// step that cannot. Widening it here would put that decision in the
-	// wrong place and hide from a reader that the subsystems already
-	// handle it. Note a second Stop returns nil rather than the first
-	// call's error, because the dispatcher's own Once reports nothing on
-	// a repeat call.
-	stopOnce sync.Once
+	// Public lifecycle calls share a deadline-aware gate. Quiescence runs once
+	// and retains its completion channel across timed-out Stop calls.
+	lifecycleOnce sync.Once
+	lifecycleGate chan struct{}
+	stopping      bool
+	quiesced      chan struct{}
+	quiesceErr    error
+	stopped       bool
+	stopErr       error
 
 	// Workflow subsystem.
+	durable    *durableEngine
 	wfRegistry *workflow.Registry
 	wfRunner   *workflow.Runner
 	eventBus   *event.Bus
@@ -112,6 +107,22 @@ type Engine struct {
 	cronStore    cron.Store
 	clusterStore cluster.Store
 	scheduler    *cron.Scheduler
+
+	// self is the cluster row Build registered for this worker. The row
+	// heartbeat (heartbeat.go) registers it again from here when another
+	// instance's stale sweep has deleted it.
+	self cluster.Worker
+
+	// heartbeatCancel and heartbeatDone belong to the running row
+	// heartbeat; both are nil when it is not running. heartbeatStopped is
+	// set by stopHeartbeat even when no loop is running, and
+	// startHeartbeat does nothing once it is set. heartbeatMu guards all
+	// three, so Start and Stop can race in either order without leaking a
+	// goroutine or registering a stopped worker's row again.
+	heartbeatMu      sync.Mutex
+	heartbeatCancel  context.CancelFunc
+	heartbeatDone    chan struct{}
+	heartbeatStopped bool
 
 	// wakeStop terminates the store wake listener (store.WakeNotifier);
 	// nil when the store has no push capability.
@@ -232,16 +243,13 @@ func WithResourceDefaults(global resource.Set, perQueue map[string]resource.Set)
 // declared its own 2 GiB would hard-reject the tessellation job the
 // heavy tier runs perfectly well.
 //
-// The check cannot derive the fleet maximum for itself, because
-// cluster.Worker.Capacity does not round-trip. Only store/memory carries
-// it; postgres, sqlite, mongo, redis and the k8s provider all enumerate
-// worker fields by hand and drop it, so a worker registered with
-// {memory: 64GiB} reads back an empty map. MaxWorkerCapacity therefore
-// sees this value and — on memory alone — whatever live workers
-// published, never the real fleet maximum. Persisting Capacity in those
-// four models would make the derivation honest and is tracked as
-// follow-up work; until then, declaring the ceiling is the operator's
-// job or the check stays off.
+// The check cannot derive the fleet maximum for itself. Every store
+// backend now persists cluster.Worker.Capacity (the k8s provider still
+// drops it), but a worker's row carries only what that worker passed
+// here, so a fleet in which nobody declared reads back with no capacity
+// at all. MaxWorkerCapacity therefore starts from this value and lets
+// live workers' published capacities raise it, never lower it.
+// Declaring the ceiling is the operator's job, or the check stays off.
 //
 // It is deliberately NOT defaulted from WithResourceManager's capacity.
 // That default read as a convenience and behaved as a silent rescope of
@@ -383,6 +391,9 @@ func Build(d *dispatch.Dispatcher, opts ...Option) (*Engine, error) {
 	for _, opt := range opts {
 		opt(eng)
 	}
+	if err := eng.buildDurable(st); err != nil {
+		return nil, err
+	}
 
 	// Assemble the executor registry now that WithExecutor options have
 	// populated extraExecutors, and before any definition is registered
@@ -400,8 +411,10 @@ func Build(d *dispatch.Dispatcher, opts ...Option) (*Engine, error) {
 		eng.bo = backoff.DefaultStrategy()
 	}
 
-	// Create the DLQ service.
-	eng.dlqService = dlq.NewService(ds, js)
+	// Create the DLQ service. Its replays enqueue through the engine, so
+	// a replayed job is checked against the fleet, wakes the pool and is
+	// reported to extensions like any other enqueue.
+	eng.dlqService = dlq.NewService(ds, js, dlq.WithEnqueuer(eng.enqueuePrepared))
 
 	// Create the workflow subsystem.
 	emitter := &extRunEmitter{r: eng.extensions}
@@ -513,7 +526,7 @@ func Build(d *dispatch.Dispatcher, opts ...Option) (*Engine, error) {
 		// The manager describes THIS process; workerCapacity is the floor
 		// of a fleet-wide check. Defaulting one from the other rescoped
 		// the question to one process, and because cluster.Worker.Capacity
-		// does not round-trip on four of the five backends, nothing could
+		// did not then round-trip on four of the five backends, nothing could
 		// raise it back to the fleet maximum afterwards — so a light API
 		// worker rejected at enqueue every job bigger than itself. See
 		// WithWorkerCapacity.
@@ -580,17 +593,20 @@ func Build(d *dispatch.Dispatcher, opts ...Option) (*Engine, error) {
 	if hostnameErr != nil {
 		hostname = "unknown"
 	}
-	w := &cluster.Worker{
+	registeredAt := time.Now().UTC()
+	eng.self = cluster.Worker{
 		ID:          eng.pool.WorkerID(),
 		Hostname:    hostname,
 		Queues:      config.Queues,
 		Concurrency: config.Concurrency,
 		Capacity:    eng.workerCapacity.Clone(),
 		State:       cluster.WorkerActive,
-		LastSeen:    time.Now().UTC(),
-		CreatedAt:   time.Now().UTC(),
+		LastSeen:    registeredAt,
+		CreatedAt:   registeredAt,
 	}
-	if regErr := cls.RegisterWorker(context.Background(), w); regErr != nil {
+	// A failure here is not fatal: the row heartbeat started by Start
+	// registers the row on its first beat when it finds it missing.
+	if regErr := cls.RegisterWorker(context.Background(), eng.workerRow()); regErr != nil {
 		logger.Warn("failed to register worker in cluster store", log.String("error", regErr.Error()))
 	}
 
@@ -699,28 +715,42 @@ func (eng *Engine) EnqueueRaw(ctx context.Context, name string, payload []byte, 
 		return nil, err
 	}
 
-	if err := eng.jobStore.EnqueueJob(ctx, j); err != nil {
+	if err := eng.commitEnqueue(ctx, j); err != nil {
 		return nil, err
 	}
 
-	// Nudge the local worker pool so in-process enqueues are picked up
-	// immediately instead of waiting out the idle poll backoff.
-	if eng.pool != nil {
-		eng.pool.Wake()
-	}
-
-	eng.extensions.EmitJobEnqueued(ctx, j)
 	return j, nil
 }
 
 // Health checks the health of the engine by pinging the dispatcher's store.
 func (eng *Engine) Health(ctx context.Context) error {
+	if err := eng.durableError(); err != nil {
+		return fmt.Errorf("durable workflow worker: %w", err)
+	}
 	return eng.d.Store().Ping(ctx)
 }
 
 // Start begins job processing by starting the worker pool and cron scheduler.
 // It also resumes any workflow runs left in "running" state (crash recovery).
-func (eng *Engine) Start(ctx context.Context) error {
+func (eng *Engine) Start(ctx context.Context) (startErr error) {
+	if err := eng.lockLifecycle(ctx); err != nil {
+		return err
+	}
+	defer eng.unlockLifecycle()
+	if eng.stopping {
+		return durable.ErrClosed
+	}
+
+	if err := eng.startDurable(ctx); err != nil {
+		return err
+	}
+	defer func() {
+		if startErr != nil && eng.durable != nil {
+			cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+			defer cancel()
+			startErr = errors.Join(startErr, eng.stopDurable(cleanupCtx))
+		}
+	}()
 	// Resume any interrupted workflow runs (best-effort, non-fatal).
 	if resumeErr := eng.wfRunner.ResumeAll(ctx); resumeErr != nil {
 		eng.logger.Warn("failed to resume workflow runs",
@@ -752,40 +782,118 @@ func (eng *Engine) Start(ctx context.Context) error {
 		}
 	}
 
+	// Keep this worker's cluster row alive. See startHeartbeat.
+	eng.startHeartbeat(ctx)
+
 	return nil
 }
 
-// Stop gracefully shuts down the engine.
+// Stop confirms worker quiescence before attempting publisher drain and storage
+// closure. A timed-out caller leaves one quiescence task running and can retry.
 func (eng *Engine) Stop(ctx context.Context) error {
-	// Stop the store wake listener first; it only reduces poll latency.
+	if err := eng.lockLifecycle(ctx); err != nil {
+		return err
+	}
+	if eng.stopped {
+		err := eng.stopErr
+		eng.unlockLifecycle()
+		return err
+	}
+	eng.stopping = true
+	// An explicit force-stop may escalate while ordinary Stop observes drain.
+	// Neither waiter owns the accepted operation deadline.
+	eng.unlockLifecycle()
+	if err := eng.waitDurableDrain(ctx); err != nil {
+		return err
+	}
+	if err := eng.lockLifecycle(ctx); err != nil {
+		return err
+	}
+	defer eng.unlockLifecycle()
+	if eng.stopped {
+		return eng.stopErr
+	}
+	if err := eng.stopWorkersLocked(ctx); err != nil {
+		return err
+	}
+	if err := eng.d.Stop(ctx); err != nil {
+		return errors.Join(eng.quiesceErr, err)
+	}
+	eng.closeExecutors()
+	eng.stopped = true
+	eng.stopErr = eng.quiesceErr
+	return eng.stopErr
+}
+
+// StopWorkers permanently stops this engine's execution producers and waits for
+// both worker pools to finish. Publisher delivery, final extension hooks and
+// storage remain active. This is a terminal worker stop, not a resumable pause.
+// Concurrent Stop/StopWorkers calls share the same quiescence task. A caller's
+// timeout never establishes completion and can be retried with a fresh context.
+func (eng *Engine) StopWorkers(ctx context.Context) error {
+	if err := eng.lockLifecycle(ctx); err != nil {
+		return err
+	}
+	defer eng.unlockLifecycle()
+	if eng.stopped {
+		return eng.stopErr
+	}
+	if err := eng.stopWorkersLocked(ctx); err != nil {
+		return err
+	}
+	return eng.quiesceErr
+}
+func (eng *Engine) stopWorkersLocked(ctx context.Context) error {
+	eng.stopping = true
+	if eng.quiesced == nil {
+		eng.quiesced = make(chan struct{})
+		go func() { eng.quiesceErr = eng.quiesce(); close(eng.quiesced) }()
+	}
+	select {
+	case <-eng.quiesced:
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+	return ctx.Err()
+}
+func (eng *Engine) lockLifecycle(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	eng.lifecycleOnce.Do(func() { eng.lifecycleGate = make(chan struct{}, 1) })
+	select {
+	case eng.lifecycleGate <- struct{}{}:
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+	if err := ctx.Err(); err != nil {
+		eng.unlockLifecycle()
+		return err
+	}
+	return nil
+}
+func (eng *Engine) unlockLifecycle() { <-eng.lifecycleGate }
+
+// This single goroutine owns shutdown preamble state. No later Stop repeats
+// store operations after Close, and no caller deadline substitutes for worker
+// completion. Arbitrary uncooperative code may delay quiescence, not the caller.
+func (eng *Engine) quiesce() error {
+	ctx := context.Background()
+	durableErr := eng.stopDurable(ctx)
 	if eng.wakeStop != nil {
 		eng.wakeStop()
 		eng.wakeStop = nil
 	}
-
-	// Deregister this worker from the cluster.
-	if err := eng.clusterStore.DeregisterWorker(ctx, eng.pool.WorkerID()); err != nil {
+	eng.stopHeartbeat(ctx)
+	deregisterCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	if err := eng.clusterStore.DeregisterWorker(deregisterCtx, eng.pool.WorkerID()); err != nil {
 		eng.logger.Warn("failed to deregister worker", log.String("error", err.Error()))
 	}
-
-	// Stop the cron scheduler.
-	if err := eng.scheduler.Stop(ctx); err != nil {
-		eng.logger.Error("cron scheduler stop error", log.String("error", err.Error()))
-	}
-
-	stopErr := eng.d.Stop(ctx)
-
-	// Close the executors last. The dispatcher stop above drains the worker
-	// pool, so no attempt is still running through a rung when its resources
-	// go away. In-process Close is a no-op; an out-of-process rung releases
-	// its clients and child processes here or leaks them.
-	//
-	// Guarded by stopOnce: a second Stop call must not close every executor
-	// again, since Close is newly reachable here and, unlike the rest of
-	// this method, is not itself idempotent.
-	eng.stopOnce.Do(eng.closeExecutors)
-
-	return stopErr
+	cancel()
+	schedulerErr := eng.scheduler.Stop(ctx)
+	workflowErr := eng.wfRunner.Shutdown(ctx)
+	poolErr := eng.pool.Stop(ctx)
+	return errors.Join(durableErr, schedulerErr, workflowErr, poolErr)
 }
 
 // closeExecutors releases every configured executor's resources, logging
@@ -858,9 +966,15 @@ func RegisterCron[T any](ctx context.Context, eng *Engine, def *cron.Definition[
 		return fmt.Errorf("marshal cron payload: %w", err)
 	}
 
-	// Compute the initial NextRunAt.
+	// Compute the initial NextRunAt. A schedule the parser accepts can
+	// still never fire (30 February), and Next says so with the zero
+	// time. Stored, that zero is due on every tick, so refuse it here.
 	now := time.Now().UTC()
 	next := sched.Next(now)
+	if next.IsZero() {
+		return fmt.Errorf("%w: cron %q schedule %q never fires",
+			dispatch.ErrInvalidState, def.Name, def.Schedule)
+	}
 
 	entry := &cron.Entry{
 		Entity:    dispatch.NewEntity(),

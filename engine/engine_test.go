@@ -1619,3 +1619,39 @@ func TestEngine_RegisterCronInvalidSchedule(t *testing.T) {
 		t.Fatal("expected error for invalid cron schedule")
 	}
 }
+
+// TestEngine_RegisterCronRefusesAScheduleThatNeverFires registers 30
+// February. The parser accepts it, but it has no fire time, and a stored
+// zero next_run_at is due on every scheduler tick. Registration must
+// refuse it and store nothing.
+func TestEngine_RegisterCronRefusesAScheduleThatNeverFires(t *testing.T) {
+	s := memory.New()
+	d, err := dispatch.New(dispatch.WithStore(s))
+	if err != nil {
+		t.Fatalf("dispatch.New: %v", err)
+	}
+
+	eng, err := engine.Build(d)
+	if err != nil {
+		t.Fatalf("engine.Build: %v", err)
+	}
+
+	ctx := context.Background()
+	err = engine.RegisterCron(ctx, eng, &cron.Definition[struct{}]{
+		Name:     "never-cron",
+		Schedule: "0 0 30 2 *",
+		JobName:  "noop",
+		Payload:  struct{}{},
+	})
+	if !errors.Is(err, dispatch.ErrInvalidState) {
+		t.Fatalf("RegisterCron error = %v, want ErrInvalidState", err)
+	}
+
+	entries, err := s.ListCrons(ctx)
+	if err != nil {
+		t.Fatalf("ListCrons: %v", err)
+	}
+	if len(entries) != 0 {
+		t.Errorf("stored %d cron entries for a schedule that never fires, want 0", len(entries))
+	}
+}

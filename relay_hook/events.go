@@ -16,12 +16,29 @@ const (
 	EventJobFailed             = "dispatch.job.failed"
 	EventJobRetrying           = "dispatch.job.retrying"
 	EventJobDLQ                = "dispatch.job.dlq"
+	EventJobCancelled          = "dispatch.job.cancelled"
 	EventWorkflowStarted       = "dispatch.workflow.started"
 	EventWorkflowStepCompleted = "dispatch.workflow.step_completed"
 	EventWorkflowStepFailed    = "dispatch.workflow.step_failed"
 	EventWorkflowCompleted     = "dispatch.workflow.completed"
 	EventWorkflowFailed        = "dispatch.workflow.failed"
 	EventCronFired             = "dispatch.cron.fired"
+)
+
+// Operator action event types. Each constant maps to one ext.ActionKind.
+// They sit under dispatch.operator so a subscriber can tell an operator's
+// cancel apart from the dispatch.job.cancelled lifecycle event it causes.
+const (
+	EventOperatorJobCancelled     = "dispatch.operator.job_cancelled"
+	EventOperatorJobRetried       = "dispatch.operator.job_retried"
+	EventOperatorDLQReplayed      = "dispatch.operator.dlq_replayed"
+	EventOperatorDLQDeleted       = "dispatch.operator.dlq_deleted"
+	EventOperatorDLQPurged        = "dispatch.operator.dlq_purged"
+	EventOperatorCronEnabled      = "dispatch.operator.cron_enabled"
+	EventOperatorCronDisabled     = "dispatch.operator.cron_disabled"
+	EventOperatorCronDeleted      = "dispatch.operator.cron_deleted"
+	EventOperatorCronTriggered    = "dispatch.operator.cron_triggered"
+	EventOperatorWorkflowReplayed = "dispatch.operator.workflow_replayed"
 )
 
 // AllDefinitions returns webhook definitions for all Dispatch lifecycle
@@ -65,6 +82,12 @@ func AllDefinitions() []catalog.WebhookDefinition {
 			Group:       "jobs",
 			Version:     "2025-01-01",
 		},
+		{
+			Name:        EventJobCancelled,
+			Description: "Fired when a job reaches cancelled.",
+			Group:       "jobs",
+			Version:     "2026-10-07",
+		},
 		// ── Workflow events ─────────────────────────────
 		{
 			Name:        EventWorkflowStarted,
@@ -102,6 +125,67 @@ func AllDefinitions() []catalog.WebhookDefinition {
 			Description: "Fired when a cron entry fires and enqueues a job.",
 			Group:       "cron",
 			Version:     "2025-01-01",
+		},
+		// ── Operator events ────────────────────────────
+		{
+			Name:        EventOperatorJobCancelled,
+			Description: "Fired when an operator cancels a job.",
+			Group:       "operator",
+			Version:     "2026-10-07",
+		},
+		{
+			Name:        EventOperatorJobRetried,
+			Description: "Fired when an operator retries a failed job.",
+			Group:       "operator",
+			Version:     "2026-10-07",
+		},
+		{
+			Name:        EventOperatorDLQReplayed,
+			Description: "Fired when an operator replays a dead letter queue entry.",
+			Group:       "operator",
+			Version:     "2026-10-07",
+		},
+		{
+			Name:        EventOperatorDLQDeleted,
+			Description: "Fired when an operator deletes a dead letter queue entry.",
+			Group:       "operator",
+			Version:     "2026-10-07",
+		},
+		{
+			Name:        EventOperatorDLQPurged,
+			Description: "Fired when an operator purges old dead letter queue entries.",
+			Group:       "operator",
+			Version:     "2026-10-07",
+		},
+		{
+			Name:        EventOperatorCronEnabled,
+			Description: "Fired when an operator enables a cron entry.",
+			Group:       "operator",
+			Version:     "2026-10-07",
+		},
+		{
+			Name:        EventOperatorCronDisabled,
+			Description: "Fired when an operator disables a cron entry.",
+			Group:       "operator",
+			Version:     "2026-10-07",
+		},
+		{
+			Name:        EventOperatorCronDeleted,
+			Description: "Fired when an operator deletes a cron entry.",
+			Group:       "operator",
+			Version:     "2026-10-07",
+		},
+		{
+			Name:        EventOperatorCronTriggered,
+			Description: "Fired when an operator triggers a cron entry by hand.",
+			Group:       "operator",
+			Version:     "2026-10-07",
+		},
+		{
+			Name:        EventOperatorWorkflowReplayed,
+			Description: "Fired when an operator replays a workflow run from a step.",
+			Group:       "operator",
+			Version:     "2026-10-07",
 		},
 	}
 }

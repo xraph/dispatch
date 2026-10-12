@@ -10,13 +10,19 @@ import (
 	"github.com/xraph/dispatch/id"
 )
 
-// PushDLQ adds a failed job entry to the dead letter queue.
+// PushDLQ adds a failed job entry to the dead letter queue. An ID that is
+// already there is refused with dispatch.ErrDLQAlreadyExists rather than
+// overwritten. The primary key is the only unique constraint on
+// dispatch_dlq, so a unique violation here can only mean the ID.
 func (s *Store) PushDLQ(ctx context.Context, entry *dlq.Entry) error {
 	m, err := toDLQModel(entry)
 	if err != nil {
 		return err
 	}
 	if _, err = s.pgdb.NewInsert(m).Exec(ctx); err != nil {
+		if isDuplicateKey(err) {
+			return dispatch.ErrDLQAlreadyExists
+		}
 		return fmt.Errorf(errPrefix+"push dlq: %w", err)
 	}
 	return nil

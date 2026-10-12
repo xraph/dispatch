@@ -279,7 +279,12 @@ var shimAllowedModules = []string{
 	// exists to keep out, and the prefix rule above does not cover it
 	// because x/sys is its own module rather than a subpackage of
 	// something already allowed.
-	"golang.org/x/sys",              // cpuid's CPU feature detection
+	"golang.org/x/sys", // cpuid's CPU feature detection
+	// go-utils v1.3.0's log package reads whether stderr is a terminal,
+	// which brought x/term in with the forge v1.12.0 bump rather than with
+	// any change here. Like x/sys above, it is terminal and syscall
+	// plumbing, not a client for anything outside the process.
+	"golang.org/x/term",             // go-utils/log's terminal detection
 	"go.jetify.com/typeid",          // ID generation
 	"github.com/gofrs/uuid",         // typeid's underlying uuid generator
 	"go.uber.org/zap",               // logging

@@ -9,6 +9,8 @@ import (
 
 // Store defines the persistence contract for cron entries.
 type Store interface {
+	TargetedUpdater
+
 	// RegisterCron persists a new cron entry. Returns an error if the name
 	// already exists.
 	RegisterCron(ctx context.Context, entry *Entry) error

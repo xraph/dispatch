@@ -196,6 +196,10 @@ func (s *Store) EnqueueJob(ctx context.Context, j *job.Job) error {
 	if err != nil {
 		return err
 	}
+	// Index before the entity; indexCreated says why the order matters.
+	if idxErr := s.indexCreated(ctx, entityJob, j.ID); idxErr != nil {
+		return fmt.Errorf("dispatch/redis: enqueue job created index: %w", idxErr)
+	}
 	if setErr := s.setEntity(ctx, key, e); setErr != nil {
 		return fmt.Errorf("dispatch/redis: enqueue set entity: %w", setErr)
 	}
@@ -334,6 +338,13 @@ func (s *Store) DeleteJob(ctx context.Context, jobID id.JobID) error {
 		return fmt.Errorf("dispatch/redis: delete job id index: %w", err)
 	}
 
+	// The ID set loses the member before the created-order index does, so
+	// a crash in between never leaves the set ahead of the index, which is
+	// what would send the next list call into a needless backfill.
+	if _, err := s.kv.ZRem(ctx, s.keys.byCreated(entityJob), jID); err != nil {
+		return fmt.Errorf("dispatch/redis: delete job created index: %w", err)
+	}
+
 	if _, err := s.kv.ZRem(ctx, s.keys.queue(e.Queue), jID); err != nil {
 		return fmt.Errorf("dispatch/redis: delete job queue index: %w", err)
 	}
@@ -432,15 +443,23 @@ func (s *Store) CountJobs(ctx context.Context, opts job.CountOpts) (int64, error
 	for _, jID := range ids {
 		raw, getErr := s.kv.GetRaw(ctx, s.keys.job(jID))
 		if getErr != nil {
-			continue
+			if isNotFound(getErr) {
+				continue
+			}
+			return 0, fmt.Errorf("dispatch/redis: count job read: %w", getErr)
 		}
-		// Quick check state/queue from JSON without full decode.
+		// Counts need identity and filter fields, without decoding payloads.
 		var partial struct {
+			ID    string `json:"id"`
 			State string `json:"state"`
 			Queue string `json:"queue"`
 		}
-		if json.Unmarshal(raw, &partial) != nil {
-			continue
+		if decodeErr := json.Unmarshal(raw, &partial); decodeErr != nil {
+			return 0, fmt.Errorf("dispatch/redis: count job decode: %w", decodeErr)
+		}
+		parsed, parseErr := id.ParseJobID(partial.ID)
+		if parseErr != nil || parsed.IsNil() || parsed.String() != jID {
+			return 0, fmt.Errorf("dispatch/redis: count job identity mismatch for key %s", jID)
 		}
 		if opts.State != "" && job.State(partial.State) != opts.State {
 			continue

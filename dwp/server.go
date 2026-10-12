@@ -1,12 +1,17 @@
 package dwp
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
+	"time"
+
+	"github.com/xraph/dispatch/security"
 
 	log "github.com/xraph/go-utils/log"
 
 	"github.com/xraph/forge"
+	"github.com/xraph/forge/extensions/auth"
 
 	"github.com/xraph/dispatch/stream"
 )
@@ -38,7 +43,7 @@ func NewServer(broker *stream.Broker, handler *Handler, opts ...Option) *Server 
 		opt(s)
 	}
 	if s.auth == nil {
-		s.auth = &NoopAuthenticator{}
+		s.auth = &RejectAuthenticator{}
 	}
 	return s
 }
@@ -57,7 +62,7 @@ func (s *Server) RegisterRoutes(router forge.Router) {
 	}
 
 	// Fallback: SSE for read-only subscriptions (uses EventStream handler)
-	if err := router.EventStream(s.basePath+"/sse", s.handleSSE); err != nil {
+	if err := router.EventStream(s.basePath+"/sse", s.handleSSE, forge.WithMiddleware(s.admitSSE)); err != nil {
 		s.logger.Error("failed to register DWP SSE", log.String("error", err.Error()))
 	}
 
@@ -72,6 +77,8 @@ func (s *Server) handleWebSocket(ctx forge.Context, conn forge.Connection) error
 	connID := conn.ID()
 	s.logger.Info("DWP WebSocket connected", log.String("conn_id", connID))
 
+	admissionTimer := time.AfterFunc(security.CheckTimeout, func() { _ = conn.Close() })
+	defer admissionTimer.Stop()
 	// Wait for auth frame.
 	authData, readErr := conn.Read()
 	if readErr != nil {
@@ -107,13 +114,42 @@ func (s *Server) handleWebSocket(ctx forge.Context, conn forge.Connection) error
 	if token == "" {
 		token = authFrame.Token
 	}
-	identity, authErr := s.auth.Authenticate(ctx.Context(), token)
+	frameCtx := ctx.Context()
+	var authErr error
+	if token != "" {
+		var scheme, credential string
+		scheme, credential, authErr = auth.ParseExplicitFrameCredential(token)
+		if authErr == nil {
+			frameCtx, authErr = auth.WithExplicitFrameCredential(frameCtx, scheme, credential)
+			// Request-aware providers receive the same presentation as the marker.
+			// Token-only authenticators retain their existing raw-token contract.
+			if _, ok := s.auth.(requestAuthenticator); ok {
+				token = scheme + " " + credential
+			}
+		}
+	}
+	var identity *Identity
+	if authErr == nil {
+		identity, authErr = s.authenticate(frameCtx, ctx.Request(), token)
+	} else {
+		_ = s.handler.security.AuthenticationDenied(ctx.Context(), subscriptionOperation("")) //nolint:errcheck // Admission remains denied if audit fails.
+	}
 	if authErr != nil {
 		//nolint:errcheck // best-effort error response before disconnect
 		_ = conn.WriteJSON(NewErrorFrame(authFrame.ID, ErrCodeUnauthorized, "authentication failed"))
 		return fmt.Errorf("dwp: auth failed: %w", authErr)
 	}
 
+	if err := s.handler.authorizeSubscription(ctx.Context(), identity, ""); err != nil {
+		if writeErr := conn.WriteJSON(NewErrorFrame(authFrame.ID, authorizationCode(err), "access denied")); writeErr != nil {
+			return writeErr
+		}
+		return err
+	}
+	streamCtx, cancelStream := context.WithTimeout(ctx.Context(), security.StreamLifetime)
+	defer cancelStream()
+	go func() { <-streamCtx.Done(); _ = conn.Close() }()
+	admissionTimer.Stop()
 	// Negotiate codec.
 	codec := s.defaultCodec
 	if authReq.Format != "" {
@@ -150,7 +186,7 @@ func (s *Server) handleWebSocket(ctx forge.Context, conn forge.Connection) error
 	// Create a subscriber for this connection and start a goroutine
 	// to forward broker events to the WebSocket.
 	sub := s.broker.Subscribe(connID)
-	go s.forwardEvents(conn, codec, sub)
+	go s.forwardEvents(streamCtx, identity, conn, codec, sub)
 
 	// Frame processing loop.
 	for {
@@ -170,6 +206,14 @@ func (s *Server) handleWebSocket(ctx forge.Context, conn forge.Connection) error
 			continue
 		}
 
+		if frame.Type == FramePing || frame.Credits > 0 {
+			if err := s.handler.authorizeSubscription(ctx.Context(), identity, ""); err != nil {
+				if writeErr := s.writeFrame(conn, codec, NewErrorFrame(frame.ID, authorizationCode(err), "access denied")); writeErr != nil {
+					return writeErr
+				}
+				return err
+			}
+		}
 		// Handle ping/pong.
 		if frame.Type == FramePing {
 			pong := &Frame{
@@ -182,18 +226,6 @@ func (s *Server) handleWebSocket(ctx forge.Context, conn forge.Connection) error
 				s.logger.Warn("failed to write pong frame", log.String("error", writeErr.Error()))
 			}
 			continue
-		}
-
-		// Check authorization for the method.
-		if frame.Method != "" {
-			reqScope := RequiredScope(frame.Method)
-			if reqScope != "" && !identity.HasScope(reqScope) {
-				errFrame := NewErrorFrame(frame.ID, ErrCodeForbidden, "insufficient permissions")
-				if writeErr := s.writeFrame(conn, codec, errFrame); writeErr != nil {
-					s.logger.Warn("failed to write forbidden frame", log.String("error", writeErr.Error()))
-				}
-				continue
-			}
 		}
 
 		// Handle credits replenishment.
@@ -229,14 +261,32 @@ func (s *Server) handleWebSocket(ctx forge.Context, conn forge.Connection) error
 
 // forwardEvents reads from the subscriber channel and writes events
 // to the WebSocket connection.
-func (s *Server) forwardEvents(conn forge.Connection, codec Codec, sub *stream.Subscriber) {
-	for evt := range sub.C() {
-		evtFrame, err := NewEventFrame(evt.Topic, evt)
-		if err != nil {
-			continue
-		}
-		if writeErr := s.writeFrame(conn, codec, evtFrame); writeErr != nil {
-			return // Connection gone.
+func (s *Server) forwardEvents(ctx context.Context, identity *Identity, conn forge.Connection, codec Codec, sub *stream.Subscriber) {
+	ticker := time.NewTicker(security.CheckTimeout)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			if err := s.handler.authorizeSubscription(ctx, identity, ""); err != nil {
+				_ = conn.Close()
+				return
+			}
+		case evt, ok := <-sub.C():
+			if !ok {
+				return
+			}
+			if err := s.handler.authorizeSubscription(ctx, identity, ""); err != nil {
+				_ = conn.Close()
+				return
+			}
+			frame, err := NewEventFrame(evt.Topic, evt)
+			if err == nil {
+				if s.writeFrame(conn, codec, frame) != nil {
+					return
+				}
+			}
 		}
 	}
 }
@@ -256,11 +306,15 @@ func (s *Server) writeFrame(conn forge.Connection, codec Codec, frame *Frame) er
 // handleSSE serves read-only Server-Sent Events for clients that
 // cannot establish WebSocket connections.
 func (s *Server) handleSSE(ctx forge.Context, sseStream forge.Stream) error {
-	// Get token from query parameter.
-	token := ctx.Query("token")
-	identity, err := s.auth.Authenticate(ctx.Context(), token)
-	if err != nil {
-		return fmt.Errorf("dwp: SSE auth failed: %w", err)
+	// SSE credentials stay in the explicit Authorization header.
+	token := ctx.Header("Authorization")
+	identity, cached := ctx.Context().Value(sseIdentityKey{}).(*Identity)
+	if !cached || identity == nil {
+		var err error
+		identity, err = s.authenticate(ctx.Context(), ctx.Request(), token, subscriptionOperation(ctx.Query("channel")))
+		if err != nil {
+			return ErrUnauthorized
+		}
 	}
 
 	// Get channel from query parameter.
@@ -269,18 +323,27 @@ func (s *Server) handleSSE(ctx forge.Context, sseStream forge.Stream) error {
 		return fmt.Errorf("dwp: SSE channel parameter required")
 	}
 
-	// Check subscribe permission.
-	if !identity.HasScope(ScopeSubscribe) && !identity.HasScope(ScopeAll) {
-		return fmt.Errorf("dwp: SSE insufficient permissions")
+	if err := s.handler.authorizeSubscription(ctx.Context(), identity, channel); err != nil {
+		return err
 	}
-
+	streamCtx, cancelStream := context.WithTimeout(sseStream.Context(), security.StreamLifetime)
+	defer cancelStream()
+	ticker := time.NewTicker(security.CheckTimeout)
+	defer ticker.Stop()
 	connID := fmt.Sprintf("sse-%s", generateFrameID())
 	sub := s.broker.Subscribe(connID, channel)
 	defer s.broker.RemoveSubscriber(connID)
 
 	for {
 		select {
+		case <-ticker.C:
+			if err := s.handler.authorizeSubscription(streamCtx, identity, channel); err != nil {
+				return err
+			}
 		case evt, ok := <-sub.C():
+			if err := s.handler.authorizeSubscription(streamCtx, identity, channel); err != nil {
+				return err
+			}
 			if !ok {
 				return nil
 			}
@@ -290,7 +353,7 @@ func (s *Server) handleSSE(ctx forge.Context, sseStream forge.Stream) error {
 			if flushErr := sseStream.Flush(); flushErr != nil {
 				return flushErr
 			}
-		case <-sseStream.Context().Done():
+		case <-streamCtx.Done():
 			return nil
 		}
 	}
@@ -309,15 +372,13 @@ func (s *Server) handleHTTPRPC(ctx forge.Context) error {
 	if token == "" {
 		token = ctx.Header("Authorization")
 	}
-	identity, err := s.auth.Authenticate(ctx.Context(), token)
+	op, targetErr := auditOperation(&frame)
+	if targetErr != nil {
+		op.Target = "invalid-target"
+	}
+	identity, err := s.authenticate(ctx.Context(), ctx.Request(), token, op)
 	if err != nil {
 		return ctx.Status(401).JSON(NewErrorFrame(frame.ID, ErrCodeUnauthorized, "unauthorized"))
-	}
-
-	// Check authorization.
-	reqScope := RequiredScope(frame.Method)
-	if reqScope != "" && !identity.HasScope(reqScope) {
-		return ctx.Status(403).JSON(NewErrorFrame(frame.ID, ErrCodeForbidden, "forbidden"))
 	}
 
 	// Create a temporary connection for scope.

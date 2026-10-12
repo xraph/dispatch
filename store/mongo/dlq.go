@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"go.mongodb.org/mongo-driver/v2/bson"
+	mongod "go.mongodb.org/mongo-driver/v2/mongo"
 	"go.mongodb.org/mongo-driver/v2/mongo/options"
 
 	"github.com/xraph/dispatch"
@@ -13,11 +14,17 @@ import (
 	"github.com/xraph/dispatch/id"
 )
 
-// PushDLQ adds a failed job entry to the dead letter queue.
+// PushDLQ adds a failed job entry to the dead letter queue. An ID that is
+// already there is refused with dispatch.ErrDLQAlreadyExists rather than
+// reported as a driver error: the _id index refuses the insert, so a push
+// can never overwrite an entry or drop its replay claim.
 func (s *Store) PushDLQ(ctx context.Context, entry *dlq.Entry) error {
 	m := toDLQModel(entry)
 	_, err := s.mdb.NewInsert(m).Exec(ctx)
 	if err != nil {
+		if mongod.IsDuplicateKeyError(err) {
+			return dispatch.ErrDLQAlreadyExists
+		}
 		return fmt.Errorf("dispatch/mongo: push dlq: %w", err)
 	}
 	return nil

@@ -51,8 +51,8 @@ func setupTestKV(t *testing.T) *kv.Store {
 	}
 
 	rdb := redisdriver.New()
-	if err := rdb.Open(ctx, connStr); err != nil {
-		t.Fatalf("open redis driver: %v", err)
+	if openErr := rdb.Open(ctx, connStr); openErr != nil {
+		t.Fatalf("open redis driver: %v", openErr)
 	}
 
 	kvStore, err := kv.Open(rdb)

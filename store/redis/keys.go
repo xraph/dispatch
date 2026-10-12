@@ -75,6 +75,16 @@ func (k keys) dlq(id string) string { return k.full("dlq:" + id) }
 // dlqIDs is the Set tracking all DLQ entry IDs for enumeration.
 func (k keys) dlqIDs() string { return k.full("dlq_ids") }
 
+// dlqByJob is the Set of DLQ entry IDs recorded for one failed job, so
+// GetDLQByJobID reads a handful of members instead of every entry.
+func (k keys) dlqByJob(jobID string) string { return k.full("dlq_by_job:" + jobID) }
+
+// dlqJobIndexed is the Set of DLQ entry IDs that are already in their
+// job's dlqByJob set. It mirrors dlqIDs member for member once every row
+// is indexed, so comparing the two counts tells GetDLQByJobID whether a
+// row written before the per-job index exists still needs adding.
+func (k keys) dlqJobIndexed() string { return k.full("dlq_job_indexed") }
+
 // ── Event keys ──
 
 // event returns the key for an event entity.
@@ -141,3 +151,13 @@ func (k keys) usageIndex() string { return k.full("usage_index") }
 // usageName is the per-definition Sorted Set, which is the read an
 // estimator actually makes: one job name over a time window.
 func (k keys) usageName(name string) string { return k.full("usage_name:" + name) }
+
+// ── Created-order index keys ──
+
+// byCreated is the Sorted Set of every ID of one entity kind (entityJob,
+// entityRun, entityDLQ, entityArtifact) scored by the Unix millisecond
+// minted into the ID. The paged lists walk it newest first. The *_ids
+// sets stay the source of truth for everything else, and a list call
+// backfills the index from them whenever a set holds more members than
+// its index.
+func (k keys) byCreated(entity string) string { return k.full(entity + "_by_created") }

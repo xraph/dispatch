@@ -738,7 +738,186 @@ func init() {
 				return err
 			},
 		},
+
+		// cluster.Worker.Capacity had no column, so every worker read back
+		// with an empty capacity and the enqueue-time fleet check, which
+		// takes the largest capacity among live workers, never saw one.
+		&migrate.Migration{
+			Name:    "worker_capacity_column",
+			Version: "20261008120000",
+			Up: func(ctx context.Context, exec migrate.Executor) error {
+				// Under the lock timeout for the reason given on
+				// job_resource_columns. A nullable column with no default
+				// is a catalog update, not a table rewrite, and every
+				// running worker heartbeats this table, so a long wait for
+				// its lock would stall them all.
+				return withLockTimeout(ctx, exec, `
+					ALTER TABLE dispatch_workers
+						ADD COLUMN IF NOT EXISTS capacity JSONB`)
+			},
+			Down: func(ctx context.Context, exec migrate.Executor) error {
+				return withLockTimeout(ctx, exec, `
+					ALTER TABLE dispatch_workers
+						DROP COLUMN IF EXISTS capacity`)
+			},
+		},
+
+		// The paged lists read newest first by ID with optional exact-match
+		// filters. With no index ending in id, a filtered page either walks
+		// the primary key backwards and drops every row that fails the
+		// filter, which reads most of a large table when matches are rare,
+		// or fetches every match and sorts them. An index on (filter, id)
+		// turns the filter into an index condition and hands rows back
+		// already in ID order, so a page stops after limit+1 rows.
+		//
+		// The name prefix filter gets no index. starts_with can only use
+		// a B-tree under the C collation, and even then the index returns
+		// matches in name order, so every match would still be sorted by
+		// ID before the first row came back. A prefix rides on whichever
+		// index the other filters choose, or on the primary key.
+		&migrate.Migration{
+			Name:    "list_order_indexes",
+			Version: "20261008130000",
+			Up: func(ctx context.Context, exec migrate.Executor) error {
+				// CONCURRENTLY, with an invalid leftover dropped first,
+				// for the reasons given on add_job_lease_columns: a plain
+				// CREATE INDEX blocks every write to the table for the
+				// whole build, and dispatch_jobs is the fleet's hottest
+				// table. The other three tables take a write on every dead
+				// letter, workflow step and upload, so they get the same
+				// treatment.
+				for _, ix := range listOrderIndexes {
+					if err := dropIfInvalid(ctx, exec, ix.name); err != nil {
+						return err
+					}
+
+					if _, err := exec.Exec(ctx, `CREATE INDEX CONCURRENTLY IF NOT EXISTS `+
+						ix.name+` ON `+ix.table+` (`+ix.columns+`)`); err != nil {
+						return err
+					}
+				}
+
+				return nil
+			},
+			Down: func(ctx context.Context, exec migrate.Executor) error {
+				for _, ix := range listOrderIndexes {
+					if _, err := exec.Exec(ctx,
+						`DROP INDEX CONCURRENTLY IF EXISTS `+ix.name); err != nil {
+						return err
+					}
+				}
+
+				return nil
+			},
+		},
+
+		// ClaimReplay records which job a replay or retry created next to
+		// replayed_at, so an operator can follow a replayed entry to its
+		// new job and a failed enqueue can release only its own claim.
+		// Retrying a failed job finds its entry with GetDLQByJobID, a
+		// lookup by job_id that no index covered. (job_id, id) answers
+		// it, newest entry first, by walking the index backwards.
+		&migrate.Migration{
+			Name:    "dlq_replayed_job_id",
+			Version: "20261009120000",
+			Up: func(ctx context.Context, exec migrate.Executor) error {
+				// Under the lock timeout for the reason given on
+				// job_resource_columns. A nullable column with no default
+				// is a catalog update, not a table rewrite.
+				if err := withLockTimeout(ctx, exec, `
+					ALTER TABLE dispatch_dlq
+						ADD COLUMN IF NOT EXISTS replayed_job_id TEXT`); err != nil {
+					return err
+				}
+
+				// CONCURRENTLY, with an invalid leftover dropped first,
+				// as on list_order_indexes: a plain CREATE INDEX would
+				// block every dead letter write for the whole build.
+				if err := dropIfInvalid(ctx, exec, "idx_dispatch_dlq_job"); err != nil {
+					return err
+				}
+
+				_, err := exec.Exec(ctx, `
+					CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_dispatch_dlq_job
+						ON dispatch_dlq (job_id, id)`)
+
+				return err
+			},
+			Down: func(ctx context.Context, exec migrate.Executor) error {
+				if _, err := exec.Exec(ctx,
+					`DROP INDEX CONCURRENTLY IF EXISTS idx_dispatch_dlq_job`); err != nil {
+					return err
+				}
+
+				return withLockTimeout(ctx, exec, `
+					ALTER TABLE dispatch_dlq
+						DROP COLUMN IF EXISTS replayed_job_id`)
+			},
+		},
+
+		// workflow.Run.ParentRunID and Version had no columns. A child run
+		// read back as top-level, ListChildRuns failed on a column that did
+		// not exist, and every run read back as version 0, which the
+		// registry resolves to the newest definition. The runner resumes
+		// and replays a run on its stamped version, so a run started on
+		// version 1 would have resumed on whatever was newest.
+		&migrate.Migration{
+			Name:    "workflow_run_version_parent",
+			Version: "20261009130000",
+			Up: func(ctx context.Context, exec migrate.Executor) error {
+				// Under the lock timeout for the reason given on
+				// job_resource_columns. The parent link is nullable and the
+				// version default is a constant, so both are catalog
+				// updates rather than a table rewrite. Runs written before
+				// this read back as version 0, which is what they were
+				// already reading back as.
+				if err := withLockTimeout(ctx, exec, `
+					ALTER TABLE dispatch_workflow_runs
+						ADD COLUMN IF NOT EXISTS version       INT NOT NULL DEFAULT 0,
+						ADD COLUMN IF NOT EXISTS parent_run_id TEXT`); err != nil {
+					return err
+				}
+
+				// ListChildRuns filters on parent_run_id. Partial, because
+				// most runs have no parent and a NULL entry for each would
+				// only make the index bigger. CONCURRENTLY, with an invalid
+				// leftover dropped first, as on list_order_indexes: every
+				// workflow step writes this table.
+				if err := dropIfInvalid(ctx, exec, "idx_dispatch_workflow_runs_parent"); err != nil {
+					return err
+				}
+
+				_, err := exec.Exec(ctx, `
+					CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_dispatch_workflow_runs_parent
+						ON dispatch_workflow_runs (parent_run_id, id)
+						WHERE parent_run_id IS NOT NULL`)
+
+				return err
+			},
+			Down: func(ctx context.Context, exec migrate.Executor) error {
+				if _, err := exec.Exec(ctx,
+					`DROP INDEX CONCURRENTLY IF EXISTS idx_dispatch_workflow_runs_parent`); err != nil {
+					return err
+				}
+
+				return withLockTimeout(ctx, exec, `
+					ALTER TABLE dispatch_workflow_runs
+						DROP COLUMN IF EXISTS version,
+						DROP COLUMN IF EXISTS parent_run_id`)
+			},
+		},
 	)
+}
+
+// listOrderIndexes are the indexes list_order_indexes builds, one per
+// exact-match filter a paged list can narrow by. Each ends in id so a
+// backward walk returns the filtered rows newest first.
+var listOrderIndexes = []struct{ name, table, columns string }{
+	{"idx_dispatch_jobs_list_state", "dispatch_jobs", "state, id"},
+	{"idx_dispatch_jobs_list_queue", "dispatch_jobs", "queue, id"},
+	{"idx_dispatch_dlq_list_queue", "dispatch_dlq", "queue, id"},
+	{"idx_dispatch_workflow_runs_list_state", "dispatch_workflow_runs", "state, id"},
+	{"idx_dispatch_artifacts_list_scope", "dispatch_artifacts", "scope_app_id, id"},
 }
 
 // ddlLockTimeout bounds how long a DDL statement waits for its ACCESS

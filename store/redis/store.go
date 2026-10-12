@@ -61,6 +61,10 @@ type Store struct {
 	kv     *kv.Store
 	keys   keys
 	logger log.Logger
+
+	// scanBudget is how many index members one paged list call examines;
+	// listScanBudget in production. Tests lower it through export_test.go.
+	scanBudget int
 }
 
 // New creates a new Redis KV-backed store. The caller owns the KV store
@@ -70,6 +74,8 @@ func New(store *kv.Store, opts ...Option) *Store {
 		kv:     store,
 		keys:   newKeys(""),
 		logger: log.NewNoopLogger(),
+
+		scanBudget: listScanBudget,
 	}
 	for _, o := range opts {
 		o(s)

@@ -1,0 +1,935 @@
+schemaVersion: 1
+contributor:
+  name: dispatch
+  envelope: { supports: [v1], preferred: v1 }
+  capabilities: [dispatch.read, dispatch.write]
+
+# Operator-wide. Scope fields are explicit filters, never principal claims.
+intents:
+  - { name: artifacts.list, kind: query, version: 1, requires: { warden: dispatchInstallationOperator }, capability: read }
+  - { name: artifacts.get, kind: query, version: 1, requires: { warden: dispatchInstallationOperator }, capability: read }
+  - { name: artifacts.forJob, kind: query, version: 1, requires: { warden: dispatchInstallationOperator }, capability: read }
+  - { name: artifacts.presign, kind: query, version: 1, requires: { warden: dispatchInstallationOperator }, capability: read }
+  - { name: workers.list, kind: query, version: 1, requires: { warden: dispatchInstallationOperator }, capability: read }
+  - { name: workers.get, kind: query, version: 1, requires: { warden: dispatchInstallationOperator }, capability: read }
+  - { name: queues.list, kind: query, version: 1, requires: { warden: dispatchInstallationOperator }, capability: read }
+  - { name: queues.get, kind: query, version: 1, requires: { warden: dispatchInstallationOperator }, capability: read }
+  - { name: handlers.list, kind: query, version: 1, requires: { warden: dispatchInstallationOperator }, capability: read }
+  - { name: handlers.get, kind: query, version: 1, requires: { warden: dispatchInstallationOperator }, capability: read }
+  - { name: engine.config, kind: query, version: 1, requires: { warden: dispatchInstallationOperator }, capability: read }
+  - { name: overview.summary, kind: query, version: 1, requires: { warden: dispatchInstallationOperator }, capability: read }
+  - { name: workflows.list, kind: query, version: 1, requires: { warden: dispatchInstallationOperator }, capability: read }
+  - { name: workflows.get, kind: query, version: 1, requires: { warden: dispatchInstallationOperator }, capability: read }
+  - { name: workflows.replayPreview, kind: query, version: 1, requires: { warden: dispatchInstallationOperator }, capability: read }
+  - { name: workflows.replayFrom, kind: command, version: 1, requires: { warden: dispatchInstallationOperator }, capability: write, invalidates: [workflows.list, workflows.get, workflows.replayPreview, overview.summary] }
+  - { name: jobs.list, kind: query, version: 1, requires: { warden: dispatchInstallationOperator }, capability: read }
+  - { name: jobs.get, kind: query, version: 1, requires: { warden: dispatchInstallationOperator }, capability: read }
+  - { name: jobs.counts, kind: query, version: 1, requires: { warden: dispatchInstallationOperator }, capability: read }
+  - { name: jobs.cancel, kind: command, version: 1, requires: { warden: dispatchInstallationOperator }, capability: write, invalidates: [jobs.list, jobs.get, jobs.counts, queues.list, queues.get, overview.summary] }
+  - { name: jobs.retry, kind: command, version: 1, requires: { warden: dispatchInstallationOperator }, capability: write, invalidates: [jobs.list, jobs.get, jobs.counts, queues.list, queues.get, overview.summary, dlq.list, dlq.get, dlq.counts] }
+  - { name: dlq.list, kind: query, version: 1, requires: { warden: dispatchInstallationOperator }, capability: read }
+  - { name: dlq.get, kind: query, version: 1, requires: { warden: dispatchInstallationOperator }, capability: read }
+  - { name: dlq.counts, kind: query, version: 1, requires: { warden: dispatchInstallationOperator }, capability: read }
+  - { name: dlq.purgePreview, kind: query, version: 1, requires: { warden: dispatchInstallationOperator }, capability: read }
+  - { name: dlq.replay, kind: command, version: 1, requires: { warden: dispatchInstallationOperator }, capability: write, invalidates: [dlq.list, dlq.get, dlq.counts, jobs.list, jobs.counts, queues.list, queues.get, overview.summary] }
+  - { name: dlq.replayAll, kind: command, version: 1, requires: { warden: dispatchInstallationOperator }, capability: write, invalidates: [dlq.list, dlq.get, dlq.counts, jobs.list, jobs.counts, queues.list, queues.get, overview.summary] }
+  - { name: dlq.delete, kind: command, version: 1, requires: { warden: dispatchInstallationOperator }, capability: write, invalidates: [dlq.list, dlq.get, dlq.counts, dlq.purgePreview, overview.summary] }
+  - { name: dlq.purge, kind: command, version: 1, requires: { warden: dispatchInstallationOperator }, capability: write, invalidates: [dlq.list, dlq.get, dlq.counts, dlq.purgePreview, overview.summary] }
+  - { name: crons.list, kind: query, version: 1, requires: { warden: dispatchInstallationOperator }, capability: read }
+  - { name: crons.get, kind: query, version: 1, requires: { warden: dispatchInstallationOperator }, capability: read }
+  - { name: crons.enable, kind: command, version: 1, requires: { warden: dispatchInstallationOperator }, capability: write, invalidates: [crons.list, crons.get, overview.summary] }
+  - { name: crons.disable, kind: command, version: 1, requires: { warden: dispatchInstallationOperator }, capability: write, invalidates: [crons.list, crons.get, overview.summary] }
+  - { name: crons.delete, kind: command, version: 1, requires: { warden: dispatchInstallationOperator }, capability: write, invalidates: [crons.list, crons.get, overview.summary] }
+  - { name: crons.runNow, kind: command, version: 1, requires: { warden: dispatchInstallationOperator }, capability: write, invalidates: [crons.get, jobs.list, jobs.counts, queues.list, queues.get, overview.summary] }
+
+# Durable targets use persisted namespace ownership and decoded payload input.
+  - { name: durable.namespaces, kind: query, version: 1, requires: { warden: dispatchDurableOperator }, capability: read }
+  - { name: durable.executions, kind: query, version: 1, requires: { warden: dispatchDurableOperator }, capability: read }
+  - { name: durable.execution, kind: query, version: 1, requires: { warden: dispatchDurableOperator }, capability: read }
+  - { name: durable.history, kind: query, version: 1, requires: { warden: dispatchDurableOperator }, capability: read }
+  - { name: durable.tasks, kind: query, version: 1, requires: { warden: dispatchDurableOperator }, capability: read }
+  - { name: durable.chain, kind: query, version: 1, requires: { warden: dispatchDurableOperator }, capability: read }
+  - { name: durable.children, kind: query, version: 1, requires: { warden: dispatchDurableOperator }, capability: read }
+  - { name: durable.payload, kind: query, version: 1, requires: { warden: dispatchDurableOperator }, capability: read }
+  - { name: durable.audit, kind: query, version: 1, requires: { warden: dispatchDurableOperator }, capability: read }
+  - { name: durable.hooks, kind: query, version: 1, requires: { warden: dispatchDurableOperator }, capability: read }
+  - { name: durable.start, kind: command, version: 1, requires: { warden: dispatchDurableOperator }, capability: write, invalidates: [durable.executions, durable.execution, durable.history, durable.tasks, durable.chain, durable.children, durable.audit, durable.hooks, durable.capabilities, durable.payload, durable.query] }
+  - { name: durable.signal, kind: command, version: 1, requires: { warden: dispatchDurableOperator }, capability: write, invalidates: [durable.executions, durable.execution, durable.history, durable.tasks, durable.chain, durable.children, durable.audit, durable.hooks, durable.capabilities, durable.payload, durable.query] }
+  - { name: durable.signalStart, kind: command, version: 1, requires: { warden: dispatchDurableOperator }, capability: write, invalidates: [durable.executions, durable.execution, durable.history, durable.tasks, durable.chain, durable.children, durable.audit, durable.hooks, durable.capabilities, durable.payload, durable.query] }
+  - { name: durable.cancel, kind: command, version: 1, requires: { warden: dispatchDurableOperator }, capability: write, invalidates: [durable.executions, durable.execution, durable.history, durable.tasks, durable.chain, durable.children, durable.audit, durable.hooks, durable.capabilities, durable.payload, durable.query] }
+  - { name: durable.query, kind: query, version: 1, requires: { warden: dispatchDurableOperator }, capability: read }
+  - { name: durable.capabilities, kind: query, version: 1, requires: { warden: dispatchDurableOperator }, capability: read }
+  - name: durable.compatibility
+    kind: query
+    version: 1
+    requires:
+      warden: dispatchDurableOperator
+    capability: read
+    schema:
+      input:
+        type: object
+        properties:
+          namespace: &identifier
+            type: string
+            minLength: 1
+        required:
+        - namespace
+      output: &compatibilityOutput
+        type: object
+        properties:
+          namespace:
+            type: string
+          enrolled: &boolean
+            type: boolean
+          schema_version: &decimal
+            type: string
+            pattern: ^(0|[1-9][0-9]*)$
+            description: Canonical nonnegative decimal integer. Keep this value as a string.
+          writer_protocol: *decimal
+          query_schema_version: *decimal
+          drain_schema_version: *decimal
+          version: *decimal
+          observed_at: &timestamp
+            type: string
+            format: date-time
+        required:
+        - namespace
+        - enrolled
+        - schema_version
+        - writer_protocol
+        - query_schema_version
+        - drain_schema_version
+        - version
+        - observed_at
+  - name: durable.build
+    kind: query
+    version: 1
+    requires:
+      warden: dispatchDurableOperator
+    capability: read
+    schema:
+      input:
+        type: object
+        properties:
+          namespace: *identifier
+          build_id: *identifier
+        required:
+        - namespace
+        - build_id
+      output:
+        type: object
+        properties:
+          namespace: *identifier
+          build_id: *identifier
+          state: &buildState
+            type: string
+            enum:
+            - accepting
+            - retiring
+            - retired
+          epoch: &positiveDecimal
+            type: string
+            pattern: ^[1-9][0-9]*$
+            description: Canonical positive decimal integer. Keep this value as a string.
+          version: *positiveDecimal
+          compatibility_version: *decimal
+          observed_at: *timestamp
+          has_blockers: *boolean
+          blockers:
+            type: object
+            properties:
+              open_executions: *decimal
+              pending_tasks: *decimal
+              async_callbacks: *decimal
+              delayed_runs: *decimal
+              pending_child_deliveries: *decimal
+              child_obligations: *decimal
+            required:
+            - open_executions
+            - pending_tasks
+            - async_callbacks
+            - delayed_runs
+            - pending_child_deliveries
+            - child_obligations
+          retained_executions: *decimal
+          verified_query_runtimes: *decimal
+        required:
+        - namespace
+        - build_id
+        - state
+        - epoch
+        - version
+        - compatibility_version
+        - observed_at
+        - has_blockers
+        - blockers
+        - retained_executions
+        - verified_query_runtimes
+  - name: durable.retirementEnroll
+    kind: command
+    version: 1
+    requires:
+      warden: dispatchDurableOperator
+    capability: write
+    invalidates:
+    - durable.compatibility
+    - durable.build
+    - durable.workerStatus
+    - durable.workerDrainReceipt
+    - durable.audit
+    schema:
+      input:
+        type: object
+        properties:
+          namespace: *identifier
+          request_id: *identifier
+        required:
+        - namespace
+        - request_id
+      output:
+        type: object
+        properties:
+          namespace: *identifier
+          request_id: *identifier
+          operation:
+            type: string
+            enum:
+            - namespace.retirement.enroll
+          status: &id001
+            type: string
+            enum:
+            - accepted
+          accepted_at: *timestamp
+        required:
+        - namespace
+        - request_id
+        - operation
+        - status
+        - accepted_at
+  - name: durable.buildRegister
+    kind: command
+    version: 1
+    requires:
+      warden: dispatchDurableOperator
+    capability: write
+    invalidates:
+    - durable.compatibility
+    - durable.build
+    - durable.workerStatus
+    - durable.workerDrainReceipt
+    - durable.audit
+    schema:
+      input:
+        type: object
+        properties:
+          namespace: *identifier
+          build_id: *identifier
+          request_id: *identifier
+          expected_version: *decimal
+        required:
+        - namespace
+        - build_id
+        - request_id
+        - expected_version
+      output:
+        type: object
+        properties:
+          namespace: *identifier
+          request_id: *identifier
+          operation:
+            type: string
+            enum:
+            - build.register
+          status: *id001
+          accepted_at: *timestamp
+          build_id: *identifier
+          state: *buildState
+          version: *positiveDecimal
+          epoch: *positiveDecimal
+        required:
+        - namespace
+        - request_id
+        - operation
+        - status
+        - accepted_at
+        - build_id
+        - state
+        - version
+        - epoch
+  - name: durable.buildRetire
+    kind: command
+    version: 1
+    requires:
+      warden: dispatchDurableOperator
+    capability: write
+    invalidates:
+    - durable.compatibility
+    - durable.build
+    - durable.workerStatus
+    - durable.workerDrainReceipt
+    - durable.audit
+    schema:
+      input: &buildRetirementInput
+        type: object
+        properties:
+          namespace: *identifier
+          build_id: *identifier
+          request_id: *identifier
+          expected_version: *positiveDecimal
+          expected_epoch: *positiveDecimal
+        required:
+        - namespace
+        - build_id
+        - request_id
+        - expected_version
+        - expected_epoch
+      output:
+        type: object
+        properties:
+          namespace: *identifier
+          request_id: *identifier
+          operation:
+            type: string
+            enum:
+            - build.retirement.begin
+          status: *id001
+          accepted_at: *timestamp
+          build_id: *identifier
+          state: *buildState
+          version: *positiveDecimal
+          epoch: *positiveDecimal
+        required:
+        - namespace
+        - request_id
+        - operation
+        - status
+        - accepted_at
+        - build_id
+        - state
+        - version
+        - epoch
+  - name: durable.buildFinalize
+    kind: command
+    version: 1
+    requires:
+      warden: dispatchDurableOperator
+    capability: write
+    invalidates:
+    - durable.compatibility
+    - durable.build
+    - durable.workerStatus
+    - durable.workerDrainReceipt
+    - durable.audit
+    schema:
+      input: *buildRetirementInput
+      output:
+        type: object
+        properties:
+          namespace: *identifier
+          request_id: *identifier
+          operation:
+            type: string
+            enum:
+            - build.retirement.finalize
+          status: *id001
+          accepted_at: *timestamp
+          build_id: *identifier
+          state: *buildState
+          version: *positiveDecimal
+          epoch: *positiveDecimal
+        required:
+        - namespace
+        - request_id
+        - operation
+        - status
+        - accepted_at
+        - build_id
+        - state
+        - version
+        - epoch
+  - name: durable.buildResume
+    kind: command
+    version: 1
+    requires:
+      warden: dispatchDurableOperator
+    capability: write
+    invalidates:
+    - durable.compatibility
+    - durable.build
+    - durable.workerStatus
+    - durable.workerDrainReceipt
+    - durable.audit
+    schema:
+      input: *buildRetirementInput
+      output:
+        type: object
+        properties:
+          namespace: *identifier
+          request_id: *identifier
+          operation:
+            type: string
+            enum:
+            - build.retirement.abort
+          status: *id001
+          accepted_at: *timestamp
+          build_id: *identifier
+          state: *buildState
+          version: *positiveDecimal
+          epoch: *positiveDecimal
+        required:
+        - namespace
+        - request_id
+        - operation
+        - status
+        - accepted_at
+        - build_id
+        - state
+        - version
+        - epoch
+  - name: durable.workerStatus
+    kind: query
+    version: 1
+    requires:
+      warden: dispatchDurableOperator
+    capability: read
+    schema:
+      input:
+        type: object
+        properties:
+          namespace: *identifier
+          build_id: *identifier
+          runtime_id: *identifier
+        required:
+        - namespace
+        - build_id
+        - runtime_id
+      output:
+        type: object
+        properties:
+          namespace: *identifier
+          build_id: *identifier
+          runtime_id: *identifier
+          instance_id: *identifier
+          queue: *identifier
+          state:
+            type: string
+            enum:
+            - not_started
+            - running
+            - draining
+            - stopped
+            - failed
+          ready: *boolean
+          admission_closed: *boolean
+          in_flight: *decimal
+          unknown_claims: *decimal
+          failure:
+            type: string
+            enum:
+            - processing_failed
+            - unavailable
+          host_qualification:
+            type: string
+            enum:
+            - not_observed
+          claims:
+            type:
+            - array
+            - 'null'
+            items:
+              type: object
+              properties:
+                kind: *identifier
+                claiming: *decimal
+                processing: *decimal
+              required:
+              - kind
+              - claiming
+              - processing
+          retirement_status:
+            type: string
+            enum:
+            - unenrolled
+            - incompatible
+            - unavailable
+            - ready
+          compatibility: *compatibilityOutput
+          observed_at: *timestamp
+        required:
+        - namespace
+        - build_id
+        - runtime_id
+        - instance_id
+        - queue
+        - state
+        - ready
+        - admission_closed
+        - in_flight
+        - unknown_claims
+        - host_qualification
+        - claims
+        - retirement_status
+        - compatibility
+        - observed_at
+  - name: durable.workerDrain
+    kind: command
+    version: 1
+    requires:
+      warden: dispatchDurableOperator
+    capability: write
+    invalidates:
+    - durable.compatibility
+    - durable.build
+    - durable.workerStatus
+    - durable.workerDrainReceipt
+    - durable.audit
+    schema:
+      input: &workerDrainInput
+        type: object
+        properties:
+          namespace: *identifier
+          build_id: *identifier
+          runtime_id: *identifier
+          request_id: *identifier
+          operation_id: *identifier
+          deadline: *timestamp
+        required:
+        - namespace
+        - build_id
+        - runtime_id
+        - request_id
+        - operation_id
+        - deadline
+      output: &workerDrainOutput
+        type: object
+        properties:
+          namespace: *identifier
+          request_id: *identifier
+          operation:
+            type: string
+            enum:
+            - worker.drain.request
+          status:
+            type: string
+            enum:
+            - requested
+          accepted_at: *timestamp
+          build_id: *identifier
+          runtime_id: *identifier
+          instance_id: *identifier
+          queue: *identifier
+          operation_id: *identifier
+          deadline: *timestamp
+          process:
+            type: string
+            enum:
+            - unknown
+            - draining
+            - complete
+            - incomplete
+            description: Unknown has no authoritative process outcome. Incomplete needs original process evidence
+              or authoritative first-acceptance refusal.
+          complete: *boolean
+          quiescent: *boolean
+          deadline_expired:
+            type: boolean
+            description: Elapsed original deadline or observed operation expiry. This alone does not establish a process
+              outcome.
+          in_flight: &observedCount
+            type: string
+            pattern: ^(|0|[1-9][0-9]*)$
+            description: Canonical decimal count when observed. Empty means unknown, not zero.
+          unknown_claims: *observedCount
+        required:
+        - namespace
+        - request_id
+        - operation
+        - status
+        - accepted_at
+        - build_id
+        - runtime_id
+        - instance_id
+        - queue
+        - operation_id
+        - deadline
+        - process
+        - complete
+        - quiescent
+        - deadline_expired
+        - in_flight
+        - unknown_claims
+  - name: durable.workerDrainReceipt
+    kind: query
+    version: 1
+    requires:
+      warden: dispatchDurableOperator
+    capability: read
+    schema:
+      input: *workerDrainInput
+      output: *workerDrainOutput
+  - name: durable.queryRuntime
+    kind: query
+    version: 1
+    requires:
+      warden: dispatchDurableOperator
+    capability: read
+    schema:
+      input:
+        type: object
+        properties:
+          namespace: &queryid001
+            type: string
+            minLength: 1
+          build_id: *queryid001
+          runtime_id: *queryid001
+        required:
+        - namespace
+        - build_id
+        - runtime_id
+      output: &queryid004
+        type: object
+        properties:
+          namespace: *queryid001
+          build_id: *queryid001
+          runtime_id: *queryid001
+          instance_id: *queryid001
+          identity_version: &queryid002
+            type: string
+            pattern: ^[1-9][0-9]*$
+          state:
+            type: string
+            enum:
+            - active
+            - removing
+            - removed
+          version: *queryid002
+          removal_epoch: &queryid006
+            type: string
+            pattern: ^(0|[1-9][0-9]*)$
+          proof_id: *queryid001
+          probe_policy_id: *queryid001
+          probe_policy_version: *queryid002
+          verified_at: &queryid003
+            type: string
+            format: date-time
+          valid_until: *queryid003
+        required:
+        - namespace
+        - build_id
+        - runtime_id
+        - instance_id
+        - identity_version
+        - state
+        - version
+        - removal_epoch
+        - probe_policy_id
+        - probe_policy_version
+        - verified_at
+        - valid_until
+  - name: durable.queryRuntimeRegister
+    kind: command
+    version: 1
+    requires:
+      warden: dispatchDurableOperator
+    capability: write
+    invalidates:
+    - durable.queryRuntime
+    - durable.queryRuntimeRemovalCheck
+    - durable.build
+    - durable.audit
+    schema:
+      input:
+        type: object
+        properties:
+          namespace: *queryid001
+          build_id: *queryid001
+          runtime_id: *queryid001
+          request_id: *queryid001
+          expected_version:
+            type: string
+            enum:
+            - '0'
+        required:
+        - namespace
+        - build_id
+        - runtime_id
+        - request_id
+        - expected_version
+      output:
+        type: object
+        properties:
+          namespace: *queryid001
+          request_id: *queryid001
+          operation:
+            type: string
+            enum:
+            - query_runtime.register
+          status:
+            type: string
+            enum:
+            - accepted
+          accepted_at: *queryid003
+          binding: *queryid004
+        required:
+        - namespace
+        - request_id
+        - operation
+        - status
+        - accepted_at
+        - binding
+  - name: durable.queryRuntimeVerify
+    kind: command
+    version: 1
+    requires:
+      warden: dispatchDurableOperator
+    capability: write
+    invalidates:
+    - durable.queryRuntime
+    - durable.queryRuntimeRemovalCheck
+    - durable.build
+    - durable.audit
+    schema:
+      input:
+        type: object
+        properties: &queryid005
+          namespace: *queryid001
+          build_id: *queryid001
+          runtime_id: *queryid001
+          request_id: *queryid001
+          expected_version: *queryid002
+        required:
+        - namespace
+        - build_id
+        - runtime_id
+        - request_id
+        - expected_version
+      output:
+        type: object
+        properties:
+          namespace: *queryid001
+          request_id: *queryid001
+          operation:
+            type: string
+            enum:
+            - query_runtime.verify
+          status:
+            type: string
+            enum:
+            - accepted
+          accepted_at: *queryid003
+          binding: *queryid004
+        required:
+        - namespace
+        - request_id
+        - operation
+        - status
+        - accepted_at
+        - binding
+  - name: durable.queryRuntimeRemove
+    kind: command
+    version: 1
+    requires:
+      warden: dispatchDurableOperator
+    capability: write
+    invalidates:
+    - durable.queryRuntime
+    - durable.queryRuntimeRemovalCheck
+    - durable.build
+    - durable.audit
+    schema:
+      input:
+        type: object
+        properties: *queryid005
+        required:
+        - namespace
+        - build_id
+        - runtime_id
+        - request_id
+        - expected_version
+      output:
+        type: object
+        properties:
+          namespace: *queryid001
+          request_id: *queryid001
+          operation:
+            type: string
+            enum:
+            - query_runtime.remove
+          status:
+            type: string
+            enum:
+            - accepted
+          accepted_at: *queryid003
+          binding: *queryid004
+          fence: &queryid007
+            type: object
+            properties:
+              namespace: *queryid001
+              build_id: *queryid001
+              runtime_id: *queryid001
+              instance_id: *queryid001
+              candidate_version: *queryid002
+              survivor_runtime_id: *queryid001
+              survivor_instance_id: *queryid001
+              survivor_version: *queryid006
+              build_epoch: *queryid002
+              build_version: *queryid002
+              build_state:
+                type: string
+                enum:
+                - accepting
+                - retiring
+                - retired
+              removal_epoch: *queryid002
+              request_id: *queryid001
+              digest:
+                type: string
+                pattern: ^[0-9a-f]{64}$
+              accepted_at: *queryid003
+              valid_until: *queryid003
+            required:
+            - namespace
+            - build_id
+            - runtime_id
+            - instance_id
+            - candidate_version
+            - survivor_version
+            - build_epoch
+            - build_version
+            - build_state
+            - removal_epoch
+            - request_id
+            - digest
+            - accepted_at
+            - valid_until
+        required:
+        - namespace
+        - request_id
+        - operation
+        - status
+        - accepted_at
+        - binding
+        - fence
+  - name: durable.queryRuntimeRemovalCheck
+    kind: query
+    version: 1
+    requires:
+      warden: dispatchDurableOperator
+    capability: read
+    schema:
+      input:
+        type: object
+        properties:
+          namespace: *queryid001
+          build_id: *queryid001
+          runtime_id: *queryid001
+          reservation_request_id: *queryid001
+          reservation_version: *queryid002
+        required:
+        - namespace
+        - build_id
+        - runtime_id
+        - reservation_request_id
+        - reservation_version
+      output:
+        type: object
+        properties:
+          fence: *queryid007
+          checked_at: *queryid003
+        required:
+        - fence
+        - checked_at
+  - name: durable.queryRuntimeFinish
+    kind: command
+    version: 1
+    requires:
+      warden: dispatchDurableOperator
+    capability: write
+    invalidates:
+    - durable.queryRuntime
+    - durable.queryRuntimeRemovalCheck
+    - durable.build
+    - durable.audit
+    schema:
+      input:
+        type: object
+        properties: &queryid008
+          namespace: *queryid001
+          build_id: *queryid001
+          runtime_id: *queryid001
+          reservation_request_id: *queryid001
+          reservation_version: *queryid002
+          request_id: *queryid001
+        required:
+        - namespace
+        - build_id
+        - runtime_id
+        - reservation_request_id
+        - reservation_version
+        - request_id
+      output:
+        type: object
+        properties:
+          namespace: *queryid001
+          request_id: *queryid001
+          operation:
+            type: string
+            enum:
+            - query_runtime.finish
+          status:
+            type: string
+            enum:
+            - accepted
+          accepted_at: *queryid003
+          binding: *queryid004
+        required:
+        - namespace
+        - request_id
+        - operation
+        - status
+        - accepted_at
+        - binding
+  - name: durable.queryRuntimeAbort
+    kind: command
+    version: 1
+    requires:
+      warden: dispatchDurableOperator
+    capability: write
+    invalidates:
+    - durable.queryRuntime
+    - durable.queryRuntimeRemovalCheck
+    - durable.build
+    - durable.audit
+    schema:
+      input:
+        type: object
+        properties: *queryid008
+        required:
+        - namespace
+        - build_id
+        - runtime_id
+        - reservation_request_id
+        - reservation_version
+        - request_id
+      output:
+        type: object
+        properties:
+          namespace: *queryid001
+          request_id: *queryid001
+          operation:
+            type: string
+            enum:
+            - query_runtime.abort
+          status:
+            type: string
+            enum:
+            - accepted
+          accepted_at: *queryid003
+          binding: *queryid004
+        required:
+        - namespace
+        - request_id
+        - operation
+        - status
+        - accepted_at
+        - binding

@@ -2,7 +2,10 @@
 package api
 
 import (
+	"errors"
+	"fmt"
 	"net/http"
+	"sync"
 
 	"github.com/xraph/forge"
 
@@ -10,44 +13,110 @@ import (
 	"github.com/xraph/dispatch/dlq"
 	"github.com/xraph/dispatch/engine"
 	"github.com/xraph/dispatch/job"
+	"github.com/xraph/dispatch/operator"
+	"github.com/xraph/dispatch/security"
 	"github.com/xraph/dispatch/workflow"
 )
 
 // API wires all Forge-style HTTP handlers together for the dispatch system.
 type API struct {
-	eng    *engine.Engine
-	router forge.Router
+	durable     *operator.Service
+	durableAuth *security.ForgeAuthenticator
+	auth        security.Authenticator
+	boundary    security.Boundary
+	eng         *engine.Engine
+	router      forge.Router
+
+	handlerOnce sync.Once
+	handler     http.Handler
 }
 
 // New creates an API from a dispatch Engine.
-func New(eng *engine.Engine, router forge.Router) *API {
-	return &API{eng: eng, router: router}
+func New(eng *engine.Engine, router forge.Router, opts ...Option) *API {
+	a := &API{eng: eng, router: router}
+	for _, opt := range opts {
+		opt(a)
+	}
+	return a
 }
 
-// Handler returns the fully assembled http.Handler with all routes.
+// Handler returns the fully assembled http.Handler with all routes. The
+// routes are registered on the first call; later calls return the same
+// handler. A route forge refuses is a programming error, so Handler
+// panics with forge's reason rather than serve an api with a hole in it.
 func (a *API) Handler() http.Handler {
-	if a.router == nil {
-		a.router = forge.NewRouter()
-	}
-	a.RegisterRoutes(a.router)
-	return a.router.Handler()
+	a.handlerOnce.Do(func() {
+		if a.router == nil {
+			a.router = forge.NewRouter()
+		}
+		if err := a.RegisterRoutes(a.router); err != nil {
+			panic(fmt.Sprintf("dispatch api: %v", err))
+		}
+		a.handler = a.router.Handler()
+	})
+
+	return a.handler
 }
 
 // RegisterRoutes registers all dispatch API routes into the given Forge router
-// with full OpenAPI metadata.
-func (a *API) RegisterRoutes(router forge.Router) {
-	a.registerJobRoutes(router)
-	a.registerWorkflowRoutes(router)
-	a.registerDLQRoutes(router)
-	a.registerCronRoutes(router)
-	a.registerStatsRoutes(router)
+// with full OpenAPI metadata. It returns every route forge refused, each
+// named by method and path. Forge refuses a handler it cannot bind, or a
+// path that collides with one already registered, and that route would
+// otherwise answer 404.
+func (a *API) RegisterRoutes(router forge.Router) error {
+	return errors.Join(
+		a.registerJobRoutes(router),
+		a.registerWorkflowRoutes(router),
+		a.registerDLQRoutes(router),
+		a.registerCronRoutes(router),
+		a.registerStatsRoutes(router),
+		a.registerDurableRoutes(router),
+	)
+}
+
+// routes registers one group's routes and keeps the error forge returns
+// for each, named by method and path.
+type routes struct {
+	a    *API
+	g    forge.Router
+	errs []error
+}
+
+// group starts a /v1 group with the given OpenAPI tag.
+func (a *API) group(router forge.Router, tag string) *routes {
+	return &routes{a: a, g: router.Group("/v1", forge.WithGroupTags(tag))}
+}
+
+func (r *routes) get(path string, handler any, opts ...forge.RouteOption) {
+	opts = append(opts, forge.WithMiddleware(r.a.guard(http.MethodGet, path)))
+	r.keep(http.MethodGet, path, r.g.GET(path, handler, opts...))
+}
+
+func (r *routes) post(path string, handler any, opts ...forge.RouteOption) {
+	opts = append(opts, forge.WithMiddleware(r.a.guard(http.MethodPost, path)))
+	r.keep(http.MethodPost, path, r.g.POST(path, handler, opts...))
+}
+
+func (r *routes) delete(path string, handler any, opts ...forge.RouteOption) {
+	opts = append(opts, forge.WithMiddleware(r.a.guard(http.MethodDelete, path)))
+	r.keep(http.MethodDelete, path, r.g.DELETE(path, handler, opts...))
+}
+
+func (r *routes) keep(method, path string, err error) {
+	if err != nil {
+		r.errs = append(r.errs, fmt.Errorf("%s /v1%s: %w", method, path, err))
+	}
+}
+
+func (r *routes) err() error {
+	return errors.Join(r.errs...)
 }
 
 // registerJobRoutes registers job management routes.
-func (a *API) registerJobRoutes(router forge.Router) {
-	g := router.Group("/v1", forge.WithGroupTags("jobs"))
+func (a *API) registerJobRoutes(router forge.Router) error {
+	r := a.group(router, "jobs")
 
-	_ = g.GET("/jobs", a.listJobs,
+	r.get("/jobs", a.listJobs,
 		forge.WithSummary("List jobs"),
 		forge.WithDescription("Returns jobs filtered by state and queue."),
 		forge.WithOperationID("listJobs"),
@@ -56,7 +125,7 @@ func (a *API) registerJobRoutes(router forge.Router) {
 		forge.WithErrorResponses(),
 	)
 
-	_ = g.GET("/jobs/:jobId", a.getJob,
+	r.get("/jobs/:jobId", a.getJob,
 		forge.WithSummary("Get job"),
 		forge.WithDescription("Returns details of a specific job."),
 		forge.WithOperationID("getJob"),
@@ -65,38 +134,42 @@ func (a *API) registerJobRoutes(router forge.Router) {
 		forge.WithErrorResponses(),
 	)
 
-	_ = g.POST("/jobs/:jobId/cancel", a.cancelJob,
+	r.post("/jobs/:jobId/cancel", a.cancelJob,
 		forge.WithSummary("Cancel job"),
-		forge.WithDescription("Cancels a pending or retrying job."),
+		forge.WithDescription("Cancels a pending, retrying or running job. The worker cancels a running handler's context on its next lease renewal."),
 		forge.WithOperationID("cancelJob"),
 		forge.WithRequestSchema(CancelJobRequest{}),
 		forge.WithNoContentResponse(),
+		conflictResponse("The job is completed, failed or already cancelled"),
 		forge.WithErrorResponses(),
 	)
 
-	_ = g.POST("/jobs/:jobId/retry", a.retryJob,
+	r.post("/jobs/:jobId/retry", a.retryJob,
 		forge.WithSummary("Retry job"),
-		forge.WithDescription("Retries a failed job by resetting it to pending state."),
+		forge.WithDescription("Retries a failed job by resetting it to pending state. Claims the job's DLQ entry, if it has one, so the entry cannot also be replayed."),
 		forge.WithOperationID("retryJob"),
 		forge.WithRequestSchema(RetryJobRequest{}),
 		forge.WithNoContentResponse(),
+		conflictResponse("The job is not failed, or its DLQ entry was already replayed"),
 		forge.WithErrorResponses(),
 	)
 
-	_ = g.GET("/jobs/counts", a.jobCounts,
+	r.get("/jobs/counts", a.jobCounts,
 		forge.WithSummary("Job counts"),
 		forge.WithDescription("Returns job counts grouped by state."),
 		forge.WithOperationID("jobCounts"),
 		forge.WithResponseSchema(http.StatusOK, "Job counts", JobCountsResponse{}),
 		forge.WithErrorResponses(),
 	)
+
+	return r.err()
 }
 
 // registerWorkflowRoutes registers workflow management routes.
-func (a *API) registerWorkflowRoutes(router forge.Router) {
-	g := router.Group("/v1", forge.WithGroupTags("workflows"))
+func (a *API) registerWorkflowRoutes(router forge.Router) error {
+	r := a.group(router, "workflows")
 
-	_ = g.GET("/workflows", a.listWorkflowNames,
+	r.get("/workflows", a.listWorkflowNames,
 		forge.WithSummary("List workflows"),
 		forge.WithDescription("Returns the names of all registered workflows."),
 		forge.WithOperationID("listWorkflows"),
@@ -104,7 +177,7 @@ func (a *API) registerWorkflowRoutes(router forge.Router) {
 		forge.WithErrorResponses(),
 	)
 
-	_ = g.GET("/workflows/runs", a.listWorkflowRuns,
+	r.get("/workflows/runs", a.listWorkflowRuns,
 		forge.WithSummary("List workflow runs"),
 		forge.WithDescription("Returns workflow runs filtered by state."),
 		forge.WithOperationID("listWorkflowRuns"),
@@ -113,7 +186,7 @@ func (a *API) registerWorkflowRoutes(router forge.Router) {
 		forge.WithErrorResponses(),
 	)
 
-	_ = g.GET("/workflows/runs/:runId", a.getWorkflowRun,
+	r.get("/workflows/runs/:runId", a.getWorkflowRun,
 		forge.WithSummary("Get workflow run"),
 		forge.WithDescription("Returns details of a specific workflow run."),
 		forge.WithOperationID("getWorkflowRun"),
@@ -121,13 +194,36 @@ func (a *API) registerWorkflowRoutes(router forge.Router) {
 		forge.WithResponseSchema(http.StatusOK, "Workflow run details", &workflow.Run{}),
 		forge.WithErrorResponses(),
 	)
+
+	r.get("/workflows/runs/:runId/replay", a.planWorkflowReplay,
+		forge.WithSummary("Plan workflow replay"),
+		forge.WithDescription("Reports what replaying the run from a step would do, without changing anything."),
+		forge.WithOperationID("planWorkflowReplay"),
+		forge.WithRequestSchema(PlanWorkflowReplayRequest{}),
+		forge.WithResponseSchema(http.StatusOK, "Replay plan", &workflow.ReplayPlan{}),
+		conflictResponse("The step has no checkpoint, or the run's version is not registered"),
+		forge.WithErrorResponses(),
+	)
+
+	r.post("/workflows/runs/:runId/replay", a.replayWorkflow,
+		forge.WithSummary("Replay workflow run"),
+		forge.WithDescription("Re-runs a finished run from a step on its own version. Answers once the replay has started; the run continues in the background."),
+		forge.WithOperationID("replayWorkflowRun"),
+		forge.WithRequestSchema(ReplayWorkflowRequest{}),
+		forge.WithResponseSchema(http.StatusAccepted, "Replay started", &workflow.ReplayPlan{}),
+		conflictResponse("The run is running, the step has no checkpoint, or the run's version is not registered"),
+		forge.WithResponseSchema(http.StatusServiceUnavailable, "The workflow runner has shut down", ErrorResponse{}),
+		forge.WithErrorResponses(),
+	)
+
+	return r.err()
 }
 
 // registerDLQRoutes registers dead letter queue management routes.
-func (a *API) registerDLQRoutes(router forge.Router) {
-	g := router.Group("/v1", forge.WithGroupTags("dlq"))
+func (a *API) registerDLQRoutes(router forge.Router) error {
+	r := a.group(router, "dlq")
 
-	_ = g.GET("/dlq", a.listDLQ,
+	r.get("/dlq", a.listDLQ,
 		forge.WithSummary("List DLQ entries"),
 		forge.WithDescription("Returns dead letter queue entries."),
 		forge.WithOperationID("listDLQ"),
@@ -136,7 +232,7 @@ func (a *API) registerDLQRoutes(router forge.Router) {
 		forge.WithErrorResponses(),
 	)
 
-	_ = g.GET("/dlq/:entryId", a.getDLQ,
+	r.get("/dlq/:entryId", a.getDLQ,
 		forge.WithSummary("Get DLQ entry"),
 		forge.WithDescription("Returns details of a specific DLQ entry."),
 		forge.WithOperationID("getDLQ"),
@@ -145,45 +241,59 @@ func (a *API) registerDLQRoutes(router forge.Router) {
 		forge.WithErrorResponses(),
 	)
 
-	_ = g.POST("/dlq/:entryId/replay", a.replayDLQ,
+	r.post("/dlq/:entryId/replay", a.replayDLQ,
 		forge.WithSummary("Replay DLQ entry"),
-		forge.WithDescription("Re-enqueues a DLQ entry as a new pending job."),
+		forge.WithDescription("Re-enqueues a DLQ entry as a new pending job. An entry is replayed at most once."),
 		forge.WithOperationID("dispatchReplayDLQ"),
 		forge.WithRequestSchema(ReplayDLQRequest{}),
 		forge.WithCreatedResponse(&job.Job{}),
+		conflictResponse("The entry was already replayed, or no worker can run the job"),
 		forge.WithErrorResponses(),
 	)
 
-	_ = g.POST("/dlq/replay-all", a.replayAllDLQ,
+	r.delete("/dlq/:entryId", a.deleteDLQ,
+		forge.WithSummary("Delete DLQ entry"),
+		forge.WithDescription("Permanently removes one DLQ entry."),
+		forge.WithOperationID("deleteDLQ"),
+		forge.WithRequestSchema(DeleteDLQRequest{}),
+		forge.WithNoContentResponse(),
+		forge.WithErrorResponses(),
+	)
+
+	r.post("/dlq/replay-all", a.replayAllDLQ,
 		forge.WithSummary("Replay all DLQ entries"),
-		forge.WithDescription("Re-enqueues all unreplayed DLQ entries as new pending jobs."),
+		forge.WithDescription("Re-enqueues unreplayed DLQ entries as new pending jobs, newest first, optionally in one queue and up to a limit."),
 		forge.WithOperationID("replayAllDLQ"),
+		forge.WithRequestSchema(ReplayAllDLQRequest{}),
 		forge.WithResponseSchema(http.StatusOK, "Replay result", ReplayAllDLQResponse{}),
 		forge.WithErrorResponses(),
 	)
 
-	_ = g.POST("/dlq/purge", a.purgeDLQ,
+	r.post("/dlq/purge", a.purgeDLQ,
 		forge.WithSummary("Purge DLQ"),
-		forge.WithDescription("Removes old DLQ entries."),
+		forge.WithDescription("Removes DLQ entries that failed before a cutoff: before, older_than, or 30 days ago when neither is given. dry_run counts them instead."),
 		forge.WithOperationID("purgeDLQ"),
+		forge.WithRequestSchema(PurgeDLQRequest{}),
 		forge.WithResponseSchema(http.StatusOK, "Purge result", PurgeDLQResponse{}),
 		forge.WithErrorResponses(),
 	)
 
-	_ = g.GET("/dlq/count", a.dlqCount,
+	r.get("/dlq/count", a.dlqCount,
 		forge.WithSummary("DLQ count"),
 		forge.WithDescription("Returns the total number of DLQ entries."),
 		forge.WithOperationID("dlqCount"),
 		forge.WithResponseSchema(http.StatusOK, "DLQ count", DLQCountResponse{}),
 		forge.WithErrorResponses(),
 	)
+
+	return r.err()
 }
 
 // registerCronRoutes registers cron management routes.
-func (a *API) registerCronRoutes(router forge.Router) {
-	g := router.Group("/v1", forge.WithGroupTags("crons"))
+func (a *API) registerCronRoutes(router forge.Router) error {
+	r := a.group(router, "crons")
 
-	_ = g.GET("/crons", a.listCrons,
+	r.get("/crons", a.listCrons,
 		forge.WithSummary("List cron entries"),
 		forge.WithDescription("Returns all registered cron entries."),
 		forge.WithOperationID("listCrons"),
@@ -192,7 +302,7 @@ func (a *API) registerCronRoutes(router forge.Router) {
 		forge.WithErrorResponses(),
 	)
 
-	_ = g.GET("/crons/:cronId", a.getCron,
+	r.get("/crons/:cronId", a.getCron,
 		forge.WithSummary("Get cron entry"),
 		forge.WithDescription("Returns details of a specific cron entry."),
 		forge.WithOperationID("getCron"),
@@ -201,16 +311,17 @@ func (a *API) registerCronRoutes(router forge.Router) {
 		forge.WithErrorResponses(),
 	)
 
-	_ = g.POST("/crons/:cronId/enable", a.enableCron,
+	r.post("/crons/:cronId/enable", a.enableCron,
 		forge.WithSummary("Enable cron entry"),
-		forge.WithDescription("Enables a disabled cron entry."),
+		forge.WithDescription("Enables a cron entry. Its next run is computed from now, so it does not fire a catch-up."),
 		forge.WithOperationID("enableCron"),
 		forge.WithRequestSchema(EnableCronRequest{}),
 		forge.WithResponseSchema(http.StatusOK, "Enabled cron entry", &cron.Entry{}),
+		conflictResponse("The schedule never fires"),
 		forge.WithErrorResponses(),
 	)
 
-	_ = g.POST("/crons/:cronId/disable", a.disableCron,
+	r.post("/crons/:cronId/disable", a.disableCron,
 		forge.WithSummary("Disable cron entry"),
 		forge.WithDescription("Disables a cron entry so it no longer fires."),
 		forge.WithOperationID("disableCron"),
@@ -219,7 +330,7 @@ func (a *API) registerCronRoutes(router forge.Router) {
 		forge.WithErrorResponses(),
 	)
 
-	_ = g.DELETE("/crons/:cronId", a.deleteCron,
+	r.delete("/crons/:cronId", a.deleteCron,
 		forge.WithSummary("Delete cron entry"),
 		forge.WithDescription("Permanently removes a cron entry."),
 		forge.WithOperationID("deleteCron"),
@@ -227,17 +338,37 @@ func (a *API) registerCronRoutes(router forge.Router) {
 		forge.WithNoContentResponse(),
 		forge.WithErrorResponses(),
 	)
+
+	r.post("/crons/:cronId/trigger", a.triggerCron,
+		forge.WithSummary("Trigger cron entry"),
+		forge.WithDescription("Enqueues the entry's job now. The schedule is left alone, and a disabled entry can be triggered too."),
+		forge.WithOperationID("triggerCron"),
+		forge.WithRequestSchema(TriggerCronRequest{}),
+		forge.WithCreatedResponse(&job.Job{}),
+		conflictResponse("No worker can run the job"),
+		forge.WithErrorResponses(),
+	)
+
+	return r.err()
+}
+
+// conflictResponse documents the 409 an operator route answers when the
+// current state refuses the action. WithErrorResponses does not list 409.
+func conflictResponse(description string) forge.RouteOption {
+	return forge.WithResponseSchema(http.StatusConflict, description, ErrorResponse{})
 }
 
 // registerStatsRoutes registers aggregate statistics routes.
-func (a *API) registerStatsRoutes(router forge.Router) {
-	g := router.Group("/v1", forge.WithGroupTags("stats"))
+func (a *API) registerStatsRoutes(router forge.Router) error {
+	r := a.group(router, "stats")
 
-	_ = g.GET("/stats", a.stats,
+	r.get("/stats", a.stats,
 		forge.WithSummary("Dispatch stats"),
 		forge.WithDescription("Returns aggregate statistics for jobs, workflows, and DLQ."),
 		forge.WithOperationID("dispatchStats"),
 		forge.WithResponseSchema(http.StatusOK, "Dispatch statistics", StatsResponse{}),
 		forge.WithErrorResponses(),
 	)
+
+	return r.err()
 }

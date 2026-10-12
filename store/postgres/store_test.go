@@ -33,6 +33,12 @@ import (
 // setupTestStore creates a Postgres container and returns a connected store.
 func setupTestStore(t *testing.T) *postgres.Store {
 	t.Helper()
+	s, _ := setupTestStoreConnection(t)
+	return s
+}
+
+func setupTestStoreConnection(t *testing.T) (*postgres.Store, string) {
+	t.Helper()
 
 	ctx := context.Background()
 
@@ -81,7 +87,7 @@ func setupTestStore(t *testing.T) *postgres.Store {
 		t.Fatalf("migrate: %v", migErr)
 	}
 
-	return store
+	return store, connStr
 }
 
 // ──────────────────────────────────────────────────

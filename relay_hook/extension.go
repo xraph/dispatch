@@ -2,6 +2,7 @@ package relayhook
 
 import (
 	"context"
+	"strings"
 	"time"
 
 	"github.com/xraph/relay"
@@ -15,19 +16,21 @@ import (
 
 // Compile-time interface checks.
 var (
-	_ ext.Extension             = (*Extension)(nil)
-	_ ext.JobEnqueued           = (*Extension)(nil)
-	_ ext.JobStarted            = (*Extension)(nil)
-	_ ext.JobCompleted          = (*Extension)(nil)
-	_ ext.JobFailed             = (*Extension)(nil)
-	_ ext.JobRetrying           = (*Extension)(nil)
-	_ ext.JobDLQ                = (*Extension)(nil)
-	_ ext.WorkflowStarted       = (*Extension)(nil)
-	_ ext.WorkflowStepCompleted = (*Extension)(nil)
-	_ ext.WorkflowStepFailed    = (*Extension)(nil)
-	_ ext.WorkflowCompleted     = (*Extension)(nil)
-	_ ext.WorkflowFailed        = (*Extension)(nil)
-	_ ext.CronFired             = (*Extension)(nil)
+	_ ext.Extension              = (*Extension)(nil)
+	_ ext.JobEnqueued            = (*Extension)(nil)
+	_ ext.JobStarted             = (*Extension)(nil)
+	_ ext.JobCompleted           = (*Extension)(nil)
+	_ ext.JobFailed              = (*Extension)(nil)
+	_ ext.JobRetrying            = (*Extension)(nil)
+	_ ext.JobDLQ                 = (*Extension)(nil)
+	_ ext.JobCancelled           = (*Extension)(nil)
+	_ ext.WorkflowStarted        = (*Extension)(nil)
+	_ ext.WorkflowStepCompleted  = (*Extension)(nil)
+	_ ext.WorkflowStepFailed     = (*Extension)(nil)
+	_ ext.WorkflowCompleted      = (*Extension)(nil)
+	_ ext.WorkflowFailed         = (*Extension)(nil)
+	_ ext.CronFired              = (*Extension)(nil)
+	_ ext.OperatorActionObserver = (*Extension)(nil)
 )
 
 // Extension bridges Dispatch lifecycle events to Relay for webhook
@@ -96,6 +99,11 @@ func (h *Extension) OnJobDLQ(ctx context.Context, j *job.Job, jobErr error) erro
 	})
 }
 
+// OnJobCancelled implements ext.JobCancelled.
+func (h *Extension) OnJobCancelled(ctx context.Context, j *job.Job) error {
+	return h.send(ctx, EventJobCancelled, j.ScopeOrgID, newJobPayload(j))
+}
+
 // ── Workflow lifecycle hooks ────────────────────────
 
 // OnWorkflowStarted implements ext.WorkflowStarted.
@@ -145,6 +153,35 @@ func (h *Extension) OnCronFired(ctx context.Context, entryName string, jobID id.
 		EntryName: entryName,
 		JobID:     jobID.String(),
 	})
+}
+
+// ── Operator actions ────────────────────────────────
+
+// operatorEvents maps each operator action kind to its event type.
+var operatorEvents = map[ext.ActionKind]string{
+	ext.ActionJobCancelled:     EventOperatorJobCancelled,
+	ext.ActionJobRetried:       EventOperatorJobRetried,
+	ext.ActionDLQReplayed:      EventOperatorDLQReplayed,
+	ext.ActionDLQDeleted:       EventOperatorDLQDeleted,
+	ext.ActionDLQPurged:        EventOperatorDLQPurged,
+	ext.ActionCronEnabled:      EventOperatorCronEnabled,
+	ext.ActionCronDisabled:     EventOperatorCronDisabled,
+	ext.ActionCronDeleted:      EventOperatorCronDeleted,
+	ext.ActionCronTriggered:    EventOperatorCronTriggered,
+	ext.ActionWorkflowReplayed: EventOperatorWorkflowReplayed,
+}
+
+// OnOperatorAction implements ext.OperatorActionObserver. Operator events
+// are system-level, like cron events, so they carry no tenant. A kind
+// this version does not know becomes "dispatch.operator." plus the kind
+// with its dots turned into underscores; it has no catalog entry, so
+// Relay refuses it and the registry logs the error.
+func (h *Extension) OnOperatorAction(ctx context.Context, a ext.Action) error {
+	eventType, ok := operatorEvents[a.Kind]
+	if !ok {
+		eventType = "dispatch.operator." + strings.ReplaceAll(string(a.Kind), ".", "_")
+	}
+	return h.send(ctx, eventType, "", newOperatorPayload(a))
 }
 
 // ── Internal helpers ────────────────────────────────
@@ -248,4 +285,41 @@ type workflowStepPayload struct {
 type cronPayload struct {
 	EntryName string `json:"entry_name"`
 	JobID     string `json:"job_id"`
+}
+
+type operatorPayload struct {
+	Kind     string `json:"kind"`
+	Actor    string `json:"actor,omitempty"`
+	JobID    string `json:"job_id,omitempty"`
+	NewJobID string `json:"new_job_id,omitempty"`
+	DLQID    string `json:"dlq_id,omitempty"`
+	CronID   string `json:"cron_id,omitempty"`
+	RunID    string `json:"run_id,omitempty"`
+	Step     string `json:"step,omitempty"`
+	Count    *int64 `json:"count,omitempty"`
+	At       string `json:"at,omitempty"`
+}
+
+// newOperatorPayload leaves out every field that does not apply to the
+// action. Nil IDs already print as "". Count is a pointer so that a purge
+// which removed nothing still sends "count": 0.
+func newOperatorPayload(a ext.Action) *operatorPayload {
+	p := &operatorPayload{
+		Kind:     string(a.Kind),
+		Actor:    a.Actor,
+		JobID:    a.JobID.String(),
+		NewJobID: a.NewJobID.String(),
+		DLQID:    a.DLQID.String(),
+		CronID:   a.CronID.String(),
+		RunID:    a.RunID.String(),
+		Step:     a.Step,
+	}
+	if a.Count != 0 || a.Kind == ext.ActionDLQPurged {
+		count := a.Count
+		p.Count = &count
+	}
+	if !a.At.IsZero() {
+		p.At = a.At.Format(time.RFC3339)
+	}
+	return p
 }

@@ -3,6 +3,7 @@ package cron
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -12,6 +13,7 @@ import (
 
 	log "github.com/xraph/go-utils/log"
 
+	"github.com/xraph/dispatch"
 	"github.com/xraph/dispatch/cluster"
 	"github.com/xraph/dispatch/id"
 	"github.com/xraph/dispatch/job"
@@ -99,6 +101,12 @@ var cronParser = cronlib.NewParser(
 // ParseSchedule parses a cron expression and returns the schedule.
 // Exported for use by engine.RegisterCron.
 func ParseSchedule(expr string) (cronlib.Schedule, error) {
+	// robfig v3.0.1 slices a CRON_TZ= or TZ= prefix up to the first
+	// space without checking there is one, so "CRON_TZ=UTC" on its own
+	// panics. Give it the error any other malformed spec gets.
+	if hasTZPrefix(expr) && !strings.Contains(expr, " ") {
+		return nil, fmt.Errorf("time zone prefix without a schedule: %q", expr)
+	}
 	return cronParser.Parse(expr)
 }
 
@@ -137,6 +145,15 @@ type Scheduler struct {
 	cronCache    []*Entry
 	lastCronList time.Time
 
+	// nextRuns holds the next fire time this scheduler wrote for each
+	// entry it fired since the cache was last listed, keyed by entry ID.
+	// tick prefers it to the cached NextRunAt, so an entry does not fire
+	// again on the next tick while the cache still holds the old time.
+	// The cached entries are never written: with the memory store they
+	// are the store's own rows. Owned by the tickLoop goroutine, and
+	// emptied whenever the cache is re-listed.
+	nextRuns map[string]time.Time
+
 	stopCh     chan struct{}
 	cancelCtx  context.Context
 	cancelFunc context.CancelFunc
@@ -173,6 +190,7 @@ func NewScheduler(
 		leaderTTL:           60 * time.Second,
 		cronRefreshInterval: 30 * time.Second,
 		parsed:              make(map[string]cronlib.Schedule),
+		nextRuns:            make(map[string]time.Time),
 		stopCh:              make(chan struct{}),
 	}
 	for _, opt := range opts {
@@ -387,6 +405,8 @@ func (s *Scheduler) cronEntries() []*Entry {
 	s.cronCache = entries
 	s.lastCronList = time.Now()
 	s.cronDirty.Store(false)
+	// The fresh list carries every next_run_at this scheduler wrote.
+	clear(s.nextRuns)
 	return entries
 }
 
@@ -402,27 +422,56 @@ func (s *Scheduler) tick() {
 		if !entry.Enabled {
 			continue
 		}
-		if entry.NextRunAt == nil || entry.NextRunAt.After(now) {
+		due := entry.NextRunAt
+		if next, ok := s.nextRuns[entry.ID.String()]; ok {
+			due = &next
+		}
+		if due == nil || due.After(now) {
 			continue
 		}
-		s.fireEntry(s.cancelCtx, entry, now)
+		s.fireEntry(s.cancelCtx, entry.ID, now)
 	}
 }
 
-func (s *Scheduler) fireEntry(ctx context.Context, entry *Entry, now time.Time) {
+// fireEntry fires one entry the cache says is due.
+//
+// The cache can be cronRefreshInterval old, and an operator acting
+// through another node invalidates only that node's cache, so a cached
+// row is never enough to fire on. Under the entry's lock, fireEntry
+// re-reads it and fires only if the store still has it enabled and due.
+// That is one GetCron per fire, not per tick. An operator's disable that
+// lands after the re-read still sees the fire it raced go out, but
+// nothing here can undo the disable: the post-fire writes are
+// UpdateCronLastRun and UpdateCronNextRun, and neither touches enabled.
+func (s *Scheduler) fireEntry(ctx context.Context, cronID id.CronID, now time.Time) {
 	// Acquire per-entry lock under a bounded subcontext.
 	acqCtx, acqCancel := s.callCtx()
-	acquired, err := s.cronStore.AcquireCronLock(acqCtx, entry.ID, s.workerID, s.lockTTL)
+	acquired, err := s.cronStore.AcquireCronLock(acqCtx, cronID, s.workerID, s.lockTTL)
 	acqCancel()
 	if err != nil {
-		s.logger.Error("acquire cron lock error",
-			log.String("cron_id", entry.ID.String()),
-			log.String("error", err.Error()),
-		)
+		s.logCronErr("acquire cron lock error", cronID, err)
 		return
 	}
 	if !acquired {
 		return // Another worker got it.
+	}
+
+	getCtx, getCancel := s.callCtx()
+	entry, err := s.cronStore.GetCron(getCtx, cronID)
+	getCancel()
+	if err != nil {
+		s.logCronErr("re-read cron entry error", cronID, err)
+		if !errors.Is(err, dispatch.ErrCronNotFound) {
+			s.releaseCronLock(cronID)
+		}
+		return
+	}
+	if !entry.Enabled || entry.NextRunAt == nil || entry.NextRunAt.After(now) {
+		// Disabled, or fired or rescheduled since the cache was listed.
+		// Re-list on the next tick so the cache stops offering it.
+		s.cronDirty.Store(true)
+		s.releaseCronLock(cronID)
+		return
 	}
 
 	// Enqueue the job with optional queue override.
@@ -439,30 +488,19 @@ func (s *Scheduler) fireEntry(ctx context.Context, entry *Entry, now time.Time) 
 			log.String("job_name", entry.JobName),
 			log.String("error", enqErr.Error()),
 		)
-		relCtx, relCancel := s.callCtx()
-		relErr := s.cronStore.ReleaseCronLock(relCtx, entry.ID, s.workerID)
-		relCancel()
-		if relErr != nil {
-			s.logger.Error("release cron lock error",
-				log.String("cron_id", entry.ID.String()),
-				log.String("error", relErr.Error()),
-			)
-		}
+		s.releaseCronLock(cronID)
 		return
 	}
 
-	// Update LastRunAt.
+	// Record the fire with targeted writes only. A whole-row write here
+	// would put back whatever enabled was when the row was read.
 	lrCtx, lrCancel := s.callCtx()
-	updateErr := s.cronStore.UpdateCronLastRun(lrCtx, entry.ID, now)
+	err = s.cronStore.UpdateCronLastRun(lrCtx, cronID, now)
 	lrCancel()
-	if updateErr != nil {
-		s.logger.Error("update cron last run error",
-			log.String("cron_id", entry.ID.String()),
-			log.String("error", updateErr.Error()),
-		)
+	if err != nil {
+		s.logCronErr("update cron last run error", cronID, err)
 	}
 
-	// Compute and persist NextRunAt.
 	sched, parseErr := s.getOrParseSchedule(entry.Schedule)
 	if parseErr != nil {
 		s.logger.Error("parse cron schedule error",
@@ -472,28 +510,16 @@ func (s *Scheduler) fireEntry(ctx context.Context, entry *Entry, now time.Time) 
 		)
 	} else {
 		next := sched.Next(now)
-		entry.NextRunAt = &next
+		s.nextRuns[cronID.String()] = next
 		nrCtx, nrCancel := s.callCtx()
-		updateErr := s.cronStore.UpdateCronEntry(nrCtx, entry)
+		err = s.cronStore.UpdateCronNextRun(nrCtx, cronID, next)
 		nrCancel()
-		if updateErr != nil {
-			s.logger.Error("update cron next run error",
-				log.String("cron_id", entry.ID.String()),
-				log.String("error", updateErr.Error()),
-			)
+		if err != nil {
+			s.logCronErr("update cron next run error", cronID, err)
 		}
 	}
 
-	// Release lock.
-	relCtx, relCancel := s.callCtx()
-	relErr := s.cronStore.ReleaseCronLock(relCtx, entry.ID, s.workerID)
-	relCancel()
-	if relErr != nil {
-		s.logger.Error("release cron lock error",
-			log.String("cron_id", entry.ID.String()),
-			log.String("error", relErr.Error()),
-		)
-	}
+	s.releaseCronLock(cronID)
 
 	// Emit hook.
 	if s.emitter != nil {
@@ -504,6 +530,35 @@ func (s *Scheduler) fireEntry(ctx context.Context, entry *Entry, now time.Time) 
 		log.String("cron_name", entry.Name),
 		log.String("job_name", entry.JobName),
 		log.String("job_id", jobID.String()),
+	)
+}
+
+// releaseCronLock gives up this worker's lock on an entry.
+func (s *Scheduler) releaseCronLock(cronID id.CronID) {
+	relCtx, relCancel := s.callCtx()
+	err := s.cronStore.ReleaseCronLock(relCtx, cronID, s.workerID)
+	relCancel()
+	if err != nil {
+		s.logCronErr("release cron lock error", cronID, err)
+	}
+}
+
+// logCronErr logs a failed store call on one entry. An entry that is no
+// longer there was deleted after the cache listed it, which is ordinary,
+// so that is logged at debug and the cache is re-listed on the next tick.
+// Anything else is an error.
+func (s *Scheduler) logCronErr(msg string, cronID id.CronID, err error) {
+	if errors.Is(err, dispatch.ErrCronNotFound) {
+		s.cronDirty.Store(true)
+		s.logger.Debug("cron entry deleted while firing",
+			log.String("cron_id", cronID.String()),
+			log.String("step", msg),
+		)
+		return
+	}
+	s.logger.Error(msg,
+		log.String("cron_id", cronID.String()),
+		log.String("error", err.Error()),
 	)
 }
 

@@ -4,14 +4,29 @@
   "description": "TypeScript client SDK for the Dispatch Wire Protocol (DWP)",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
-  "files": ["dist"],
+  "files": [
+    "dist"
+  ],
   "scripts": {
     "build": "tsc",
-    "clean": "rm -rf dist"
+    "clean": "rm -rf dist",
+    "typecheck": "tsc --noEmit",
+    "lint": "biome lint .",
+    "format": "biome format --write .",
+    "format:check": "biome format .",
+    "test": "tsc --module commonjs --moduleResolution node --outDir .test-build --declaration false && node --test --test-timeout=1000 tests/*.test.cjs"
   },
-  "keywords": ["dispatch", "dwp", "workflow", "jobs", "queue", "real-time"],
+  "keywords": [
+    "dispatch",
+    "dwp",
+    "workflow",
+    "jobs",
+    "queue",
+    "real-time"
+  ],
   "license": "MIT",
   "devDependencies": {
+    "@biomejs/biome": "2.4.2",
     "typescript": "^5.4.0"
   }
 }

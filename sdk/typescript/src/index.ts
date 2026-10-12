@@ -31,7 +31,7 @@ export {
 export {
   type Frame,
   type FrameType,
-  type ErrorDetail,
+  type FrameError as ErrorDetail,
   type StreamEvent,
   Method,
 } from "./frame";

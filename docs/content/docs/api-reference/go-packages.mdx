@@ -261,8 +261,8 @@ Prefix constants:
 |--------|------|---------|
 | `API` | struct | HTTP admin API handler |
 | `New(eng, router)` | func | Create API from engine and Forge router |
-| `RegisterRoutes(router)` | method | Mount all `/v1` routes on the router |
-| `Handler()` | method | Returns a standalone `http.Handler` |
+| `RegisterRoutes(router) error` | method | Mount all `/v1` routes on the router; the error names every route forge refused |
+| `Handler()` | method | Returns a standalone `http.Handler`; registers the routes on the first call and panics if forge refuses one |
 
 See [HTTP Admin API](/docs/api-reference/http-api) for route details.
 

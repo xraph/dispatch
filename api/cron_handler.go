@@ -4,15 +4,16 @@ package api
 import (
 	"fmt"
 	"net/http"
-	"time"
 
 	"github.com/xraph/forge"
 
 	"github.com/xraph/dispatch/cron"
 	"github.com/xraph/dispatch/id"
+	"github.com/xraph/dispatch/job"
 )
 
-func (a *API) listCrons(ctx forge.Context, req *ListCronsRequest) ([]*cron.Entry, error) {
+// listCrons answers a page of entries, oldest first, as a bare JSON array.
+func (a *API) listCrons(ctx forge.Context, req *ListCronsRequest) (*ListCronsResponse, error) {
 	cs, ok := a.eng.Dispatcher().Store().(cron.Store)
 	if !ok {
 		return nil, fmt.Errorf("store does not implement cron.Store")
@@ -25,17 +26,10 @@ func (a *API) listCrons(ctx forge.Context, req *ListCronsRequest) ([]*cron.Entry
 
 	// Apply basic pagination.
 	limit := defaultLimit(req.Limit)
-	offset := req.Offset
-	if offset > len(entries) {
-		offset = len(entries)
-	}
-	end := offset + limit
-	if end > len(entries) {
-		end = len(entries)
-	}
-	page := entries[offset:end]
+	offset := min(max(req.Offset, 0), len(entries))
+	end := min(offset+limit, len(entries))
 
-	return page, ctx.JSON(http.StatusOK, page)
+	return &ListCronsResponse{Entries: nonNil(entries[offset:end])}, nil
 }
 
 func (a *API) getCron(ctx forge.Context, _ *GetCronRequest) (*cron.Entry, error) {
@@ -54,73 +48,66 @@ func (a *API) getCron(ctx forge.Context, _ *GetCronRequest) (*cron.Entry, error)
 		return nil, mapStoreError(err)
 	}
 
-	return entry, ctx.JSON(http.StatusOK, entry)
+	return nil, ctx.JSON(http.StatusOK, entry)
 }
 
+// enableCron turns an entry on through the engine, which computes the
+// next fire time from now. A schedule that never fires answers 409.
 func (a *API) enableCron(ctx forge.Context, _ *EnableCronRequest) (*cron.Entry, error) {
 	cronID, err := id.ParseCronID(ctx.Param("cronId"))
 	if err != nil {
 		return nil, forge.BadRequest(fmt.Sprintf("invalid cron ID: %v", err))
 	}
 
-	cs, ok := a.eng.Dispatcher().Store().(cron.Store)
-	if !ok {
-		return nil, fmt.Errorf("store does not implement cron.Store")
-	}
-
-	entry, err := cs.GetCron(ctx.Context(), cronID)
+	entry, err := a.eng.EnableCron(ctx.Context(), cronID)
 	if err != nil {
 		return nil, mapStoreError(err)
 	}
 
-	entry.Enabled = true
-	entry.UpdatedAt = time.Now().UTC()
-	if updateErr := cs.UpdateCronEntry(ctx.Context(), entry); updateErr != nil {
-		return nil, fmt.Errorf("enable cron: %w", updateErr)
-	}
-
-	return entry, ctx.JSON(http.StatusOK, entry)
+	return nil, ctx.JSON(http.StatusOK, entry)
 }
 
+// disableCron turns an entry off through the engine.
 func (a *API) disableCron(ctx forge.Context, _ *DisableCronRequest) (*cron.Entry, error) {
 	cronID, err := id.ParseCronID(ctx.Param("cronId"))
 	if err != nil {
 		return nil, forge.BadRequest(fmt.Sprintf("invalid cron ID: %v", err))
 	}
 
-	cs, ok := a.eng.Dispatcher().Store().(cron.Store)
-	if !ok {
-		return nil, fmt.Errorf("store does not implement cron.Store")
-	}
-
-	entry, err := cs.GetCron(ctx.Context(), cronID)
+	entry, err := a.eng.DisableCron(ctx.Context(), cronID)
 	if err != nil {
 		return nil, mapStoreError(err)
 	}
 
-	entry.Enabled = false
-	entry.UpdatedAt = time.Now().UTC()
-	if updateErr := cs.UpdateCronEntry(ctx.Context(), entry); updateErr != nil {
-		return nil, fmt.Errorf("disable cron: %w", updateErr)
-	}
-
-	return entry, ctx.JSON(http.StatusOK, entry)
+	return nil, ctx.JSON(http.StatusOK, entry)
 }
 
+// deleteCron removes an entry through the engine.
 func (a *API) deleteCron(ctx forge.Context, _ *DeleteCronRequest) (*struct{}, error) {
 	cronID, err := id.ParseCronID(ctx.Param("cronId"))
 	if err != nil {
 		return nil, forge.BadRequest(fmt.Sprintf("invalid cron ID: %v", err))
 	}
 
-	cs, ok := a.eng.Dispatcher().Store().(cron.Store)
-	if !ok {
-		return nil, fmt.Errorf("store does not implement cron.Store")
-	}
-
-	if delErr := cs.DeleteCron(ctx.Context(), cronID); delErr != nil {
+	if delErr := a.eng.DeleteCron(ctx.Context(), cronID); delErr != nil {
 		return nil, mapStoreError(delErr)
 	}
 
 	return nil, ctx.NoContent(http.StatusNoContent)
+}
+
+// triggerCron enqueues the entry's job now. The schedule is left alone,
+// and a disabled entry can be triggered too.
+func (a *API) triggerCron(ctx forge.Context, _ *TriggerCronRequest) (*job.Job, error) {
+	cronID, err := id.ParseCronID(ctx.Param("cronId"))
+	if err != nil {
+		return nil, forge.BadRequest(fmt.Sprintf("invalid cron ID: %v", err))
+	}
+
+	j, err := a.eng.TriggerCron(ctx.Context(), cronID)
+	if err != nil {
+		return nil, mapStoreError(err)
+	}
+
+	return nil, ctx.JSON(http.StatusCreated, j)
 }

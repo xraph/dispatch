@@ -11,10 +11,11 @@ import (
 // moved to the dead letter queue for inspection or replay.
 //
 // The fields below the identity block exist so Replay can rebuild a job
-// that behaves like the one that failed. Replay calls EnqueueJob directly
-// rather than going back through the engine, so nothing re-derives these
-// for it: whatever the entry does not carry, the replayed job silently
-// takes a default for. They are stored as the effective values from the
+// that behaves like the one that failed. Replay enqueues the job it
+// builds as it is, through the engine's prepared-job path or straight to
+// the job store, and neither re-derives these from the definition:
+// whatever the entry does not carry, the replayed job silently takes a
+// default for. They are stored as the effective values from the
 // failed job rather than looked up from the definition by name, because a
 // definition's declaration is only half the story. The enqueue site can
 // override every one of them, and a definition can be changed or removed
@@ -33,6 +34,12 @@ type Entry struct {
 	FailedAt   time.Time  `json:"failed_at"`
 	ReplayedAt *time.Time `json:"replayed_at,omitempty"`
 	CreatedAt  time.Time  `json:"created_at"`
+
+	// ReplayedJobID is the job a replay created, or for a retry the
+	// retried job itself. ClaimReplay sets it together with ReplayedAt,
+	// and it is nil while the entry is unreplayed. An entry marked by the
+	// older ReplayDLQ has ReplayedAt set and this nil.
+	ReplayedJobID *id.JobID `json:"replayed_job_id,omitempty"`
 
 	// Priority is the claim ordering the job was enqueued with.
 	Priority int `json:"priority,omitempty"`

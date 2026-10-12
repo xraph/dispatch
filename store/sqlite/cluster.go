@@ -13,13 +13,17 @@ import (
 // RegisterWorker adds a new worker to the cluster registry.
 // Uses ON CONFLICT to upsert if the worker already exists.
 func (s *Store) RegisterWorker(ctx context.Context, w *cluster.Worker) error {
-	m := toWorkerModel(w)
-	_, err := s.sdb.NewInsert(m).
+	m, err := toWorkerModel(w)
+	if err != nil {
+		return err
+	}
+	_, err = s.sdb.NewInsert(m).
 		OnConflict("(id) DO UPDATE").
 		Set("hostname = EXCLUDED.hostname").
 		Set("queues = EXCLUDED.queues").
 		Set("concurrency = EXCLUDED.concurrency").
 		Set("state = EXCLUDED.state").
+		Set("capacity = EXCLUDED.capacity").
 		Set("last_seen = EXCLUDED.last_seen").
 		Set("metadata = EXCLUDED.metadata").
 		Exec(ctx)
@@ -57,6 +61,22 @@ func (s *Store) HeartbeatWorker(ctx context.Context, workerID id.WorkerID) error
 		return dispatch.ErrWorkerNotFound
 	}
 	return nil
+}
+
+// GetWorker returns one registered worker.
+func (s *Store) GetWorker(ctx context.Context, workerID id.WorkerID) (*cluster.Worker, error) {
+	m := new(workerModel)
+	err := s.sdb.NewSelect(m).
+		Where("id = ?", workerID.String()).
+		Limit(1).
+		Scan(ctx)
+	if err != nil {
+		if isNoRows(err) {
+			return nil, dispatch.ErrWorkerNotFound
+		}
+		return nil, fmt.Errorf("dispatch/sqlite: get worker: %w", err)
+	}
+	return fromWorkerModel(m)
 }
 
 // ListWorkers returns all registered workers.
@@ -121,45 +141,64 @@ func (s *Store) ReapDeadWorkers(ctx context.Context, threshold time.Duration) ([
 }
 
 // AcquireLeadership attempts to become the cluster leader.
-// Uses a multi-step approach: clear expired, check active, claim.
 func (s *Store) AcquireLeadership(ctx context.Context, workerID id.WorkerID, ttl time.Duration) (bool, error) {
+	var acquired bool
+	err := withBusyRetry(ctx, func() error {
+		var claimErr error
+		acquired, claimErr = s.acquireLeadership(ctx, workerID, ttl)
+		return claimErr
+	})
+	return acquired, err
+}
+
+func (s *Store) acquireLeadership(ctx context.Context, workerID id.WorkerID, ttl time.Duration) (bool, error) {
 	wID := workerID.String()
 	now := time.Now().UTC()
 	until := now.Add(ttl)
 
-	// Step 1: Clear any expired leader.
-	_, err := s.sdb.NewUpdate((*workerModel)(nil)).
-		Set("is_leader = ?", false).
-		Set("leader_until = NULL").
-		Where("is_leader = ? AND leader_until < ?", true, now).
-		Exec(ctx)
+	leader, err := s.readLeader(ctx)
 	if err != nil {
-		return false, fmt.Errorf("dispatch/sqlite: clear expired leader: %w", err)
+		return false, err
 	}
-
-	// Step 2: Check if there's already an active leader that isn't us.
-	var activeLeaderID string
-	err = s.sdb.NewSelect().
-		TableExpr("dispatch_workers").
-		Column("id").
-		Where("is_leader = ? AND leader_until >= ?", true, now).
-		Limit(1).
-		Scan(ctx, &activeLeaderID)
-	if err != nil {
-		if !isNoRows(err) {
-			return false, fmt.Errorf("dispatch/sqlite: check leader: %w", err)
+	if leader != nil {
+		if leader.LeaderUntil != nil && !leader.LeaderUntil.Before(now) {
+			if leader.ID != workerID {
+				return false, nil
+			}
+		} else {
+			// Compare parsed instants in Go. leader_until stores RFC 3339 text,
+			// while a bound time.Time uses the driver's different text format.
+			clearQuery := s.sdb.NewUpdate((*workerModel)(nil)).
+				Set("is_leader = ?", false).
+				Set("leader_until = NULL").
+				Where("id = ? AND is_leader = ?", leader.ID.String(), true)
+			if leader.LeaderUntil == nil {
+				clearQuery = clearQuery.Where("leader_until IS NULL")
+			} else {
+				clearQuery = clearQuery.Where("leader_until = ?", leader.LeaderUntil.UTC().Format(time.RFC3339Nano))
+			}
+			result, clearErr := clearQuery.Exec(ctx)
+			if clearErr != nil {
+				return false, fmt.Errorf("dispatch/sqlite: clear expired leader: %w", clearErr)
+			}
+			n, rowsErr := result.RowsAffected()
+			if rowsErr != nil {
+				return false, fmt.Errorf("dispatch/sqlite: clear expired leader rows affected: %w", rowsErr)
+			}
+			if n == 0 {
+				return false, nil // The observed lease changed before it could be cleared.
+			}
 		}
-		// No active leader -- proceed to claim.
-	} else if activeLeaderID != wID {
-		return false, nil
 	}
 
-	// Step 3: Claim or re-claim leadership.
+	// SQLite serializes this conditional write, so competing contenders cannot
+	// both claim after observing an empty registry. The partial index is not unique.
 	untilStr := until.UTC().Format(time.RFC3339Nano)
 	res, claimErr := s.sdb.NewUpdate((*workerModel)(nil)).
 		Set("is_leader = ?", true).
 		Set("leader_until = ?", untilStr).
 		Where("id = ?", wID).
+		Where("NOT EXISTS (SELECT 1 FROM dispatch_workers AS other WHERE other.is_leader = ? AND other.id <> ?)", true, wID).
 		Exec(ctx)
 	if claimErr != nil {
 		return false, fmt.Errorf("dispatch/sqlite: claim leadership: %w", claimErr)
@@ -191,17 +230,39 @@ func (s *Store) RenewLeadership(ctx context.Context, workerID id.WorkerID, ttl t
 
 // GetLeader returns the current cluster leader, or nil if there is no leader.
 func (s *Store) GetLeader(ctx context.Context) (*cluster.Worker, error) {
-	now := time.Now().UTC()
-	m := new(workerModel)
-	err := s.sdb.NewSelect(m).
-		Where("is_leader = ? AND leader_until >= ?", true, now).
-		Limit(1).
+	leader, err := s.readLeader(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if leader == nil || leader.LeaderUntil == nil || leader.LeaderUntil.Before(time.Now()) {
+		return nil, nil
+	}
+	return leader, nil
+}
+
+func (s *Store) readLeader(ctx context.Context) (*cluster.Worker, error) {
+	var models []workerModel
+	err := s.sdb.NewSelect(&models).
+		Where("is_leader = ?", true).
+		Limit(2).
 		Scan(ctx)
 	if err != nil {
 		if isNoRows(err) {
 			return nil, nil
 		}
 		return nil, fmt.Errorf("dispatch/sqlite: get leader: %w", err)
+	}
+	if len(models) == 0 {
+		return nil, nil
+	}
+	if len(models) > 1 {
+		return nil, fmt.Errorf("dispatch/sqlite: multiple leader rows require repair")
+	}
+	m := &models[0]
+	if m.LeaderUntil != nil {
+		if _, parseErr := time.Parse(time.RFC3339Nano, *m.LeaderUntil); parseErr != nil {
+			return nil, fmt.Errorf("dispatch/sqlite: parse leader expiry: %w", parseErr)
+		}
 	}
 	return fromWorkerModel(m)
 }

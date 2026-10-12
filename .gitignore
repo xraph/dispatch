@@ -5,3 +5,5 @@ docs/superpowers/
 
 # ─── Local agent config ─────────────────────────────────────
 .claude/
+output/
+.playwright-cli/

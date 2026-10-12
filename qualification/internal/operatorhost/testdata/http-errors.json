@@ -1,0 +1,64 @@
+{
+  "anonymous": {
+    "http_status": 401,
+    "response": {
+      "ok": false,
+      "envelope": "v1",
+      "error": {
+        "code": "UNAUTHENTICATED"
+      }
+    }
+  },
+  "forbidden": {
+    "http_status": 403,
+    "response": {
+      "ok": false,
+      "envelope": "v1",
+      "error": {
+        "code": "PERMISSION_DENIED"
+      }
+    }
+  },
+  "invalid_limit": {
+    "http_status": 400,
+    "response": {
+      "ok": false,
+      "envelope": "v1",
+      "error": {
+        "code": "BAD_REQUEST",
+        "message": "invalid durable scope, filter or continuation"
+      }
+    }
+  },
+  "not_found": {
+    "http_status": 404,
+    "response": {
+      "ok": false,
+      "envelope": "v1",
+      "error": {
+        "code": "NOT_FOUND",
+        "message": "durable resource not found"
+      }
+    }
+  },
+  "payload_denied": {
+    "http_status": 403,
+    "response": {
+      "ok": false,
+      "envelope": "v1",
+      "error": {
+        "code": "PERMISSION_DENIED"
+      }
+    }
+  },
+  "unavailable": {
+    "http_status": 503,
+    "response": {
+      "ok": false,
+      "envelope": "v1",
+      "error": {
+        "code": "UNAVAILABLE"
+      }
+    }
+  }
+}

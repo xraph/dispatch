@@ -19,6 +19,8 @@ type ListOpts struct {
 
 // Store defines the persistence contract for the dead letter queue.
 type Store interface {
+	ReplayClaimer
+
 	// PushDLQ adds a failed job entry to the dead letter queue.
 	PushDLQ(ctx context.Context, entry *Entry) error
 

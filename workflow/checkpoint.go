@@ -1,6 +1,7 @@
 package workflow
 
 import (
+	"strings"
 	"time"
 
 	"github.com/xraph/dispatch/id"
@@ -14,4 +15,13 @@ type Checkpoint struct {
 	StepName  string          `json:"step_name"`
 	Data      []byte          `json:"data"`
 	CreatedAt time.Time       `json:"created_at"`
+}
+
+// CompareCheckpoints orders checkpoints by creation time, then ID. Timeline,
+// replay preview and storage pruning use the same tie boundary.
+func CompareCheckpoints(a, b *Checkpoint) int {
+	if order := a.CreatedAt.Compare(b.CreatedAt); order != 0 {
+		return order
+	}
+	return strings.Compare(a.ID.String(), b.ID.String())
 }

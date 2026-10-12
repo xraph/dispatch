@@ -2,7 +2,9 @@ package redis
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"strconv"
 	"time"
 
 	"github.com/xraph/dispatch"
@@ -28,6 +30,10 @@ type dlqEntity struct {
 	ReplayedAt *time.Time `json:"replayed_at,omitempty"`
 	CreatedAt  time.Time  `json:"created_at"`
 
+	// ReplayedJobID is set by ClaimReplay together with ReplayedAt, and
+	// empty on an unreplayed entry or one the older ReplayDLQ marked.
+	ReplayedJobID string `json:"replayed_job_id,omitempty"`
+
 	// Carried so Replay can rebuild a job that behaves like the failed
 	// one; see the dlq.Entry doc. resource.Set is a map[string]int64 and
 	// marshals natively, like every other field here.
@@ -43,6 +49,11 @@ type dlqEntity struct {
 }
 
 func toDLQEntity(e *dlq.Entry) *dlqEntity {
+	var replayedJobID string
+	if e.ReplayedJobID != nil {
+		replayedJobID = e.ReplayedJobID.String()
+	}
+
 	return &dlqEntity{
 		ID:         e.ID.String(),
 		JobID:      e.JobID.String(),
@@ -57,6 +68,8 @@ func toDLQEntity(e *dlq.Entry) *dlqEntity {
 		FailedAt:   e.FailedAt,
 		ReplayedAt: e.ReplayedAt,
 		CreatedAt:  e.CreatedAt,
+
+		ReplayedJobID: replayedJobID,
 
 		Priority:         e.Priority,
 		Timeout:          e.Timeout,
@@ -78,6 +91,15 @@ func fromDLQEntity(e *dlqEntity) (*dlq.Entry, error) {
 
 	parsedJobID, _ := id.ParseJobID(e.JobID) //nolint:errcheck // best-effort
 
+	var replayedJobID *id.JobID
+	if e.ReplayedJobID != "" {
+		parsed, parseErr := id.ParseJobID(e.ReplayedJobID)
+		if parseErr != nil {
+			return nil, fmt.Errorf("dispatch/redis: parse dlq replayed job id: %w", parseErr)
+		}
+		replayedJobID = &parsed
+	}
+
 	return &dlq.Entry{
 		ID:         parsedID,
 		JobID:      parsedJobID,
@@ -93,6 +115,8 @@ func fromDLQEntity(e *dlqEntity) (*dlq.Entry, error) {
 		ReplayedAt: e.ReplayedAt,
 		CreatedAt:  e.CreatedAt,
 
+		ReplayedJobID: replayedJobID,
+
 		Priority:         e.Priority,
 		Timeout:          e.Timeout,
 		LeaseTTL:         e.LeaseTTL,
@@ -105,19 +129,56 @@ func fromDLQEntity(e *dlqEntity) (*dlq.Entry, error) {
 	}, nil
 }
 
-// PushDLQ adds a failed job entry to the dead letter queue.
+// pushDLQScript writes a new DLQ entry and every index that points at it,
+// or nothing at all when the entry ID is already taken.
+//
+// KEYS[1] the entry key, KEYS[2] dlqIDs, KEYS[3] the DLQ created-order
+// index, KEYS[4] the job's dlqByJob set, KEYS[5] dlqJobIndexed.
+// ARGV[1] the entry blob, ARGV[2] the entry ID, ARGV[3] its created score.
+// Returns 1 when written, 0 when the entry already existed.
+const pushDLQScript = `
+if not redis.call('SET', KEYS[1], ARGV[1], 'NX') then
+  return 0
+end
+redis.call('ZADD', KEYS[3], ARGV[3], ARGV[2])
+redis.call('SADD', KEYS[2], ARGV[2])
+redis.call('SADD', KEYS[4], ARGV[2])
+redis.call('SADD', KEYS[5], ARGV[2])
+return 1
+`
+
+// PushDLQ adds a failed job entry to the dead letter queue. An ID that is
+// already there is refused with dispatch.ErrDLQAlreadyExists rather than
+// overwritten, which would silently drop a replay claim. The SET NX and
+// the index writes run in one script, so a refused push leaves no index
+// member behind and an accepted one is never visible half-indexed.
 func (s *Store) PushDLQ(ctx context.Context, entry *dlq.Entry) error {
 	eID := entry.ID.String()
-	key := s.keys.dlq(eID)
 
-	e := toDLQEntity(entry)
-	if err := s.setEntity(ctx, key, e); err != nil {
-		return fmt.Errorf("dispatch/redis: push dlq set: %w", err)
+	blob, err := json.Marshal(toDLQEntity(entry))
+	if err != nil {
+		return fmt.Errorf("dispatch/redis: push dlq marshal: %w", err)
 	}
 
-	if _, err := s.kv.SAdd(ctx, s.keys.dlqIDs(), eID); err != nil {
-		return fmt.Errorf("dispatch/redis: push dlq index: %w", err)
+	res, err := s.kv.Eval(ctx, pushDLQScript,
+		[]string{
+			s.keys.dlq(eID),
+			s.keys.dlqIDs(),
+			s.keys.byCreated(entityDLQ),
+			s.keys.dlqByJob(entry.JobID.String()),
+			s.keys.dlqJobIndexed(),
+		},
+		blob,
+		eID,
+		strconv.FormatFloat(createdScore(entry.ID), 'f', -1, 64),
+	)
+	if err != nil {
+		return fmt.Errorf("dispatch/redis: push dlq: %w", err)
 	}
+	if scriptInt(res) == 0 {
+		return dispatch.ErrDLQAlreadyExists
+	}
+
 	return nil
 }
 
@@ -159,20 +220,17 @@ func (s *Store) GetDLQ(ctx context.Context, entryID id.DLQID) (*dlq.Entry, error
 	return fromDLQEntity(&e)
 }
 
-// ReplayDLQ marks a DLQ entry as replayed.
+// ReplayDLQ marks a DLQ entry as replayed. It goes through the same
+// compare-and-set as ClaimReplay, so it can never overwrite a claim's
+// replayed_job_id with a copy of the entry read before the claim.
 func (s *Store) ReplayDLQ(ctx context.Context, entryID id.DLQID) error {
-	key := s.keys.dlq(entryID.String())
-	var e dlqEntity
-	if err := s.getEntity(ctx, key, &e); err != nil {
-		if isNotFound(err) {
-			return dispatch.ErrDLQNotFound
-		}
-		return fmt.Errorf("dispatch/redis: replay dlq get: %w", err)
-	}
+	return updateEntity(ctx, s, s.keys.dlq(entryID.String()), dispatch.ErrDLQNotFound,
+		func(e *dlqEntity) error {
+			t := now()
+			e.ReplayedAt = &t
 
-	t := now()
-	e.ReplayedAt = &t
-	return s.setEntity(ctx, key, &e)
+			return nil
+		})
 }
 
 // PurgeDLQ removes DLQ entries with FailedAt before the given time.
@@ -195,8 +253,18 @@ func (s *Store) PurgeDLQ(ctx context.Context, before time.Time) (int64, error) {
 				return purged, fmt.Errorf("dispatch/redis: purge dlq del: %w", pErr)
 			}
 
+			// The entry goes first, so a crash partway leaves only index
+			// members pointing at nothing, which every read skips.
 			if _, pErr := s.kv.SRem(ctx, s.keys.dlqIDs(), eID); pErr != nil {
 				return purged, fmt.Errorf("dispatch/redis: purge dlq index: %w", pErr)
+			}
+			if _, pErr := s.kv.ZRem(ctx, s.keys.byCreated(entityDLQ), eID); pErr != nil {
+				return purged, fmt.Errorf("dispatch/redis: purge dlq created index: %w", pErr)
+			}
+			for _, set := range []string{s.keys.dlqByJob(e.JobID), s.keys.dlqJobIndexed()} {
+				if _, pErr := s.kv.SRem(ctx, set, eID); pErr != nil {
+					return purged, fmt.Errorf("dispatch/redis: purge dlq job index: %w", pErr)
+				}
 			}
 			purged++
 		}

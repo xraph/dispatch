@@ -32,6 +32,7 @@ func (s *Store) RegisterWorker(ctx context.Context, w *cluster.Worker) error {
 			"last_seen":    m.LastSeen,
 			"metadata":     m.Metadata,
 			"created_at":   m.CreatedAt,
+			"capacity":     m.Capacity,
 		}},
 		options.UpdateOne().SetUpsert(true),
 	)
@@ -74,6 +75,21 @@ func (s *Store) HeartbeatWorker(ctx context.Context, workerID id.WorkerID) error
 		return dispatch.ErrWorkerNotFound
 	}
 	return nil
+}
+
+// GetWorker returns one registered worker.
+func (s *Store) GetWorker(ctx context.Context, workerID id.WorkerID) (*cluster.Worker, error) {
+	var m workerModel
+	err := s.mdb.Collection(colWorkers).
+		FindOne(ctx, bson.M{"_id": workerID.String()}).
+		Decode(&m)
+	if err != nil {
+		if isNoDocuments(err) {
+			return nil, dispatch.ErrWorkerNotFound
+		}
+		return nil, fmt.Errorf("dispatch/mongo: get worker: %w", err)
+	}
+	return fromWorkerModel(&m)
 }
 
 // HeartbeatWorkers updates last-seen for many workers in one round-trip via

@@ -3,6 +3,7 @@ package id_test
 import (
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/xraph/dispatch/id"
 )
@@ -296,5 +297,29 @@ func TestArtifactID(t *testing.T) {
 
 	if _, err := id.ParseArtifactID("job_01h2xcejqtf2nbrexx3vqjhp41"); err == nil {
 		t.Fatal("ParseArtifactID accepted a job ID, want error")
+	}
+}
+
+func TestIDTime(t *testing.T) {
+	before := time.Now().UTC().Truncate(time.Millisecond)
+	got := id.NewJobID().Time()
+	after := time.Now().UTC()
+
+	if got.Before(before) || got.After(after) {
+		t.Fatalf("Time() = %v, want between %v and %v", got, before, after)
+	}
+	if !id.Nil.Time().IsZero() {
+		t.Fatalf("Nil.Time() = %v, want zero", id.Nil.Time())
+	}
+}
+
+func TestIDsMintedInOrderSortInOrder(t *testing.T) {
+	prev := id.NewJobID().String()
+	for range 5000 {
+		next := id.NewJobID().String()
+		if next <= prev {
+			t.Fatalf("id %s minted after %s sorts at or below it", next, prev)
+		}
+		prev = next
 	}
 }

@@ -214,23 +214,41 @@ type workflowRunModel struct {
 	CompletedAt *time.Time `grove:"completed_at"   bson:"completed_at,omitempty"`
 	CreatedAt   time.Time  `grove:"created_at,notnull" bson:"created_at"`
 	UpdatedAt   time.Time  `grove:"updated_at,notnull" bson:"updated_at"`
+
+	// Version is the definition version the run executes, which the
+	// runner resumes and replays on. ParentRunID links a child run to its
+	// parent, and ListChildRuns filters on it. Both used to be dropped
+	// here, so every run read back as version 1 with no parent. A
+	// document written before they were added decodes as version 0 (the
+	// runner's "version 1") with no parent, which is what it was read as
+	// before.
+	Version          int     `grove:"version"        bson:"version"`
+	ReplayGeneration int64   `grove:"replay_generation" bson:"replay_generation"`
+	ParentRunID      *string `grove:"parent_run_id"  bson:"parent_run_id,omitempty"`
 }
 
 func toRunModel(r *workflow.Run) *workflowRunModel {
-	return &workflowRunModel{
-		ID:          r.ID.String(),
-		Name:        r.Name,
-		State:       string(r.State),
-		Input:       r.Input,
-		Output:      r.Output,
-		Error:       r.Error,
-		ScopeAppID:  r.ScopeAppID,
-		ScopeOrgID:  r.ScopeOrgID,
-		StartedAt:   r.StartedAt,
-		CompletedAt: r.CompletedAt,
-		CreatedAt:   r.CreatedAt,
-		UpdatedAt:   r.UpdatedAt,
+	m := &workflowRunModel{
+		ID:               r.ID.String(),
+		Name:             r.Name,
+		State:            string(r.State),
+		Input:            r.Input,
+		Output:           r.Output,
+		Error:            r.Error,
+		ScopeAppID:       r.ScopeAppID,
+		ScopeOrgID:       r.ScopeOrgID,
+		StartedAt:        r.StartedAt,
+		CompletedAt:      r.CompletedAt,
+		CreatedAt:        r.CreatedAt,
+		UpdatedAt:        r.UpdatedAt,
+		Version:          r.Version,
+		ReplayGeneration: r.ReplayGeneration,
 	}
+	if r.ParentRunID != nil {
+		parent := r.ParentRunID.String()
+		m.ParentRunID = &parent
+	}
+	return m
 }
 
 func fromRunModel(m *workflowRunModel) (*workflow.Run, error) {
@@ -239,22 +257,32 @@ func fromRunModel(m *workflowRunModel) (*workflow.Run, error) {
 		return nil, fmt.Errorf("dispatch/mongo: parse run id %q: %w", m.ID, err)
 	}
 
-	return &workflow.Run{
+	r := &workflow.Run{
 		Entity: dispatch.Entity{
 			CreatedAt: m.CreatedAt,
 			UpdatedAt: m.UpdatedAt,
 		},
-		ID:          parsedID,
-		Name:        m.Name,
-		State:       workflow.RunState(m.State),
-		Input:       m.Input,
-		Output:      m.Output,
-		Error:       m.Error,
-		ScopeAppID:  m.ScopeAppID,
-		ScopeOrgID:  m.ScopeOrgID,
-		StartedAt:   m.StartedAt,
-		CompletedAt: m.CompletedAt,
-	}, nil
+		ID:               parsedID,
+		Name:             m.Name,
+		State:            workflow.RunState(m.State),
+		Input:            m.Input,
+		Output:           m.Output,
+		Error:            m.Error,
+		ScopeAppID:       m.ScopeAppID,
+		ScopeOrgID:       m.ScopeOrgID,
+		StartedAt:        m.StartedAt,
+		CompletedAt:      m.CompletedAt,
+		Version:          m.Version,
+		ReplayGeneration: m.ReplayGeneration,
+	}
+	if m.ParentRunID != nil {
+		parent, parseErr := id.ParseRunID(*m.ParentRunID)
+		if parseErr != nil {
+			return nil, fmt.Errorf("dispatch/mongo: parse parent run id %q: %w", *m.ParentRunID, parseErr)
+		}
+		r.ParentRunID = &parent
+	}
+	return r, nil
 }
 
 // ── Checkpoint model ──────────────────────────────────────────────
@@ -383,6 +411,13 @@ type dlqEntryModel struct {
 	ReplayedAt *time.Time `grove:"replayed_at"    bson:"replayed_at,omitempty"`
 	CreatedAt  time.Time  `grove:"created_at,notnull" bson:"created_at"`
 
+	// ReplayedJobID is the job a claimed replay or retry created. Like
+	// replayed_at, it is an explicit null after grove's insert and absent
+	// after ReleaseReplay or a raw-driver write, so any filter on it must
+	// match both shapes. ReleaseReplay only ever compares it with a job
+	// ID, which neither shape equals.
+	ReplayedJobID *string `grove:"replayed_job_id" bson:"replayed_job_id,omitempty"`
+
 	// Carried so Replay can rebuild a job that behaves like the failed
 	// one; see the dlq.Entry doc. Mongo is schemaless, so these need no
 	// migration, and resource.Set marshals as a native BSON subdocument
@@ -399,7 +434,7 @@ type dlqEntryModel struct {
 }
 
 func toDLQModel(e *dlq.Entry) *dlqEntryModel {
-	return &dlqEntryModel{
+	m := &dlqEntryModel{
 		ID:         e.ID.String(),
 		JobID:      e.JobID.String(),
 		JobName:    e.JobName,
@@ -424,6 +459,11 @@ func toDLQModel(e *dlq.Entry) *dlqEntryModel {
 		InputBytes:       e.InputBytes,
 		PrimaryInputHash: e.PrimaryInputHash,
 	}
+	if e.ReplayedJobID != nil {
+		replayedJob := e.ReplayedJobID.String()
+		m.ReplayedJobID = &replayedJob
+	}
+	return m
 }
 
 func fromDLQModel(m *dlqEntryModel) (*dlq.Entry, error) {
@@ -437,7 +477,7 @@ func fromDLQModel(m *dlqEntryModel) (*dlq.Entry, error) {
 		return nil, fmt.Errorf("dispatch/mongo: parse job id %q: %w", m.JobID, err)
 	}
 
-	return &dlq.Entry{
+	e := &dlq.Entry{
 		ID:         parsedID,
 		JobID:      parsedJobID,
 		JobName:    m.JobName,
@@ -461,7 +501,15 @@ func fromDLQModel(m *dlqEntryModel) (*dlq.Entry, error) {
 		ResourceClass:    m.ResourceClass,
 		InputBytes:       m.InputBytes,
 		PrimaryInputHash: m.PrimaryInputHash,
-	}, nil
+	}
+	if m.ReplayedJobID != nil {
+		replayedJob, parseErr := id.ParseJobID(*m.ReplayedJobID)
+		if parseErr != nil {
+			return nil, fmt.Errorf("dispatch/mongo: parse replayed job id %q: %w", *m.ReplayedJobID, parseErr)
+		}
+		e.ReplayedJobID = &replayedJob
+	}
+	return e, nil
 }
 
 // ── Event model ───────────────────────────────────────────────────
@@ -522,10 +570,14 @@ type workerModel struct {
 	LastSeen    time.Time         `grove:"last_seen,notnull" bson:"last_seen"`
 	Metadata    map[string]string `grove:"metadata"       bson:"metadata,omitempty"`
 	CreatedAt   time.Time         `grove:"created_at,notnull" bson:"created_at"`
+
+	// Capacity is a native BSON subdocument, as the resource sets on
+	// jobModel are. A zero Set is stored as null and reads back as nil.
+	Capacity resource.Set `grove:"capacity" bson:"capacity,omitempty"`
 }
 
 func toWorkerModel(w *cluster.Worker) *workerModel {
-	return &workerModel{
+	m := &workerModel{
 		ID:          w.ID.String(),
 		Hostname:    w.Hostname,
 		Queues:      w.Queues,
@@ -537,6 +589,14 @@ func toWorkerModel(w *cluster.Worker) *workerModel {
 		Metadata:    w.Metadata,
 		CreatedAt:   w.CreatedAt,
 	}
+
+	// Left nil for a zero Set, for the reason toJobModel gives: nil is
+	// what reads back, never an empty subdocument.
+	if !w.Capacity.IsZero() {
+		m.Capacity = w.Capacity
+	}
+
+	return m
 }
 
 func fromWorkerModel(m *workerModel) (*cluster.Worker, error) {
@@ -551,6 +611,7 @@ func fromWorkerModel(m *workerModel) (*cluster.Worker, error) {
 		Queues:      m.Queues,
 		Concurrency: m.Concurrency,
 		State:       cluster.WorkerState(m.State),
+		Capacity:    m.Capacity,
 		IsLeader:    m.IsLeader,
 		LeaderUntil: m.LeaderUntil,
 		LastSeen:    m.LastSeen,

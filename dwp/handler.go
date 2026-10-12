@@ -6,16 +6,20 @@ import (
 
 	log "github.com/xraph/go-utils/log"
 
+	"github.com/xraph/dispatch/durable"
 	"github.com/xraph/dispatch/engine"
+	"github.com/xraph/dispatch/ext"
 	"github.com/xraph/dispatch/id"
 	"github.com/xraph/dispatch/job"
 	"github.com/xraph/dispatch/scope"
+	"github.com/xraph/dispatch/security"
 	"github.com/xraph/dispatch/stream"
 	"github.com/xraph/dispatch/workflow"
 )
 
 // Handler dispatches DWP frames to engine operations.
 type Handler struct {
+	security   security.Boundary
 	eng        *engine.Engine
 	broker     *stream.Broker
 	federation *Federation
@@ -23,8 +27,12 @@ type Handler struct {
 }
 
 // NewHandler creates a new DWP method handler.
-func NewHandler(eng *engine.Engine, broker *stream.Broker, logger log.Logger) *Handler {
-	return &Handler{eng: eng, broker: broker, logger: logger}
+func NewHandler(eng *engine.Engine, broker *stream.Broker, logger log.Logger, boundaries ...security.Boundary) *Handler {
+	h := &Handler{eng: eng, broker: broker, logger: logger}
+	if len(boundaries) > 0 {
+		h.security = boundaries[0]
+	}
+	return h
 }
 
 // SetFederation attaches a federation manager for handling server-to-server methods.
@@ -33,7 +41,31 @@ func (h *Handler) SetFederation(f *Federation) {
 }
 
 // Handle processes a single DWP request frame and returns a response.
-func (h *Handler) Handle(ctx context.Context, frame *Frame, conn *Connection) *Frame {
+func (h *Handler) Handle(ctx context.Context, frame *Frame, conn *Connection) (response *Frame) {
+	if frame == nil {
+		return NewErrorFrame("", ErrCodeBadRequest, "missing frame")
+	}
+	op, targetErr := auditOperation(frame)
+	if conn == nil || conn.Identity == nil {
+		_ = h.security.AuthenticationDenied(ctx, op) //nolint:errcheck // The frame remains unauthorized if local audit fails.
+		return NewErrorFrame(frame.ID, ErrCodeUnauthorized, "authentication required")
+	}
+	if err := h.security.Check(ctx, conn.Identity.principal(), op); err != nil {
+		return NewErrorFrame(frame.ID, authorizationCode(err), "access unavailable or denied")
+	}
+	if targetErr != nil {
+		return NewErrorFrame(frame.ID, ErrCodeBadRequest, "invalid operation target")
+	}
+	attempt, err := h.security.BeginCommand(ctx, conn.Identity.principal(), op)
+	if err != nil {
+		return NewErrorFrame(frame.ID, 503, "audit acceptance unavailable")
+	}
+	defer func() {
+		if outcomeErr := h.security.FinishCommand(ctx, attempt, response != nil && response.Type != FrameErr && response.Error == nil); outcomeErr != nil {
+			response = NewErrorFrame(frame.ID, 503, outcomeErr.Error())
+		}
+	}()
+	ctx = durable.WithAuditMetadata(ext.WithActor(ctx, conn.Identity.Subject), security.Metadata(conn.Identity.principal()))
 	// Inject scope from connection identity.
 	if conn.Identity != nil {
 		ctx = scope.Restore(ctx, conn.Identity.AppID, conn.Identity.OrgID)

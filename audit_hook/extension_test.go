@@ -496,8 +496,17 @@ func TestExtension_ViaRegistry(t *testing.T) {
 	reg.EmitWorkflowCompleted(ctx, r, 2*time.Second)
 	reg.EmitWorkflowFailed(ctx, r, errors.New("wf fail"))
 	reg.EmitCronFired(ctx, "hourly", id.NewJobID())
+	reg.EmitJobCancelled(ctx, j)
+	for _, kind := range []ext.ActionKind{
+		ext.ActionJobCancelled, ext.ActionJobRetried,
+		ext.ActionDLQReplayed, ext.ActionDLQDeleted, ext.ActionDLQPurged,
+		ext.ActionCronEnabled, ext.ActionCronDisabled, ext.ActionCronDeleted, ext.ActionCronTriggered,
+		ext.ActionWorkflowReplayed,
+	} {
+		reg.EmitOperatorAction(ctx, ext.Action{Kind: kind})
+	}
 
-	// Verify all 12 event types were recorded.
+	// Verify every action in AllActions was recorded exactly once.
 	allActions := ah.AllActions()
 	if rec.count() != len(allActions) {
 		t.Fatalf("expected %d events, got %d", len(allActions), rec.count())
@@ -515,7 +524,7 @@ func TestExtension_ViaRegistry(t *testing.T) {
 
 func TestAllActions(t *testing.T) {
 	actions := ah.AllActions()
-	if len(actions) != 12 {
-		t.Errorf("expected 12 actions, got %d", len(actions))
+	if len(actions) != 23 {
+		t.Errorf("expected 23 actions, got %d", len(actions))
 	}
 }

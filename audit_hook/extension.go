@@ -3,6 +3,7 @@ package audithook
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	log "github.com/xraph/go-utils/log"
@@ -15,19 +16,21 @@ import (
 
 // Compile-time interface checks.
 var (
-	_ ext.Extension             = (*Extension)(nil)
-	_ ext.JobEnqueued           = (*Extension)(nil)
-	_ ext.JobStarted            = (*Extension)(nil)
-	_ ext.JobCompleted          = (*Extension)(nil)
-	_ ext.JobFailed             = (*Extension)(nil)
-	_ ext.JobRetrying           = (*Extension)(nil)
-	_ ext.JobDLQ                = (*Extension)(nil)
-	_ ext.WorkflowStarted       = (*Extension)(nil)
-	_ ext.WorkflowStepCompleted = (*Extension)(nil)
-	_ ext.WorkflowStepFailed    = (*Extension)(nil)
-	_ ext.WorkflowCompleted     = (*Extension)(nil)
-	_ ext.WorkflowFailed        = (*Extension)(nil)
-	_ ext.CronFired             = (*Extension)(nil)
+	_ ext.Extension              = (*Extension)(nil)
+	_ ext.JobEnqueued            = (*Extension)(nil)
+	_ ext.JobStarted             = (*Extension)(nil)
+	_ ext.JobCompleted           = (*Extension)(nil)
+	_ ext.JobFailed              = (*Extension)(nil)
+	_ ext.JobRetrying            = (*Extension)(nil)
+	_ ext.JobDLQ                 = (*Extension)(nil)
+	_ ext.JobCancelled           = (*Extension)(nil)
+	_ ext.WorkflowStarted        = (*Extension)(nil)
+	_ ext.WorkflowStepCompleted  = (*Extension)(nil)
+	_ ext.WorkflowStepFailed     = (*Extension)(nil)
+	_ ext.WorkflowCompleted      = (*Extension)(nil)
+	_ ext.WorkflowFailed         = (*Extension)(nil)
+	_ ext.CronFired              = (*Extension)(nil)
+	_ ext.OperatorActionObserver = (*Extension)(nil)
 )
 
 // Recorder is the interface that audit backends must implement.
@@ -174,6 +177,15 @@ func (e *Extension) OnJobDLQ(ctx context.Context, j *job.Job, jobErr error) erro
 	)
 }
 
+// OnJobCancelled implements ext.JobCancelled.
+func (e *Extension) OnJobCancelled(ctx context.Context, j *job.Job) error {
+	return e.record(ctx, ActionJobCancelled, SeverityWarning, OutcomeSuccess,
+		ResourceJob, j.ID.String(), CategoryJob, nil,
+		"job_name", j.Name,
+		"queue", j.Queue,
+	)
+}
+
 // ── Workflow lifecycle hooks ────────────────────────
 
 // OnWorkflowStarted implements ext.WorkflowStarted.
@@ -228,6 +240,94 @@ func (e *Extension) OnCronFired(ctx context.Context, entryName string, jobID id.
 		ResourceCron, entryName, CategoryCron, nil,
 		"job_id", jobID.String(),
 	)
+}
+
+// ── Operator actions ────────────────────────────────
+
+// operatorAudit says how one ext.ActionKind is recorded.
+type operatorAudit struct {
+	action   string
+	resource string
+	severity string
+}
+
+// operatorAudits maps each operator action kind to its audit action,
+// resource type and severity. Actions that stop or remove work are
+// warnings; the rest are info.
+var operatorAudits = map[ext.ActionKind]operatorAudit{
+	ext.ActionJobCancelled:     {ActionOperatorJobCancelled, ResourceJob, SeverityWarning},
+	ext.ActionJobRetried:       {ActionOperatorJobRetried, ResourceJob, SeverityInfo},
+	ext.ActionDLQReplayed:      {ActionOperatorDLQReplayed, ResourceDLQ, SeverityInfo},
+	ext.ActionDLQDeleted:       {ActionOperatorDLQDeleted, ResourceDLQ, SeverityWarning},
+	ext.ActionDLQPurged:        {ActionOperatorDLQPurged, ResourceDLQ, SeverityWarning},
+	ext.ActionCronEnabled:      {ActionOperatorCronEnabled, ResourceCron, SeverityInfo},
+	ext.ActionCronDisabled:     {ActionOperatorCronDisabled, ResourceCron, SeverityWarning},
+	ext.ActionCronDeleted:      {ActionOperatorCronDeleted, ResourceCron, SeverityWarning},
+	ext.ActionCronTriggered:    {ActionOperatorCronTriggered, ResourceCron, SeverityInfo},
+	ext.ActionWorkflowReplayed: {ActionOperatorWorkflowReplayed, ResourceWorkflow, SeverityInfo},
+}
+
+// OnOperatorAction implements ext.OperatorActionObserver. AuditEvent has
+// no field for the acting subject, so it goes into Metadata["actor"].
+// IDs that do not apply to the kind are left out of Metadata. A kind
+// this version does not know is still recorded, as "operator." plus the
+// kind with its dots turned into underscores.
+func (e *Extension) OnOperatorAction(ctx context.Context, a ext.Action) error {
+	m, ok := operatorAudits[a.Kind]
+	if !ok {
+		m = operatorAudit{
+			action:   "operator." + strings.ReplaceAll(string(a.Kind), ".", "_"),
+			severity: SeverityInfo,
+		}
+	}
+
+	kv := []any{"kind", string(a.Kind), "actor", a.Actor}
+	if !a.At.IsZero() {
+		kv = append(kv, "at", a.At.Format(time.RFC3339))
+	}
+	kv = appendID(kv, "job_id", a.JobID)
+	kv = appendID(kv, "new_job_id", a.NewJobID)
+	kv = appendID(kv, "dlq_id", a.DLQID)
+	kv = appendID(kv, "cron_id", a.CronID)
+	kv = appendID(kv, "run_id", a.RunID)
+	if a.Step != "" {
+		kv = append(kv, "step", a.Step)
+	}
+	// A purge that removed nothing still says so.
+	if a.Count != 0 || a.Kind == ext.ActionDLQPurged {
+		kv = append(kv, "count", a.Count)
+	}
+
+	return e.record(ctx, m.action, m.severity, OutcomeSuccess,
+		m.resource, operatorResourceID(m.resource, a), CategoryOperator, nil,
+		kv...,
+	)
+}
+
+// operatorResourceID picks the ID of the thing the action was taken on.
+// A DLQ purge acts on no single entry, so its DLQID is nil and this
+// returns "".
+func operatorResourceID(resource string, a ext.Action) string {
+	switch resource {
+	case ResourceJob:
+		return a.JobID.String()
+	case ResourceDLQ:
+		return a.DLQID.String()
+	case ResourceCron:
+		return a.CronID.String()
+	case ResourceWorkflow:
+		return a.RunID.String()
+	default:
+		return ""
+	}
+}
+
+// appendID adds key and the ID's string to kv, unless the ID is nil.
+func appendID(kv []any, key string, v id.ID) []any {
+	if v.IsNil() {
+		return kv
+	}
+	return append(kv, key, v.String())
 }
 
 // ── Internal helpers ────────────────────────────────

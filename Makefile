@@ -111,14 +111,14 @@ fmt f:
 lint l:
 	@echo "$(BLUE)Running linter...$(NC)"
 	@command -v golangci-lint >/dev/null 2>&1 || { echo "$(RED)golangci-lint not found. Install: https://golangci-lint.run/usage/install/$(NC)"; exit 1; }
-	golangci-lint run ./...
+	golangci-lint run --allow-serial-runners ./...
 	@echo "$(GREEN)✓ Linting complete$(NC)"
 
 ## lint-fix (lf): Run linter with auto-fix
 lint-fix lf:
 	@echo "$(BLUE)Running linter with auto-fix...$(NC)"
 	@command -v golangci-lint >/dev/null 2>&1 || { echo "$(RED)golangci-lint not found. Install: https://golangci-lint.run/usage/install/$(NC)"; exit 1; }
-	golangci-lint run --fix ./...
+	golangci-lint run --allow-serial-runners --fix ./...
 	@echo "$(GREEN)✓ Linting with fixes complete$(NC)"
 
 ## vet (v): Run go vet
@@ -231,7 +231,7 @@ templ-watch:
 	templ generate --watch ./dashboard/...
 
 ## all: Run templ generate, check, test, and build
-all: templ check test build
+all: check test build
 	@echo "$(GREEN)✓ All tasks complete$(NC)"
 
 # Short aliases
@@ -246,3 +246,24 @@ lf: lint-fix
 v: vet
 d: dev
 i: install
+
+# Qualification is a separate published-module consumer. Keep workspace
+# overrides disabled so these checks exercise the pinned host composition.
+.PHONY: qualification-check qualification-lint
+qualification-lint:
+	cd qualification && GOWORK=off GOTOOLCHAIN=go1.26.9 golangci-lint run --allow-serial-runners --max-same-issues=0 --max-issues-per-linter=0 ./...
+
+qualification-check:
+	cd qualification && GOWORK=off GOTOOLCHAIN=go1.26.9 go mod tidy -diff
+	cd qualification && GOWORK=off GOTOOLCHAIN=go1.26.9 go mod verify
+	cd qualification && GOWORK=off GOTOOLCHAIN=go1.26.9 go vet ./...
+	cd qualification && GOWORK=off GOTOOLCHAIN=go1.26.9 go test -race -count=1 ./...
+	cd qualification && GOWORK=off GOTOOLCHAIN=go1.26.9 go build ./...
+
+.PHONY: qualification-process-check
+qualification-process-check:
+	bash qualification/process-check.sh
+
+.PHONY: qualification-operator-check
+qualification-operator-check:
+	bash qualification/operator-check.sh

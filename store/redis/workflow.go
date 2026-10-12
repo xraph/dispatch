@@ -3,6 +3,7 @@ package redis
 import (
 	"context"
 	"fmt"
+	"sort"
 	"time"
 
 	"github.com/xraph/dispatch"
@@ -25,22 +26,37 @@ type runEntity struct {
 	CompletedAt *time.Time `json:"completed_at,omitempty"`
 	CreatedAt   time.Time  `json:"created_at"`
 	UpdatedAt   time.Time  `json:"updated_at"`
+
+	// Version and ParentRunID were dropped by every write before this
+	// release, so a run written then reads back as unversioned (latest)
+	// and top-level. Both are omitted when zero, like on workflow.Run.
+	Version          int    `json:"version,omitempty"`
+	ReplayGeneration int64  `json:"replay_generation"`
+	ParentRunID      string `json:"parent_run_id,omitempty"`
 }
 
 func toRunEntity(r *workflow.Run) *runEntity {
+	var parentRunID string
+	if r.ParentRunID != nil {
+		parentRunID = r.ParentRunID.String()
+	}
+
 	return &runEntity{
-		ID:          r.ID.String(),
-		Name:        r.Name,
-		State:       string(r.State),
-		Input:       r.Input,
-		Output:      r.Output,
-		Error:       r.Error,
-		ScopeAppID:  r.ScopeAppID,
-		ScopeOrgID:  r.ScopeOrgID,
-		StartedAt:   r.StartedAt,
-		CompletedAt: r.CompletedAt,
-		CreatedAt:   r.CreatedAt,
-		UpdatedAt:   r.UpdatedAt,
+		ID:               r.ID.String(),
+		Name:             r.Name,
+		State:            string(r.State),
+		Input:            r.Input,
+		Output:           r.Output,
+		Error:            r.Error,
+		ScopeAppID:       r.ScopeAppID,
+		ScopeOrgID:       r.ScopeOrgID,
+		StartedAt:        r.StartedAt,
+		CompletedAt:      r.CompletedAt,
+		CreatedAt:        r.CreatedAt,
+		UpdatedAt:        r.UpdatedAt,
+		Version:          r.Version,
+		ReplayGeneration: r.ReplayGeneration,
+		ParentRunID:      parentRunID,
 	}
 }
 
@@ -50,21 +66,33 @@ func fromRunEntity(e *runEntity) (*workflow.Run, error) {
 		return nil, fmt.Errorf("dispatch/redis: parse run id: %w", err)
 	}
 
+	var parentRunID *id.RunID
+	if e.ParentRunID != "" {
+		parsed, parseErr := id.ParseRunID(e.ParentRunID)
+		if parseErr != nil {
+			return nil, fmt.Errorf("dispatch/redis: parse parent run id: %w", parseErr)
+		}
+		parentRunID = &parsed
+	}
+
 	return &workflow.Run{
 		Entity: dispatch.Entity{
 			CreatedAt: e.CreatedAt,
 			UpdatedAt: e.UpdatedAt,
 		},
-		ID:          rID,
-		Name:        e.Name,
-		State:       workflow.RunState(e.State),
-		Input:       e.Input,
-		Output:      e.Output,
-		Error:       e.Error,
-		ScopeAppID:  e.ScopeAppID,
-		ScopeOrgID:  e.ScopeOrgID,
-		StartedAt:   e.StartedAt,
-		CompletedAt: e.CompletedAt,
+		ID:               rID,
+		Name:             e.Name,
+		State:            workflow.RunState(e.State),
+		Input:            e.Input,
+		Output:           e.Output,
+		Error:            e.Error,
+		ScopeAppID:       e.ScopeAppID,
+		ScopeOrgID:       e.ScopeOrgID,
+		StartedAt:        e.StartedAt,
+		CompletedAt:      e.CompletedAt,
+		Version:          e.Version,
+		ReplayGeneration: e.ReplayGeneration,
+		ParentRunID:      parentRunID,
 	}, nil
 }
 
@@ -89,6 +117,11 @@ func (s *Store) CreateRun(ctx context.Context, run *workflow.Run) error {
 		return dispatch.ErrJobAlreadyExists // reuse duplicate sentinel
 	}
 
+	// Index before the entity; indexCreated says why the order matters.
+	if err := s.indexCreated(ctx, entityRun, run.ID); err != nil {
+		return fmt.Errorf("dispatch/redis: create run created index: %w", err)
+	}
+
 	e := toRunEntity(run)
 	if err := s.setEntity(ctx, key, e); err != nil {
 		return fmt.Errorf("dispatch/redis: create run set: %w", err)
@@ -109,23 +142,35 @@ func (s *Store) GetRun(ctx context.Context, runID id.RunID) (*workflow.Run, erro
 		}
 		return nil, fmt.Errorf("dispatch/redis: get run: %w", err)
 	}
-	return fromRunEntity(&e)
+	run, err := fromRunEntity(&e)
+	if err != nil {
+		return nil, err
+	}
+	if err := validateRunIdentity(run, runID.String()); err != nil {
+		return nil, err
+	}
+	return run, nil
+}
+
+func validateRunIdentity(run *workflow.Run, member string) error {
+	if run.ID.String() != member {
+		return fmt.Errorf("dispatch/redis: run identity mismatch for key %s", member)
+	}
+	return nil
 }
 
 // UpdateRun persists changes to an existing workflow run.
 func (s *Store) UpdateRun(ctx context.Context, run *workflow.Run) error {
 	key := s.keys.run(run.ID.String())
-	exists, err := s.entityExists(ctx, key)
-	if err != nil {
-		return fmt.Errorf("dispatch/redis: update run exists: %w", err)
-	}
-	if !exists {
-		return dispatch.ErrRunNotFound
-	}
-
 	e := toRunEntity(run)
 	e.UpdatedAt = now()
-	return s.setEntity(ctx, key, e)
+	return updateEntity(ctx, s, key, dispatch.ErrRunNotFound, func(current *runEntity) error {
+		if current.ReplayGeneration != run.ReplayGeneration {
+			return fmt.Errorf("%w: run %s replay generation changed", dispatch.ErrInvalidState, run.ID)
+		}
+		*current = *e
+		return nil
+	})
 }
 
 // ListRuns returns workflow runs matching the given options.
@@ -139,14 +184,20 @@ func (s *Store) ListRuns(ctx context.Context, opts workflow.ListOpts) ([]*workfl
 	for _, rID := range ids {
 		var e runEntity
 		if getErr := s.getEntity(ctx, s.keys.run(rID), &e); getErr != nil {
-			continue
+			if isNotFound(getErr) {
+				continue
+			}
+			return nil, fmt.Errorf("dispatch/redis: list runs read: %w", getErr)
 		}
 		if opts.State != "" && workflow.RunState(e.State) != opts.State {
 			continue
 		}
 		r, convErr := fromRunEntity(&e)
 		if convErr != nil {
-			continue
+			return nil, fmt.Errorf("dispatch/redis: list runs convert: %w", convErr)
+		}
+		if identityErr := validateRunIdentity(r, rID); identityErr != nil {
+			return nil, identityErr
 		}
 		runs = append(runs, r)
 	}
@@ -203,11 +254,20 @@ func (s *Store) ListCheckpoints(ctx context.Context, runID id.RunID) ([]*workflo
 		key := s.keys.checkpoint(rID, step)
 		var e checkpointEntity
 		if getErr := s.getEntity(ctx, key, &e); getErr != nil {
-			continue
+			if isNotFound(getErr) {
+				continue
+			}
+			return nil, fmt.Errorf("dispatch/redis: list checkpoints read: %w", getErr)
 		}
 
-		cpID, _ := id.ParseCheckpointID(e.ID)  //nolint:errcheck // best-effort
-		rIDParsed, _ := id.ParseRunID(e.RunID) //nolint:errcheck // best-effort
+		cpID, parseErr := id.ParseCheckpointID(e.ID)
+		if parseErr != nil || cpID.IsNil() {
+			return nil, fmt.Errorf("dispatch/redis: invalid checkpoint ID %q", e.ID)
+		}
+		rIDParsed, parseErr := id.ParseRunID(e.RunID)
+		if parseErr != nil || rIDParsed != runID || e.StepName != step {
+			return nil, fmt.Errorf("dispatch/redis: checkpoint identity mismatch for run %s step %q", runID, step)
+		}
 
 		checkpoints = append(checkpoints, &workflow.Checkpoint{
 			ID:        cpID,
@@ -217,6 +277,9 @@ func (s *Store) ListCheckpoints(ctx context.Context, runID id.RunID) ([]*workflo
 			CreatedAt: e.CreatedAt,
 		})
 	}
+	sort.Slice(checkpoints, func(i, j int) bool {
+		return workflow.CompareCheckpoints(checkpoints[i], checkpoints[j]) < 0
+	})
 	return checkpoints, nil
 }
 
@@ -240,36 +303,33 @@ func (s *Store) ListChildRuns(ctx context.Context, parentRunID id.RunID) ([]*wor
 // DeleteCheckpointsAfter removes all checkpoints created after the
 // given step name (by creation order). Used for workflow replay.
 func (s *Store) DeleteCheckpointsAfter(ctx context.Context, runID id.RunID, afterStep string) error {
-	rID := runID.String()
-
-	// Get the target checkpoint's time.
-	var target checkpointEntity
-	if err := s.getEntity(ctx, s.keys.checkpoint(rID, afterStep), &target); err != nil {
-		if isNotFound(err) {
-			return nil // step not found; nothing to delete
-		}
-		return fmt.Errorf("dispatch/redis: get target checkpoint: %w", err)
-	}
-
-	// List all step names for this run.
-	steps, err := s.kv.SMembers(ctx, s.keys.checkpointIndex(rID))
+	// Resolve the whole boundary before deleting anything. A failed read
+	// cannot turn into a replay that silently keeps a later checkpoint.
+	checkpoints, err := s.ListCheckpoints(ctx, runID)
 	if err != nil {
-		return fmt.Errorf("dispatch/redis: list checkpoint steps: %w", err)
+		return err
 	}
-
-	for _, step := range steps {
-		key := s.keys.checkpoint(rID, step)
-		var e checkpointEntity
-		if getErr := s.getEntity(ctx, key, &e); getErr != nil {
+	var target *workflow.Checkpoint
+	for _, cp := range checkpoints {
+		if cp.StepName == afterStep {
+			target = cp
+			break
+		}
+	}
+	if target == nil {
+		return nil
+	}
+	rID := runID.String()
+	for _, cp := range checkpoints {
+		if workflow.CompareCheckpoints(cp, target) <= 0 {
 			continue
 		}
-		if e.CreatedAt.After(target.CreatedAt) {
-			if delErr := s.kv.Delete(ctx, key); delErr != nil {
-				return fmt.Errorf("delete checkpoint %s: %w", key, delErr)
-			}
-			if _, remErr := s.kv.SRem(ctx, s.keys.checkpointIndex(rID), step); remErr != nil {
-				return fmt.Errorf("remove checkpoint index %s: %w", step, remErr)
-			}
+		key := s.keys.checkpoint(rID, cp.StepName)
+		if delErr := s.kv.Delete(ctx, key); delErr != nil {
+			return fmt.Errorf("delete checkpoint %s: %w", key, delErr)
+		}
+		if _, remErr := s.kv.SRem(ctx, s.keys.checkpointIndex(rID), cp.StepName); remErr != nil {
+			return fmt.Errorf("remove checkpoint index %s: %w", cp.StepName, remErr)
 		}
 	}
 	return nil

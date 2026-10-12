@@ -144,6 +144,13 @@ func (s *Store) CreateArtifact(ctx context.Context, a *artifact.Artifact, link *
 		return fmt.Errorf("dispatch/redis: create artifact guard: %w", err)
 	}
 
+	// Index before the entity; indexCreated says why the order matters.
+	if err := s.indexCreated(ctx, entityArtifact, a.ID); err != nil {
+		_ = s.kv.Delete(ctx, guard) //nolint:errcheck // releasing the guard is best effort
+
+		return fmt.Errorf("dispatch/redis: create artifact created index: %w", err)
+	}
+
 	if err := s.setEntity(ctx, s.keys.artifact(a.ID.String()), toArtifactEntity(a)); err != nil {
 		// Release the guard so the coordinates are not permanently burned.
 		_ = s.kv.Delete(ctx, guard) //nolint:errcheck // releasing the guard is best effort
@@ -199,7 +206,14 @@ func (s *Store) loadArtifact(ctx context.Context, artifactID string) (*artifact.
 		return nil, fmt.Errorf("dispatch/redis: get artifact: %w", err)
 	}
 
-	return fromArtifactEntity(&e)
+	a, err := fromArtifactEntity(&e)
+	if err != nil {
+		return nil, err
+	}
+	if err := validateArtifactIdentity(a, artifactID); err != nil {
+		return nil, err
+	}
+	return a, nil
 }
 
 // FindArtifactByKey retrieves a live artifact by its storage coordinates.
@@ -846,7 +860,7 @@ func (s *Store) PurgeArtifact(ctx context.Context, artifactID id.ArtifactID) err
 		return fmt.Errorf("dispatch/redis: purge artifact id index: %w", err)
 	}
 
-	for _, index := range []string{s.keys.artifactEphemeral(), s.keys.artifactDeleted()} {
+	for _, index := range []string{s.keys.byCreated(entityArtifact), s.keys.artifactEphemeral(), s.keys.artifactDeleted()} {
 		if _, err := s.kv.ZRem(ctx, index, key); err != nil {
 			return fmt.Errorf("dispatch/redis: purge artifact index: %w", err)
 		}

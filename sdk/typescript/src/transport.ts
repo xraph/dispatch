@@ -5,6 +5,12 @@
 import type { Frame, StreamEvent } from "./frame";
 import { generateFrameID, Method } from "./frame";
 import { AuthError, ConnectionError } from "./errors";
+import {
+  correlationID,
+  isFrame,
+  isNonemptyString,
+  isRecord,
+} from "./frame-validation";
 
 export interface TransportOptions {
   url: string;
@@ -19,10 +25,14 @@ export interface TransportOptions {
 type FrameHandler = (frame: Frame) => void;
 type EventHandler = (event: StreamEvent) => void;
 type CloseHandler = () => void;
+type PendingReply = {
+  resolve: FrameHandler;
+  reject: (error: ConnectionError) => void;
+};
 
 export class Transport {
   private ws: WebSocket | null = null;
-  private pending = new Map<string, (frame: Frame) => void>();
+  private pending = new Map<string, PendingReply>();
   private eventHandlers = new Map<string, EventHandler[]>();
   private onClose: CloseHandler | null = null;
   private closed = false;
@@ -64,20 +74,33 @@ export class Transport {
           ts: new Date().toISOString(),
         };
 
-        this.pending.set(authFrame.id, (resp) => {
-          if (resp.type === "error") {
-            reject(
-              new AuthError(resp.error?.message ?? "Authentication failed"),
-            );
-            return;
-          }
-          const data = resp.data as { session_id?: string; format?: string };
-          this.sessionId = data?.session_id ?? "";
-          this.retryCount = 0;
-          resolve(this.sessionId);
+        this.pending.set(authFrame.id, {
+          reject,
+          resolve: (resp) => {
+            if (resp.type === "error") {
+              reject(
+                new AuthError(resp.error?.message ?? "Authentication failed"),
+              );
+              return;
+            }
+            const data = resp.data;
+            if (
+              !isRecord(data) ||
+              !isNonemptyString(data.session_id) ||
+              data.format !== "json"
+            ) {
+              reject(
+                new ConnectionError("Invalid DWP authentication response"),
+              );
+              return;
+            }
+            this.sessionId = data.session_id;
+            this.retryCount = 0;
+            resolve(this.sessionId);
+          },
         });
 
-        this.ws!.send(JSON.stringify(authFrame));
+        this.ws?.send(JSON.stringify(authFrame));
       };
 
       this.ws.onmessage = (event) => {
@@ -98,21 +121,35 @@ export class Transport {
   }
 
   private handleMessage(raw: string) {
-    let frame: Frame;
+    let frame: unknown;
     try {
       frame = JSON.parse(raw);
     } catch {
       return;
     }
 
+    if (!isRecord(frame)) return;
+    const correlId = correlationID(frame);
+    if (!isFrame(frame)) {
+      if (correlId !== undefined) {
+        const pending = this.pending.get(correlId);
+        if (pending) {
+          this.pending.delete(correlId);
+          pending.reject(new ConnectionError("Invalid DWP frame"));
+        }
+      }
+      return;
+    }
+
     switch (frame.type) {
       case "response":
       case "error": {
-        const correlId = frame.correl_id ?? frame.id;
-        const resolver = this.pending.get(correlId);
-        if (resolver) {
+        // Valid frames always have an id, even without correl_id.
+        if (correlId === undefined) return;
+        const pending = this.pending.get(correlId);
+        if (pending && typeof pending.resolve === "function") {
           this.pending.delete(correlId);
-          resolver(frame);
+          pending.resolve(frame);
         }
         break;
       }
@@ -120,7 +157,7 @@ export class Transport {
         const channel = frame.channel ?? "";
         const handlers = this.eventHandlers.get(channel);
         if (handlers) {
-          const evt = JSON.parse(raw) as StreamEvent;
+          const evt = frame as unknown as StreamEvent;
           for (const handler of handlers) {
             handler(evt);
           }
@@ -136,7 +173,7 @@ export class Transport {
     while (this.retryCount < this.opts.maxRetries && !this.closed) {
       this.retryCount++;
       const delay = Math.min(
-        this.opts.baseDelay * Math.pow(2, this.retryCount - 1),
+        this.opts.baseDelay * 2 ** (this.retryCount - 1),
         this.opts.maxDelay,
       );
 
@@ -166,16 +203,19 @@ export class Transport {
         ts: new Date().toISOString(),
       };
 
-      this.pending.set(frame.id, (resp) => {
-        if (resp.type === "error") {
-          reject(
-            new (class extends Error {
-              code = resp.error?.code;
-            })(resp.error?.message ?? "Unknown DWP error"),
-          );
-          return;
-        }
-        resolve(resp);
+      this.pending.set(frame.id, {
+        reject,
+        resolve: (resp) => {
+          if (resp.type === "error") {
+            reject(
+              new (class extends Error {
+                code = resp.error?.code;
+              })(resp.error?.message ?? "Unknown DWP error"),
+            );
+            return;
+          }
+          resolve(resp);
+        },
       });
 
       this.ws.send(JSON.stringify(frame));

@@ -125,6 +125,19 @@ func (p *Provider) HeartbeatWorker(ctx context.Context, workerID id.WorkerID) er
 	return nil
 }
 
+// GetWorker returns the worker whose Pod carries the given worker-id
+// annotation.
+func (p *Provider) GetWorker(ctx context.Context, workerID id.WorkerID) (*cluster.Worker, error) {
+	pod, err := p.findPodByWorkerID(ctx, workerID.String())
+	if err != nil {
+		return nil, err
+	}
+	if pod == nil {
+		return nil, dispatch.ErrWorkerNotFound
+	}
+	return p.workerFromPod(pod)
+}
+
 // ListWorkers returns all registered dispatch workers by scanning Pod annotations.
 func (p *Provider) ListWorkers(ctx context.Context) ([]*cluster.Worker, error) {
 	pods, err := p.client.CoreV1().Pods(p.namespace).List(ctx, metav1.ListOptions{

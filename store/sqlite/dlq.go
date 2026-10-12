@@ -10,13 +10,20 @@ import (
 	"github.com/xraph/dispatch/id"
 )
 
-// PushDLQ adds a failed job entry to the dead letter queue.
+// PushDLQ adds a failed job entry to the dead letter queue. An ID that is
+// already there is refused with dispatch.ErrDLQAlreadyExists. The primary
+// key is the only unique constraint on dispatch_dlq, so a UNIQUE failure
+// here can only be the ID, and isDuplicateKey matches it the way
+// RegisterCron and CreateRun match theirs.
 func (s *Store) PushDLQ(ctx context.Context, entry *dlq.Entry) error {
 	m, err := toDLQModel(entry)
 	if err != nil {
 		return err
 	}
 	if _, err = s.sdb.NewInsert(m).Exec(ctx); err != nil {
+		if isDuplicateKey(err) {
+			return dispatch.ErrDLQAlreadyExists
+		}
 		return fmt.Errorf("dispatch/sqlite: push dlq: %w", err)
 	}
 	return nil

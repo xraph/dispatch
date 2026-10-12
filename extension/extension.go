@@ -13,6 +13,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"sync"
 	"time"
 
 	"github.com/xraph/forge"
@@ -28,11 +29,15 @@ import (
 	"github.com/xraph/dispatch/artifact/cache"
 	"github.com/xraph/dispatch/artifact/sweeper"
 	"github.com/xraph/dispatch/backoff"
+	"github.com/xraph/dispatch/durable/delivery"
+	"github.com/xraph/dispatch/durable/runtime"
 	"github.com/xraph/dispatch/dwp"
 	"github.com/xraph/dispatch/engine"
 	"github.com/xraph/dispatch/ext"
 	mw "github.com/xraph/dispatch/middleware"
+	"github.com/xraph/dispatch/operator"
 	"github.com/xraph/dispatch/resource"
+	"github.com/xraph/dispatch/security"
 	mongostore "github.com/xraph/dispatch/store/mongo"
 	pgstore "github.com/xraph/dispatch/store/postgres"
 	redisstore "github.com/xraph/dispatch/store/redis"
@@ -56,19 +61,33 @@ var _ forge.Extension = (*Extension)(nil)
 type Extension struct {
 	*forge.BaseExtension
 
-	config       Config
-	eng          *engine.Engine
-	apiHandler   *api.API
-	dwpServer    *dwp.Server
-	logger       log.Logger
-	dispatchOpts []dispatch.Option
-	exts         []ext.Extension
-	mws          []mw.Middleware
-	dwpOpts      []dwp.Option
-	bo           backoff.Strategy
-	useGrove     bool
-	useGroveKV   bool
-	enableDWP    bool
+	lifecycleOnce         sync.Once
+	lifecycleGate         chan struct{}
+	stopping              bool
+	sweeperStopped        chan struct{}
+	deliveryConfig        *DeliveryConfig
+	publisher             *delivery.Publisher
+	memoryAuditForTesting bool
+	remoteAuth            security.Authenticator
+	boundary              *security.Boundary
+	operatorOptions       *operator.Options
+	lifecycleHost         operator.LifecycleHost
+	operatorRuntime       func(string, string) (*runtime.Worker, error)
+	durable               *runtime.Options
+	durableHandlers       runtime.Options
+	config                Config
+	eng                   *engine.Engine
+	apiHandler            *api.API
+	dwpServer             *dwp.Server
+	logger                log.Logger
+	dispatchOpts          []dispatch.Option
+	exts                  []ext.Extension
+	mws                   []mw.Middleware
+	dwpOpts               []dwp.Option
+	bo                    backoff.Strategy
+	useGrove              bool
+	useGroveKV            bool
+	enableDWP             bool
 
 	// artifactBackend is an explicitly supplied backend, taking priority
 	// over anything discovered in the container.
@@ -262,13 +281,28 @@ func (e *Extension) init(fapp forge.App) error {
 		}
 	}
 
+	durableOptions, durableErr := e.durableOption()
+	if durableErr != nil {
+		return durableErr
+	}
+	engOpts = append(engOpts, durableOptions...)
 	e.eng, err = engine.Build(d, engOpts...)
 	if err != nil {
 		return fmt.Errorf("dispatch: build engine: %w", err)
 	}
 
 	// Create the API handler.
-	e.apiHandler = api.New(e.eng, fapp.Router())
+	e.configureSecurity()
+	e.eng.Dispatcher().BeforeStoreClose(e.stopDelivery)
+	operators, operatorErr := e.operatorService()
+	if operatorErr != nil {
+		return operatorErr
+	}
+	callbackAuth, stockCallbacks := e.remoteAuth.(*security.ForgeAuthenticator)
+	if !stockCallbacks {
+		callbackAuth = nil
+	}
+	e.apiHandler = api.New(e.eng, fapp.Router(), api.WithSecurity(e.remoteAuth, *e.boundary), api.WithDurableCallbacks(operators, callbackAuth))
 
 	// Register HTTP routes unless disabled.
 	if !e.config.DisableRoutes {
@@ -276,19 +310,21 @@ func (e *Extension) init(fapp forge.App) error {
 		if basePath == "" {
 			basePath = "/dispatch"
 		}
-		e.apiHandler.RegisterRoutes(fapp.Router().Group(basePath))
+		if routeErr := e.apiHandler.RegisterRoutes(fapp.Router().Group(basePath)); routeErr != nil {
+			return fmt.Errorf("dispatch: register routes: %w", routeErr)
+		}
 	}
 
 	// Create DWP server if stream broker is available.
 	if e.eng.StreamBroker() != nil {
 		dwpOptList := make([]dwp.Option, 0, len(e.dwpOpts)+2)
-		dwpOptList = append(dwpOptList, dwp.WithLogger(logger))
+		dwpOptList = append(dwpOptList, dwp.WithLogger(logger), dwp.WithAuth(&dwp.ForgeAuthenticator{Auth: e.remoteAuth}), dwp.WithSecurity(*e.boundary))
 		if e.config.DWPBasePath != "" {
 			dwpOptList = append(dwpOptList, dwp.WithPath(e.config.DWPBasePath))
 		}
 		dwpOptList = append(dwpOptList, e.dwpOpts...)
 
-		handler := dwp.NewHandler(e.eng, e.eng.StreamBroker(), logger)
+		handler := dwp.NewHandler(e.eng, e.eng.StreamBroker(), logger, *e.boundary)
 		e.dwpServer = dwp.NewServer(e.eng.StreamBroker(), handler, dwpOptList...)
 
 		if !e.config.DisableRoutes {
@@ -301,6 +337,16 @@ func (e *Extension) init(fapp forge.App) error {
 
 // Start begins job processing and runs auto-migration if enabled.
 func (e *Extension) Start(ctx context.Context) error {
+	if err := e.lockLifecycle(ctx); err != nil {
+		return err
+	}
+	defer e.unlockLifecycle()
+	if e.stopping {
+		return errors.New("dispatch: extension is stopping")
+	}
+	if e.IsStarted() {
+		return nil
+	}
 	if e.eng == nil {
 		return errors.New("dispatch: extension not initialized")
 	}
@@ -312,6 +358,15 @@ func (e *Extension) Start(ctx context.Context) error {
 			if err := store.Migrate(ctx); err != nil {
 				return fmt.Errorf("dispatch: migration failed: %w", err)
 			}
+		}
+	}
+
+	if err := e.prepareDelivery(ctx); err != nil {
+		return err
+	}
+	if e.publisher != nil {
+		if err := e.publisher.Start(); err != nil {
+			return err
 		}
 	}
 
@@ -347,7 +402,10 @@ func (e *Extension) Start(ctx context.Context) error {
 	}
 
 	if err := e.eng.Start(ctx); err != nil {
-		return err
+		return errors.Join(err, e.stopDelivery(ctx))
+	}
+	if err := e.activateAudit(ctx); err != nil {
+		return errors.Join(err, e.eng.Stop(ctx))
 	}
 
 	e.startSweeper(ctx)
@@ -410,21 +468,59 @@ func (e *Extension) isClusterLeader() bool {
 
 // Stop gracefully shuts down the dispatch engine.
 func (e *Extension) Stop(ctx context.Context) error {
+	if err := e.lockLifecycle(ctx); err != nil {
+		return err
+	}
+	defer e.unlockLifecycle()
+	e.stopping = true
 	if e.eng == nil {
 		e.MarkStopped()
 		return nil
 	}
 	if e.sweeper != nil {
-		if serr := e.sweeper.Stop(ctx); serr != nil {
-			e.Logger().Warn("dispatch: artifact sweeper did not stop cleanly",
-				forge.F("error", serr.Error()))
+		if e.sweeperStopped == nil {
+			e.sweeperStopped = make(chan struct{})
+			go func() {
+				// Retain caller values while waiting for actual completion. Individual
+				// Stop deadlines must not finish this shared cleanup task early.
+				if err := e.sweeper.Stop(context.WithoutCancel(ctx)); err != nil {
+					e.Logger().Warn("dispatch: artifact sweeper stop failed", forge.F("error", err.Error()))
+				}
+				close(e.sweeperStopped)
+			}()
+		}
+		select {
+		case <-e.sweeperStopped:
+		case <-ctx.Done():
+			return ctx.Err()
 		}
 	}
 
 	err := e.eng.Stop(ctx)
-	e.MarkStopped()
+	if err == nil {
+		// stopDelivery deactivates the boundary after worker quiescence.
+		e.MarkStopped()
+	}
 	return err
 }
+
+func (e *Extension) lockLifecycle(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	e.lifecycleOnce.Do(func() { e.lifecycleGate = make(chan struct{}, 1) })
+	select {
+	case e.lifecycleGate <- struct{}{}:
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+	if err := ctx.Err(); err != nil {
+		e.unlockLifecycle()
+		return err
+	}
+	return nil
+}
+func (e *Extension) unlockLifecycle() { <-e.lifecycleGate }
 
 // Health implements [forge.Extension].
 func (e *Extension) Health(ctx context.Context) error {
@@ -432,12 +528,7 @@ func (e *Extension) Health(ctx context.Context) error {
 		return errors.New("dispatch: extension not initialized")
 	}
 
-	store := e.eng.Dispatcher().Store()
-	if store == nil {
-		return errors.New("dispatch: no store configured")
-	}
-
-	return store.Ping(ctx)
+	return e.eng.Health(ctx)
 }
 
 // Handler returns the HTTP handler for all API routes.
@@ -450,10 +541,13 @@ func (e *Extension) Handler() http.Handler {
 }
 
 // RegisterRoutes registers all dispatch API routes into a Forge router.
-func (e *Extension) RegisterRoutes(router forge.Router) {
-	if e.apiHandler != nil {
-		e.apiHandler.RegisterRoutes(router)
+// It returns every route forge refused; see api.API.RegisterRoutes.
+func (e *Extension) RegisterRoutes(router forge.Router) error {
+	if e.apiHandler == nil {
+		return nil
 	}
+
+	return e.apiHandler.RegisterRoutes(router)
 }
 
 // --- Config Loading (mirrors grove/shield extension pattern) ---
@@ -578,6 +672,42 @@ func (e *Extension) mergeWithDefaults(cfg Config) Config {
 // mergeConfigurations merges YAML config with programmatic options.
 // YAML config takes precedence for most fields; programmatic bool flags fill gaps.
 func (e *Extension) mergeConfigurations(yamlConfig, programmaticConfig Config) Config {
+	if yamlConfig.Security.InstallationID == "" {
+		yamlConfig.Security.InstallationID = programmaticConfig.Security.InstallationID
+	}
+	if yamlConfig.Security.PolicyTenant == "" {
+		yamlConfig.Security.PolicyTenant = programmaticConfig.Security.PolicyTenant
+	}
+	if len(yamlConfig.Security.Providers) == 0 {
+		yamlConfig.Security.Providers = append([]string(nil), programmaticConfig.Security.Providers...)
+	}
+	if programmaticConfig.Durable.Enabled {
+		yamlConfig.Durable.Enabled = true
+	}
+	if yamlConfig.Durable.Namespace == "" {
+		yamlConfig.Durable.Namespace = programmaticConfig.Durable.Namespace
+	}
+	if yamlConfig.Durable.Queue == "" {
+		yamlConfig.Durable.Queue = programmaticConfig.Durable.Queue
+	}
+	if yamlConfig.Durable.BuildID == "" {
+		yamlConfig.Durable.BuildID = programmaticConfig.Durable.BuildID
+	}
+	if yamlConfig.Durable.Owner == "" {
+		yamlConfig.Durable.Owner = programmaticConfig.Durable.Owner
+	}
+	if yamlConfig.Durable.LeaseDuration == 0 {
+		yamlConfig.Durable.LeaseDuration = programmaticConfig.Durable.LeaseDuration
+	}
+	if yamlConfig.Durable.PollInterval == 0 {
+		yamlConfig.Durable.PollInterval = programmaticConfig.Durable.PollInterval
+	}
+	if yamlConfig.Durable.StoreTimeout == 0 {
+		yamlConfig.Durable.StoreTimeout = programmaticConfig.Durable.StoreTimeout
+	}
+	if yamlConfig.Durable.Concurrency == 0 {
+		yamlConfig.Durable.Concurrency = programmaticConfig.Durable.Concurrency
+	}
 	// Programmatic bool flags override when true.
 	if programmaticConfig.DisableRoutes {
 		yamlConfig.DisableRoutes = true

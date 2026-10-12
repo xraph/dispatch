@@ -181,34 +181,46 @@ func fromJobModel(m *jobModel) (*job.Job, error) {
 type workflowRunModel struct {
 	grove.BaseModel `grove:"table:dispatch_workflow_runs"`
 
-	ID          string     `grove:"id,pk"`
-	Name        string     `grove:"name,notnull"`
-	State       string     `grove:"state,notnull,default:'running'"`
-	Input       []byte     `grove:"input,type:bytea"`
-	Output      []byte     `grove:"output,type:bytea"`
-	Error       string     `grove:"error"`
-	ScopeAppID  string     `grove:"scope_app_id"`
-	ScopeOrgID  string     `grove:"scope_org_id"`
-	StartedAt   time.Time  `grove:"started_at,notnull,default:current_timestamp"`
-	CompletedAt *time.Time `grove:"completed_at"`
-	CreatedAt   time.Time  `grove:"created_at,notnull,default:current_timestamp"`
-	UpdatedAt   time.Time  `grove:"updated_at,notnull,default:current_timestamp"`
+	ID               string     `grove:"id,pk"`
+	Name             string     `grove:"name,notnull"`
+	State            string     `grove:"state,notnull,default:'running'"`
+	Input            []byte     `grove:"input,type:bytea"`
+	Output           []byte     `grove:"output,type:bytea"`
+	Error            string     `grove:"error"`
+	ScopeAppID       string     `grove:"scope_app_id"`
+	ScopeOrgID       string     `grove:"scope_org_id"`
+	StartedAt        time.Time  `grove:"started_at,notnull,default:current_timestamp"`
+	CompletedAt      *time.Time `grove:"completed_at"`
+	CreatedAt        time.Time  `grove:"created_at,notnull,default:current_timestamp"`
+	UpdatedAt        time.Time  `grove:"updated_at,notnull,default:current_timestamp"`
+	ParentRunID      *string    `grove:"parent_run_id"`
+	Version          int        `grove:"version,notnull,default:0"`
+	ReplayGeneration int64      `grove:"replay_generation,notnull,default:0"`
 }
 
 func toRunModel(r *workflow.Run) *workflowRunModel {
+	var parentRunID *string
+	if r.ParentRunID != nil {
+		raw := r.ParentRunID.String()
+		parentRunID = &raw
+	}
+
 	return &workflowRunModel{
-		ID:          r.ID.String(),
-		Name:        r.Name,
-		State:       string(r.State),
-		Input:       r.Input,
-		Output:      r.Output,
-		Error:       r.Error,
-		ScopeAppID:  r.ScopeAppID,
-		ScopeOrgID:  r.ScopeOrgID,
-		StartedAt:   r.StartedAt,
-		CompletedAt: r.CompletedAt,
-		CreatedAt:   r.CreatedAt,
-		UpdatedAt:   r.UpdatedAt,
+		ID:               r.ID.String(),
+		Name:             r.Name,
+		State:            string(r.State),
+		Input:            r.Input,
+		Output:           r.Output,
+		Error:            r.Error,
+		ScopeAppID:       r.ScopeAppID,
+		ScopeOrgID:       r.ScopeOrgID,
+		StartedAt:        r.StartedAt,
+		CompletedAt:      r.CompletedAt,
+		CreatedAt:        r.CreatedAt,
+		UpdatedAt:        r.UpdatedAt,
+		ParentRunID:      parentRunID,
+		Version:          r.Version,
+		ReplayGeneration: r.ReplayGeneration,
 	}
 }
 
@@ -218,21 +230,33 @@ func fromRunModel(m *workflowRunModel) (*workflow.Run, error) {
 		return nil, fmt.Errorf(errPrefix+"parse run id %q: %w", m.ID, err)
 	}
 
+	var parentRunID *id.RunID
+	if m.ParentRunID != nil {
+		parsed, parseErr := id.ParseRunID(*m.ParentRunID)
+		if parseErr != nil {
+			return nil, fmt.Errorf(errPrefix+"parse parent run id %q: %w", *m.ParentRunID, parseErr)
+		}
+		parentRunID = &parsed
+	}
+
 	return &workflow.Run{
 		Entity: dispatch.Entity{
 			CreatedAt: m.CreatedAt,
 			UpdatedAt: m.UpdatedAt,
 		},
-		ID:          parsedID,
-		Name:        m.Name,
-		State:       workflow.RunState(m.State),
-		Input:       m.Input,
-		Output:      m.Output,
-		Error:       m.Error,
-		ScopeAppID:  m.ScopeAppID,
-		ScopeOrgID:  m.ScopeOrgID,
-		StartedAt:   m.StartedAt,
-		CompletedAt: m.CompletedAt,
+		ID:               parsedID,
+		Name:             m.Name,
+		State:            workflow.RunState(m.State),
+		Input:            m.Input,
+		Output:           m.Output,
+		Error:            m.Error,
+		ScopeAppID:       m.ScopeAppID,
+		ScopeOrgID:       m.ScopeOrgID,
+		StartedAt:        m.StartedAt,
+		CompletedAt:      m.CompletedAt,
+		Version:          m.Version,
+		ReplayGeneration: m.ReplayGeneration,
+		ParentRunID:      parentRunID,
 	}, nil
 }
 
@@ -362,6 +386,11 @@ type dlqEntryModel struct {
 	ReplayedAt *time.Time `grove:"replayed_at"`
 	CreatedAt  time.Time  `grove:"created_at,notnull,default:current_timestamp"`
 
+	// ReplayedJobID is the job ClaimReplay recorded with replayed_at. It
+	// is NULL while the entry is unreplayed, and on rows the older
+	// ReplayDLQ marked, which set replayed_at alone.
+	ReplayedJobID *string `grove:"replayed_job_id"`
+
 	// Carried so Replay can rebuild a job that behaves like the failed
 	// one; see the dlq.Entry doc. The two resource sets are stored with
 	// the same jsonb codec jobModel uses rather than as scalar columns:
@@ -388,6 +417,12 @@ func toDLQModel(e *dlq.Entry) (*dlqEntryModel, error) {
 		return nil, fmt.Errorf(errPrefix+"encode dlq resource limits: %w", err)
 	}
 
+	var replayedJobID *string
+	if e.ReplayedJobID != nil {
+		raw := e.ReplayedJobID.String()
+		replayedJobID = &raw
+	}
+
 	return &dlqEntryModel{
 		ID:         e.ID.String(),
 		JobID:      e.JobID.String(),
@@ -402,6 +437,8 @@ func toDLQModel(e *dlq.Entry) (*dlqEntryModel, error) {
 		FailedAt:   e.FailedAt,
 		ReplayedAt: e.ReplayedAt,
 		CreatedAt:  e.CreatedAt,
+
+		ReplayedJobID: replayedJobID,
 
 		Priority:         e.Priority,
 		Timeout:          int64(e.Timeout),
@@ -435,6 +472,15 @@ func fromDLQModel(m *dlqEntryModel) (*dlq.Entry, error) {
 		return nil, fmt.Errorf(errPrefix+"decode dlq resource limits: %w", err)
 	}
 
+	var replayedJobID *id.JobID
+	if m.ReplayedJobID != nil {
+		parsed, parseErr := id.ParseJobID(*m.ReplayedJobID)
+		if parseErr != nil {
+			return nil, fmt.Errorf(errPrefix+"parse replayed job id %q: %w", *m.ReplayedJobID, parseErr)
+		}
+		replayedJobID = &parsed
+	}
+
 	return &dlq.Entry{
 		ID:         parsedID,
 		JobID:      parsedJobID,
@@ -449,6 +495,8 @@ func fromDLQModel(m *dlqEntryModel) (*dlq.Entry, error) {
 		FailedAt:   m.FailedAt,
 		ReplayedAt: m.ReplayedAt,
 		CreatedAt:  m.CreatedAt,
+
+		ReplayedJobID: replayedJobID,
 
 		Priority:         m.Priority,
 		Timeout:          time.Duration(m.Timeout),
@@ -520,9 +568,19 @@ type workerModel struct {
 	LastSeen    time.Time         `grove:"last_seen,notnull,default:current_timestamp"`
 	Metadata    map[string]string `grove:"metadata,type:jsonb"`
 	CreatedAt   time.Time         `grove:"created_at,notnull,default:current_timestamp"`
+
+	// Capacity uses the jsonb codec jobModel's resource sets use:
+	// resource.EncodeSet writes NULL for a zero Set, so a worker that
+	// advertised nothing reads back as a nil Set.
+	Capacity []byte `grove:"capacity,type:jsonb"`
 }
 
-func toWorkerModel(w *cluster.Worker) *workerModel {
+func toWorkerModel(w *cluster.Worker) (*workerModel, error) {
+	capacity, err := resource.EncodeSet(w.Capacity)
+	if err != nil {
+		return nil, fmt.Errorf(errPrefix+"encode worker capacity: %w", err)
+	}
+
 	return &workerModel{
 		ID:          w.ID.String(),
 		Hostname:    w.Hostname,
@@ -534,7 +592,8 @@ func toWorkerModel(w *cluster.Worker) *workerModel {
 		LastSeen:    w.LastSeen,
 		Metadata:    w.Metadata,
 		CreatedAt:   w.CreatedAt,
-	}
+		Capacity:    capacity,
+	}, nil
 }
 
 func fromWorkerModel(m *workerModel) (*cluster.Worker, error) {
@@ -543,12 +602,18 @@ func fromWorkerModel(m *workerModel) (*cluster.Worker, error) {
 		return nil, fmt.Errorf(errPrefix+"parse worker id %q: %w", m.ID, err)
 	}
 
+	capacity, err := resource.DecodeSet(m.Capacity)
+	if err != nil {
+		return nil, fmt.Errorf(errPrefix+"decode worker capacity: %w", err)
+	}
+
 	return &cluster.Worker{
 		ID:          parsedID,
 		Hostname:    m.Hostname,
 		Queues:      m.Queues,
 		Concurrency: m.Concurrency,
 		State:       cluster.WorkerState(m.State),
+		Capacity:    capacity,
 		IsLeader:    m.IsLeader,
 		LeaderUntil: m.LeaderUntil,
 		LastSeen:    m.LastSeen,

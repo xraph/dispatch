@@ -18,13 +18,17 @@ type ListOpts struct {
 
 // Store defines the persistence contract for workflows.
 type Store interface {
+	Reopener
+
 	// CreateRun persists a new workflow run.
 	CreateRun(ctx context.Context, run *Run) error
 
 	// GetRun retrieves a workflow run by ID.
 	GetRun(ctx context.Context, runID id.RunID) (*Run, error)
 
-	// UpdateRun persists changes to an existing workflow run.
+	// UpdateRun persists changes to an existing workflow run. It refuses a
+	// ReplayGeneration that no longer matches with dispatch.ErrInvalidState,
+	// so an old execution cannot overwrite a later replay's claim.
 	UpdateRun(ctx context.Context, run *Run) error
 
 	// ListRuns returns workflow runs matching the given options.
@@ -38,13 +42,13 @@ type Store interface {
 	// Returns nil data if no checkpoint exists.
 	GetCheckpoint(ctx context.Context, runID id.RunID, stepName string) ([]byte, error)
 
-	// ListCheckpoints returns all checkpoints for a workflow run.
+	// ListCheckpoints returns checkpoints in ascending creation-time/ID order.
 	ListCheckpoints(ctx context.Context, runID id.RunID) ([]*Checkpoint, error)
 
 	// ListChildRuns returns all child workflow runs for a parent.
 	ListChildRuns(ctx context.Context, parentRunID id.RunID) ([]*Run, error)
 
-	// DeleteCheckpointsAfter removes all checkpoints created after the
-	// given step name (by creation order). Used for workflow replay.
+	// DeleteCheckpointsAfter removes checkpoints strictly after the named
+	// step in creation-time/ID order, preserving the target and earlier ties.
 	DeleteCheckpointsAfter(ctx context.Context, runID id.RunID, afterStep string) error
 }

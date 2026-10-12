@@ -3,6 +3,8 @@ package memory
 import (
 	"context"
 	"fmt"
+	"maps"
+	"slices"
 	"sort"
 	"sync"
 	"time"
@@ -12,6 +14,7 @@ import (
 	"github.com/xraph/dispatch/cluster"
 	"github.com/xraph/dispatch/cron"
 	"github.com/xraph/dispatch/dlq"
+	"github.com/xraph/dispatch/durable"
 	"github.com/xraph/dispatch/event"
 	"github.com/xraph/dispatch/id"
 	"github.com/xraph/dispatch/job"
@@ -34,7 +37,18 @@ var (
 // Store is a fully in-memory implementation of store.Store.
 // Safe for concurrent access. Intended for unit testing and development.
 type Store struct {
-	mu sync.RWMutex
+	taskDeferrals        map[taskDeferralKey]durable.WorkflowTaskDeferral
+	taskDeferralReceipts map[taskDeferralKey]durable.WorkflowTaskDeferral
+	mu                   sync.RWMutex
+	legacyAttempts       map[string]durable.LegacyAttempt
+	namespaces           map[string]durable.NamespaceRecord
+	outbox               map[string]durable.DeliveryRecord
+	retirementNamespaces map[string]durable.CompatibilityFacts
+	buildAdmissions      map[durable.BuildTarget]durable.BuildAdmission
+	queryRuntimes        map[queryRuntimeKey]durable.QueryRuntimeBinding
+	lifecycleReceipts    map[lifecycleReceiptKey]durable.LifecycleReceipt
+	// outboxPrepare injects preparation failure in package tests, before publication.
+	outboxPrepare func(durable.Delivery) error
 
 	jobs        map[string]*job.Job
 	runs        map[string]*workflow.Run
@@ -44,9 +58,16 @@ type Store struct {
 	events      map[string]*event.Event
 	workers     map[string]*cluster.Worker
 
-	jobUsage      []*job.Usage
-	artifacts     map[string]*artifact.Artifact
-	artifactLinks []*artifact.Link
+	jobUsage              []*job.Usage
+	artifacts             map[string]*artifact.Artifact
+	artifactLinks         []*artifact.Link
+	executions            map[durable.Key]*executionRecord
+	executionHeads        map[durable.Key]durable.Key
+	childParents          map[durable.Key]durable.ChildExecution
+	childDeliveries       map[childDeliveryKey]durable.ChildDelivery
+	childDeliveryReceipts map[childDeliveryReceiptKey]childDeliveryReceiptRecord
+	signalReceipts        map[signalReceiptKey]signalReceiptRecord
+	cancellationReceipts  map[signalReceiptKey]cancellationReceiptRecord
 
 	// leader tracks the current cluster leader worker ID string.
 	leader      string
@@ -56,14 +77,29 @@ type Store struct {
 // New returns a new empty Store.
 func New() *Store {
 	return &Store{
-		jobs:        make(map[string]*job.Job),
-		runs:        make(map[string]*workflow.Run),
-		checkpoints: make(map[string]*workflow.Checkpoint),
-		crons:       make(map[string]*cron.Entry),
-		dlqs:        make(map[string]*dlq.Entry),
-		events:      make(map[string]*event.Event),
-		workers:     make(map[string]*cluster.Worker),
-		artifacts:   make(map[string]*artifact.Artifact),
+		taskDeferrals:         make(map[taskDeferralKey]durable.WorkflowTaskDeferral),
+		taskDeferralReceipts:  make(map[taskDeferralKey]durable.WorkflowTaskDeferral),
+		namespaces:            make(map[string]durable.NamespaceRecord),
+		retirementNamespaces:  make(map[string]durable.CompatibilityFacts),
+		buildAdmissions:       make(map[durable.BuildTarget]durable.BuildAdmission),
+		queryRuntimes:         make(map[queryRuntimeKey]durable.QueryRuntimeBinding),
+		lifecycleReceipts:     make(map[lifecycleReceiptKey]durable.LifecycleReceipt),
+		outbox:                make(map[string]durable.DeliveryRecord),
+		jobs:                  make(map[string]*job.Job),
+		runs:                  make(map[string]*workflow.Run),
+		checkpoints:           make(map[string]*workflow.Checkpoint),
+		crons:                 make(map[string]*cron.Entry),
+		dlqs:                  make(map[string]*dlq.Entry),
+		events:                make(map[string]*event.Event),
+		workers:               make(map[string]*cluster.Worker),
+		artifacts:             make(map[string]*artifact.Artifact),
+		executions:            make(map[durable.Key]*executionRecord),
+		executionHeads:        make(map[durable.Key]durable.Key),
+		childParents:          make(map[durable.Key]durable.ChildExecution),
+		childDeliveries:       make(map[childDeliveryKey]durable.ChildDelivery),
+		childDeliveryReceipts: make(map[childDeliveryReceiptKey]childDeliveryReceiptRecord),
+		signalReceipts:        make(map[signalReceiptKey]signalReceiptRecord),
+		cancellationReceipts:  make(map[signalReceiptKey]cancellationReceiptRecord),
 	}
 }
 
@@ -371,7 +407,8 @@ func (m *Store) CreateRun(_ context.Context, run *workflow.Run) error {
 	if _, exists := m.runs[key]; exists {
 		return dispatch.ErrJobAlreadyExists // reuse for "already exists"
 	}
-	m.runs[key] = run
+	stored := *run
+	m.runs[key] = &stored
 	return nil
 }
 
@@ -384,7 +421,8 @@ func (m *Store) GetRun(_ context.Context, runID id.RunID) (*workflow.Run, error)
 	if !ok {
 		return nil, dispatch.ErrRunNotFound
 	}
-	return r, nil
+	copyRun := *r
+	return &copyRun, nil
 }
 
 // UpdateRun persists changes to an existing workflow run.
@@ -393,11 +431,16 @@ func (m *Store) UpdateRun(_ context.Context, run *workflow.Run) error {
 	defer m.mu.Unlock()
 
 	key := run.ID.String()
-	if _, ok := m.runs[key]; !ok {
+	current, ok := m.runs[key]
+	if !ok {
 		return dispatch.ErrRunNotFound
 	}
+	if current.ReplayGeneration != run.ReplayGeneration {
+		return fmt.Errorf("%w: run %s replay generation changed", dispatch.ErrInvalidState, run.ID)
+	}
 	run.UpdatedAt = time.Now().UTC()
-	m.runs[key] = run
+	stored := *run
+	m.runs[key] = &stored
 	return nil
 }
 
@@ -478,7 +521,7 @@ func (m *Store) ListCheckpoints(_ context.Context, runID id.RunID) ([]*workflow.
 	}
 
 	sort.Slice(result, func(i, k int) bool {
-		return result[i].CreatedAt.Before(result[k].CreatedAt)
+		return workflow.CompareCheckpoints(result[i], result[k]) < 0
 	})
 
 	return result, nil
@@ -518,12 +561,10 @@ func (m *Store) DeleteCheckpointsAfter(_ context.Context, runID id.RunID, afterS
 		return nil // step not found; nothing to delete
 	}
 
-	// Delete all checkpoints for this run created at or after the target,
-	// except the target itself. Using !Before covers the case where
-	// multiple checkpoints share the exact same timestamp.
+	// Keep the target and earlier IDs when creation times tie.
 	for k, cp := range m.checkpoints {
 		if len(k) > len(prefix) && k[:len(prefix)] == prefix && k != targetKey {
-			if !cp.CreatedAt.Before(target.CreatedAt) {
+			if workflow.CompareCheckpoints(cp, target) > 0 {
 				delete(m.checkpoints, k)
 			}
 		}
@@ -670,12 +711,18 @@ func (m *Store) DeleteCron(_ context.Context, entryID id.CronID) error {
 // DLQ Store
 // ──────────────────────────────────────────────────
 
-// PushDLQ adds a failed job entry to the dead letter queue.
+// PushDLQ adds a failed job entry to the dead letter queue. An ID that is
+// already there is refused with dispatch.ErrDLQAlreadyExists rather than
+// overwritten, which would silently drop a replay claim.
 func (m *Store) PushDLQ(_ context.Context, entry *dlq.Entry) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	m.dlqs[entry.ID.String()] = entry
+	key := entry.ID.String()
+	if _, exists := m.dlqs[key]; exists {
+		return dispatch.ErrDLQAlreadyExists
+	}
+	m.dlqs[key] = entry
 	return nil
 }
 
@@ -819,12 +866,31 @@ func (m *Store) AckEvent(_ context.Context, eventID id.EventID) error {
 // Cluster Store
 // ──────────────────────────────────────────────────
 
-// RegisterWorker adds a new worker to the cluster registry.
+// cloneWorker returns a copy of w that shares no maps, slices or pointers
+// with it. The store keeps its own copy and hands out copies, because the
+// engine's heartbeat writes LastSeen on one goroutine while the dashboard
+// and the fleet capacity check read workers on others.
+func cloneWorker(w *cluster.Worker) *cluster.Worker {
+	out := *w
+	out.Queues = slices.Clone(w.Queues)
+	out.Capacity = w.Capacity.Clone()
+	out.Metadata = maps.Clone(w.Metadata)
+
+	if w.LeaderUntil != nil {
+		until := *w.LeaderUntil
+		out.LeaderUntil = &until
+	}
+
+	return &out
+}
+
+// RegisterWorker adds a worker to the cluster registry, replacing any
+// existing entry with the same ID.
 func (m *Store) RegisterWorker(_ context.Context, w *cluster.Worker) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	m.workers[w.ID.String()] = w
+	m.workers[w.ID.String()] = cloneWorker(w)
 	return nil
 }
 
@@ -854,6 +920,18 @@ func (m *Store) HeartbeatWorker(_ context.Context, workerID id.WorkerID) error {
 	return nil
 }
 
+// GetWorker returns a copy of one registered worker.
+func (m *Store) GetWorker(_ context.Context, workerID id.WorkerID) (*cluster.Worker, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	w, ok := m.workers[workerID.String()]
+	if !ok {
+		return nil, dispatch.ErrWorkerNotFound
+	}
+	return cloneWorker(w), nil
+}
+
 // ListWorkers returns all registered workers.
 func (m *Store) ListWorkers(_ context.Context) ([]*cluster.Worker, error) {
 	m.mu.RLock()
@@ -861,7 +939,7 @@ func (m *Store) ListWorkers(_ context.Context) ([]*cluster.Worker, error) {
 
 	result := make([]*cluster.Worker, 0, len(m.workers))
 	for _, w := range m.workers {
-		result = append(result, w)
+		result = append(result, cloneWorker(w))
 	}
 
 	sort.Slice(result, func(i, k int) bool {
@@ -881,7 +959,7 @@ func (m *Store) ReapDeadWorkers(_ context.Context, threshold time.Duration) ([]*
 	var dead []*cluster.Worker
 	for _, w := range m.workers {
 		if w.LastSeen.Before(cutoff) {
-			dead = append(dead, w)
+			dead = append(dead, cloneWorker(w))
 		}
 	}
 	return dead, nil
@@ -964,5 +1042,5 @@ func (m *Store) GetLeader(_ context.Context) (*cluster.Worker, error) {
 	if !ok {
 		return nil, nil
 	}
-	return w, nil
+	return cloneWorker(w), nil
 }

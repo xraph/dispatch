@@ -43,13 +43,16 @@ func (s *Store) GetRun(ctx context.Context, runID id.RunID) (*workflow.Run, erro
 func (s *Store) UpdateRun(ctx context.Context, run *workflow.Run) error {
 	m := toRunModel(run)
 	m.UpdatedAt = time.Now().UTC()
-	res, err := s.pgdb.NewUpdate(m).WherePK().Exec(ctx)
+	res, err := s.pgdb.NewUpdate(m).WherePK().Where("replay_generation = ?", run.ReplayGeneration).Exec(ctx)
 	if err != nil {
 		return fmt.Errorf(errPrefix+"update run: %w", err)
 	}
 	rows, _ := res.RowsAffected() //nolint:errcheck // driver always returns nil
 	if rows == 0 {
-		return dispatch.ErrRunNotFound
+		if _, getErr := s.GetRun(ctx, run.ID); getErr != nil {
+			return getErr
+		}
+		return fmt.Errorf("%w: run %s replay generation changed", dispatch.ErrInvalidState, run.ID)
 	}
 	return nil
 }
@@ -132,7 +135,7 @@ func (s *Store) ListCheckpoints(ctx context.Context, runID id.RunID) ([]*workflo
 	var models []checkpointModel
 	err := s.pgdb.NewSelect(&models).
 		Where("run_id = ?", runID.String()).
-		OrderExpr("created_at ASC").
+		OrderExpr("created_at ASC, id ASC").
 		Scan(ctx)
 	if err != nil {
 		return nil, fmt.Errorf(errPrefix+"list checkpoints: %w", err)
@@ -176,7 +179,7 @@ func (s *Store) ListChildRuns(ctx context.Context, parentRunID id.RunID) ([]*wor
 func (s *Store) DeleteCheckpointsAfter(ctx context.Context, runID id.RunID, afterStep string) error {
 	_, err := s.pgdb.NewDelete(&checkpointModel{}).
 		Where("run_id = ?", runID.String()).
-		Where("created_at > (SELECT created_at FROM dispatch_checkpoints WHERE run_id = ? AND step_name = ?)", runID.String(), afterStep).
+		Where("(created_at, id) > (SELECT created_at, id FROM dispatch_checkpoints WHERE run_id = ? AND step_name = ?)", runID.String(), afterStep).
 		Exec(ctx)
 	if err != nil {
 		return fmt.Errorf(errPrefix+"delete checkpoints after: %w", err)
