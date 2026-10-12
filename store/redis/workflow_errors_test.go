@@ -6,13 +6,12 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
-	"net"
+	"slices"
 	"sync/atomic"
 	"testing"
 
-	goredis "github.com/redis/go-redis/v9"
-	"github.com/xraph/grove/kv/drivers/redisdriver"
+	"github.com/xraph/grove/hook"
+	"github.com/xraph/grove/kv"
 
 	"github.com/xraph/dispatch"
 	"github.com/xraph/dispatch/id"
@@ -20,33 +19,30 @@ import (
 	"github.com/xraph/dispatch/workflow"
 )
 
+// workflowReadFault fails every GET or MGET that touches key, the way a
+// Redis outage on that one read would.
 type workflowReadFault struct{ key atomic.Value }
 
-func (h *workflowReadFault) DialHook(next goredis.DialHook) goredis.DialHook {
-	return func(ctx context.Context, n, a string) (net.Conn, error) { return next(ctx, n, a) }
-}
-func (h *workflowReadFault) ProcessPipelineHook(next goredis.ProcessPipelineHook) goredis.ProcessPipelineHook {
-	return next
-}
-func (h *workflowReadFault) ProcessHook(next goredis.ProcessHook) goredis.ProcessHook {
-	return func(ctx context.Context, cmd goredis.Cmder) error {
-		if cmd.Name() == "get" && fmt.Sprint(cmd.Args()[1]) == h.key.Load().(string) {
-			err := errors.New("injected workflow read outage")
-			cmd.SetErr(err)
-			return err
-		}
-		return next(ctx, cmd)
+// BeforeQuery implements hook.PreQueryHook.
+func (h *workflowReadFault) BeforeQuery(_ context.Context, qc *hook.QueryContext) (*hook.HookResult, error) {
+	if qc.Operation != kv.OpGet && qc.Operation != kv.OpMGet {
+		return nil, nil
 	}
+	target, _ := h.key.Load().(string)
+	keys, _ := qc.Values["_kv_keys"].([]string)
+	if target != "" && slices.Contains(keys, target) {
+		return nil, errors.New("injected workflow read outage")
+	}
+	return nil, nil
 }
 
 func TestWorkflowReadsRejectPartialResults(t *testing.T) {
 	ctx := context.Background()
 	kvStore := setupTestKV(t)
 	s := redisstore.New(kvStore)
-	client := redisdriver.UnwrapClient(kvStore)
-	hook := &workflowReadFault{}
-	hook.key.Store("")
-	client.AddHook(hook)
+	fault := &workflowReadFault{}
+	fault.key.Store("")
+	kvStore.Hooks().AddHook(fault)
 	parent := id.NewRunID()
 	run := &workflow.Run{Entity: dispatch.NewEntity(), ID: id.NewRunID(), Name: "child", State: workflow.RunStateCompleted, ParentRunID: &parent}
 	if err := s.CreateRun(ctx, run); err != nil {
@@ -70,20 +66,20 @@ func TestWorkflowReadsRejectPartialResults(t *testing.T) {
 	}
 	for name, read := range reads {
 		t.Run(name, func(t *testing.T) {
-			original, err := client.Get(ctx, read.key).Bytes()
+			original, err := kvStore.GetRaw(ctx, read.key)
 			if err != nil {
 				t.Fatal(err)
 			}
 			for _, mode := range []string{"outage", "json", "id", "parent-or-run-id"} {
 				t.Run(mode, func(t *testing.T) {
 					t.Cleanup(func() {
-						hook.key.Store("")
-						if restoreErr := client.Set(ctx, read.key, original, 0).Err(); restoreErr != nil {
+						fault.key.Store("")
+						if restoreErr := kvStore.SetRaw(ctx, read.key, original); restoreErr != nil {
 							t.Error(restoreErr)
 						}
 					})
 					if mode == "outage" {
-						hook.key.Store(read.key)
+						fault.key.Store(read.key)
 					} else {
 						raw := []byte("{broken")
 						if mode != "json" {
@@ -104,7 +100,7 @@ func TestWorkflowReadsRejectPartialResults(t *testing.T) {
 								t.Fatal(err)
 							}
 						}
-						if err := client.Set(ctx, read.key, raw, 0).Err(); err != nil {
+						if err := kvStore.SetRaw(ctx, read.key, raw); err != nil {
 							t.Fatal(err)
 						}
 					}
@@ -123,10 +119,10 @@ func TestWorkflowReadsRejectPartialResults(t *testing.T) {
 		}
 	}
 	// A dangling set member is different from an outage or a corrupt record.
-	if err := client.SAdd(ctx, "dispatch:run_ids", id.NewRunID().String()).Err(); err != nil {
+	if _, err := kvStore.SAdd(ctx, "dispatch:run_ids", id.NewRunID().String()); err != nil {
 		t.Fatal(err)
 	}
-	if err := client.SAdd(ctx, "dispatch:checkpoint_idx:"+run.ID.String(), "missing").Err(); err != nil {
+	if _, err := kvStore.SAdd(ctx, "dispatch:checkpoint_idx:"+run.ID.String(), "missing"); err != nil {
 		t.Fatal(err)
 	}
 	runs, err := s.ListChildRuns(ctx, parent)

@@ -7,8 +7,6 @@ import (
 	"strconv"
 	"time"
 
-	goredis "github.com/redis/go-redis/v9"
-
 	"github.com/xraph/dispatch"
 	"github.com/xraph/dispatch/dlq"
 	"github.com/xraph/dispatch/id"
@@ -138,7 +136,7 @@ func fromDLQEntity(e *dlqEntity) (*dlq.Entry, error) {
 // index, KEYS[4] the job's dlqByJob set, KEYS[5] dlqJobIndexed.
 // ARGV[1] the entry blob, ARGV[2] the entry ID, ARGV[3] its created score.
 // Returns 1 when written, 0 when the entry already existed.
-var pushDLQScript = goredis.NewScript(`
+const pushDLQScript = `
 if not redis.call('SET', KEYS[1], ARGV[1], 'NX') then
   return 0
 end
@@ -147,7 +145,7 @@ redis.call('SADD', KEYS[2], ARGV[2])
 redis.call('SADD', KEYS[4], ARGV[2])
 redis.call('SADD', KEYS[5], ARGV[2])
 return 1
-`)
+`
 
 // PushDLQ adds a failed job entry to the dead letter queue. An ID that is
 // already there is refused with dispatch.ErrDLQAlreadyExists rather than
@@ -162,7 +160,7 @@ func (s *Store) PushDLQ(ctx context.Context, entry *dlq.Entry) error {
 		return fmt.Errorf("dispatch/redis: push dlq marshal: %w", err)
 	}
 
-	res, err := pushDLQScript.Run(ctx, s.rdb,
+	res, err := s.kv.Eval(ctx, pushDLQScript,
 		[]string{
 			s.keys.dlq(eID),
 			s.keys.dlqIDs(),
@@ -173,11 +171,11 @@ func (s *Store) PushDLQ(ctx context.Context, entry *dlq.Entry) error {
 		blob,
 		eID,
 		strconv.FormatFloat(createdScore(entry.ID), 'f', -1, 64),
-	).Int64()
+	)
 	if err != nil {
 		return fmt.Errorf("dispatch/redis: push dlq: %w", err)
 	}
-	if res == 0 {
+	if scriptInt(res) == 0 {
 		return dispatch.ErrDLQAlreadyExists
 	}
 
@@ -186,7 +184,7 @@ func (s *Store) PushDLQ(ctx context.Context, entry *dlq.Entry) error {
 
 // ListDLQ returns DLQ entries matching the given options.
 func (s *Store) ListDLQ(ctx context.Context, opts dlq.ListOpts) ([]*dlq.Entry, error) {
-	ids, err := s.rdb.SMembers(ctx, s.keys.dlqIDs()).Result()
+	ids, err := s.kv.SMembers(ctx, s.keys.dlqIDs())
 	if err != nil {
 		return nil, fmt.Errorf("dispatch/redis: list dlq: %w", err)
 	}
@@ -237,7 +235,7 @@ func (s *Store) ReplayDLQ(ctx context.Context, entryID id.DLQID) error {
 
 // PurgeDLQ removes DLQ entries with FailedAt before the given time.
 func (s *Store) PurgeDLQ(ctx context.Context, before time.Time) (int64, error) {
-	ids, err := s.rdb.SMembers(ctx, s.keys.dlqIDs()).Result()
+	ids, err := s.kv.SMembers(ctx, s.keys.dlqIDs())
 	if err != nil {
 		return 0, fmt.Errorf("dispatch/redis: purge dlq smembers: %w", err)
 	}
@@ -251,14 +249,22 @@ func (s *Store) PurgeDLQ(ctx context.Context, before time.Time) (int64, error) {
 		}
 
 		if e.FailedAt.Before(before) {
-			pipe := s.rdb.TxPipeline()
-			pipe.Del(ctx, key)
-			pipe.SRem(ctx, s.keys.dlqIDs(), eID)
-			pipe.ZRem(ctx, s.keys.byCreated(entityDLQ), eID)
-			pipe.SRem(ctx, s.keys.dlqByJob(e.JobID), eID)
-			pipe.SRem(ctx, s.keys.dlqJobIndexed(), eID)
-			if _, pErr := pipe.Exec(ctx); pErr != nil {
+			if pErr := s.kv.Delete(ctx, key); pErr != nil {
 				return purged, fmt.Errorf("dispatch/redis: purge dlq del: %w", pErr)
+			}
+
+			// The entry goes first, so a crash partway leaves only index
+			// members pointing at nothing, which every read skips.
+			if _, pErr := s.kv.SRem(ctx, s.keys.dlqIDs(), eID); pErr != nil {
+				return purged, fmt.Errorf("dispatch/redis: purge dlq index: %w", pErr)
+			}
+			if _, pErr := s.kv.ZRem(ctx, s.keys.byCreated(entityDLQ), eID); pErr != nil {
+				return purged, fmt.Errorf("dispatch/redis: purge dlq created index: %w", pErr)
+			}
+			for _, set := range []string{s.keys.dlqByJob(e.JobID), s.keys.dlqJobIndexed()} {
+				if _, pErr := s.kv.SRem(ctx, set, eID); pErr != nil {
+					return purged, fmt.Errorf("dispatch/redis: purge dlq job index: %w", pErr)
+				}
 			}
 			purged++
 		}
@@ -268,7 +274,7 @@ func (s *Store) PurgeDLQ(ctx context.Context, before time.Time) (int64, error) {
 
 // CountDLQ returns the total number of entries in the dead letter queue.
 func (s *Store) CountDLQ(ctx context.Context) (int64, error) {
-	count, err := s.rdb.SCard(ctx, s.keys.dlqIDs()).Result()
+	count, err := s.kv.SCard(ctx, s.keys.dlqIDs())
 	if err != nil {
 		return 0, fmt.Errorf("dispatch/redis: count dlq: %w", err)
 	}

@@ -2,11 +2,11 @@ package redis
 
 import (
 	"context"
-	"net"
 	"strings"
 	"sync"
 
-	goredis "github.com/redis/go-redis/v9"
+	"github.com/xraph/grove/hook"
+	"github.com/xraph/grove/kv"
 )
 
 // SetListScanBudgetForTest lowers how many index members one paged list
@@ -14,54 +14,32 @@ import (
 // its budget without writing thousands of rows.
 func (s *Store) SetListScanBudgetForTest(n int) { s.scanBudget = n }
 
-// commandLog records the Redis commands a store sends once it is attached.
+// commandLog records the kv operations a store sends once it is attached.
 type commandLog struct {
-	mu        sync.Mutex
-	singles   []string
-	pipelines [][]string
+	mu   sync.Mutex
+	sent []string
 }
 
-func (l *commandLog) DialHook(next goredis.DialHook) goredis.DialHook {
-	return func(ctx context.Context, network, addr string) (net.Conn, error) {
-		return next(ctx, network, addr)
-	}
+// BeforeQuery implements hook.PreQueryHook.
+func (l *commandLog) BeforeQuery(_ context.Context, qc *hook.QueryContext) (*hook.HookResult, error) {
+	l.mu.Lock()
+	l.sent = append(l.sent, strings.ToLower(kv.CommandName(qc.Operation)))
+	l.mu.Unlock()
+
+	return nil, nil
 }
 
-func (l *commandLog) ProcessHook(next goredis.ProcessHook) goredis.ProcessHook {
-	return func(ctx context.Context, cmd goredis.Cmder) error {
-		l.mu.Lock()
-		l.singles = append(l.singles, strings.ToLower(cmd.Name()))
-		l.mu.Unlock()
-
-		return next(ctx, cmd)
-	}
-}
-
-func (l *commandLog) ProcessPipelineHook(next goredis.ProcessPipelineHook) goredis.ProcessPipelineHook {
-	return func(ctx context.Context, cmds []goredis.Cmder) error {
-		names := make([]string, len(cmds))
-		for i, c := range cmds {
-			names[i] = strings.ToLower(c.Name())
-		}
-		l.mu.Lock()
-		l.pipelines = append(l.pipelines, names)
-		l.mu.Unlock()
-
-		return next(ctx, cmds)
-	}
-}
-
-// RecordCommandsForTest starts recording every command this store sends.
-// The returned function reports what was sent so far: the commands sent on
-// their own, and each pipeline (a MULTI shows as multi ... exec).
-func (s *Store) RecordCommandsForTest() func() (singles []string, pipelines [][]string) {
+// RecordCommandsForTest starts recording every kv operation this store
+// sends. The returned function reports them in order, lower-cased. A
+// script shows as one "eval", whatever it runs on the server.
+func (s *Store) RecordCommandsForTest() func() []string {
 	l := &commandLog{}
-	s.rdb.AddHook(l)
+	s.kv.Hooks().AddHook(l)
 
-	return func() ([]string, [][]string) {
+	return func() []string {
 		l.mu.Lock()
 		defer l.mu.Unlock()
 
-		return append([]string(nil), l.singles...), append([][]string(nil), l.pipelines...)
+		return append([]string(nil), l.sent...)
 	}
 }

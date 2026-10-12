@@ -5,8 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-
-	goredis "github.com/redis/go-redis/v9"
 )
 
 // The conditional writes on JSON entities (the replay claim and its
@@ -52,7 +50,7 @@ import (
 // the blob to write in its place.
 // Returns casWritten, casMissing when the key no longer exists, or
 // casChanged when it holds something else.
-var casSetScript = goredis.NewScript(`
+const casSetScript = `
 local cur = redis.call('GET', KEYS[1])
 if not cur then
   return 0
@@ -62,7 +60,7 @@ if cur ~= ARGV[1] then
 end
 redis.call('SET', KEYS[1], ARGV[2])
 return 1
-`)
+`
 
 const (
 	casMissing = 0
@@ -89,8 +87,10 @@ var errSkipWrite = errors.New("dispatch/redis: nothing to write")
 // refusal can be a sentinel the caller passes straight up.
 func updateEntity[T any](ctx context.Context, s *Store, key string, notFound error, mutate func(e *T) error) error {
 	for range casAttempts {
-		raw, err := s.rdb.Get(ctx, key).Bytes()
-		if errors.Is(err, goredis.Nil) {
+		// GetRaw hands back the driver's bytes untouched, which is what
+		// casSetScript compares against on the server.
+		raw, err := s.kv.GetRaw(ctx, key)
+		if isNotFound(err) {
 			return notFound
 		}
 		if err != nil {
@@ -114,11 +114,11 @@ func updateEntity[T any](ctx context.Context, s *Store, key string, notFound err
 			return fmt.Errorf("dispatch/redis: marshal %s: %w", key, marshalErr)
 		}
 
-		res, runErr := casSetScript.Run(ctx, s.rdb, []string{key}, raw, next).Int64()
+		reply, runErr := s.kv.Eval(ctx, casSetScript, []string{key}, raw, next)
 		if runErr != nil {
 			return fmt.Errorf("dispatch/redis: write %s: %w", key, runErr)
 		}
-		switch res {
+		switch scriptInt(reply) {
 		case casWritten:
 			return nil
 		case casMissing:

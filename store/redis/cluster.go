@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/xraph/grove/kv"
+
 	"github.com/xraph/dispatch"
 	"github.com/xraph/dispatch/cluster"
 	"github.com/xraph/dispatch/id"
@@ -79,7 +81,7 @@ func (s *Store) RegisterWorker(ctx context.Context, w *cluster.Worker) error {
 		return fmt.Errorf("dispatch/redis: register worker set: %w", err)
 	}
 
-	if err := s.rdb.SAdd(ctx, s.keys.workerIDs(), wID).Err(); err != nil {
+	if _, err := s.kv.SAdd(ctx, s.keys.workerIDs(), wID); err != nil {
 		return fmt.Errorf("dispatch/redis: register worker index: %w", err)
 	}
 	return nil
@@ -98,13 +100,14 @@ func (s *Store) DeregisterWorker(ctx context.Context, workerID id.WorkerID) erro
 		return dispatch.ErrWorkerNotFound
 	}
 
-	pipe := s.rdb.TxPipeline()
-	pipe.Del(ctx, key)
-	pipe.SRem(ctx, s.keys.workerIDs(), wID)
-	_, err = pipe.Exec(ctx)
-	if err != nil {
+	if err = s.kv.Delete(ctx, key); err != nil {
 		return fmt.Errorf("dispatch/redis: deregister worker: %w", err)
 	}
+
+	if _, err = s.kv.SRem(ctx, s.keys.workerIDs(), wID); err != nil {
+		return fmt.Errorf("dispatch/redis: deregister worker index: %w", err)
+	}
+
 	return nil
 }
 
@@ -133,7 +136,7 @@ func (s *Store) HeartbeatWorker(ctx context.Context, workerID id.WorkerID) error
 		return fmt.Errorf("dispatch/redis: heartbeat set: %w", err)
 	}
 
-	if err := s.rdb.SAdd(ctx, s.keys.workerIDs(), wID).Err(); err != nil {
+	if _, err := s.kv.SAdd(ctx, s.keys.workerIDs(), wID); err != nil {
 		return fmt.Errorf("dispatch/redis: heartbeat index: %w", err)
 	}
 	return nil
@@ -156,7 +159,7 @@ func (s *Store) GetWorker(ctx context.Context, workerID id.WorkerID) (*cluster.W
 
 // ListWorkers returns all registered workers.
 func (s *Store) ListWorkers(ctx context.Context) ([]*cluster.Worker, error) {
-	ids, err := s.rdb.SMembers(ctx, s.keys.workerIDs()).Result()
+	ids, err := s.kv.SMembers(ctx, s.keys.workerIDs())
 	if err != nil {
 		return nil, fmt.Errorf("dispatch/redis: list workers: %w", err)
 	}
@@ -184,7 +187,7 @@ func (s *Store) ListWorkers(ctx context.Context) ([]*cluster.Worker, error) {
 func (s *Store) DeleteStaleWorkers(ctx context.Context, threshold time.Duration) (int64, error) {
 	cutoff := now().Add(-threshold)
 
-	ids, err := s.rdb.SMembers(ctx, s.keys.workerIDs()).Result()
+	ids, err := s.kv.SMembers(ctx, s.keys.workerIDs())
 	if err != nil {
 		return 0, fmt.Errorf("dispatch/redis: delete stale smembers: %w", err)
 	}
@@ -196,17 +199,18 @@ func (s *Store) DeleteStaleWorkers(ctx context.Context, threshold time.Duration)
 			// Orphaned set member without a backing entity — treat as
 			// stale and remove from the index.
 			if isNotFound(getErr) {
-				if remErr := s.rdb.SRem(ctx, s.keys.workerIDs(), wID).Err(); remErr == nil {
+				if _, remErr := s.kv.SRem(ctx, s.keys.workerIDs(), wID); remErr == nil {
 					deleted++
 				}
 			}
 			continue
 		}
 		if e.LastSeen.Before(cutoff) {
-			pipe := s.rdb.TxPipeline()
-			pipe.Del(ctx, s.keys.worker(wID))
-			pipe.SRem(ctx, s.keys.workerIDs(), wID)
-			if _, execErr := pipe.Exec(ctx); execErr == nil {
+			if execErr := s.kv.Delete(ctx, s.keys.worker(wID)); execErr != nil {
+				continue
+			}
+
+			if _, execErr := s.kv.SRem(ctx, s.keys.workerIDs(), wID); execErr == nil {
 				deleted++
 			}
 		}
@@ -218,7 +222,7 @@ func (s *Store) DeleteStaleWorkers(ctx context.Context, threshold time.Duration)
 func (s *Store) ReapDeadWorkers(ctx context.Context, threshold time.Duration) ([]*cluster.Worker, error) {
 	cutoff := now().Add(-threshold)
 
-	ids, err := s.rdb.SMembers(ctx, s.keys.workerIDs()).Result()
+	ids, err := s.kv.SMembers(ctx, s.keys.workerIDs())
 	if err != nil {
 		return nil, fmt.Errorf("dispatch/redis: reap smembers: %w", err)
 	}
@@ -254,10 +258,18 @@ func (s *Store) AcquireLeadership(ctx context.Context, workerID id.WorkerID, ttl
 		return false, dispatch.ErrWorkerNotFound
 	}
 
-	// Try SET NX with TTL (atomic acquire).
-	ok, err := s.rdb.SetNX(ctx, s.keys.leader(), wID, ttl).Result()
-	if err != nil {
-		return false, fmt.Errorf("dispatch/redis: acquire leadership setnx: %w", err)
+	// Set-if-absent with a TTL is the atomic acquire: a conflict means
+	// someone else already holds it, which is an answer rather than a
+	// failure.
+	setErr := s.kv.SetRaw(ctx, s.keys.leader(), []byte(wID), kv.WithNX(), kv.WithTTL(ttl))
+
+	ok := setErr == nil
+	if setErr != nil && errors.Is(setErr, kv.ErrConflict) {
+		setErr = nil
+	}
+
+	if setErr != nil {
+		return false, fmt.Errorf("dispatch/redis: acquire leadership setnx: %w", setErr)
 	}
 	if ok {
 		// We got the lock -- update worker fields.
@@ -272,13 +284,14 @@ func (s *Store) AcquireLeadership(ctx context.Context, workerID id.WorkerID, ttl
 	}
 
 	// Check if we already hold it.
-	current, err := s.rdb.Get(ctx, s.keys.leader()).Result()
-	if err != nil && !isRedisNil(err) {
+	currentRaw, err := s.kv.GetRaw(ctx, s.keys.leader())
+	if err != nil && !isNotFound(err) {
 		return false, fmt.Errorf("dispatch/redis: acquire leadership get: %w", err)
 	}
-	if current == wID {
+
+	if string(currentRaw) == wID {
 		// Re-acquire: extend TTL.
-		_ = s.rdb.Expire(ctx, s.keys.leader(), ttl).Err() //nolint:errcheck // best-effort
+		_ = s.kv.Expire(ctx, s.keys.leader(), ttl) //nolint:errcheck // best-effort
 		until := now().Add(ttl)
 		var e workerEntity
 		if getErr := s.getEntity(ctx, wKey, &e); getErr == nil {
@@ -296,18 +309,18 @@ func (s *Store) AcquireLeadership(ctx context.Context, workerID id.WorkerID, ttl
 func (s *Store) RenewLeadership(ctx context.Context, workerID id.WorkerID, ttl time.Duration) (bool, error) {
 	wID := workerID.String()
 
-	current, err := s.rdb.Get(ctx, s.keys.leader()).Result()
+	currentRaw, err := s.kv.GetRaw(ctx, s.keys.leader())
 	if err != nil {
-		if isRedisNil(err) {
+		if isNotFound(err) {
 			return false, nil // no leader
 		}
 		return false, fmt.Errorf("dispatch/redis: renew leadership get: %w", err)
 	}
-	if current != wID {
+	if string(currentRaw) != wID {
 		return false, nil // not the leader
 	}
 
-	_ = s.rdb.Expire(ctx, s.keys.leader(), ttl).Err() //nolint:errcheck // best-effort
+	_ = s.kv.Expire(ctx, s.keys.leader(), ttl) //nolint:errcheck // best-effort
 	until := now().Add(ttl)
 	var e workerEntity
 	if getErr := s.getEntity(ctx, s.keys.worker(wID), &e); getErr == nil {
@@ -319,15 +332,15 @@ func (s *Store) RenewLeadership(ctx context.Context, workerID id.WorkerID, ttl t
 
 // GetLeader returns the current cluster leader, or nil if there is no leader.
 func (s *Store) GetLeader(ctx context.Context) (*cluster.Worker, error) {
-	wID, err := s.rdb.Get(ctx, s.keys.leader()).Result()
+	wIDRaw, err := s.kv.GetRaw(ctx, s.keys.leader())
 	if err != nil {
-		if isRedisNil(err) {
+		if isNotFound(err) {
 			return nil, nil // no leader
 		}
 		return nil, fmt.Errorf("dispatch/redis: get leader: %w", err)
 	}
 
-	workerID, parseErr := id.ParseWorkerID(wID)
+	workerID, parseErr := id.ParseWorkerID(string(wIDRaw))
 	if parseErr != nil {
 		return nil, fmt.Errorf("dispatch/redis: parse leader ID: %w", parseErr)
 	}

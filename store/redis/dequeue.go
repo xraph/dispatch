@@ -3,12 +3,11 @@ package redis
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"sort"
 	"time"
 
-	goredis "github.com/redis/go-redis/v9"
+	kvdriver "github.com/xraph/grove/kv/driver"
 
 	"github.com/xraph/dispatch/job"
 )
@@ -243,13 +242,16 @@ func (s *Store) scanQueue(
 	)
 
 	for {
-		stop := int64(-1) // the whole index
+		// An unbounded score range paged by offset visits members in the
+		// same order as a rank range, so this is the index scan it
+		// replaces -- expressed in the one range form kv exposes.
+		spec := kvdriver.RangeSpec{Offset: scanned}
 		if !full {
-			stop = scanned + window - 1
+			spec.Count = window
 		}
 
-		ids, err := s.rdb.ZRange(ctx, key, scanned, stop).Result()
-		if err != nil && !isRedisNil(err) {
+		ids, err := s.kv.ZRange(ctx, key, spec)
+		if err != nil && !isNotFound(err) {
 			return nil, fmt.Errorf("dispatch/redis: dequeue scan %q: %w", q, err)
 		}
 
@@ -349,26 +351,25 @@ func (s *Store) eligibleIn(
 // against a clustered client, where the job keys of one queue are spread
 // over many slots.
 func (s *Store) readJobEntities(ctx context.Context, ids []string) ([]*jobEntity, error) {
-	pipe := s.rdb.Pipeline()
-
-	cmds := make([]*goredis.StringCmd, len(ids))
+	keys := make([]string, len(ids))
 	for i, jID := range ids {
-		cmds[i] = pipe.Get(ctx, s.keys.job(jID))
+		keys[i] = s.keys.job(jID)
 	}
 
-	// A missing key makes Exec report goredis.Nil for the batch as a
-	// whole; the per-command results below distinguish the misses, and a
-	// job that vanished between the index read and this one is simply not
-	// a candidate.
-	if _, err := pipe.Exec(ctx); err != nil && !errors.Is(err, goredis.Nil) {
+	// MGetRaw pipelines its GETs rather than issuing one MGET, so this
+	// stays a single round trip and stays correct against a clustered
+	// client, where one queue's job keys are spread over many slots. A
+	// job that vanished between the index read and this one comes back
+	// nil and is simply not a candidate.
+	raws, err := s.kv.MGetRaw(ctx, keys)
+	if err != nil {
 		return nil, fmt.Errorf("dispatch/redis: dequeue read entities: %w", err)
 	}
 
 	out := make([]*jobEntity, len(ids))
 
-	for i, cmd := range cmds {
-		raw, err := cmd.Bytes()
-		if err != nil {
+	for i, raw := range raws {
+		if raw == nil {
 			continue
 		}
 
@@ -425,23 +426,28 @@ func (s *Store) claimCandidates(
 	opts job.DequeueOpts,
 	candidates []dequeueCandidate,
 ) ([]*job.Job, error) {
-	pipe := s.rdb.Pipeline()
+	// Each ZRem is its own round trip now rather than one pipelined
+	// batch. The pipeline was never providing atomicity -- it was a
+	// Pipeline, not a TxPipeline -- so the claim semantics are unchanged:
+	// a single ZRem is atomic on its own, and returning 1 still means
+	// this worker took the job. What it costs is one round trip per
+	// candidate instead of one per batch, bounded by the dequeue limit.
+	wins := make([]bool, len(candidates))
 
-	rems := make([]*goredis.IntCmd, len(candidates))
 	for i, c := range candidates {
-		rems[i] = pipe.ZRem(ctx, s.keys.queue(c.queue), c.id)
-	}
+		won, err := s.kv.ZRem(ctx, s.keys.queue(c.queue), c.id)
+		if err != nil {
+			return nil, fmt.Errorf("dispatch/redis: dequeue claim: %w", err)
+		}
 
-	if _, err := pipe.Exec(ctx); err != nil {
-		return nil, fmt.Errorf("dispatch/redis: dequeue claim: %w", err)
+		wins[i] = won == 1
 	}
 
 	t := now()
 	claimed := make([]*job.Job, 0, len(candidates))
 
 	for i, c := range candidates {
-		won, err := rems[i].Result()
-		if err != nil || won != 1 {
+		if !wins[i] {
 			continue // another worker removed it first
 		}
 

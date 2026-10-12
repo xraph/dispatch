@@ -310,14 +310,14 @@ func TestListJobs_pagesThroughIDsFromOneMillisecond(t *testing.T) {
 }
 
 // The set and index counts that decide whether to backfill must come from
-// one MULTI. As two round trips, a delete landing between them makes the
+// one script. As two round trips, a delete landing between them makes the
 // set look one member ahead of the index, and the list rebuilds the whole
 // index for nothing (and can put back a member a concurrent delete just
 // removed). A race cannot be forced deterministically, so this pins the
-// shape instead: the counts travel in one MULTI, and a list over an index
-// that is in step with its set, including after a delete, never reads the
-// whole set.
-func TestListJobs_readsTheBackfillCountsInOneMulti(t *testing.T) {
+// shape instead: no count travels on its own, a script reads them, and a
+// list over an index that is in step with its set, including after a
+// delete, never reads the whole set.
+func TestListJobs_readsTheBackfillCountsInOneScript(t *testing.T) {
 	ctx := context.Background()
 	s := redisstore.New(setupTestKV(t))
 
@@ -345,26 +345,19 @@ func TestListJobs_readsTheBackfillCountsInOneMulti(t *testing.T) {
 		t.Fatalf("listed %d jobs, want the 2 that were not deleted", len(page.Jobs))
 	}
 
-	singles, pipelines := sent()
-	for _, name := range singles {
+	commands := sent()
+	var evals int
+	for _, name := range commands {
 		switch name {
 		case "scard", "zcard":
-			t.Errorf("%s was sent on its own; the two counts must share one MULTI", name)
+			t.Errorf("%s was sent on its own; the two counts must come from one script", name)
 		case "smembers", "zadd":
 			t.Errorf("%s was sent: an index in step with its set must not backfill", name)
+		case "eval":
+			evals++
 		}
 	}
-
-	var counted bool
-	for _, p := range pipelines {
-		if slices.Contains(p, "scard") && slices.Contains(p, "zcard") {
-			counted = true
-			if p[0] != "multi" || p[len(p)-1] != "exec" {
-				t.Errorf("counts pipeline = %v, want it wrapped in multi ... exec", p)
-			}
-		}
-	}
-	if !counted {
-		t.Errorf("no pipeline carried both SCARD and ZCARD; pipelines were %v", pipelines)
+	if evals == 0 {
+		t.Errorf("no script read the counts; commands were %v", commands)
 	}
 }

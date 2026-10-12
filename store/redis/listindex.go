@@ -30,13 +30,11 @@ func createdScore(i id.ID) float64 {
 
 // indexCreated adds member to entity's created-order index.
 //
-// The create paths that write one key at a time call this BEFORE they
-// write the entity. A crash between the two then leaves an index member
-// with no entity, which the list reads skip. The other order would leave
-// a row the lists cannot see until a later list call notices its ID set
-// has outgrown the index and backfills. The create paths that already
-// write their indexes in one MULTI (job enqueue) add the member inside it
-// instead.
+// Every create path calls this BEFORE it writes the entity. A crash
+// between the two then leaves an index member with no entity, which the
+// list reads skip. The other order would leave a row the lists cannot see
+// until a later list call notices its ID set has outgrown the index and
+// backfills.
 func (s *Store) indexCreated(ctx context.Context, entity string, member id.ID) error {
 	_, err := s.kv.ZAdd(ctx, s.keys.byCreated(entity), driver.ScoredMember{
 		Member: member.String(),
@@ -45,6 +43,12 @@ func (s *Store) indexCreated(ctx context.Context, entity string, member id.ID) e
 
 	return err
 }
+
+// countSetAndIndexScript reads SCARD of KEYS[1] and ZCARD of KEYS[2] in
+// one atomic step and returns both.
+const countSetAndIndexScript = `
+return {redis.call('SCARD', KEYS[1]), redis.call('ZCARD', KEYS[2])}
+`
 
 // backfillChunk bounds how many members one ZADD carries while an index
 // is built from its ID set, so a large set does not become one huge
@@ -55,24 +59,22 @@ const backfillChunk = 500
 // entity's created-order index when the set has outgrown it. Every list
 // call runs it before reading the index; the check is two O(1) counts.
 //
-// The two counts are read in one MULTI, so they describe one instant. Read
-// as two round trips, a delete landing between them (it removes the ID
-// from the set and the index in one MULTI) would show the set one member
-// ahead of the index, and the list would run a full backfill although
-// nothing is missing. With the counts in one MULTI, a delete is either
-// wholly before them or wholly after them, so the check itself cannot be
-// fooled into a backfill by a delete in flight.
+// The two counts are read in one script, so they describe one instant.
+// Read as two round trips, a delete landing between them would show the
+// set one member ahead of the index, and the list would run a full
+// backfill although nothing is missing. With the counts in one script, a
+// delete's SREM is either before them or after them.
 //
-// The SMEMBERS that follows is not in that MULTI. When a backfill does run
+// The SMEMBERS that follows is not in that script. When a backfill does run
 // (legacy rows, or a rolling upgrade), a delete that lands between the
 // SMEMBERS and the ZADD can have its member put back in the index, since
 // nothing removes index members except the delete that already ran. That
 // is harmless to results, because the reads skip a member whose entity is
 // gone, and it is the same kind of leftover as the one described below.
 //
-// On this release every create writes its index member before, or in the
-// same MULTI as, its ID-set member, and every delete removes both in one
-// MULTI. So a snapshot shows the set holding more members than the index
+// On this release every create writes its index member before its ID-set
+// member, and every delete removes the ID-set member before the index
+// member. So a snapshot shows the set holding more members than the index
 // only when something wrote the set alone. That is every row from a
 // release before the index existed, and every row a process still on that
 // release writes during a rolling upgrade. Either way this ZADDs the whole
@@ -91,13 +93,15 @@ const backfillChunk = 500
 func (s *Store) ensureBackfilled(ctx context.Context, entity, idsKey string) error {
 	index := s.keys.byCreated(entity)
 
-	pipe := s.rdb.TxPipeline()
-	setCount := pipe.SCard(ctx, idsKey)
-	indexCount := pipe.ZCard(ctx, index)
-	if _, err := pipe.Exec(ctx); err != nil {
+	raw, err := s.kv.Eval(ctx, countSetAndIndexScript, []string{idsKey, index})
+	if err != nil {
 		return fmt.Errorf("dispatch/redis: count %s ids and index: %w", entity, err)
 	}
-	inSet, inIndex := setCount.Val(), indexCount.Val()
+	counts, ok := raw.([]any)
+	if !ok || len(counts) != 2 {
+		return fmt.Errorf("dispatch/redis: count %s ids and index: unexpected reply %T", entity, raw)
+	}
+	inSet, inIndex := scriptInt(counts[0]), scriptInt(counts[1])
 
 	if inSet <= inIndex {
 		return nil

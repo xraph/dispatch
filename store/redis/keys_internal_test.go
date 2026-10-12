@@ -22,6 +22,22 @@ func TestKeys_full(t *testing.T) {
 	}
 }
 
+// Usage keys arrived after WithKeyPrefix and must not slip back to the
+// unprefixed namespace: a shared Redis would then mix two tenants' usage
+// history into one estimator read.
+func TestKeys_usageCarriesPrefix(t *testing.T) {
+	k := newKeys("ws_acme:")
+	for got, want := range map[string]string{
+		k.usage("u1"):         "ws_acme:dispatch:usage:u1",
+		k.usageIndex():        "ws_acme:dispatch:usage_index",
+		k.usageName("resize"): "ws_acme:dispatch:usage_name:resize",
+	} {
+		if got != want {
+			t.Fatalf("usage key = %q, want %q", got, want)
+		}
+	}
+}
+
 // The created-order indexes are new keys on data that already exists in
 // production, so their exact shape is pinned: renaming one would orphan
 // every index already built and quietly backfill a new one.

@@ -247,7 +247,9 @@ func (r *Runner) Close() error {
 //     cancelled it, or JobFailed otherwise, so extensions still observe
 //     the loss.
 func (r *Runner) Execute(ctx context.Context, j *job.Job) error {
-	terminal, err := r.terminalFor(j)
+	at := &attemptUsage{}
+
+	terminal, err := r.terminalFor(j, at)
 	if err != nil {
 		// terminalFor fails before the middleware chain — and therefore
 		// r.mw — ever runs, so returning err bare here, as this used to,
@@ -284,8 +286,15 @@ func (r *Runner) Execute(ctx context.Context, j *job.Job) error {
 	j.UpdatedAt = now
 
 	if execErr != nil {
+		// Recorded before handleFailure, which mutates RetryCount on its
+		// way to scheduling the next attempt: the row must describe the
+		// attempt that just ran, not the one about to.
+		r.recordUsage(ctx, j, at, job.StateFailed, elapsed, j.WorkerID)
+
 		return r.handleFailure(ctx, j, execErr, now)
 	}
+
+	r.recordUsage(ctx, j, at, job.StateCompleted, elapsed, j.WorkerID)
 
 	return r.handleSuccess(ctx, j, now, elapsed)
 }
@@ -296,7 +305,7 @@ func (r *Runner) Execute(ctx context.Context, j *job.Job) error {
 // timeout, and artifact staging — wraps this closure, which is precisely
 // why staging keeps running in the worker process and an out-of-process
 // handler receives a directory rather than storage credentials.
-func (r *Runner) terminalFor(j *job.Job) (middleware.Handler, error) {
+func (r *Runner) terminalFor(j *job.Job, at *attemptUsage) (middleware.Handler, error) {
 	if r.executors == nil {
 		handler, ok := r.registry.Get(j.Name)
 		if !ok {
@@ -367,6 +376,16 @@ func (r *Runner) terminalFor(j *job.Job) (middleware.Handler, error) {
 			}
 
 			return &exec.Error{Status: exec.StatusLaunchFailed, Msg: runErr.Error()}
+		}
+
+		// The Result is the only place an attempt's measurements exist,
+		// and it does not survive this closure. Copy them out before
+		// collapsing it to an error, and before committing outputs: an
+		// attempt whose commit fails still consumed what it consumed.
+		if at != nil && res != nil {
+			at.usage = res.Usage
+			at.executor = executor.Name()
+			at.measured = true
 		}
 
 		// Commit what the sandbox actually left on disk before reporting

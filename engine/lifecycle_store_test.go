@@ -268,6 +268,10 @@ func (s *strictLifecycleStore) ListDLQPage(arg0 context.Context, arg1 dlq.PageOp
 	defer s.call("ListDLQPage")()
 	return s.base.ListDLQPage(arg0, arg1)
 }
+func (s *strictLifecycleStore) ListJobUsage(arg0 context.Context, arg1 job.UsageListOpts) ([]*job.Usage, error) {
+	defer s.call("ListJobUsage")()
+	return s.base.ListJobUsage(arg0, arg1)
+}
 func (s *strictLifecycleStore) ListJobs(arg0 context.Context, arg1 job.ListJobsOpts) (job.Page, error) {
 	defer s.call("ListJobs")()
 	return s.base.ListJobs(arg0, arg1)
@@ -324,6 +328,10 @@ func (s *strictLifecycleStore) PurgeDLQ(arg0 context.Context, arg1 time.Time) (i
 	defer s.call("PurgeDLQ")()
 	return s.base.PurgeDLQ(arg0, arg1)
 }
+func (s *strictLifecycleStore) PurgeJobUsage(arg0 context.Context, arg1 time.Time, arg2 int) (int64, error) {
+	defer s.call("PurgeJobUsage")()
+	return s.base.PurgeJobUsage(arg0, arg1, arg2)
+}
 func (s *strictLifecycleStore) PushDLQ(arg0 context.Context, arg1 *dlq.Entry) error {
 	defer s.call("PushDLQ")()
 	return s.base.PushDLQ(arg0, arg1)
@@ -347,6 +355,10 @@ func (s *strictLifecycleStore) ReclaimExpiredLeases(arg0 context.Context, arg1 i
 func (s *strictLifecycleStore) RecordHeartbeat(arg0 context.Context, arg1 durable.HeartbeatRequest) (durable.Receipt, error) {
 	defer s.call("RecordHeartbeat")()
 	return s.base.RecordHeartbeat(arg0, arg1)
+}
+func (s *strictLifecycleStore) RecordJobUsage(arg0 context.Context, arg1 *job.Usage) error {
+	defer s.call("RecordJobUsage")()
+	return s.base.RecordJobUsage(arg0, arg1)
 }
 func (s *strictLifecycleStore) RegisterCron(arg0 context.Context, arg1 *cron.Entry) error {
 	defer s.call("RegisterCron")()

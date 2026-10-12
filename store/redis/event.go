@@ -5,8 +5,6 @@ import (
 	"fmt"
 	"time"
 
-	goredis "github.com/redis/go-redis/v9"
-
 	"github.com/xraph/dispatch"
 	"github.com/xraph/dispatch/event"
 	"github.com/xraph/dispatch/id"
@@ -53,6 +51,11 @@ func fromEventEntity(e *eventEntity) (*event.Event, error) {
 	}, nil
 }
 
+// eventScanBatch bounds one poll of an event stream. A waiter is looking
+// for the first match, not draining the stream, so reading more per pass
+// costs latency on every miss and buys nothing on a hit.
+const eventScanBatch = 10
+
 // PublishEvent persists a new event and adds it to the name's stream.
 func (s *Store) PublishEvent(ctx context.Context, evt *event.Event) error {
 	eID := evt.ID.String()
@@ -64,12 +67,9 @@ func (s *Store) PublishEvent(ctx context.Context, evt *event.Event) error {
 	}
 
 	// Add to the named stream so subscribers get notified.
-	if err := s.rdb.XAdd(ctx, &goredis.XAddArgs{
-		Stream: s.keys.eventStream(evt.Name),
-		Values: map[string]interface{}{
-			"event_id": eID,
-		},
-	}).Err(); err != nil {
+	if _, err := s.kv.XAdd(ctx, s.keys.eventStream(evt.Name), map[string][]byte{
+		"event_id": []byte(eID),
+	}); err != nil {
 		return fmt.Errorf("dispatch/redis: publish event stream: %w", err)
 	}
 	return nil
@@ -93,16 +93,18 @@ func (s *Store) SubscribeEvent(ctx context.Context, name string, timeout time.Du
 		}
 
 		// Read oldest messages from the stream.
-		msgs, err := s.rdb.XRangeN(ctx, stream, "-", "+", 10).Result()
+		msgs, err := s.kv.XRange(ctx, stream, "", "", eventScanBatch)
 		if err != nil {
 			return nil, fmt.Errorf("dispatch/redis: subscribe xrange: %w", err)
 		}
 
 		for _, msg := range msgs {
-			eID, ok := msg.Values["event_id"].(string)
+			raw, ok := msg.Values["event_id"]
 			if !ok {
 				continue
 			}
+
+			eID := string(raw)
 
 			key := s.keys.event(eID)
 			var e eventEntity

@@ -19,6 +19,54 @@ var (
 	_ workflow.Reopener    = (*Store)(nil)
 )
 
+// countTwoSetsScript reads SCARD of KEYS[1] and KEYS[2] in one atomic
+// step and returns both.
+const countTwoSetsScript = `
+return {redis.call('SCARD', KEYS[1]), redis.call('SCARD', KEYS[2])}
+`
+
+// setDiffScript returns the members of KEYS[1] that are not in KEYS[2].
+const setDiffScript = `
+return redis.call('SDIFF', KEYS[1], KEYS[2])
+`
+
+// deleteDLQScript removes a DLQ entry and every index that points at it.
+//
+// KEYS[1] the entry key, KEYS[2] dlqIDs, KEYS[3] the DLQ created-order
+// index, KEYS[4] the job's dlqByJob set, KEYS[5] dlqJobIndexed. ARGV[1] the
+// entry ID. Returns 1 when this call deleted the entry, 0 when it was
+// already gone, in which case nothing is touched.
+const deleteDLQScript = `
+if redis.call('DEL', KEYS[1]) == 0 then
+  return 0
+end
+redis.call('SREM', KEYS[2], ARGV[1])
+redis.call('ZREM', KEYS[3], ARGV[1])
+redis.call('SREM', KEYS[4], ARGV[1])
+redis.call('SREM', KEYS[5], ARGV[1])
+return 1
+`
+
+// scriptStrings reads a script reply that is a list of strings.
+func scriptStrings(v any) ([]string, error) {
+	if v == nil {
+		return nil, nil
+	}
+	items, ok := v.([]any)
+	if !ok {
+		return nil, fmt.Errorf("unexpected script reply %T", v)
+	}
+	out := make([]string, 0, len(items))
+	for _, item := range items {
+		str, isStr := item.(string)
+		if !isStr {
+			return nil, fmt.Errorf("unexpected script reply element %T", item)
+		}
+		out = append(out, str)
+	}
+	return out, nil
+}
+
 // ClaimReplay marks an unreplayed entry replayed by jobID. The decision
 // and the write are one compare-and-set (updateEntity), so of two
 // concurrent claims exactly one wins and the other re-reads the entry,
@@ -63,7 +111,7 @@ func (s *Store) GetDLQByJobID(ctx context.Context, jobID id.JobID) (*dlq.Entry, 
 		return nil, err
 	}
 
-	members, err := s.rdb.SMembers(ctx, s.keys.dlqByJob(jobID.String())).Result()
+	members, err := s.kv.SMembers(ctx, s.keys.dlqByJob(jobID.String()))
 	if err != nil {
 		return nil, fmt.Errorf("dispatch/redis: read dlq entries of job %s: %w", jobID, err)
 	}
@@ -96,12 +144,14 @@ func (s *Store) GetDLQByJobID(ctx context.Context, jobID id.JobID) (*dlq.Entry, 
 // would report them not found and a retry would skip their replay claim.
 //
 // It follows ensureBackfilled (listindex.go): both counts are read in one
-// MULTI, and when dlqIDs holds no more members than dlqJobIndexed there is
+// script, and when dlqIDs holds no more members than dlqJobIndexed there is
 // nothing to do, which is every call once all rows are indexed. Otherwise
 // it reads the difference, looks up each entry's job, and adds the entry
-// to its job's set and to dlqJobIndexed in one MULTI per entry. An entry
-// whose blob is gone is marked indexed anyway, since it has no job to be
-// found under, so it does not make every later call look again.
+// to its job's set and then to dlqJobIndexed. A crash between the two
+// leaves the entry unmarked, so the next call indexes it again, and SADD
+// of a present member changes nothing. An entry whose blob is gone is
+// marked indexed anyway, since it has no job to be found under, so it does
+// not make every later call look again.
 //
 // The leftovers are the same kind ensureBackfilled describes. A delete
 // that lands between this read and its write leaves a dlqByJob member
@@ -111,17 +161,23 @@ func (s *Store) GetDLQByJobID(ctx context.Context, jobID id.JobID) (*dlq.Entry, 
 func (s *Store) ensureDLQJobIndex(ctx context.Context) error {
 	idsKey, indexedKey := s.keys.dlqIDs(), s.keys.dlqJobIndexed()
 
-	pipe := s.rdb.TxPipeline()
-	setCount := pipe.SCard(ctx, idsKey)
-	indexedCount := pipe.SCard(ctx, indexedKey)
-	if _, err := pipe.Exec(ctx); err != nil {
+	raw, err := s.kv.Eval(ctx, countTwoSetsScript, []string{idsKey, indexedKey})
+	if err != nil {
 		return fmt.Errorf("dispatch/redis: count dlq ids and job index: %w", err)
 	}
-	if setCount.Val() <= indexedCount.Val() {
+	counts, ok := raw.([]any)
+	if !ok || len(counts) != 2 {
+		return fmt.Errorf("dispatch/redis: count dlq ids and job index: unexpected reply %T", raw)
+	}
+	if scriptInt(counts[0]) <= scriptInt(counts[1]) {
 		return nil
 	}
 
-	missing, err := s.rdb.SDiff(ctx, idsKey, indexedKey).Result()
+	diff, err := s.kv.Eval(ctx, setDiffScript, []string{idsKey, indexedKey})
+	if err != nil {
+		return fmt.Errorf("dispatch/redis: read unindexed dlq ids: %w", err)
+	}
+	missing, err := scriptStrings(diff)
 	if err != nil {
 		return fmt.Errorf("dispatch/redis: read unindexed dlq ids: %w", err)
 	}
@@ -133,13 +189,13 @@ func (s *Store) ensureDLQJobIndex(ctx context.Context) error {
 			return fmt.Errorf("dispatch/redis: backfill dlq job index get %s: %w", m, getErr)
 		}
 
-		add := s.rdb.TxPipeline()
 		if getErr == nil {
-			add.SAdd(ctx, s.keys.dlqByJob(e.JobID), m)
+			if _, addErr := s.kv.SAdd(ctx, s.keys.dlqByJob(e.JobID), m); addErr != nil {
+				return fmt.Errorf("dispatch/redis: backfill dlq job index %s: %w", m, addErr)
+			}
 		}
-		add.SAdd(ctx, indexedKey, m)
-		if _, execErr := add.Exec(ctx); execErr != nil {
-			return fmt.Errorf("dispatch/redis: backfill dlq job index %s: %w", m, execErr)
+		if _, addErr := s.kv.SAdd(ctx, indexedKey, m); addErr != nil {
+			return fmt.Errorf("dispatch/redis: backfill dlq job index %s: %w", m, addErr)
 		}
 	}
 
@@ -147,8 +203,8 @@ func (s *Store) ensureDLQJobIndex(ctx context.Context) error {
 }
 
 // DeleteDLQ hard-deletes one entry together with every index that points
-// at it, in one MULTI. The entry is read first only to learn its job;
-// whether this call deleted it is decided by the DEL inside the MULTI, so
+// at it, in one script. The entry is read first only to learn its job;
+// whether this call deleted it is decided by the DEL inside the script, so
 // of two concurrent deletes exactly one returns nil.
 func (s *Store) DeleteDLQ(ctx context.Context, entryID id.DLQID) error {
 	eID := entryID.String()
@@ -162,16 +218,20 @@ func (s *Store) DeleteDLQ(ctx context.Context, entryID id.DLQID) error {
 		return fmt.Errorf("dispatch/redis: delete dlq get: %w", err)
 	}
 
-	pipe := s.rdb.TxPipeline()
-	deleted := pipe.Del(ctx, key)
-	pipe.SRem(ctx, s.keys.dlqIDs(), eID)
-	pipe.ZRem(ctx, s.keys.byCreated(entityDLQ), eID)
-	pipe.SRem(ctx, s.keys.dlqByJob(e.JobID), eID)
-	pipe.SRem(ctx, s.keys.dlqJobIndexed(), eID)
-	if _, err := pipe.Exec(ctx); err != nil {
+	deleted, err := s.kv.Eval(ctx, deleteDLQScript,
+		[]string{
+			key,
+			s.keys.dlqIDs(),
+			s.keys.byCreated(entityDLQ),
+			s.keys.dlqByJob(e.JobID),
+			s.keys.dlqJobIndexed(),
+		},
+		eID,
+	)
+	if err != nil {
 		return fmt.Errorf("dispatch/redis: delete dlq: %w", err)
 	}
-	if deleted.Val() == 0 {
+	if scriptInt(deleted) == 0 {
 		return dispatch.ErrDLQNotFound
 	}
 

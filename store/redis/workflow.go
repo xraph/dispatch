@@ -127,7 +127,7 @@ func (s *Store) CreateRun(ctx context.Context, run *workflow.Run) error {
 		return fmt.Errorf("dispatch/redis: create run set: %w", err)
 	}
 
-	if err := s.rdb.SAdd(ctx, s.keys.runIDs(), rID).Err(); err != nil {
+	if _, err := s.kv.SAdd(ctx, s.keys.runIDs(), rID); err != nil {
 		return fmt.Errorf("dispatch/redis: create run index: %w", err)
 	}
 	return nil
@@ -175,7 +175,7 @@ func (s *Store) UpdateRun(ctx context.Context, run *workflow.Run) error {
 
 // ListRuns returns workflow runs matching the given options.
 func (s *Store) ListRuns(ctx context.Context, opts workflow.ListOpts) ([]*workflow.Run, error) {
-	ids, err := s.rdb.SMembers(ctx, s.keys.runIDs()).Result()
+	ids, err := s.kv.SMembers(ctx, s.keys.runIDs())
 	if err != nil {
 		return nil, fmt.Errorf("dispatch/redis: list runs smembers: %w", err)
 	}
@@ -222,7 +222,7 @@ func (s *Store) SaveCheckpoint(ctx context.Context, runID id.RunID, stepName str
 		return fmt.Errorf("dispatch/redis: save checkpoint: %w", err)
 	}
 
-	if err := s.rdb.SAdd(ctx, s.keys.checkpointIndex(rID), stepName).Err(); err != nil {
+	if _, err := s.kv.SAdd(ctx, s.keys.checkpointIndex(rID), stepName); err != nil {
 		return fmt.Errorf("dispatch/redis: save checkpoint index: %w", err)
 	}
 	return nil
@@ -244,7 +244,7 @@ func (s *Store) GetCheckpoint(ctx context.Context, runID id.RunID, stepName stri
 // ListCheckpoints returns all checkpoints for a workflow run.
 func (s *Store) ListCheckpoints(ctx context.Context, runID id.RunID) ([]*workflow.Checkpoint, error) {
 	rID := runID.String()
-	steps, err := s.rdb.SMembers(ctx, s.keys.checkpointIndex(rID)).Result()
+	steps, err := s.kv.SMembers(ctx, s.keys.checkpointIndex(rID))
 	if err != nil {
 		return nil, fmt.Errorf("dispatch/redis: list checkpoints: %w", err)
 	}
@@ -325,11 +325,11 @@ func (s *Store) DeleteCheckpointsAfter(ctx context.Context, runID id.RunID, afte
 			continue
 		}
 		key := s.keys.checkpoint(rID, cp.StepName)
-		if err := s.rdb.Del(ctx, key).Err(); err != nil {
-			return fmt.Errorf("delete checkpoint %s: %w", key, err)
+		if delErr := s.kv.Delete(ctx, key); delErr != nil {
+			return fmt.Errorf("delete checkpoint %s: %w", key, delErr)
 		}
-		if err := s.rdb.SRem(ctx, s.keys.checkpointIndex(rID), cp.StepName).Err(); err != nil {
-			return fmt.Errorf("remove checkpoint index %s: %w", cp.StepName, err)
+		if _, remErr := s.kv.SRem(ctx, s.keys.checkpointIndex(rID), cp.StepName); remErr != nil {
+			return fmt.Errorf("remove checkpoint index %s: %w", cp.StepName, remErr)
 		}
 	}
 	return nil

@@ -25,7 +25,7 @@ func TestSummaryReadsPropagateOutagesAndCorruptRecords(t *testing.T) {
 	client := redisdriver.UnwrapClient(kvStore)
 	hook := &workflowReadFault{}
 	hook.key.Store("")
-	client.AddHook(hook)
+	kvStore.Hooks().AddHook(hook)
 	worker := &cluster.Worker{ID: id.NewWorkerID(), State: cluster.WorkerActive, LastSeen: time.Now(), CreatedAt: time.Now()}
 	if err := s.RegisterWorker(ctx, worker); err != nil {
 		t.Fatal(err)
