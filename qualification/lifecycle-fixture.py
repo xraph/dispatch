@@ -73,7 +73,8 @@ def main():
         current = call("durable.buildRetire", build | {"request_id": "fixture-retire", "expected_version": "1", "expected_epoch": "1"})
         call("durable.buildResume", build | {"request_id": "fixture-resume", "expected_version": current["version"], "expected_epoch": current["epoch"]})
 
-    until = time.monotonic() + 20
+    # Resume covers the maximum 30-second retry and 10 seconds for scheduling.
+    until = time.monotonic() + (40 if args.action == "resume" else 20)
     while True:
         output = {}
         for kind in kinds:
