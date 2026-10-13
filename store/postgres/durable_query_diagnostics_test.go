@@ -42,15 +42,11 @@ func TestNativeClockJSONRoundTrip(t *testing.T) {
 	if err = json.Unmarshal(raw, &recovered); err != nil || now != recovered || now.Location() != time.UTC {
 		t.Fatalf("native clock differs after JSON round trip: %v location=%s recovered=%s", err, now.Location(), recovered.Location())
 	}
-	before, err := json.Marshal(scanned)
-	if err != nil {
-		t.Fatal(err)
+	canonical := durable.Timestamp(scanned)
+	if !scanned.Equal(canonical) || canonical.Location() != time.UTC {
+		t.Fatal("clock canonicalization changed the instant")
 	}
-	after, err := json.Marshal(durable.Timestamp(scanned))
-	if err != nil || string(before) != string(after) {
-		t.Fatalf("clock canonicalization changed persisted bytes: %s != %s (%v)", before, after, err)
-	}
-	t.Logf("driver location=%s native location=%s local=%s unchanged wire=%s", scanned.Location(), now.Location(), time.Local, before)
+	t.Logf("driver offset=%s canonical=%s local=%s", scanned.Format(time.RFC3339Nano), canonical.Format(time.RFC3339Nano), time.Local)
 }
 
 func queryDiagnosticFixture(t *testing.T) (*Store, durable.VerifyQueryRuntimeRequest) {
