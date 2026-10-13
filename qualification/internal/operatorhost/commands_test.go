@@ -101,7 +101,7 @@ func (c *commandClient) request(method, path, token string, raw []byte) (int, []
 func (c *commandClient) envelope(intent string, payload any) []byte {
 	c.t.Helper()
 	kind := "command"
-	if intent == "durable.query" || intent == "durable.capabilities" || intent == "durable.compatibility" || intent == "durable.build" || intent == "durable.workerStatus" || intent == "durable.workerDrainReceipt" || intent == "durable.queryRuntime" || intent == "durable.queryRuntimeRemovalCheck" {
+	if intent == "durable.queryRemovalRevalidation" || intent == "durable.queryRemovalCommitStatus" || intent == "durable.queryRemovalGuardReceipt" || intent == "durable.query" || intent == "durable.capabilities" || intent == "durable.compatibility" || intent == "durable.build" || intent == "durable.workerStatus" || intent == "durable.workerDrainReceipt" || intent == "durable.queryRuntime" || intent == "durable.queryRuntimeRemovalCheck" {
 		kind = "query"
 	}
 	raw, err := json.Marshal(map[string]any{"envelope": "v1", "kind": kind, "contributor": "dispatch", "intent": intent, "intentVersion": 1, "idempotencyKey": "transport-" + intent, "csrf": c.csrf, "params": map[string]any{"namespace": "foreign"}, "payload": payload})

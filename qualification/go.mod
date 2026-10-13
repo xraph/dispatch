@@ -9,15 +9,15 @@ require (
 	github.com/golang-jwt/jwt/v5 v5.3.1
 	github.com/jackc/pgx/v5 v5.11.0
 	github.com/xraph/authsome v1.7.3-0.20261009205819-7b694db1b80a
-	github.com/xraph/chronicle v1.7.1-0.20261009182725-f75626bdff89
-	github.com/xraph/dispatch v1.7.1-0.20261010155241-dc2b759f2e64
-	github.com/xraph/forge v1.12.5-0.20261010012931-217abffa75f0
-	github.com/xraph/forge/extensions/auth v1.12.4-0.20261009184218-9ec7ce62855a
+	github.com/xraph/chronicle v1.8.0
+	github.com/xraph/dispatch v1.8.1-0.20261013152932-9cc8451d1cb1
+	github.com/xraph/forge v1.12.7
+	github.com/xraph/forge/extensions/auth v1.12.7
 	github.com/xraph/go-utils v1.3.0
-	github.com/xraph/grove v1.7.1
-	github.com/xraph/grove/drivers/pgdriver v1.7.1
-	github.com/xraph/relay v1.7.1-0.20261009182245-e91c9e295315
-	github.com/xraph/warden v1.7.0
+	github.com/xraph/grove v1.7.3
+	github.com/xraph/grove/drivers/pgdriver v1.7.3
+	github.com/xraph/relay v1.7.2
+	github.com/xraph/warden v1.7.1
 )
 
 require (
@@ -105,10 +105,9 @@ require (
 	github.com/xdg-go/scram v1.2.0 // indirect
 	github.com/xdg-go/stringprep v1.0.4 // indirect
 	github.com/xraph/confy v1.0.3 // indirect
-	github.com/xraph/grove/drivers/mongodriver v1.7.1 // indirect
-	github.com/xraph/grove/drivers/sqlitedriver v1.7.1 // indirect
-	github.com/xraph/grove/kv v1.7.1 // indirect
-	github.com/xraph/grove/kv/drivers/redisdriver v1.7.1 // indirect
+	github.com/xraph/grove/drivers/mongodriver v1.7.3 // indirect
+	github.com/xraph/grove/drivers/sqlitedriver v1.7.3 // indirect
+	github.com/xraph/grove/kv v1.7.3 // indirect
 	github.com/xraph/keysmith v1.7.0 // indirect
 	github.com/xraph/ledger v1.7.0 // indirect
 	github.com/xraph/trove v1.7.0 // indirect

@@ -19,6 +19,8 @@ import (
 // LifecycleOptions comes from trusted local configuration, never request fields.
 // StartupPolicy is the physical-instance enrollment hook for a deployment host.
 type LifecycleOptions struct {
+	// QueryRemovalGuardVerifier authenticates records from trusted host configuration.
+	QueryRemovalGuardVerifier durable.QueryRemovalGuardVerifier
 	// DiagnosticWriter is a trusted local sink. Writes must return promptly.
 	DiagnosticWriter     io.Writer
 	SkipSampleExecutions bool
@@ -57,7 +59,7 @@ type lifecycleHost struct {
 }
 
 func lifecycleActions() []string {
-	return []string{operator.ReadBuild, operator.EnrollRetirement, operator.RegisterBuild, operator.RetireBuild, operator.FinalizeBuild, operator.ResumeBuild, operator.ReadWorker, operator.DrainWorker, operator.ReadQueryRuntime, operator.RegisterQueryRuntime, operator.VerifyQueryRuntime, operator.RemoveQueryRuntime, operator.FinishQueryRuntime, operator.AbortQueryRuntime}
+	return []string{operator.RevalidateQueryRuntime, operator.ReadQueryRevalidation, operator.CommitQueryRemoval, operator.ReadQueryCommit, operator.CloseQueryGuard, operator.ReadQueryGuard, operator.ReadBuild, operator.EnrollRetirement, operator.RegisterBuild, operator.RetireBuild, operator.FinalizeBuild, operator.ResumeBuild, operator.ReadWorker, operator.DrainWorker, operator.ReadQueryRuntime, operator.RegisterQueryRuntime, operator.VerifyQueryRuntime, operator.RemoveQueryRuntime, operator.FinishQueryRuntime, operator.AbortQueryRuntime}
 }
 
 func defaultProbes(build string) []HistoricalProbe {

@@ -186,6 +186,7 @@ func newHost(ctx context.Context, store Store, options *LifecycleOptions) (host 
 	if h.lifecycle != nil {
 		operatorOptions.BuildIdentity = h.lifecycle.buildIdentity
 		operatorOptions.WorkerControl = h.lifecycle.workerControl
+		operatorOptions.QueryRemovalGuardVerifier = h.lifecycle.options.QueryRemovalGuardVerifier
 		operatorOptions.QueryHost = h.lifecycle
 		operatorOptions.QueryRejection = h.lifecycle.observeQueryRejection
 		operatorOptions.QueryRegistrationPolicy = h.lifecycle.options.RegistrationPolicy
