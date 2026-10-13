@@ -30,8 +30,8 @@ func TestExtension_Metadata(t *testing.T) {
 	if ext.Version() != extension.ExtensionVersion {
 		t.Errorf("Version() = %q, want %q", ext.Version(), extension.ExtensionVersion)
 	}
-	if deps := ext.Dependencies(); len(deps) != 0 {
-		t.Errorf("Dependencies() = %v, want empty", deps)
+	if deps := ext.Dependencies(); len(deps) != 1 || deps[0] != extension.GroveExtensionName {
+		t.Errorf("Dependencies() = %v, want [%s]", deps, extension.GroveExtensionName)
 	}
 }
 

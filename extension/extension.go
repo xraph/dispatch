@@ -13,6 +13,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"slices"
 	"sync"
 	"time"
 
@@ -52,6 +53,13 @@ const ExtensionDescription = "Durable execution engine for background jobs, work
 
 // ExtensionVersion is the semantic version.
 const ExtensionVersion = "0.1.0"
+
+// GroveExtensionName is the name the grove Forge extension registers
+// under. Dispatch declares it as a dependency so a grove-backed store
+// finds grove's database already in the container. It is spelled out
+// here, not imported, so Dispatch does not pull in grove's extension
+// module just to read a constant.
+const GroveExtensionName = "grove"
 
 // Ensure Extension implements forge.Extension at compile time.
 var _ forge.Extension = (*Extension)(nil)
@@ -112,6 +120,27 @@ func New(opts ...ExtOption) *Extension {
 		opt(e)
 	}
 	return e
+}
+
+// Dependencies implements [forge.Extension]. It adds the grove extension
+// to whatever was set with SetDependencies, so Forge registers and starts
+// grove first and the store resolution in Register can see its *grove.DB
+// or kv.Store.
+//
+// The dependency is declared unconditionally because the store is chosen
+// inside Register (WithGroveDatabase, WithGroveKV, or auto-discovery of a
+// default *grove.DB), after Forge has already ordered the extensions.
+// That is safe without grove: Forge skips a declared dependency that is
+// not a registered extension, so an app running Dispatch on its own store
+// starts exactly as before.
+func (e *Extension) Dependencies() []string {
+	deps := e.BaseExtension.Dependencies()
+	if slices.Contains(deps, GroveExtensionName) {
+		return deps
+	}
+	out := make([]string, 0, len(deps)+1)
+	out = append(out, deps...)
+	return append(out, GroveExtensionName)
 }
 
 // Engine returns the underlying dispatch engine.
