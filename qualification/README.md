@@ -143,6 +143,12 @@ the real Authsome session cookie, as covered by its HTTP tests. It provides no
 login bypass endpoint, permissive CORS policy or alternative identity provider.
 Use the payload credential only for the explicit reveal check.
 
+The same authenticated route group serves Forge's shared `/principal` and
+`/capabilities` handlers beneath `/api/dashboard/v1`. Forward these bootstrap
+requests through your proxy too. They return uncached session identity and the
+registered contract catalog. Each durable read or command still requires its
+own Warden permission, including when bootstrap succeeds.
+
 Set `DISPATCH_OPERATOR_DSN` before starting to use a disposable PostgreSQL
 database. You must not point this seeding host at shared or production data.
 It persists namespaces, executions, continuation history, task state and outbox

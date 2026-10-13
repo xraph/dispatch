@@ -23,6 +23,7 @@ import (
 	"github.com/xraph/forge/extensions/dashboard/contract/dispatcher"
 	"github.com/xraph/forge/extensions/dashboard/contract/idempotency"
 	"github.com/xraph/forge/extensions/dashboard/contract/transport"
+	dashhandlers "github.com/xraph/forge/extensions/dashboard/handlers"
 	dashsecurity "github.com/xraph/forge/extensions/dashboard/security"
 	"github.com/xraph/warden"
 	wid "github.com/xraph/warden/id"
@@ -222,6 +223,22 @@ func newHost(ctx context.Context, store Store, options *LifecycleOptions) (host 
 	router := forge.NewRouter()
 	router.Use(authEngine.AuthMiddleware())
 	router.Use(dashauth.ForgeMiddleware(contextUser{}))
+	for path, handler := range map[string]http.Handler{
+		"/api/dashboard/v1/principal":    dashhandlers.NewPrincipalHandler(dashhandlers.PrincipalOptions{AuthEnabled: true}),
+		"/api/dashboard/v1/capabilities": transport.NewCapabilitiesHandler(reg, []string{"v1"}, nil),
+	} {
+		if routeErr := router.GET(path, func(c forge.Context) error {
+			c.Response().Header().Set("Cache-Control", "no-store")
+			if dashauth.UserFromContext(c.Request().Context()) == nil {
+				dashhandlers.HandleAPIPrincipalHTTP(c.Response(), c.Request())
+				return nil
+			}
+			handler.ServeHTTP(c.Response(), c.Request())
+			return nil
+		}); routeErr != nil {
+			return nil, routeErr
+		}
+	}
 	csrfHandler := transport.NewCSRFTokenHandler(csrf, 10*time.Minute)
 	if err := router.GET("/api/dashboard/v1/csrf", func(c forge.Context) error { csrfHandler.ServeHTTP(c.Response(), c.Request()); return nil }); err != nil {
 		return nil, err
