@@ -56,7 +56,9 @@ func (r QueryRemovalOriginal) MatchOriginal(receipt LifecycleReceipt) error {
 
 // QueryRemovalCompatibleBuild permits only unchanged catalogs or final retirement.
 func QueryRemovalCompatibleBuild(prior, next BuildAdmission) bool {
-	if prior == next {
+	sameChangedAt := prior.ChangedAt.Equal(next.ChangedAt)
+	prior.ChangedAt, next.ChangedAt = time.Time{}, time.Time{}
+	if sameChangedAt && prior == next {
 		return true
 	}
 	return prior.BuildTarget == next.BuildTarget && prior.QueryIdentity == next.QueryIdentity && prior.Epoch == next.Epoch && prior.CutoffEpoch == next.CutoffEpoch && prior.State == BuildRetiring && next.State == BuildRetired && next.Version == prior.Version+1

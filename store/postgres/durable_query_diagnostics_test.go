@@ -2,6 +2,7 @@ package postgres
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -17,6 +18,40 @@ import (
 	"github.com/xraph/dispatch/durable"
 	"github.com/xraph/dispatch/durable/durabletest"
 )
+
+func TestNativeClockJSONRoundTrip(t *testing.T) {
+	s, _ := queryDiagnosticFixture(t)
+	tx, err := s.pgdb.BeginTx(t.Context(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.rollbackExecution(tx)
+	var scanned time.Time
+	if err = tx.QueryRow(t.Context(), `SELECT clock_timestamp()`).Scan(&scanned); err != nil {
+		t.Fatal(err)
+	}
+	now, err := executionTime(t.Context(), tx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := json.Marshal(now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var recovered time.Time
+	if err = json.Unmarshal(raw, &recovered); err != nil || now != recovered || now.Location() != time.UTC {
+		t.Fatalf("native clock differs after JSON round trip: %v location=%s recovered=%s", err, now.Location(), recovered.Location())
+	}
+	before, err := json.Marshal(scanned)
+	if err != nil {
+		t.Fatal(err)
+	}
+	after, err := json.Marshal(durable.Timestamp(scanned))
+	if err != nil || string(before) != string(after) {
+		t.Fatalf("clock canonicalization changed persisted bytes: %s != %s (%v)", before, after, err)
+	}
+	t.Logf("driver location=%s native location=%s local=%s unchanged wire=%s", scanned.Location(), now.Location(), time.Local, before)
+}
 
 func queryDiagnosticFixture(t *testing.T) (*Store, durable.VerifyQueryRuntimeRequest) {
 	t.Helper()

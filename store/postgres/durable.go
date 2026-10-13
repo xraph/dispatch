@@ -225,7 +225,7 @@ func (s *Store) rollbackExecution(tx driver.Tx) {
 func executionTime(ctx context.Context, tx driver.Tx) (time.Time, error) {
 	var now time.Time
 	err := tx.QueryRow(ctx, `SELECT clock_timestamp()`).Scan(&now)
-	return now, err
+	return durable.Timestamp(now), err
 }
 
 func executionBytes(value []byte) []byte {

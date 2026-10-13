@@ -27,12 +27,19 @@ type binding struct {
 
 func query[I, O any](intent string, fn func(context.Context, I, fc.Principal) (O, error)) binding {
 	return binding{intent: intent, bind: func(d *dispatcher.Dispatcher) error {
-		return dispatcher.RegisterQuery(d, ContributorName, intent, 1, fn, dispatcher.RequireKind(fc.KindQuery))
+		options := []dispatcher.RegisterOption{dispatcher.RequireKind(fc.KindQuery)}
+		if queryGuardDurableKind(intent) != "" {
+			options = append(options, strictQueryGuardInput[I]())
+		}
+		return dispatcher.RegisterQuery(d, ContributorName, intent, 1, fn, options...)
 	}}
 }
 func command[I, O any](deps Deps, intent string, fn func(context.Context, I, fc.Principal) (O, error)) binding {
 	return binding{intent: intent, bind: func(d *dispatcher.Dispatcher) error {
 		options := []dispatcher.RegisterOption{dispatcher.RequireKind(fc.KindCommand)}
+		if queryGuardDurableKind(intent) != "" {
+			options = append(options, strictQueryGuardInput[I]())
+		}
 		if durableKind(intent) == fc.KindCommand {
 			options = append(options, dispatcher.BypassIdempotency())
 		} else {

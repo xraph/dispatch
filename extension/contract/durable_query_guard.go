@@ -1,9 +1,13 @@
 package contract
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
+	"io"
 
 	fc "github.com/xraph/forge/extensions/dashboard/contract"
+	"github.com/xraph/forge/extensions/dashboard/contract/dispatcher"
 
 	"github.com/xraph/dispatch/durable"
 	"github.com/xraph/dispatch/operator"
@@ -65,4 +69,30 @@ func queryGuardDurableBindings(deps Deps) []binding {
 			return s.ReadQueryRemovalGuardReceipt(ctx, p, in)
 		})),
 	}
+}
+
+// strictQueryGuardInput rejects unknown fields before typed decoding can discard them.
+func strictQueryGuardInput[I any]() dispatcher.RegisterOption {
+	return dispatcher.BeforeDispatch(func(_ context.Context, request fc.Request, _ fc.Principal) error {
+		params, err := json.Marshal(request.Params)
+		if err != nil {
+			return fc.ErrBadRequest
+		}
+		for _, raw := range [][]byte{params, request.Payload} {
+			if len(raw) == 0 {
+				continue
+			}
+			var input I
+			decoder := json.NewDecoder(bytes.NewReader(raw))
+			decoder.DisallowUnknownFields()
+			if err := decoder.Decode(&input); err != nil {
+				return fc.ErrBadRequest
+			}
+			var extra any
+			if err := decoder.Decode(&extra); err != io.EOF {
+				return fc.ErrBadRequest
+			}
+		}
+		return nil
+	})
 }
