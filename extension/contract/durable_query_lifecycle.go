@@ -10,6 +10,9 @@ import (
 )
 
 func queryLifecycleDurableAction(intent string) string {
+	if action := queryGuardDurableAction(intent); action != "" {
+		return action
+	}
 	switch intent {
 	case "durable.queryRuntime":
 		return operator.ReadQueryRuntime
@@ -28,6 +31,9 @@ func queryLifecycleDurableAction(intent string) string {
 }
 
 func queryLifecycleDurableKind(intent string) fc.Kind {
+	if kind := queryGuardDurableKind(intent); kind != "" {
+		return kind
+	}
 	switch intent {
 	case "durable.queryRuntime", "durable.queryRuntimeRemovalCheck":
 		return fc.KindQuery
@@ -38,7 +44,7 @@ func queryLifecycleDurableKind(intent string) fc.Kind {
 }
 
 func queryLifecycleDurableBindings(deps Deps) []binding {
-	return []binding{
+	return append([]binding{
 		query("durable.queryRuntime", durableHandle(deps, "durable.queryRuntime", func(ctx context.Context, s *operator.Service, p security.Principal, in operator.QueryRuntimeInput) (operator.QueryRuntime, error) {
 			return s.QueryRuntime(ctx, p, in)
 		})),
@@ -60,5 +66,5 @@ func queryLifecycleDurableBindings(deps Deps) []binding {
 		command(deps, "durable.queryRuntimeAbort", durableHandle(deps, "durable.queryRuntimeAbort", func(ctx context.Context, s *operator.Service, p security.Principal, in operator.QueryRemovalInput) (operator.QueryRuntimeAcceptance, error) {
 			return s.AbortQueryRuntimeRemoval(ctx, p, in)
 		})),
-	}
+	}, queryGuardDurableBindings(deps)...)
 }

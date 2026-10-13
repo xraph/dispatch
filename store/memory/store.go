@@ -37,6 +37,12 @@ var (
 // Store is a fully in-memory implementation of store.Store.
 // Safe for concurrent access. Intended for unit testing and development.
 type Store struct {
+	queryRemovalGuards    map[queryGuardKey]durable.QueryRemovalGuard
+	queryRemovalCurrent   map[queryGuardKey]durable.QueryRemovalCurrent
+	queryRemovalMaterials map[queryGuardKey]durable.QueryRemovalRevalidationMaterial
+	queryRemovalCommits   map[queryGuardKey]durable.QueryRemovalCommitReceipt
+	queryRemovalCloses    map[queryGuardKey]durable.QueryRemovalGuardCloseReceipt
+
 	taskDeferrals        map[taskDeferralKey]durable.WorkflowTaskDeferral
 	taskDeferralReceipts map[taskDeferralKey]durable.WorkflowTaskDeferral
 	mu                   sync.RWMutex
@@ -77,6 +83,12 @@ type Store struct {
 // New returns a new empty Store.
 func New() *Store {
 	return &Store{
+		queryRemovalGuards:    make(map[queryGuardKey]durable.QueryRemovalGuard),
+		queryRemovalCurrent:   make(map[queryGuardKey]durable.QueryRemovalCurrent),
+		queryRemovalMaterials: make(map[queryGuardKey]durable.QueryRemovalRevalidationMaterial),
+		queryRemovalCommits:   make(map[queryGuardKey]durable.QueryRemovalCommitReceipt),
+		queryRemovalCloses:    make(map[queryGuardKey]durable.QueryRemovalGuardCloseReceipt),
+
 		taskDeferrals:         make(map[taskDeferralKey]durable.WorkflowTaskDeferral),
 		taskDeferralReceipts:  make(map[taskDeferralKey]durable.WorkflowTaskDeferral),
 		namespaces:            make(map[string]durable.NamespaceRecord),

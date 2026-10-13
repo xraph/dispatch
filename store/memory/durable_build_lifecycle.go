@@ -34,6 +34,9 @@ func (m *Store) RegisterBuild(ctx context.Context, r durable.RegisterBuildReques
 		if registerErr != nil {
 			return durable.LifecycleReceipt{}, registerErr
 		}
+		if guardErr := c.guardBuildMutation(c.buildAdmissions[r.BuildTarget], build); guardErr != nil {
+			return durable.LifecycleReceipt{}, guardErr
+		}
 		c.buildAdmissions[r.BuildTarget] = build
 		return c.saveBuildReceipt(ctx, key, digest, r.CommandDigest, build)
 	})
@@ -173,6 +176,9 @@ func (m *Store) mutateBuildLifecycle(ctx context.Context, r durable.BuildRetirem
 		build, transitionErr := durable.TransitionBuild(f.Admission, r, operation, f.Blockers, now)
 		if transitionErr != nil {
 			return durable.LifecycleReceipt{}, transitionErr
+		}
+		if guardErr := c.guardBuildMutation(c.buildAdmissions[r.BuildTarget], build); guardErr != nil {
+			return durable.LifecycleReceipt{}, guardErr
 		}
 		c.buildAdmissions[r.BuildTarget] = build
 		return c.saveBuildReceipt(ctx, key, digest, "", build)

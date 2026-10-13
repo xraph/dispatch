@@ -33,6 +33,10 @@ func TestWireFixtures(t *testing.T) {
 	retained := deferral
 	retained.Active = false
 	examples["tasks_deferral_retained"] = Page[Task]{Items: []Task{{ID: "workflow:1", Kind: durable.TaskWorkflow, State: "leased", Attempt: "3", Version: "9007199254740997", AvailableAt: deferral.RetryAt, LeaseUntil: &now, Deferral: &retained}}, Complete: true, AsOf: now, Observation: "current_page", Revision: deferral.SourceRevision}
+	guardReceipt := QueryGuardAcceptance{Kind: "commit", GuardID: "guard-digest", RootDigest: "root-digest", RequestID: "bind-1", CommandDigest: "command-digest", ReceiptDigest: "receipt-digest", PermissionID: "permission-1", InvocationID: "invoke-1", PermissionProofDigest: "original-proof-digest", CurrentProofDigest: "refreshed-proof-digest", AcceptedAt: now}
+	examples["query_guard_commit"] = guardReceipt
+	examples["query_guard_commit_status"] = QueryCommitStatus{Receipt: guardReceipt, State: "closed", CurrentRequestID: "refresh-2", CurrentProofDigest: "refreshed-proof-digest", SourceObservedAt: now, ObservedAt: now}
+	examples["query_guard_close"] = QueryGuardAcceptance{Kind: "close", GuardID: "guard-digest", RootDigest: "root-digest", RequestID: "close-1", CommandDigest: "close-command-digest", ReceiptDigest: "close-receipt-digest", CutoffDigest: "cutoff-digest", Disposition: "settled_without_deletion", AcceptedAt: now}
 	envelopes := map[string]any{}
 	for name, data := range examples {
 		raw, err := json.Marshal(data)

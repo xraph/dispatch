@@ -97,6 +97,9 @@ func (m *Store) mutateQueryRuntime(ctx context.Context, target durable.QueryRunt
 		if err != nil {
 			return durable.LifecycleReceipt{}, err
 		}
+		if guardErr := c.guardQueryMutation(prior, next); guardErr != nil {
+			return durable.LifecycleReceipt{}, guardErr
+		}
 		if checkErr := next.Validate(); checkErr != nil {
 			return durable.LifecycleReceipt{}, checkErr
 		}

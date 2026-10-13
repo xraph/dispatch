@@ -10,10 +10,13 @@ Dispatch is a durable execution engine for Go, shipped as a library. You import 
 | `github.com/xraph/dispatch/qualification` | `qualification/` | no |
 | `github.com/xraph/dispatch/qualification/oldwriter` | `qualification/oldwriter/` | no |
 | `github.com/xraph/dispatch/qualification/protocolone` | `qualification/protocolone/` | no |
+| `github.com/xraph/dispatch/qualification/querypreguard` | `qualification/querypreguard/` | no |
 
-Only the root is a library anyone depends on. The three `qualification` modules are test harnesses that consume Dispatch the way an outside host would, from published versions, with no `replace` lines. The root has none either.
+Only the root is a library anyone depends on. The four `qualification` modules are test harnesses that consume Dispatch the way an outside host would, from published versions, with no `replace` lines. The root has none either.
 
 `qualification/` pins a published Dispatch commit next to published authsome, warden, chronicle, relay, forge and `forge/extensions/auth`, then runs real authsome sessions, warden policies and DWP WebSocket frames against it (the credential and DPoP regressions). It also builds two loopback hosts. `cmd/operatorhost` serves the durable operator contract for dashboard work, and `cmd/sinkhost` runs Chronicle, Relay, Dispatch and a webhook receiver as separate processes against PostgreSQL. `qualification/README.md` explains each scenario in detail.
+
+`querypreguard` pins published pre-guard commit `290a77873305` and exercises query removal, proof refresh and SQL mutation refusal against the current schema. Keep that pin unchanged when you update the qualification host. Run `make qualification-queryguard-check` with `DISPATCH_LIFECYCLE_TEST_DSN` pointing at a disposable PostgreSQL server. The target builds all three historical executables and requires their named native compatibility tests. It does not start a database.
 
 `oldwriter` and `protocolone` are small executables linked against older Dispatch commits. Tests in `store/postgres` launch them to prove the current store works beside an old writer that never sets the retirement marker, and beside a library from before query retention.
 
@@ -49,13 +52,13 @@ make qualification-operator-check  # needs Docker and govulncheck on PATH
 make qualification-process-check   # needs Docker and govulncheck on PATH
 ```
 
-These targets pin `GOWORK=off` and a `GOTOOLCHAIN` themselves. `oldwriter` and `protocolone` each have a tiny Makefile of their own (`make f`, `make l`, `make test`). The last two qualification targets build the real host binaries, scan them with govulncheck, start a capped `postgres:17-alpine` container, and remove only that container when they exit.
+These targets pin `GOWORK=off` and a `GOTOOLCHAIN` themselves. `oldwriter`, `protocolone` and `querypreguard` each have a tiny Makefile of their own (`make f`, `make l`, `make test`). The last two qualification targets build the real host binaries, scan them with govulncheck, start a capped `postgres:17-alpine` container, and remove only that container when they exit.
 
 Some targets are broken, so skip them. `make build`, `run`, `install`, `dev` and `all` point at `./cmd/dispatch`, which doesn't exist. `make templ` and `templ-watch` point at `./dashboard/...`, and the old templ dashboard now sits in `_dashboard/`, which the Go tool ignores.
 
 ### Tests and what they need
 
-There are four tiers, and only the first two run in CI.
+There are four tiers. The shared CI runs the first two. The native query removal guard job also runs its named PostgreSQL tests and all three historical executable campaigns from the fourth tier.
 
 1. Plain unit tests, plus the memory and SQLite stores. They need nothing.
 2. Container tests without a build tag: `store/postgres/wake_test.go`, `store/redis/reap_test.go` and `store/mongo/dequeue_test.go` start testcontainers. They skip under `-short` or when no container runtime answers. CI's runner has Docker, so they run there.
@@ -72,6 +75,7 @@ There are four tiers, and only the first two run in CI.
 | `DISPATCH_READ_TEST_DSN` | Durable reads and signal outcomes in `store/postgres`, the durable HTTP test in `extension/contract` |
 | `DISPATCH_LIFECYCLE_TEST_DSN` | Retirement, lifecycle and query diagnostics in `store/postgres` |
 | `DISPATCH_OLDWRITER_BINARY` | With the lifecycle DSN, `TestRetirementNativeOldWriter` (build it from `qualification/oldwriter`) |
+| `DISPATCH_QUERYPREGUARD_BINARY` | With the lifecycle DSN, the guard-unaware query executable campaign |
 | `DISPATCH_PROTOCOL_ONE_BINARY` | With the lifecycle DSN, `TestQueryNativeProtocolOne` (build it from `qualification/protocolone`) |
 | `DISPATCH_SINK_TEST_DSN` | `TestSinkConflictRestart`, which also needs `-tags integration` |
 | `DISPATCH_READ_REQUIRED=1`, `DISPATCH_LIFECYCLE_REQUIRED=1`, `DISPATCH_QUERY_REQUIRED=1` | Turn the matching skip into a failure |
@@ -83,7 +87,7 @@ Point the DSNs at a throwaway server. These tests create and drop databases, dis
 
 `.github/workflows/ci.yml` calls the shared `xraph/workflows/.github/workflows/go-ci.yml@v1`. For the root module you get `make test`, a coverage run under `-race`, golangci-lint at the version the shared workflow pins, `gofmt -l .`, `make vet`, a `go mod tidy` diff on the root `go.mod` and `go.sum`, gosec and govulncheck. gosec runs standalone there, so the excludes in `.golangci.yml` don't apply to it (it skips only G115). A nested-modules job checks that the qualification modules require Dispatch at real semver versions.
 
-The same file adds three jobs. Published host qualification fails if any qualification dependency is replaced, then lints, runs `make qualification-check`, `govulncheck -test ./...`, `make qualification-operator-check` and `make qualification-process-check`. Format runs `goimports -l -local github.com/xraph/dispatch .` over the whole tree. Docs runs `pnpm types:check`, `pnpm lint` and `pnpm build` in `docs/`.
+The same file adds four jobs. Native query removal guard compatibility starts a capped PostgreSQL fixture, verifies the querypreguard module and requires the native guard and historical executable tests. Published host qualification fails if any qualification dependency is replaced, then lints, runs `make qualification-check`, `govulncheck -test ./...`, `make qualification-operator-check` and `make qualification-process-check`. Format runs `goimports -l -local github.com/xraph/dispatch .` over the whole tree. Docs runs `pnpm types:check`, `pnpm lint` and `pnpm build` in `docs/`.
 
 ## Layout
 

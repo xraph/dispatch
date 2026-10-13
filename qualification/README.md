@@ -406,3 +406,13 @@ and pool. It verifies the default sampler against the unchanged PostgreSQL clock
 with explicit cleanup inside that test and an independent test timeout. A separate
 rollback fixture checks that settlement ordering remains strict. These tests do
 not identify the cause of the earlier retained historical-query HTTP 409.
+
+## Native removal guard compatibility
+
+`querypreguard/` consumes published Dispatch commit `290a77873305`, before removal guards. Its executable exercises the old Begin, Abort, Finish, Resume and proof-refresh methods, plus fixed SQL updates and deletes. You keep this historical pin when updating the qualification host, just as you keep the `oldwriter` and `protocolone` pins.
+
+Run `make qualification-queryguard-check` from the root with `DISPATCH_LIFECYCLE_TEST_DSN` set to a disposable PostgreSQL server. The target builds the three historical binaries in a temporary directory, runs their native compatibility campaigns with required fixture flags, then removes those binaries. Guard tests also cover fresh OS-process recovery, current proof expiry, pinned mutation races, the joint maximum material and audit rollback.
+
+The complete material row is capped at 512 KiB; the exported receipt is capped at 4 KiB. Commit requests remain capped at 16 KiB, while the persisted commit receipt allows 17 KiB for its authenticated wrapper. Close requests and receipts remain capped at 16 KiB. The joint maximum lifecycle keeps all supported identities and proofs together.
+
+The storage tests use synthetic verifier evidence. They qualify native transactions and compatible old-library refusal. Authenticated provider evidence, controller invocation markers, production database grants and server-loss recovery need separate host qualification.

@@ -38,7 +38,9 @@ func (t BuildTarget) Validate() error {
 }
 
 type CompatibilityFacts struct {
-	WorkerDrainSchemaVersion int `json:",omitempty"`
+	// QueryRemovalGuardSchemaVersion describes native enforcement, not host trust readiness.
+	QueryRemovalGuardSchemaVersion int `json:",omitempty"`
+	WorkerDrainSchemaVersion       int `json:",omitempty"`
 	// QueryRetentionSchemaVersion describes current store capability only. It is
 	// not proof that a host artifact or controller is query-retention qualified.
 	QueryRetentionSchemaVersion int `json:",omitempty"`

@@ -13,10 +13,11 @@ import (
 // LifecycleHost keeps deployment evidence and process control inside the host.
 // Its resolvers must bind actual immutable resources, never caller-supplied proof.
 type LifecycleHost struct {
-	QueryRuntime            QueryRuntimeHost
-	QueryRegistrationPolicy QueryRegistrationPolicy
-	BuildIdentity           func(context.Context, durable.BuildTarget) (durable.BuildQueryIdentity, error)
-	WorkerControl           func(context.Context, durable.QueryRuntimeTarget) (WorkerControl, error)
+	QueryRuntime              QueryRuntimeHost
+	QueryRegistrationPolicy   QueryRegistrationPolicy
+	QueryRemovalGuardVerifier durable.QueryRemovalGuardVerifier
+	BuildIdentity             func(context.Context, durable.BuildTarget) (durable.BuildQueryIdentity, error)
+	WorkerControl             func(context.Context, durable.QueryRuntimeTarget) (WorkerControl, error)
 }
 
 const (
@@ -89,18 +90,20 @@ func (s *Service) authorizeBuild(ctx context.Context, p security.Principal, acti
 }
 
 type Compatibility struct {
-	Namespace          string    `json:"namespace"`
-	Enrolled           bool      `json:"enrolled"`
-	SchemaVersion      string    `json:"schema_version"`
-	WriterProtocol     string    `json:"writer_protocol"`
-	QuerySchemaVersion string    `json:"query_schema_version"`
-	DrainSchemaVersion string    `json:"drain_schema_version"`
-	Version            string    `json:"version"`
-	ObservedAt         time.Time `json:"observed_at"`
+	Namespace                      string    `json:"namespace"`
+	Enrolled                       bool      `json:"enrolled"`
+	SchemaVersion                  string    `json:"schema_version"`
+	WriterProtocol                 string    `json:"writer_protocol"`
+	QueryRemovalGuardSchemaVersion string    `json:"query_removal_guard_schema_version"`
+	QueryRemovalGuardReady         bool      `json:"query_removal_guard_ready"`
+	QuerySchemaVersion             string    `json:"query_schema_version"`
+	DrainSchemaVersion             string    `json:"drain_schema_version"`
+	Version                        string    `json:"version"`
+	ObservedAt                     time.Time `json:"observed_at"`
 }
 
 func compatibility(f durable.CompatibilityFacts) Compatibility {
-	return Compatibility{Namespace: f.Namespace, Enrolled: f.Enrolled, SchemaVersion: strconv.Itoa(f.SchemaVersion), WriterProtocol: strconv.Itoa(f.WriterProtocol), QuerySchemaVersion: strconv.Itoa(f.QueryRetentionSchemaVersion), DrainSchemaVersion: strconv.Itoa(f.WorkerDrainSchemaVersion), Version: strconv.FormatInt(f.Version, 10), ObservedAt: f.ObservedAt}
+	return Compatibility{Namespace: f.Namespace, Enrolled: f.Enrolled, SchemaVersion: strconv.Itoa(f.SchemaVersion), WriterProtocol: strconv.Itoa(f.WriterProtocol), QuerySchemaVersion: strconv.Itoa(f.QueryRetentionSchemaVersion), QueryRemovalGuardSchemaVersion: strconv.Itoa(f.QueryRemovalGuardSchemaVersion), DrainSchemaVersion: strconv.Itoa(f.WorkerDrainSchemaVersion), Version: strconv.FormatInt(f.Version, 10), ObservedAt: f.ObservedAt}
 }
 
 type NamespaceLifecycleInput struct {
@@ -127,7 +130,10 @@ func (s *Service) Compatibility(ctx context.Context, p security.Principal, in Na
 	if err = s.audit.RecordDurableRead(ctx, p, ReadBuild, "allowed", in.Namespace); err != nil {
 		return Compatibility{}, security.ErrUnavailable
 	}
-	return compatibility(facts), nil
+	out := compatibility(facts)
+	_, capable := s.store.(durable.QueryRemovalRevalidationStore)
+	out.QueryRemovalGuardReady = capable && s.queryRemovalGuardVerifier != nil && facts.QueryRemovalGuardSchemaVersion == durable.QueryRemovalGuardSchemaVersion
+	return out, nil
 }
 
 type BuildLifecycle struct {

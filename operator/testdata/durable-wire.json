@@ -247,6 +247,82 @@
       "intentVersion": 1
     }
   },
+  "query_guard_close": {
+    "ok": true,
+    "envelope": "v1",
+    "kind": "query",
+    "data": {
+      "kind": "close",
+      "guard_id": "guard-digest",
+      "root_digest": "root-digest",
+      "request_id": "close-1",
+      "command_digest": "close-command-digest",
+      "receipt_digest": "close-receipt-digest",
+      "permission_id": "",
+      "invocation_id": "",
+      "permission_proof_digest": "",
+      "current_proof_digest": "",
+      "cutoff_digest": "cutoff-digest",
+      "disposition": "settled_without_deletion",
+      "accepted_at": "2026-10-09T12:00:00Z"
+    },
+    "meta": {
+      "intentVersion": 1
+    }
+  },
+  "query_guard_commit": {
+    "ok": true,
+    "envelope": "v1",
+    "kind": "query",
+    "data": {
+      "kind": "commit",
+      "guard_id": "guard-digest",
+      "root_digest": "root-digest",
+      "request_id": "bind-1",
+      "command_digest": "command-digest",
+      "receipt_digest": "receipt-digest",
+      "permission_id": "permission-1",
+      "invocation_id": "invoke-1",
+      "permission_proof_digest": "original-proof-digest",
+      "current_proof_digest": "refreshed-proof-digest",
+      "cutoff_digest": "",
+      "disposition": "",
+      "accepted_at": "2026-10-09T12:00:00Z"
+    },
+    "meta": {
+      "intentVersion": 1
+    }
+  },
+  "query_guard_commit_status": {
+    "ok": true,
+    "envelope": "v1",
+    "kind": "query",
+    "data": {
+      "receipt": {
+        "kind": "commit",
+        "guard_id": "guard-digest",
+        "root_digest": "root-digest",
+        "request_id": "bind-1",
+        "command_digest": "command-digest",
+        "receipt_digest": "receipt-digest",
+        "permission_id": "permission-1",
+        "invocation_id": "invoke-1",
+        "permission_proof_digest": "original-proof-digest",
+        "current_proof_digest": "refreshed-proof-digest",
+        "cutoff_digest": "",
+        "disposition": "",
+        "accepted_at": "2026-10-09T12:00:00Z"
+      },
+      "state": "closed",
+      "current_request_id": "refresh-2",
+      "current_proof_digest": "refreshed-proof-digest",
+      "source_observed_at": "2026-10-09T12:00:00Z",
+      "observed_at": "2026-10-09T12:00:00Z"
+    },
+    "meta": {
+      "intentVersion": 1
+    }
+  },
   "tasks": {
     "ok": true,
     "envelope": "v1",

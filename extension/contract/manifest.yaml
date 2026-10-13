@@ -86,6 +86,8 @@ intents:
             pattern: ^(0|[1-9][0-9]*)$
             description: Canonical nonnegative decimal integer. Keep this value as a string.
           writer_protocol: *decimal
+          query_removal_guard_schema_version: {type: string, pattern: "^(0|[1-9][0-9]*)$"}
+          query_removal_guard_ready: {type: boolean}
           query_schema_version: *decimal
           drain_schema_version: *decimal
           version: *decimal
@@ -933,3 +935,647 @@ intents:
         - status
         - accepted_at
         - binding
+  - name: durable.queryRemovalRevalidate
+    kind: command
+    version: 1
+    requires:
+      warden: dispatchDurableOperator
+    capability: write
+    invalidates: [durable.queryRuntime, durable.build, durable.audit, durable.queryRemovalCommitStatus]
+    schema:
+      input:
+        type: "object"
+        additionalProperties: false
+        properties:
+          namespace:
+            type: "string"
+            minLength: 1
+            maxLength: 256
+          build_id:
+            type: "string"
+            minLength: 1
+            maxLength: 512
+          runtime_id:
+            type: "string"
+            minLength: 1
+            maxLength: 256
+          reservation_request_id:
+            type: "string"
+            minLength: 1
+            maxLength: 256
+          reservation_version:
+            type: "string"
+            pattern: "^[1-9][0-9]*$"
+          request_id:
+            type: "string"
+            minLength: 1
+            maxLength: 256
+            pattern: "^[A-Za-z0-9._:-]+$"
+          scope:
+            type: "object"
+            additionalProperties: false
+            properties:
+              authority_id:
+                type: "string"
+                minLength: 1
+                maxLength: 256
+                pattern: "^[A-Za-z0-9._:-]+$"
+              operation_scope_id:
+                type: "string"
+                minLength: 1
+                maxLength: 256
+                pattern: "^[A-Za-z0-9._:-]+$"
+              attempt_id:
+                type: "string"
+                minLength: 1
+                maxLength: 256
+                pattern: "^[A-Za-z0-9._:-]+$"
+              provider_operation_id:
+                type: "string"
+                minLength: 1
+                maxLength: 256
+                pattern: "^[A-Za-z0-9._:-]+$"
+              producer_id:
+                type: "string"
+                minLength: 1
+                maxLength: 256
+                pattern: "^[A-Za-z0-9._:-]+$"
+              profile_id:
+                type: "string"
+                minLength: 1
+                maxLength: 256
+                pattern: "^[A-Za-z0-9._:-]+$"
+              verifier_id:
+                type: "string"
+                minLength: 1
+                maxLength: 256
+                pattern: "^[A-Za-z0-9._:-]+$"
+              coverage_digest:
+                type: "string"
+                pattern: "^[0-9a-f]{64}$"
+              excluded_instances_digest:
+                type: "string"
+                pattern: "^[0-9a-f]{64}$"
+              profile_version:
+                type: "string"
+                pattern: "^[1-9][0-9]*$"
+            required: ["authority_id","operation_scope_id","attempt_id","provider_operation_id","producer_id","profile_id","verifier_id","coverage_digest","excluded_instances_digest","profile_version"]
+          expected_current_digest:
+            type: "string"
+            pattern: "^([0-9a-f]{64})?$"
+          evidence_reference:
+            type: "string"
+            minLength: 1
+            maxLength: 256
+            pattern: "^[A-Za-z0-9._:-]+$"
+          survivor_runtime_id:
+            type: "string"
+            maxLength: 256
+          survivor_version:
+            type: "string"
+            pattern: "^(0|[1-9][0-9]*)$"
+        required: ["namespace","build_id","runtime_id","reservation_request_id","reservation_version","request_id","scope","expected_current_digest","evidence_reference","survivor_runtime_id","survivor_version"]
+      output:
+        type: "object"
+        additionalProperties: false
+        properties:
+          guard_id:
+            type: "string"
+            pattern: "^[0-9a-f]{64}$"
+          root_digest:
+            type: "string"
+            pattern: "^[0-9a-f]{64}$"
+          request_digest:
+            type: "string"
+            pattern: "^[0-9a-f]{64}$"
+          material_digest:
+            type: "string"
+            pattern: "^[0-9a-f]{64}$"
+          original_digest:
+            type: "string"
+            pattern: "^[0-9a-f]{64}$"
+          external_scope_digest:
+            type: "string"
+            pattern: "^[0-9a-f]{64}$"
+          candidate_digest:
+            type: "string"
+            pattern: "^[0-9a-f]{64}$"
+          build_digest:
+            type: "string"
+            pattern: "^[0-9a-f]{64}$"
+          survivor_digest:
+            type: "string"
+            pattern: "^[0-9a-f]{64}$"
+          process_digest:
+            type: "string"
+            pattern: "^[0-9a-f]{64}$"
+          exclusion_digest:
+            type: "string"
+            pattern: "^[0-9a-f]{64}$"
+          coverage_digest:
+            type: "string"
+            pattern: "^[0-9a-f]{64}$"
+          schema:
+            type: "string"
+            enum: ["dispatch.query-removal.revalidation.v1"]
+          request_id:
+            type: "string"
+            minLength: 1
+            maxLength: 256
+            pattern: "^[A-Za-z0-9._:-]+$"
+          disposition:
+            type: "string"
+            enum: ["live","effect_complete"]
+          accepted_at:
+            type: "string"
+            format: "date-time"
+          valid_until:
+            type: "string"
+            format: "date-time"
+        required: ["guard_id","root_digest","request_digest","material_digest","original_digest","external_scope_digest","candidate_digest","build_digest","survivor_digest","process_digest","exclusion_digest","coverage_digest","schema","request_id","disposition","accepted_at","valid_until"]
+  - name: durable.queryRemovalRevalidation
+    kind: query
+    version: 1
+    requires:
+      warden: dispatchDurableOperator
+    capability: read
+    schema:
+      input:
+        type: "object"
+        additionalProperties: false
+        properties:
+          namespace:
+            type: "string"
+            minLength: 1
+            maxLength: 256
+          build_id:
+            type: "string"
+            minLength: 1
+            maxLength: 512
+          runtime_id:
+            type: "string"
+            minLength: 1
+            maxLength: 256
+          reservation_request_id:
+            type: "string"
+            minLength: 1
+            maxLength: 256
+          reservation_version:
+            type: "string"
+            pattern: "^[1-9][0-9]*$"
+          request_id:
+            type: "string"
+            minLength: 1
+            maxLength: 256
+            pattern: "^[A-Za-z0-9._:-]+$"
+          command_digest:
+            type: "string"
+            pattern: "^[0-9a-f]{64}$"
+        required: ["namespace","build_id","runtime_id","reservation_request_id","reservation_version","request_id","command_digest"]
+      output:
+        type: "object"
+        additionalProperties: false
+        properties:
+          guard_id:
+            type: "string"
+            pattern: "^[0-9a-f]{64}$"
+          root_digest:
+            type: "string"
+            pattern: "^[0-9a-f]{64}$"
+          request_digest:
+            type: "string"
+            pattern: "^[0-9a-f]{64}$"
+          material_digest:
+            type: "string"
+            pattern: "^[0-9a-f]{64}$"
+          original_digest:
+            type: "string"
+            pattern: "^[0-9a-f]{64}$"
+          external_scope_digest:
+            type: "string"
+            pattern: "^[0-9a-f]{64}$"
+          candidate_digest:
+            type: "string"
+            pattern: "^[0-9a-f]{64}$"
+          build_digest:
+            type: "string"
+            pattern: "^[0-9a-f]{64}$"
+          survivor_digest:
+            type: "string"
+            pattern: "^[0-9a-f]{64}$"
+          process_digest:
+            type: "string"
+            pattern: "^[0-9a-f]{64}$"
+          exclusion_digest:
+            type: "string"
+            pattern: "^[0-9a-f]{64}$"
+          coverage_digest:
+            type: "string"
+            pattern: "^[0-9a-f]{64}$"
+          schema:
+            type: "string"
+            enum: ["dispatch.query-removal.revalidation.v1"]
+          request_id:
+            type: "string"
+            minLength: 1
+            maxLength: 256
+            pattern: "^[A-Za-z0-9._:-]+$"
+          disposition:
+            type: "string"
+            enum: ["live","effect_complete"]
+          accepted_at:
+            type: "string"
+            format: "date-time"
+          valid_until:
+            type: "string"
+            format: "date-time"
+        required: ["guard_id","root_digest","request_digest","material_digest","original_digest","external_scope_digest","candidate_digest","build_digest","survivor_digest","process_digest","exclusion_digest","coverage_digest","schema","request_id","disposition","accepted_at","valid_until"]
+  - name: durable.queryRemovalCommit
+    kind: command
+    version: 1
+    requires:
+      warden: dispatchDurableOperator
+    capability: write
+    invalidates: [durable.queryRuntime, durable.build, durable.audit, durable.queryRemovalCommitStatus]
+    schema:
+      input:
+        type: "object"
+        additionalProperties: false
+        properties:
+          namespace:
+            type: "string"
+            minLength: 1
+            maxLength: 256
+          build_id:
+            type: "string"
+            minLength: 1
+            maxLength: 512
+          runtime_id:
+            type: "string"
+            minLength: 1
+            maxLength: 256
+          reservation_request_id:
+            type: "string"
+            minLength: 1
+            maxLength: 256
+          reservation_version:
+            type: "string"
+            pattern: "^[1-9][0-9]*$"
+          guard_id:
+            type: "string"
+            pattern: "^[0-9a-f]{64}$"
+          root_digest:
+            type: "string"
+            pattern: "^[0-9a-f]{64}$"
+          original_digest:
+            type: "string"
+            pattern: "^[0-9a-f]{64}$"
+          request_id:
+            type: "string"
+            minLength: 1
+            maxLength: 256
+            pattern: "^[A-Za-z0-9._:-]+$"
+          permission_reference:
+            type: "string"
+            minLength: 1
+            maxLength: 256
+            pattern: "^[A-Za-z0-9._:-]+$"
+          expected_current_digest:
+            type: "string"
+            pattern: "^[0-9a-f]{64}$"
+          current_request_id:
+            type: "string"
+            minLength: 1
+            maxLength: 256
+            pattern: "^[A-Za-z0-9._:-]+$"
+        required: ["namespace","build_id","runtime_id","reservation_request_id","reservation_version","guard_id","root_digest","original_digest","request_id","permission_reference","expected_current_digest","current_request_id"]
+      output:
+        type: "object"
+        additionalProperties: false
+        properties:
+          guard_id:
+            type: "string"
+            maxLength: 256
+          root_digest:
+            type: "string"
+            maxLength: 256
+          request_id:
+            type: "string"
+            maxLength: 256
+          command_digest:
+            type: "string"
+            maxLength: 256
+          receipt_digest:
+            type: "string"
+            maxLength: 256
+          permission_id:
+            type: "string"
+            maxLength: 256
+          invocation_id:
+            type: "string"
+            maxLength: 256
+          permission_proof_digest:
+            type: "string"
+            maxLength: 256
+          current_proof_digest:
+            type: "string"
+            maxLength: 256
+          cutoff_digest:
+            type: "string"
+            maxLength: 256
+          kind:
+            type: "string"
+            enum: ["commit","close"]
+          disposition:
+            type: "string"
+            enum: ["","all_positive","settled_without_deletion"]
+          accepted_at:
+            type: "string"
+            format: "date-time"
+        required: ["guard_id","root_digest","request_id","command_digest","receipt_digest","permission_id","invocation_id","permission_proof_digest","current_proof_digest","cutoff_digest","kind","disposition","accepted_at"]
+  - name: durable.queryRemovalCommitStatus
+    kind: query
+    version: 1
+    requires:
+      warden: dispatchDurableOperator
+    capability: read
+    schema:
+      input:
+        type: "object"
+        additionalProperties: false
+        properties:
+          namespace:
+            type: "string"
+            minLength: 1
+            maxLength: 256
+          build_id:
+            type: "string"
+            minLength: 1
+            maxLength: 512
+          runtime_id:
+            type: "string"
+            minLength: 1
+            maxLength: 256
+          reservation_request_id:
+            type: "string"
+            minLength: 1
+            maxLength: 256
+          reservation_version:
+            type: "string"
+            pattern: "^[1-9][0-9]*$"
+          request_id:
+            type: "string"
+            minLength: 1
+            maxLength: 256
+            pattern: "^[A-Za-z0-9._:-]+$"
+          command_digest:
+            type: "string"
+            pattern: "^[0-9a-f]{64}$"
+        required: ["namespace","build_id","runtime_id","reservation_request_id","reservation_version","request_id","command_digest"]
+      output:
+        type: "object"
+        additionalProperties: false
+        properties:
+          receipt:
+            type: "object"
+            additionalProperties: false
+            properties:
+              guard_id:
+                type: "string"
+                maxLength: 256
+              root_digest:
+                type: "string"
+                maxLength: 256
+              request_id:
+                type: "string"
+                maxLength: 256
+              command_digest:
+                type: "string"
+                maxLength: 256
+              receipt_digest:
+                type: "string"
+                maxLength: 256
+              permission_id:
+                type: "string"
+                maxLength: 256
+              invocation_id:
+                type: "string"
+                maxLength: 256
+              permission_proof_digest:
+                type: "string"
+                maxLength: 256
+              current_proof_digest:
+                type: "string"
+                maxLength: 256
+              cutoff_digest:
+                type: "string"
+                maxLength: 256
+              kind:
+                type: "string"
+                enum: ["commit","close"]
+              disposition:
+                type: "string"
+                enum: ["","all_positive","settled_without_deletion"]
+              accepted_at:
+                type: "string"
+                format: "date-time"
+            required: ["guard_id","root_digest","request_id","command_digest","receipt_digest","permission_id","invocation_id","permission_proof_digest","current_proof_digest","cutoff_digest","kind","disposition","accepted_at"]
+          state:
+            type: "string"
+            enum: ["active","closed"]
+          current_request_id:
+            type: "string"
+            minLength: 1
+            maxLength: 256
+            pattern: "^[A-Za-z0-9._:-]+$"
+          current_proof_digest:
+            type: "string"
+            pattern: "^[0-9a-f]{64}$"
+          source_observed_at:
+            type: "string"
+            format: "date-time"
+          observed_at:
+            type: "string"
+            format: "date-time"
+        required: ["receipt","state","current_request_id","current_proof_digest","source_observed_at","observed_at"]
+  - name: durable.queryRemovalGuardClose
+    kind: command
+    version: 1
+    requires:
+      warden: dispatchDurableOperator
+    capability: write
+    invalidates: [durable.queryRuntime, durable.build, durable.audit, durable.queryRemovalCommitStatus]
+    schema:
+      input:
+        type: "object"
+        additionalProperties: false
+        properties:
+          namespace:
+            type: "string"
+            minLength: 1
+            maxLength: 256
+          build_id:
+            type: "string"
+            minLength: 1
+            maxLength: 512
+          runtime_id:
+            type: "string"
+            minLength: 1
+            maxLength: 256
+          reservation_request_id:
+            type: "string"
+            minLength: 1
+            maxLength: 256
+          reservation_version:
+            type: "string"
+            pattern: "^[1-9][0-9]*$"
+          guard_id:
+            type: "string"
+            pattern: "^[0-9a-f]{64}$"
+          root_digest:
+            type: "string"
+            pattern: "^[0-9a-f]{64}$"
+          original_digest:
+            type: "string"
+            pattern: "^[0-9a-f]{64}$"
+          request_id:
+            type: "string"
+            minLength: 1
+            maxLength: 256
+            pattern: "^[A-Za-z0-9._:-]+$"
+          closure_reference:
+            type: "string"
+            minLength: 1
+            maxLength: 256
+            pattern: "^[A-Za-z0-9._:-]+$"
+        required: ["namespace","build_id","runtime_id","reservation_request_id","reservation_version","guard_id","root_digest","original_digest","request_id","closure_reference"]
+      output:
+        type: "object"
+        additionalProperties: false
+        properties:
+          guard_id:
+            type: "string"
+            maxLength: 256
+          root_digest:
+            type: "string"
+            maxLength: 256
+          request_id:
+            type: "string"
+            maxLength: 256
+          command_digest:
+            type: "string"
+            maxLength: 256
+          receipt_digest:
+            type: "string"
+            maxLength: 256
+          permission_id:
+            type: "string"
+            maxLength: 256
+          invocation_id:
+            type: "string"
+            maxLength: 256
+          permission_proof_digest:
+            type: "string"
+            maxLength: 256
+          current_proof_digest:
+            type: "string"
+            maxLength: 256
+          cutoff_digest:
+            type: "string"
+            maxLength: 256
+          kind:
+            type: "string"
+            enum: ["commit","close"]
+          disposition:
+            type: "string"
+            enum: ["","all_positive","settled_without_deletion"]
+          accepted_at:
+            type: "string"
+            format: "date-time"
+        required: ["guard_id","root_digest","request_id","command_digest","receipt_digest","permission_id","invocation_id","permission_proof_digest","current_proof_digest","cutoff_digest","kind","disposition","accepted_at"]
+  - name: durable.queryRemovalGuardReceipt
+    kind: query
+    version: 1
+    requires:
+      warden: dispatchDurableOperator
+    capability: read
+    schema:
+      input:
+        type: "object"
+        additionalProperties: false
+        properties:
+          namespace:
+            type: "string"
+            minLength: 1
+            maxLength: 256
+          build_id:
+            type: "string"
+            minLength: 1
+            maxLength: 512
+          runtime_id:
+            type: "string"
+            minLength: 1
+            maxLength: 256
+          reservation_request_id:
+            type: "string"
+            minLength: 1
+            maxLength: 256
+          reservation_version:
+            type: "string"
+            pattern: "^[1-9][0-9]*$"
+          request_id:
+            type: "string"
+            minLength: 1
+            maxLength: 256
+            pattern: "^[A-Za-z0-9._:-]+$"
+          command_digest:
+            type: "string"
+            pattern: "^[0-9a-f]{64}$"
+          kind:
+            type: "string"
+            enum: ["commit","close"]
+        required: ["namespace","build_id","runtime_id","reservation_request_id","reservation_version","request_id","command_digest","kind"]
+      output:
+        type: "object"
+        additionalProperties: false
+        properties:
+          guard_id:
+            type: "string"
+            maxLength: 256
+          root_digest:
+            type: "string"
+            maxLength: 256
+          request_id:
+            type: "string"
+            maxLength: 256
+          command_digest:
+            type: "string"
+            maxLength: 256
+          receipt_digest:
+            type: "string"
+            maxLength: 256
+          permission_id:
+            type: "string"
+            maxLength: 256
+          invocation_id:
+            type: "string"
+            maxLength: 256
+          permission_proof_digest:
+            type: "string"
+            maxLength: 256
+          current_proof_digest:
+            type: "string"
+            maxLength: 256
+          cutoff_digest:
+            type: "string"
+            maxLength: 256
+          kind:
+            type: "string"
+            enum: ["commit","close"]
+          disposition:
+            type: "string"
+            enum: ["","all_positive","settled_without_deletion"]
+          accepted_at:
+            type: "string"
+            format: "date-time"
+        required: ["guard_id","root_digest","request_id","command_digest","receipt_digest","permission_id","invocation_id","permission_proof_digest","current_proof_digest","cutoff_digest","kind","disposition","accepted_at"]

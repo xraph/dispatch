@@ -81,7 +81,7 @@ func durableError(err error) error {
 		return badRequest("invalid durable scope, filter or continuation")
 	case errors.Is(err, operator.ErrRuntimeUnavailable):
 		return &fc.Error{Code: fc.CodeUnavailable, Message: "compatible runtime unavailable", Retryable: true}
-	case errors.Is(err, durable.ErrWriterCompatibility), errors.Is(err, durable.ErrLifecycleBusy), errors.Is(err, durable.ErrBuildAdmission), errors.Is(err, durable.ErrRetirementBlocked), errors.Is(err, durable.ErrQueryRetention), errors.Is(err, durable.ErrQueryFence), errors.Is(err, operator.ErrBuildMismatch), errors.Is(err, operator.ErrHistoryIncompatible), errors.Is(err, durable.ErrRequestConflict), errors.Is(err, durable.ErrClosed), errors.Is(err, durable.ErrExists), errors.Is(err, durable.ErrRevisionConflict):
+	case errors.Is(err, durable.ErrQueryRemovalGuard), errors.Is(err, durable.ErrWriterCompatibility), errors.Is(err, durable.ErrLifecycleBusy), errors.Is(err, durable.ErrBuildAdmission), errors.Is(err, durable.ErrRetirementBlocked), errors.Is(err, durable.ErrQueryRetention), errors.Is(err, durable.ErrQueryFence), errors.Is(err, operator.ErrBuildMismatch), errors.Is(err, operator.ErrHistoryIncompatible), errors.Is(err, durable.ErrRequestConflict), errors.Is(err, durable.ErrClosed), errors.Is(err, durable.ErrExists), errors.Is(err, durable.ErrRevisionConflict):
 		return &fc.Error{Code: fc.CodeConflict, Message: err.Error()}
 	case errors.Is(err, drt.ErrQueryMutation):
 		return badRequest("workflow SDK mutation is forbidden in a query")

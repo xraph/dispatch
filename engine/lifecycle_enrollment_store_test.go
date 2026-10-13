@@ -93,3 +93,33 @@ func (s *strictLifecycleStore) RequestWorkerDrain(ctx context.Context, r durable
 	defer s.call("RequestWorkerDrain")()
 	return s.base.RequestWorkerDrain(ctx, r)
 }
+
+func (s *strictLifecycleStore) RevalidateQueryRuntimeRemoval(ctx context.Context, r durable.QueryRemovalRevalidationRequest) (durable.QueryRemovalRevalidationReceipt, error) {
+	defer s.call("RevalidateQueryRuntimeRemoval")()
+	return s.base.RevalidateQueryRuntimeRemoval(ctx, r)
+}
+
+func (s *strictLifecycleStore) LookupQueryRemovalRevalidation(ctx context.Context, r durable.QueryRemovalRevalidationLookup) (durable.QueryRemovalRevalidationMaterial, error) {
+	defer s.call("LookupQueryRemovalRevalidation")()
+	return s.base.LookupQueryRemovalRevalidation(ctx, r)
+}
+
+func (s *strictLifecycleStore) BindQueryRemovalCommit(ctx context.Context, r durable.QueryRemovalCommitRequest) (durable.QueryRemovalCommitReceipt, error) {
+	defer s.call("BindQueryRemovalCommit")()
+	return s.base.BindQueryRemovalCommit(ctx, r)
+}
+
+func (s *strictLifecycleStore) CheckQueryRemovalCommit(ctx context.Context, r durable.QueryRemovalCommitLookup) (durable.QueryRemovalCommitStatus, error) {
+	defer s.call("CheckQueryRemovalCommit")()
+	return s.base.CheckQueryRemovalCommit(ctx, r)
+}
+
+func (s *strictLifecycleStore) CloseQueryRemovalGuard(ctx context.Context, r durable.QueryRemovalGuardCloseRequest) (durable.QueryRemovalGuardCloseReceipt, error) {
+	defer s.call("CloseQueryRemovalGuard")()
+	return s.base.CloseQueryRemovalGuard(ctx, r)
+}
+
+func (s *strictLifecycleStore) LookupQueryRemovalGuardReceipt(ctx context.Context, r durable.QueryRemovalGuardReceiptLookup) (durable.QueryRemovalGuardReceipt, error) {
+	defer s.call("LookupQueryRemovalGuardReceipt")()
+	return s.base.LookupQueryRemovalGuardReceipt(ctx, r)
+}

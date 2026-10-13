@@ -42,6 +42,7 @@ func (e *Extension) operatorService() (*operator.Service, error) {
 	if opts.Authorizer == nil {
 		opts.Authorizer = &operator.WardenAuthorizer{Engine: func() (*warden.Engine, error) { return vessel.Inject[*warden.Engine](e.App().Container()) }}
 	}
+	opts.QueryRemovalGuardVerifier = e.lifecycleHost.QueryRemovalGuardVerifier
 	opts.QueryHost = e.lifecycleHost.QueryRuntime
 	opts.QueryRegistrationPolicy = e.lifecycleHost.QueryRegistrationPolicy
 	opts.BuildIdentity = e.lifecycleHost.BuildIdentity

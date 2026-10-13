@@ -267,3 +267,16 @@ qualification-process-check:
 .PHONY: qualification-operator-check
 qualification-operator-check:
 	bash qualification/operator-check.sh
+
+.PHONY: qualification-queryguard-check
+qualification-queryguard-check:
+	@test -n "$$DISPATCH_LIFECYCLE_TEST_DSN" || { echo "DISPATCH_LIFECYCLE_TEST_DSN is required"; exit 1; }
+	@set -eu; scratch=$$(mktemp -d "$${TMPDIR:-/tmp}/dispatch-queryguard.XXXXXX"); \
+	trap 'rm -rf "$$scratch"' EXIT; \
+	(cd qualification/oldwriter && GOWORK=off GOTOOLCHAIN=go1.26.9 go build -p=1 -o "$$scratch/oldwriter" .); \
+	(cd qualification/protocolone && GOWORK=off GOTOOLCHAIN=go1.26.9 go build -p=1 -o "$$scratch/protocolone" .); \
+	(cd qualification/querypreguard && GOWORK=off GOTOOLCHAIN=go1.26.9 go build -p=1 -o "$$scratch/querypreguard" .); \
+	GOWORK=off GOTOOLCHAIN=go1.26.9 DISPATCH_LIFECYCLE_REQUIRED=1 DISPATCH_QUERY_REQUIRED=1 \
+	DISPATCH_OLDWRITER_BINARY="$$scratch/oldwriter" DISPATCH_PROTOCOL_ONE_BINARY="$$scratch/protocolone" \
+	DISPATCH_QUERYPREGUARD_BINARY="$$scratch/querypreguard" \
+	go test -p=1 -race -count=1 ./store/postgres -run 'TestQueryRemovalGuard|TestRetirementNativeOldWriter|TestQueryNativeProtocolOne'

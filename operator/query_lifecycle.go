@@ -21,7 +21,7 @@ const (
 
 func queryLifecycleAction(action string) bool {
 	switch action {
-	case ReadQueryRuntime, RegisterQueryRuntime, VerifyQueryRuntime, RemoveQueryRuntime, FinishQueryRuntime, AbortQueryRuntime:
+	case RevalidateQueryRuntime, ReadQueryRevalidation, CommitQueryRemoval, ReadQueryCommit, CloseQueryGuard, ReadQueryGuard, ReadQueryRuntime, RegisterQueryRuntime, VerifyQueryRuntime, RemoveQueryRuntime, FinishQueryRuntime, AbortQueryRuntime:
 		return true
 	}
 	return false
