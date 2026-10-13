@@ -24,10 +24,16 @@ type nativeLifecycleHost struct {
 	command    *exec.Cmd
 	done       chan error
 	stopped    bool
+	exit       error
 	logs       *bytes.Buffer
 }
 
 func startNativeLifecycle(t *testing.T, instance string, extra ...string) *nativeLifecycleHost {
+	t.Helper()
+	return startNativeLifecycleWithSupervisor(t, nil, instance, extra...)
+}
+
+func startNativeLifecycleWithSupervisor(t *testing.T, owner *auditSupervisor, instance string, extra ...string) *nativeLifecycleHost {
 	t.Helper()
 	binary := os.Getenv("DISPATCH_OPERATOR_BINARY")
 	if binary == "" || os.Getenv("DISPATCH_OPERATOR_DSN") == "" {
@@ -36,9 +42,20 @@ func startNativeLifecycle(t *testing.T, instance string, extra ...string) *nativ
 		}
 		t.Skip("native binary and dedicated PostgreSQL required")
 	}
-	statePath := filepath.Join(t.TempDir(), "state.json")
+	var stateDirectory string
+	if owner != nil {
+		var directoryErr error
+		stateDirectory, directoryErr = os.MkdirTemp(owner.directory, "operator-")
+		if directoryErr != nil {
+			t.Fatal("private operator state directory unavailable")
+		}
+	} else {
+		stateDirectory = t.TempDir()
+	}
+	statePath := filepath.Join(stateDirectory, "state.json")
 	args := append([]string{"--state-file", statePath, "--lifecycle-instance", instance, "--run-workers=false"}, extra...)
-	command := exec.CommandContext(t.Context(), binary, args...)
+	// Managed cleanup controls dependency order independently of test cancellation.
+	command := exec.CommandContext(context.Background(), binary, args...)
 	logs := new(bytes.Buffer)
 	command.Stdout = logs
 	command.Stderr = logs
@@ -47,18 +64,26 @@ func startNativeLifecycle(t *testing.T, instance string, extra ...string) *nativ
 	}
 	n := &nativeLifecycleHost{statePath: statePath, command: command, done: make(chan error, 1), logs: logs}
 	go func() { n.done <- command.Wait() }()
-	t.Cleanup(func() {
+	cleanup := func() {
 		if !n.stopped {
 			_ = command.Process.Kill()
 			<-n.done
 			n.stopped = true
 		}
 		if t.Failed() && n.client == nil {
+			for _, line := range safeShutdownRecords(logs.String()) {
+				t.Log(line)
+			}
 			for _, line := range nativeQueryDiagnostics(logs.String(), nil) {
 				t.Log(line)
 			}
 		}
-	})
+	}
+	if owner != nil {
+		owner.operators = append(owner.operators, n)
+	} else {
+		t.Cleanup(cleanup)
+	}
 
 	var state struct {
 		URL         string                         `json:"url"`
@@ -94,13 +119,16 @@ func startNativeLifecycle(t *testing.T, instance string, extra ...string) *nativ
 	}
 	n.client.csrf = token.Token
 	n.identities = state.Runtimes
-	t.Cleanup(func() {
+	retention := func() {
 		if !n.stopped {
 			_ = command.Process.Kill()
 			<-n.done
 			n.stopped = true
 		}
 		if t.Failed() {
+			for _, line := range safeShutdownRecords(logs.String()) {
+				t.Log(line)
+			}
 			for _, line := range nativeQueryDiagnostics(logs.String(), state.Credentials) {
 				t.Log(line)
 			}
@@ -110,7 +138,10 @@ func startNativeLifecycle(t *testing.T, instance string, extra ...string) *nativ
 				t.Error("credential appeared in native log")
 			}
 		}
-	})
+	}
+	if owner == nil {
+		t.Cleanup(retention)
+	}
 	return n
 }
 

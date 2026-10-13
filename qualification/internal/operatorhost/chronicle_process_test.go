@@ -3,6 +3,7 @@ package operatorhost
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"net"
 	"net/http"
@@ -10,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"syscall"
 	"testing"
 	"time"
 
@@ -20,15 +22,16 @@ import (
 )
 
 type nativeChronicle struct {
-	command *exec.Cmd
-	done    chan error
-	stopped bool
-	exit    error
-	logs    *bytes.Buffer
-	config  sinkhost.Config
+	command           *exec.Cmd
+	done              chan error
+	stopped           bool
+	exit              error
+	logs              *bytes.Buffer
+	config            sinkhost.Config
+	additionalSecrets []string
 }
 
-func startNativeChronicle(t *testing.T, config sinkhost.Config, path string) *nativeChronicle {
+func startNativeChronicle(t *testing.T, config sinkhost.Config, path string, owners ...*auditSupervisor) *nativeChronicle {
 	t.Helper()
 	binary := os.Getenv("DISPATCH_SINK_HOST_BINARY")
 	if binary == "" {
@@ -37,27 +40,19 @@ func startNativeChronicle(t *testing.T, config sinkhost.Config, path string) *na
 		}
 		t.Skip("native Chronicle binary required")
 	}
-	command := exec.CommandContext(t.Context(), binary, "--role", "chronicle", "--config", path)
+	// Cleanup joins the operator before sinks; test-context cancellation must not
+	// terminate all children concurrently.
+	command := exec.CommandContext(context.Background(), binary, "--role", "chronicle", "--config", path)
 	logs := new(bytes.Buffer)
 	command.Stdout = logs
 	command.Stderr = logs
 	n := &nativeChronicle{command: command, done: make(chan error, 1), logs: logs, config: config}
-	t.Cleanup(func() {
-		stopErr := n.stop()
-		if n.stopped {
-			for _, credential := range config.Credentials {
-				if credential.Secret != "" && bytes.Contains(logs.Bytes(), []byte(credential.Secret)) {
-					t.Error("sink credential in logs")
-				}
-			}
-		}
-		if t.Failed() || stopErr != nil {
-			t.Log(n.diagnostic("cleanup", stopErr))
-		}
-		if stopErr != nil {
-			t.Error("native Chronicle cleanup failed")
-		}
-	})
+	if len(owners) != 0 && owners[0] != nil {
+		owners[0].sinks = append(owners[0].sinks, n)
+	} else {
+		t.Cleanup(func() { _ = n.cleanup(t) })
+	}
+
 	if err := command.Start(); err != nil {
 		n.stopped, n.exit = true, err
 		t.Fatal(n.diagnostic("start", err))
@@ -106,18 +101,26 @@ func (n *nativeChronicle) stop() error {
 		n.stopped = true
 		return nil
 	}
-	killErr := n.command.Process.Kill()
+	killErr := n.command.Process.Signal(syscall.SIGTERM)
 	if errors.Is(killErr, os.ErrProcessDone) {
 		killErr = nil
 	}
-	timer := time.NewTimer(5 * time.Second)
+	timer := time.NewTimer(8 * time.Second)
 	defer timer.Stop()
 	select {
 	case n.exit = <-n.done:
 		n.stopped = true
-		return killErr
+		return errors.Join(killErr, n.exit)
 	case <-timer.C:
-		return errors.Join(killErr, errors.New("native Chronicle child join timed out"))
+		timeoutErr := errors.Join(killErr, errors.New("native Chronicle child join timed out"))
+		forceErr := n.command.Process.Kill()
+		select {
+		case n.exit = <-n.done:
+			n.stopped = true
+		case <-time.After(5 * time.Second):
+			return errors.Join(timeoutErr, forceErr, errors.New("native Chronicle forced join incomplete"))
+		}
+		return errors.Join(timeoutErr, forceErr)
 	}
 }
 
@@ -168,4 +171,98 @@ func lifecycleSinkConfig(t *testing.T) (sinkhost.Config, string, map[string]*pgx
 		t.Cleanup(func() { _ = connection.Close(context.Background()) })
 	}
 	return config, configPath, connections
+}
+
+type nativeChronicleProfiles struct {
+	supervisor *auditSupervisor
+	configs    map[string]sinkhost.Config
+	paths      map[string]string
+	routes     sinkhost.ChronicleProfiles
+	bundle     string
+}
+
+func lifecycleChronicleProfiles(t *testing.T) (nativeChronicleProfiles, map[string]*pgx.Conn) {
+	t.Helper()
+	base, path, db := lifecycleSinkConfig(t)
+	profiles := nativeChronicleProfiles{configs: map[string]sinkhost.Config{"production": base}, paths: map[string]string{"production": path}, routes: sinkhost.ChronicleProfiles{Version: 1, Routes: []sinkhost.ChronicleRoute{sinkhost.ChronicleProfile(base)}}}
+	original, err := json.Marshal(base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	directory := t.TempDir()
+	if err = os.Chmod(directory, 0700); err != nil {
+		t.Fatal(err)
+	}
+	for _, namespace := range []string{"audit", "foreign"} {
+		listener, listenErr := (&net.ListenConfig{}).Listen(t.Context(), "tcp", "127.0.0.1:0")
+		if listenErr != nil {
+			t.Fatal(listenErr)
+		}
+		address := listener.Addr().String()
+		if err = listener.Close(); err != nil {
+			t.Fatal(err)
+		}
+		binding := base.Binding
+		binding.Namespace, binding.TenantID = namespace, "tenant-"+namespace
+		config, provisionErr := sinkhost.ProvisionChronicleProfile(t.Context(), base, binding, address)
+		if provisionErr != nil {
+			t.Fatal("additional Chronicle profile provisioning failed")
+		}
+		unchanged, marshalErr := json.Marshal(base)
+		if marshalErr != nil || !bytes.Equal(original, unchanged) || config.EnvironmentID != base.EnvironmentID || !bytes.Equal(config.HMACKey, base.HMACKey) || !bytes.Equal(config.TokenKey, base.TokenKey) || len(config.Credentials) != 1 {
+			t.Fatal("additional issuance changed original identity")
+		}
+		profiles.configs[namespace] = config
+		profiles.paths[namespace] = filepath.Join(directory, namespace+".json")
+		if err = sinkhost.Save(profiles.paths[namespace], config); err != nil {
+			t.Fatal(err)
+		}
+		profiles.routes.Routes = append(profiles.routes.Routes, sinkhost.ChronicleProfile(config))
+	}
+	profiles.bundle = filepath.Join(directory, "routes.json")
+	if err = sinkhost.SaveChronicleProfiles(profiles.bundle, profiles.routes); err != nil {
+		t.Fatal(err)
+	}
+	profiles.supervisor = newAuditSupervisor(t, db)
+	return profiles, db
+}
+
+func (p nativeChronicleProfiles) start(t *testing.T) map[string]*nativeChronicle {
+	t.Helper()
+	sinks := map[string]*nativeChronicle{}
+	for _, namespace := range []string{"production", "audit", "foreign"} {
+		sinks[namespace] = p.startSink(t, namespace)
+	}
+	return sinks
+}
+
+func (n *nativeChronicle) cleanup(t *testing.T) error {
+	stopErr := n.stop()
+	cleanupErr := stopErr
+	if n.stopped {
+		for _, credential := range n.config.Credentials {
+			if credential.Secret != "" && bytes.Contains(n.logs.Bytes(), []byte(credential.Secret)) {
+				t.Error("sink credential in logs")
+				cleanupErr = errors.Join(cleanupErr, errors.New("sink credential in logs"))
+			}
+		}
+	}
+	if t.Failed() || stopErr != nil {
+		t.Log(n.diagnostic("cleanup", stopErr))
+	}
+	if stopErr != nil {
+		t.Error("native Chronicle cleanup failed")
+	}
+	return cleanupErr
+}
+
+func (p nativeChronicleProfiles) startSink(t *testing.T, namespace string) *nativeChronicle {
+	t.Helper()
+	n := startNativeChronicle(t, p.configs[namespace], p.paths[namespace], p.supervisor)
+	for _, profile := range p.configs {
+		for _, credential := range profile.Credentials {
+			n.additionalSecrets = append(n.additionalSecrets, credential.Secret)
+		}
+	}
+	return n
 }

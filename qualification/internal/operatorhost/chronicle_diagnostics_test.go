@@ -108,7 +108,7 @@ func TestNativeChronicleFailureDiagnostics(t *testing.T) {
 
 // The buffer belongs to exec's output copier until Wait has completed.
 func (n *nativeChronicle) diagnostic(phase string, cause error) string {
-	secrets := []string{n.config.WebhookSecret}
+	secrets := append([]string{n.config.WebhookSecret}, n.additionalSecrets...)
 	for _, credential := range n.config.Credentials {
 		secrets = append(secrets, credential.Secret)
 	}

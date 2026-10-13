@@ -39,8 +39,14 @@ func run() (returnErr error) {
 	pauseBefore := flag.String("drain-pause-before-file", "", "private marker that pauses the first drain before process invocation")
 	pauseAfter := flag.String("drain-pause-after-file", "", "private marker that pauses the first drain after process invocation")
 	chroniclePath := flag.String("chronicle-config", "", "private native Chronicle config; starts a lifecycle host without sample executions")
+	routesPath := flag.String("chronicle-routes-file", "", "private three-route Chronicle bundle")
 	flag.Parse()
-	if *chroniclePath != "" && *instance == "" {
+	nativeChronicle := *chroniclePath != "" || *routesPath != ""
+	if *chroniclePath != "" && *routesPath != "" {
+		operatorhost.WriteStageDiagnostic(os.Stderr, "route_load", time.Now(), sinkhost.ErrInvalidProfile, nil)
+		return sinkhost.ErrInvalidProfile
+	}
+	if nativeChronicle && *instance == "" {
 		return errors.New("native Chronicle qualification requires lifecycle mode")
 	}
 	if (*pauseBefore != "" && *pauseAfter != "") || ((*pauseBefore != "" || *pauseAfter != "") && *instance == "") {
@@ -72,7 +78,7 @@ func run() (returnErr error) {
 	if *instance == "" {
 		host, err = operatorhost.New(ctx, store)
 	} else {
-		host, err = operatorhost.NewWithLifecycle(ctx, store, operatorhost.LifecycleOptions{DiagnosticWriter: os.Stderr, InstanceID: *instance, SkipSampleExecutions: *chroniclePath != "", DrainObserver: fileDrainObserver{before: *pauseBefore, after: *pauseAfter}})
+		host, err = operatorhost.NewWithLifecycle(ctx, store, operatorhost.LifecycleOptions{DiagnosticWriter: os.Stderr, InstanceID: *instance, SkipSampleExecutions: nativeChronicle, DrainObserver: fileDrainObserver{before: *pauseBefore, after: *pauseAfter}})
 	}
 	if err != nil {
 		return err
@@ -80,26 +86,41 @@ func run() (returnErr error) {
 	defer func() {
 		closeCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		_ = host.Close(closeCtx)
+		returnErr = errors.Join(returnErr, host.Close(closeCtx))
 	}()
-	if *chroniclePath != "" {
-		config, loadErr := sinkhost.Load(*chroniclePath)
+	if nativeChronicle {
+		started := time.Now()
+		var routes []sinkhost.ChronicleRoute
+		var loadErr error
+		if *routesPath != "" {
+			var profiles sinkhost.ChronicleProfiles
+			profiles, loadErr = sinkhost.LoadChronicleProfiles(*routesPath)
+			routes = profiles.Routes
+		} else {
+			var config sinkhost.Config
+			config, loadErr = sinkhost.Load(*chroniclePath)
+			routes = []sinkhost.ChronicleRoute{sinkhost.ChronicleProfile(config)}
+		}
+		if loadErr != nil {
+			loadErr = errors.Join(sinkhost.ErrInvalidProfile, loadErr)
+		}
+		operatorhost.WriteStageDiagnostic(os.Stderr, "route_load", started, loadErr, nil)
 		if loadErr != nil {
 			return loadErr
 		}
-		stopPublisher, startErr := host.StartChroniclePublisher(ctx, config.Binding, "http://"+config.Addresses["chronicle"]+"/accept", config.Credentials["chronicle"].Secret)
-		if startErr != nil {
+		if startErr := host.StartChroniclePublisher(ctx, routes); startErr != nil {
 			return startErr
 		}
-		defer func() {
-			shutdown, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-			defer cancel()
-			returnErr = errors.Join(returnErr, stopPublisher(shutdown))
-		}()
 	}
+
 	if *runWorkers {
 		stopWorkers := startWorkers(ctx, host, *activation)
-		defer func() { returnErr = errors.Join(returnErr, stopWorkers()) }()
+		defer func() {
+			started := time.Now()
+			stopErr := stopWorkers()
+			operatorhost.WriteStageDiagnostic(os.Stderr, "worker_stop", started, stopErr, nil)
+			returnErr = errors.Join(returnErr, stopErr)
+		}()
 	}
 	listener, err := (&net.ListenConfig{}).Listen(ctx, "tcp", *listen)
 	if err != nil {
@@ -137,7 +158,10 @@ func run() (returnErr error) {
 	}
 	shutdown, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	return server.Shutdown(shutdown)
+	started := time.Now()
+	shutdownErr := server.Shutdown(shutdown)
+	operatorhost.WriteStageDiagnostic(os.Stderr, "http_shutdown", started, shutdownErr, nil)
+	return shutdownErr
 }
 
 // startWorkers leaves the control endpoint available while enrollment is pending.

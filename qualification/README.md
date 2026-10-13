@@ -345,19 +345,79 @@ is tested separately: a PostgreSQL trigger rejects retirement and drain audit
 intents, and neither the receipt, build mutation nor process drain is accepted.
 
 
+### Native build provenance
+
+Both native runners record the revision, tracked and untracked source state,
+file hashes, binary hashes and `go version -m` metadata before qualification.
+Generated manifests and binaries stay outside the checkout. CI refuses a dirty
+checkout and retains the metadata as an artifact even when a campaign fails.
+VCS stamping stays enabled.
+
+For local work, capture the exact uncommitted snapshot you intend to test, then
+pass that manifest to the runner. Use a new private path outside the checkout:
+
+```sh
+python3 qualification/source-provenance.py capture --repo . --output /private/dispatch-source.json
+DISPATCH_QUALIFICATION_SOURCE_MANIFEST=/private/dispatch-source.json make qualification-operator-check
+```
+
+The runner refuses any later source change, including an unexpected untracked
+file. It labels the resulting build dirty and preserves its exact snapshot hash.
+You do not need to publish an unverified commit to run qualification. Set
+`DISPATCH_QUALIFICATION_EVIDENCE_DIR` to an existing directory outside the
+checkout if you want the retained metadata in a particular location. Each run
+prints its evidence directory. Private process files still use separate temporary
+directories and are removed after their processes have joined.
+
 ### Lifecycle audit delivery with native Chronicle
 
-Pass `--chronicle-config=/private/sink.json` with lifecycle mode to start the
-independent audit publisher. Use a private configuration produced by the existing
-`sinkhost.Bootstrap` API, with the production namespace owned by `operator-host`.
-The configured application and tenant must match the persisted namespace. The
-sink uses its persisted Authsome service account and Warden policy; credentials
-and the Chronicle HMAC key stay in that mode 0600 configuration file.
+Pass `--chronicle-routes-file=/private/routes.json` with lifecycle mode to
+start the audit publisher without sample executions. You need three native
+Chronicle processes: production, audit and foreign. Each process keeps its own
+immutable namespace binding, listen address, machine credential and Warden
+policy tenant.
 
-This opt-in profile skips sample executions. Default hosts still seed the normal
-production and foreign examples for authorization checks. Both profiles retain
-the same namespace ownership rules. The Chronicle adapter serves one configured
-namespace and tenant, so this scenario qualifies that binding only.
+Bootstrap production once with `sinkhost.Bootstrap`. Use
+`sinkhost.ProvisionChronicleProfile` for audit and foreign with the original app,
+environment and signing keys. The helper registers the requested namespace and
+issues a separate Chronicle-only credential through Authsome. Service accounts
+share the app and environment; the sink's exact configured credential, Warden
+policy and complete body mapping enforce the tenant boundary.
+
+Save each sink's configuration privately, then use `sinkhost.ChronicleProfile`
+and `sinkhost.SaveChronicleProfiles` to create a version 1 bundle with all three
+routes. The bundle contains bindings, numeric loopback addresses and credentials.
+It has no database DSNs or signing keys. Keep the directory at mode 0700 and the
+file at 0600. Loading rejects symlinks, non-regular files, files above 64 KiB,
+unknown fields, multiple JSON documents, duplicate identities and missing routes.
+The operator checks the full persisted namespace catalog with a bounded query
+before starting publication or HTTP readiness. The old `--chronicle-config` flag
+still reads its single-config format, but this host refuses it with
+`missing_route`. You cannot combine the two flags.
+
+Stop and join your reader first, then signal and join the operator while all
+three Chronicle processes remain available. The operator stops workers and
+drains publication before closing storage. An incomplete drain returns a failure,
+keeps storage and sink connections open, and lets an in-process caller retry
+`Host.Close` with a fresh context. A process that exits with incomplete delivery
+leaves its original PostgreSQL rows for a later process to recover. Only stop the
+sinks and database after you have retained the operator's sanitized stage records
+and outbox counts. The records include fixed error categories, deadline flags and
+bounded counts; `counts_before_drain` identifies a snapshot taken before a timed
+out drain, and `counts_known=false` means the store observation was unavailable.
+
+`TestNativeAuditProductionOnlyMappingFailure` independently reproduces the old
+production-only mapping failure with a real denied read and live sinks. It does
+not attribute the historical unexplained operator exit. The other
+`TestNativeAudit*` cases check native receipts, all six opposite credentials,
+forged binding/body fields, persisted key and policy failures, audit-sink outage,
+continued production/foreign delivery, storage retention, fresh-context shutdown
+retry and process reopen. The process assertion requires normal exit 1 with
+matching incomplete/deadline flags, and rejects signals, panics and other exit
+codes. A failure injected immediately after an audit-sink restart checks that
+the cleanup supervisor keeps replacement sinks alive until host recovery and
+diagnostic retention finish. The provisioning tests verify original app/environment
+identity, independent profiles and immutable namespace conflicts.
 
 `make qualification-operator-check` now builds both native executables and runs
 `TestNativeLifecycleChronicleOutage` against PostgreSQL. The test first delivers

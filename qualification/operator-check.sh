@@ -10,13 +10,32 @@ cleanup() {
 trap cleanup EXIT
 export GOWORK=off GOTOOLCHAIN=go1.26.9
 cd "$operator_root"
+
+# Metadata survives private binary and credential cleanup, including failed runs.
+operator_evidence=$(mktemp -d "${DISPATCH_QUALIFICATION_EVIDENCE_DIR:-${RUNNER_TEMP:-${TMPDIR:-/tmp}}}/dispatch-operator-evidence.XXXXXX")
+printf 'Qualification evidence: %s\n' "$operator_evidence"
+operator_expected=()
+if [ -n "${DISPATCH_QUALIFICATION_SOURCE_MANIFEST:-}" ]; then
+  operator_expected=(--expected "$DISPATCH_QUALIFICATION_SOURCE_MANIFEST")
+fi
+python3 "$operator_root/source-provenance.py" check --repo "$operator_root/.." \
+  --output "$operator_evidence/source-before.json" "${operator_expected[@]}"
 go version
 operator_replacements=$(go list -m -f '{{if .Replace}}{{.Path}}{{end}}' all)
 if [ -n "$operator_replacements" ]; then echo "Operator qualification refuses replacements" >&2; exit 1; fi
 go build -o "$operator_dir/operatorhost" ./cmd/operatorhost
-go version -m "$operator_dir/operatorhost"
+go version -m "$operator_dir/operatorhost" | tee "$operator_evidence/operatorhost.buildinfo.txt"
+python3 "$operator_root/source-provenance.py" artifact --repo "$operator_root/.." \
+  --source "$operator_evidence/source-before.json" --binary "$operator_dir/operatorhost" \
+  --metadata "$operator_evidence/operatorhost.buildinfo.txt" --output "$operator_evidence/operatorhost.json"
 go build -o "$operator_dir/sinkhost" ./cmd/sinkhost
-go version -m "$operator_dir/sinkhost"
+go version -m "$operator_dir/sinkhost" | tee "$operator_evidence/sinkhost.buildinfo.txt"
+python3 "$operator_root/source-provenance.py" artifact --repo "$operator_root/.." \
+  --source "$operator_evidence/source-before.json" --binary "$operator_dir/sinkhost" \
+  --metadata "$operator_evidence/sinkhost.buildinfo.txt" --output "$operator_evidence/sinkhost.json"
+python3 "$operator_root/source-provenance.py" check --repo "$operator_root/.." \
+  --expected "$operator_evidence/source-before.json" --output "$operator_evidence/source-after.json"
+go list -m -json all > "$operator_evidence/modules.json"
 govulncheck -test ./...
 govulncheck ./cmd/operatorhost
 govulncheck -mode=binary "$operator_dir/operatorhost"

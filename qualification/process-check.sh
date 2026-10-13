@@ -10,11 +10,27 @@ cleanup() {
 trap cleanup EXIT
 export GOWORK=off GOTOOLCHAIN=go1.26.9
 cd "$root"
+
+# Metadata survives private binary and credential cleanup, including failed runs.
+process_evidence=$(mktemp -d "${DISPATCH_QUALIFICATION_EVIDENCE_DIR:-${RUNNER_TEMP:-${TMPDIR:-/tmp}}}/dispatch-process-evidence.XXXXXX")
+printf 'Qualification evidence: %s\n' "$process_evidence"
+process_expected=()
+if [ -n "${DISPATCH_QUALIFICATION_SOURCE_MANIFEST:-}" ]; then
+  process_expected=(--expected "$DISPATCH_QUALIFICATION_SOURCE_MANIFEST")
+fi
+python3 "$root/source-provenance.py" check --repo "$root/.." \
+  --output "$process_evidence/source-before.json" "${process_expected[@]}"
 go version
 process_replacements=$(go list -m -f '{{if .Replace}}{{.Path}}{{end}}' all)
 if [ -n "$process_replacements" ]; then echo "Process qualification refuses module replacements" >&2; exit 1; fi
 go build -o "$process_dir/sinkhost" ./cmd/sinkhost
-go version -m "$process_dir/sinkhost"
+go version -m "$process_dir/sinkhost" | tee "$process_evidence/sinkhost.buildinfo.txt"
+python3 "$root/source-provenance.py" artifact --repo "$root/.." \
+  --source "$process_evidence/source-before.json" --binary "$process_dir/sinkhost" \
+  --metadata "$process_evidence/sinkhost.buildinfo.txt" --output "$process_evidence/sinkhost.json"
+python3 "$root/source-provenance.py" check --repo "$root/.." \
+  --expected "$process_evidence/source-before.json" --output "$process_evidence/source-after.json"
+go list -m -json all > "$process_evidence/modules.json"
 govulncheck ./cmd/sinkhost
 govulncheck -mode=binary "$process_dir/sinkhost"
 docker run -d --name "$process_container" --memory=512m --memory-swap=512m --cpus=1 --pids-limit=128 \

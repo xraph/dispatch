@@ -6,6 +6,7 @@ import (
 	"crypto/rand"
 	"errors"
 	"net/http"
+	"sync"
 	"time"
 
 	"github.com/xraph/authsome"
@@ -31,6 +32,8 @@ import (
 	"github.com/xraph/dispatch"
 	"github.com/xraph/dispatch/api"
 	"github.com/xraph/dispatch/durable"
+	"github.com/xraph/dispatch/durable/delivery"
+	"github.com/xraph/dispatch/durable/delivery/ecosystem"
 	"github.com/xraph/dispatch/engine"
 	dc "github.com/xraph/dispatch/extension/contract"
 	"github.com/xraph/dispatch/operator"
@@ -52,22 +55,28 @@ type Credential struct {
 	Token   string `json:"token"`
 }
 type Host struct {
-	LegacyPolicy    wid.PolicyID
-	authStore       *authmem.Store
-	machineProvider *authority.Provider
-	Handler         http.Handler
-	Credentials     map[string]Credential
-	Store           Store
-	Auth            *authsome.Engine
-	Policies        *wmem.Store
-	warden          *warden.Engine
-	ReaderPolicy    wid.PolicyID
-	CommandPolicies map[string]wid.PolicyID
-	Machine         authority.Credential
-	runtime         commandRuntime
-	engine          *engine.Engine
-	audit           security.Boundary
-	lifecycle       *lifecycleHost
+	closeGateOnce    sync.Once
+	closeGate        chan struct{}
+	closed           bool
+	closeErr         error
+	publisher        *delivery.Publisher
+	chronicleRemotes []*ecosystem.Remote
+	LegacyPolicy     wid.PolicyID
+	authStore        *authmem.Store
+	machineProvider  *authority.Provider
+	Handler          http.Handler
+	Credentials      map[string]Credential
+	Store            Store
+	Auth             *authsome.Engine
+	Policies         *wmem.Store
+	warden           *warden.Engine
+	ReaderPolicy     wid.PolicyID
+	CommandPolicies  map[string]wid.PolicyID
+	Machine          authority.Credential
+	runtime          commandRuntime
+	engine           *engine.Engine
+	audit            security.Boundary
+	lifecycle        *lifecycleHost
 }
 
 // New provisions real Authsome sessions and Warden grants for two namespaces.
@@ -248,13 +257,24 @@ func (contextUser) CheckAuth(ctx context.Context, _ *http.Request) (*dashauth.Us
 	return &dashauth.UserInfo{Subject: u.ID.String(), Email: u.Email}, nil
 }
 func (h *Host) Close(ctx context.Context) error {
+	if err := h.lockClose(ctx); err != nil {
+		return err
+	}
+	defer func() { <-h.closeGate }()
+	if h.closed {
+		return h.closeErr
+	}
+	started := time.Now()
 	h.audit.Audit.Deactivate()
 	var storeErr, authErr, policyErr error
 	if h.engine != nil {
 		storeErr = h.engine.Stop(ctx)
 	} else if h.Store != nil {
-		// Until Build succeeds, the partial host still owns store cleanup.
 		storeErr = h.Store.Close()
+	}
+	if storeErr != nil {
+		h.diagnose("host_close", started, storeErr, nil)
+		return storeErr
 	}
 	if h.Auth != nil {
 		authErr = h.Auth.Stop(ctx)
@@ -262,5 +282,25 @@ func (h *Host) Close(ctx context.Context) error {
 	if h.warden != nil {
 		policyErr = h.warden.Stop(ctx)
 	}
-	return errors.Join(storeErr, authErr, policyErr)
+	h.closed = true
+	h.closeErr = errors.Join(authErr, policyErr)
+	h.diagnose("host_close", started, h.closeErr, nil)
+	return h.closeErr
+}
+
+func (h *Host) lockClose(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	h.closeGateOnce.Do(func() { h.closeGate = make(chan struct{}, 1) })
+	select {
+	case h.closeGate <- struct{}{}:
+		if err := ctx.Err(); err != nil {
+			<-h.closeGate
+			return err
+		}
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }

@@ -19,11 +19,13 @@ func TestNativeLifecycleChronicleOutage(t *testing.T) {
 		}
 		t.Skip("native Chronicle executable required")
 	}
-	config, path, db := lifecycleSinkConfig(t)
+	profiles, db := lifecycleChronicleProfiles(t)
+	config := profiles.configs["production"]
 	t.Setenv("DISPATCH_OPERATOR_DSN", config.DSNs["dispatch"])
-	sink := startNativeChronicle(t, config, path)
+	sinks := profiles.start(t)
+	sink := sinks["production"]
 	activation := filepath.Join(t.TempDir(), "activate")
-	host := startNativeLifecycle(t, "chronicle-lifecycle", "--chronicle-config", path, "--run-workers=true", "--activation-file", activation)
+	host := startNativeLifecycleWithSupervisor(t, profiles.supervisor, "chronicle-lifecycle", "--chronicle-routes-file", profiles.bundle, "--run-workers=true", "--activation-file", activation)
 	c := host.client
 	c.command("durable.retirementEnroll", operator.EnrollmentInput{NamespaceLifecycleInput: operator.NamespaceLifecycleInput{Namespace: "production"}, RequestID: "live-enroll"}, 200)
 	for _, identity := range host.identities {
@@ -82,7 +84,7 @@ func TestNativeLifecycleChronicleOutage(t *testing.T) {
 	if count(`SELECT count(*) FROM dispatch_lifecycle_receipts WHERE request_id='live-retire'`) != 1 {
 		t.Fatal("outage retry duplicated acceptance")
 	}
-	sink = startNativeChronicle(t, config, path)
+	sink = profiles.startSink(t, "production")
 	eventually("drained workers stopped publication recovery", func() bool {
 		return count(`SELECT count(*) FROM dispatch_durable_outbox WHERE destination='chronicle' AND delivered_at IS NULL`) == 0
 	})

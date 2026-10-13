@@ -43,8 +43,8 @@ jobs:
       - name: Reject effective module replacements
         working-directory: qualification
         run: |
-          go list -m -json all > modules.json
-          jq -s -e 'all(.[]; .Replace == null)' modules.json
+          go list -m -json all > "$RUNNER_TEMP/dispatch-modules.json"
+          jq -s -e 'all(.[]; .Replace == null)' "$RUNNER_TEMP/dispatch-modules.json"
       - name: Lint qualification
         uses: golangci/golangci-lint-action@v9
         with:
@@ -57,12 +57,21 @@ jobs:
         run: |
           go install golang.org/x/vuln/cmd/govulncheck@latest
           govulncheck -test ./...
+      - name: Check native source provenance helper
+        run: python3 -B -m unittest discover -s qualification -p source_provenance_test.py
       - name: Qualify published durable operator HTTP and fixture
         timeout-minutes: 10
         run: make qualification-operator-check
       - name: Qualify independent PostgreSQL sink processes
         timeout-minutes: 15
         run: make qualification-process-check
+      - name: Retain native qualification provenance
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: dispatch-native-source-provenance
+          path: ${{ runner.temp }}/dispatch-*-evidence.*
+          if-no-files-found: ignore
 
   # ─── Format Check ──────────────────────────────────────────────────
   format:
@@ -178,8 +187,8 @@ jobs:
         run: |
           go mod tidy -diff
           go mod verify
-          go list -m -json all > modules.json
-          jq -s -e 'all(.[]; .Replace == null)' modules.json
+          go list -m -json all > "$RUNNER_TEMP/dispatch-modules.json"
+          jq -s -e 'all(.[]; .Replace == null)' "$RUNNER_TEMP/dispatch-modules.json"
           go vet ./...
       - name: Qualify native guards and historical writers
         run: make qualification-queryguard-check

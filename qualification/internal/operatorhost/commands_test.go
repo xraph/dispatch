@@ -45,24 +45,49 @@ func newCommandClient(t *testing.T, store Store) *commandClient {
 	return newConfiguredCommandClient(t, store, nil)
 }
 
-func newConfiguredCommandClient(t *testing.T, store Store, options *LifecycleOptions) *commandClient {
+func newConfiguredCommandClient(t *testing.T, store Store, options *LifecycleOptions, owners ...*auditSupervisor) *commandClient {
 	t.Helper()
+	var owner *auditSupervisor
+	if len(owners) != 0 {
+		owner = owners[0]
+	}
+	if owner != nil && options != nil {
+		copyOptions := *options
+		if copyOptions.DiagnosticWriter == nil {
+			copyOptions.DiagnosticWriter = new(bytes.Buffer)
+		}
+		options = &copyOptions
+		if diagnosticLog, ok := options.DiagnosticWriter.(*bytes.Buffer); ok {
+			owner.hostDiagnostics = append(owner.hostDiagnostics, func() []string { return safeShutdownRecords(diagnosticLog.String()) })
+		}
+	}
 	h, err := newHost(t.Context(), store, options)
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() {
+	cleanup := func() {
 		if t.Failed() && h.lifecycle != nil {
 			for _, line := range h.lifecycle.queryDiagnosticSnapshot() {
 				t.Log(line)
 			}
 		}
-		if err := h.Close(context.Background()); err != nil {
+		closeContext, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancel()
+		if err := h.Close(closeContext); err != nil {
 			t.Error(err)
 		}
-	})
+	}
+	if owner != nil {
+		owner.hosts = append(owner.hosts, h)
+	} else {
+		t.Cleanup(cleanup)
+	}
 	server := httptest.NewServer(h.Handler)
-	t.Cleanup(server.Close)
+	if owner != nil {
+		owner.readers = append(owner.readers, server)
+	} else {
+		t.Cleanup(server.Close)
+	}
 	c := &commandClient{t: t, host: h, server: server}
 	status, raw := c.request(http.MethodGet, "/api/dashboard/v1/csrf", h.Credentials["commander"].Token, nil)
 	var result struct {
