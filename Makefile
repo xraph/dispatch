@@ -103,8 +103,12 @@ clean c:
 ## fmt (f): Format code
 fmt f:
 	@echo "$(BLUE)Formatting code...$(NC)"
-	@gofmt -s -w .
-	@command -v goimports >/dev/null 2>&1 && goimports -w -local github.com/xraph/dispatch . || echo "$(YELLOW)goimports not found, skipping (run: go install golang.org/x/tools/cmd/goimports@latest)$(NC)"
+	@git ls-files -z --cached --others --exclude-standard '*.go' | \
+		xargs -0 sh -c 'for path do [ ! -f "$$path" ] || printf "%s\0" "$$path"; done' sh | xargs -0 gofmt -s -w
+	@if command -v goimports >/dev/null 2>&1; then \
+		git ls-files -z --cached --others --exclude-standard '*.go' | \
+			xargs -0 sh -c 'for path do [ ! -f "$$path" ] || printf "%s\0" "$$path"; done' sh | xargs -0 goimports -w -local github.com/xraph/dispatch; \
+	else echo "$(YELLOW)goimports not found, skipping (run: go install golang.org/x/tools/cmd/goimports@latest)$(NC)"; fi
 	@echo "$(GREEN)✓ Formatting complete$(NC)"
 
 ## lint (l): Run linter
