@@ -220,11 +220,17 @@ func (s *Service) AbortQueryRuntimeRemoval(ctx context.Context, p security.Princ
 	if binding.State != durable.QueryRuntimeRemoving || binding.Removal != fence || binding.QueryRuntimeIdentity != fence.Candidate {
 		return QueryRuntimeAcceptance{}, durable.ErrQueryFence
 	}
-	verifier, ok := s.queryHost.(durable.QueryRemovalAbortVerifier)
-	if !ok {
-		return QueryRuntimeAcceptance{}, ErrRuntimeUnavailable
+	var settlement durable.QueryRemovalSettlement
+	var proof durable.QueryRuntimeVerification
+	if prepared, ok := s.queryHost.(durable.QueryRemovalPreparedAbortVerifier); ok {
+		settlement, proof, err = prepared.VerifyPreparedAbort(ctx, binding, fence, in.RequestID, digest)
+	} else {
+		verifier, ok := s.queryHost.(durable.QueryRemovalAbortVerifier)
+		if !ok {
+			return QueryRuntimeAcceptance{}, ErrRuntimeUnavailable
+		}
+		settlement, proof, err = verifier.VerifyAbort(ctx, binding, fence)
 	}
-	settlement, proof, err := verifier.VerifyAbort(ctx, binding, fence)
 	if err != nil {
 		s.observeQueryRejection(ctx, target, in.RequestID, durable.OperationAbortQueryRemoval, err)
 		return QueryRuntimeAcceptance{}, commandError(err)
