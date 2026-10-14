@@ -16,13 +16,13 @@ The Forge handler authenticates an admitted executor service account through rea
 
 Every authority restore, including a restore with the same protected epoch and digest, must replace the independent launcher incarnation before exposure. A mismatch persists quarantine. Reopening requires trusted reconciliation against the complete retained external frontier. Matching the marker is insufficient. Restoring or deleting both databases is outside this trust boundary, as are a compromised launcher, ledger administrator or admitted executor.
 
-The table trigger refuses updates and deletes of immutable facts. Deployment setup must also exclude untrusted SQL sessions, DDL, truncation, trigger disabling, alternate schemas and ledger credentials. Runtime and administration handles are separate application interfaces, not proof of PostgreSQL role isolation. No role/grant cutover or fixed launcher command ships in this slice. The admission service holds no provider or native credentials; its delegate adapter forwards one exact attempt to the saved executor over the configured trusted channel.
+The table trigger refuses updates and deletes of immutable facts. Deployment setup must also exclude untrusted SQL sessions, DDL, truncation, trigger disabling, alternate schemas and ledger credentials. Runtime and administration handles are separate application interfaces, not proof of PostgreSQL role isolation. The fixed Linux launcher is documented in [launcher/README.md](launcher/README.md). Role/grant cutover still needs assembled-host qualification. The admission service holds no provider or native credentials; its delegate adapter forwards one exact attempt to the saved executor over the configured trusted channel.
 
 The current snapshot validates the complete finite delegation chain before mutation or state inspection. This is bounded by the frozen campaign quota, not intended as an unbounded production history scan. Indexed pages return at most 64 references. Pages and their cursors provide inspection, never settlement or a proof that all effects are gone. A later insertion with an earlier invocation ID may fall behind a cursor; reconciliation must use the exact sequence and full frontier.
 
 ## Checks
 
-Resolve the published module graph with `GOWORK=off GOTOOLCHAIN=go1.26.9 go mod tidy`. There are no replacements. The Ctrlplane pin includes the published protected marker and Docker custody implementation. Full terminal recovery qualification remains pending.
+Resolve the published module graph with `GOWORK=off GOTOOLCHAIN=go1.26.9 go mod tidy`. There are no replacements. The Ctrlplane pin includes the published protected marker and Docker custody implementation. The pin also includes guarded recovery and independently retained provision receipts. Full terminal recovery qualification remains pending.
 
 Use a disposable PostgreSQL server, then run `make f`, `make l` and `WRITERFLOOR_TEST_DSN=... make check`. Tests create a fresh schema and clean it up. `WRITERFLOOR_REQUIRED=1` turns a missing server into a failure; the Makefile sets it for the test target.
 
@@ -52,3 +52,11 @@ On October 14, 2026, all eight cases passed against Docker 29.9.0 in the isolate
 rootless engine using Ctrlplane `db121ca`. The final inventory matched the initial
 inventory. This drill covers process crashes and response loss, not VM disk loss
 or restoration of the assembled host.
+
+## Fixed launcher and creation custody
+
+You can prepare, enroll, inspect, supervise and stop a finite set of pinned Linux workloads with `cmd/writerfloor-launcher`. The launcher verifies the stopped container's executable and mounted startup bytes before starting it. Its private proxy holds the mTLS key outside the workload. After a retained start attempt, every return path closes that proxy and attempts bounded cleanup of the exact container ID, including a lost Docker response or a failed journal write.
+
+The Linux fixture campaign passes 44 checks with no skips, including private TLS handshakes, startup substitutions, journal restart and cleanup failures. CI reruns these checks with the race detector and requires root ownership tests. Actual Authsome/Warden readiness with the assembled host and live Docker inspection remain separate checks.
+
+`internal/managedhost` retains signed resource creation custody before one SDK send. Its creation admission adapter captures fresh grants, drops stale grants at its finite capacity boundary, and never rebuilds a send grant from historical acceptance. Removal identity comes from the retained creation result. This component still needs the service-worker enrollment, native lifecycle adapter and complete managed provider loop before you can qualify an assembled deployment.

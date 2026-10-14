@@ -117,6 +117,10 @@ jobs:
           working-directory: qualification/writerfloor
       - name: Verify, race test and build
         run: make check
+      - name: Qualify Linux launcher ownership and crash cleanup
+        run: |
+          go test -race -c -o "$RUNNER_TEMP/writerfloor-launcher.test" ./launcher
+          sudo env WRITERFLOOR_LAUNCHER_REQUIRED=1 "$RUNNER_TEMP/writerfloor-launcher.test" -test.v -test.timeout=2m
       - name: Scan qualification dependencies
         run: |
           go install golang.org/x/vuln/cmd/govulncheck@latest

@@ -4,11 +4,16 @@ go 1.26.9
 
 require (
 	github.com/jackc/pgx/v5 v5.11.0
+	github.com/moby/moby/api v1.56.1
+	github.com/moby/moby/client v0.6.2
 	github.com/xraph/authsome v1.7.3-0.20261009205819-7b694db1b80a
-	github.com/xraph/ctrlplane v1.7.1-0.20261013235740-db121ca19b61
+	github.com/xraph/ctrlplane v1.7.1-0.20261014004947-b4347f664ff3
 	github.com/xraph/dispatch v1.8.1-0.20261013152932-9cc8451d1cb1
 	github.com/xraph/dispatch/qualification v0.0.0-20261013215810-6de6b8600087
 	github.com/xraph/forge v1.12.7
+	github.com/xraph/forge/extensions/auth v1.12.7
+	github.com/xraph/grove v1.7.3
+	github.com/xraph/grove/drivers/pgdriver v1.7.3
 	github.com/xraph/warden v1.7.1
 )
 
@@ -80,8 +85,6 @@ require (
 	github.com/mattn/go-isatty v0.0.24 // indirect
 	github.com/mitchellh/go-homedir v1.1.0 // indirect
 	github.com/moby/docker-image-spec v1.3.1 // indirect
-	github.com/moby/moby/api v1.56.1 // indirect
-	github.com/moby/moby/client v0.6.2 // indirect
 	github.com/modern-go/concurrent v0.0.0-20180306012644-bacd9c7ef1dd // indirect
 	github.com/modern-go/reflect2 v1.0.3-0.20250322232337-35a7c28c31ee // indirect
 	github.com/munnerz/goautoneg v0.0.0-20191010083416-a7dc8b61c822 // indirect
@@ -106,11 +109,8 @@ require (
 	github.com/xdg-go/stringprep v1.0.4 // indirect
 	github.com/xraph/chronicle v1.8.0 // indirect
 	github.com/xraph/confy v1.0.3 // indirect
-	github.com/xraph/forge/extensions/auth v1.12.7 // indirect
 	github.com/xraph/go-utils v1.3.0 // indirect
-	github.com/xraph/grove v1.7.3 // indirect
 	github.com/xraph/grove/drivers/mongodriver v1.7.3 // indirect
-	github.com/xraph/grove/drivers/pgdriver v1.7.3 // indirect
 	github.com/xraph/grove/drivers/sqlitedriver v1.7.3 // indirect
 	github.com/xraph/keysmith v1.7.0 // indirect
 	github.com/xraph/ledger v1.7.0 // indirect

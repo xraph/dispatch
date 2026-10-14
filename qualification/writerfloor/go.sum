@@ -376,8 +376,8 @@ github.com/xraph/chronicle v1.8.0 h1:N4e+pRCZxXSwKeGD9RpBL/kmavLFEp6NYWwBomPN7kc
 github.com/xraph/chronicle v1.8.0/go.mod h1:VutAlbZ0EVAiSAWgP0XlDQcNm4S6RgzR0vB/nfMqs3U=
 github.com/xraph/confy v1.0.3 h1:mY0kIo9+dU+XcGGN7cm4IfOhvk4SDj5TrnccpGi21fs=
 github.com/xraph/confy v1.0.3/go.mod h1:DcYB+N0yKpr3t1yhhkdIIiCfch30Kh5wW6GRntUMOGk=
-github.com/xraph/ctrlplane v1.7.1-0.20261013235740-db121ca19b61 h1:FjLRyVE3jfNaxDFNPrABObhmTQt2NX0LvqeAaJTHVXM=
-github.com/xraph/ctrlplane v1.7.1-0.20261013235740-db121ca19b61/go.mod h1:jZJznCnaWH1z/QFj1cTydcRypZh8eFs7yg+GRBLbleY=
+github.com/xraph/ctrlplane v1.7.1-0.20261014004947-b4347f664ff3 h1:OIb910ffSNRLYyzFFq0ijjFv/pfhceakZj9n8QZucow=
+github.com/xraph/ctrlplane v1.7.1-0.20261014004947-b4347f664ff3/go.mod h1:jZJznCnaWH1z/QFj1cTydcRypZh8eFs7yg+GRBLbleY=
 github.com/xraph/dispatch v1.8.1-0.20261013152932-9cc8451d1cb1 h1:yv3AOOpEkfkoQnfPa34ku91Ccz1Hn/R8Qd+WApXu1Ng=
 github.com/xraph/dispatch v1.8.1-0.20261013152932-9cc8451d1cb1/go.mod h1:xBYAfxBlZuiinjwlA+7DKVBa5YMSDKBFavFoAyN2TLA=
 github.com/xraph/dispatch/qualification v0.0.0-20261013215810-6de6b8600087 h1:l4Z3kMLcAjNLN5qhfWoKGk7tXh/c9OqLsXqKFhP7LqY=
