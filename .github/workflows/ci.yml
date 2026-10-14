@@ -73,6 +73,55 @@ jobs:
           path: ${{ runner.temp }}/dispatch-*-evidence.*
           if-no-files-found: ignore
 
+  writerfloor:
+    name: External writer admission qualification
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      GOWORK: "off"
+      GOTOOLCHAIN: go1.26.9
+      GOMAXPROCS: "2"
+      WRITERFLOOR_REQUIRED: "1"
+      WRITERFLOOR_TEST_DSN: postgres://dispatch:dispatch@127.0.0.1:5432/dispatch?sslmode=disable
+    services:
+      postgres:
+        image: postgres:17.11-alpine
+        env:
+          POSTGRES_USER: dispatch
+          POSTGRES_PASSWORD: dispatch
+          POSTGRES_DB: dispatch
+        ports:
+          - 5432:5432
+        options: >-
+          --memory=512m --cpus=1 --pids-limit=128
+          --tmpfs /var/lib/postgresql/data:size=201326592
+          --health-cmd "pg_isready -U dispatch"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+    defaults:
+      run:
+        working-directory: qualification/writerfloor
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v6
+        with:
+          go-version: '1.26.9'
+          cache-dependency-path: qualification/writerfloor/go.sum
+      - name: Reject module replacements
+        run: |
+          go list -m -json all > "$RUNNER_TEMP/writerfloor-modules.json"
+          jq -s -e 'all(.[]; .Replace == null)' "$RUNNER_TEMP/writerfloor-modules.json"
+      - name: Lint writer admission and Linux custody harness
+        uses: golangci/golangci-lint-action@v9
+        with:
+          version: latest
+          working-directory: qualification/writerfloor
+      - name: Verify, race test and build
+        run: make check
+      - name: Scan qualification dependencies
+        run: |
+          go install golang.org/x/vuln/cmd/govulncheck@latest
+          govulncheck -test ./...
+
   # ─── Format Check ──────────────────────────────────────────────────
   format:
     name: Format

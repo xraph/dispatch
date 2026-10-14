@@ -11,14 +11,22 @@ Dispatch is a durable execution engine for Go, shipped as a library. You import 
 | `github.com/xraph/dispatch/qualification/oldwriter` | `qualification/oldwriter/` | no |
 | `github.com/xraph/dispatch/qualification/protocolone` | `qualification/protocolone/` | no |
 | `github.com/xraph/dispatch/qualification/querypreguard` | `qualification/querypreguard/` | no |
+| `github.com/xraph/dispatch/qualification/writerfloor` | `qualification/writerfloor/` | no |
 
-Only the root is a library anyone depends on. The four `qualification` modules are test harnesses that consume Dispatch the way an outside host would, from published versions, with no `replace` lines. The root has none either.
+Only the root is a library anyone depends on. The five `qualification` modules are test harnesses that consume Dispatch the way an outside host would, from published versions, with no `replace` lines. The root has none either.
 
 `qualification/` pins a published Dispatch commit next to published authsome, warden, chronicle, relay, forge and `forge/extensions/auth`, then runs real authsome sessions, warden policies and DWP WebSocket frames against it (the credential and DPoP regressions). It also builds two loopback hosts. `cmd/operatorhost` serves the durable operator contract for dashboard work, and `cmd/sinkhost` runs Chronicle, Relay, Dispatch and a webhook receiver as separate processes against PostgreSQL. `qualification/README.md` explains each scenario in detail.
 
 `querypreguard` pins published pre-guard commit `290a77873305` and exercises query removal, proof refresh and SQL mutation refusal against the current schema. Keep that pin unchanged when you update the qualification host. Run `make qualification-queryguard-check` with `DISPATCH_LIFECYCLE_TEST_DSN` pointing at a disposable PostgreSQL server. The target builds all three historical executables and requires their named native compatibility tests. It does not start a database.
 
 `oldwriter` and `protocolone` are small executables linked against older Dispatch commits. Tests in `store/postgres` launch them to prove the current store works beside an old writer that never sets the retirement marker, and beside a library from before query retention.
+
+`writerfloor` qualifies the external admission ledger, Authsome/Warden request
+boundary and isolated Linux Docker custody executor against published dependencies.
+In that directory, run `make f`, `make l` and
+`WRITERFLOOR_TEST_DSN=... make check` with a disposable PostgreSQL server. Its Linux
+Docker drill requires the exact isolated qualification VM described in its README.
+It does not certify the complete deployment or restore path.
 
 Because `qualification/` pins published code, a change you make in the root isn't visible there until it's pushed to `main` and you bump the require:
 
