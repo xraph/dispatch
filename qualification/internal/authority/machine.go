@@ -23,6 +23,21 @@ const ProviderName = "dispatch-sink-machine"
 
 var ErrDenied = errors.New("qualification: machine identity refused")
 
+// machineDenialError preserves a bounded diagnostic stage without exposing store or
+// credential details through the authentication error.
+type machineDenialError struct{ stage string }
+
+func (e machineDenialError) Error() string           { return ErrDenied.Error() }
+func (e machineDenialError) Unwrap() error           { return ErrDenied }
+func (e machineDenialError) DiagnosticClass() string { return e.stage }
+
+func deniedAt(ctx context.Context, stage string) error {
+	if ctx.Err() != nil {
+		stage += "_context"
+	}
+	return machineDenialError{stage: stage}
+}
+
 type Credential struct {
 	KeyID     aid.APIKeyID         `json:"key_id"`
 	AccountID aid.ServiceAccountID `json:"account_id"`
@@ -76,32 +91,48 @@ func (p *Provider) Authenticate(ctx context.Context, r *http.Request) (*auth.Aut
 		return nil, ErrDenied
 	}
 	result, err := strategy.Authenticate(ctx, clone)
-	if err != nil || result == nil || result.User != nil || result.Session == nil {
-		return nil, ErrDenied
+	if err != nil {
+		stage := "strategy"
+		switch err.Error() {
+		case "apikey: key not found":
+			stage = "strategy_key_read"
+		case "apikey: invalid key":
+			stage = "strategy_key_hash"
+		case "apikey: key is revoked or expired":
+			stage = "strategy_key_inactive"
+		case "apikey: service account is not active":
+			stage = "strategy_account"
+		case "apikey: too many failed attempts from this address":
+			stage = "strategy_rate_limit"
+		}
+		return nil, deniedAt(ctx, stage)
+	}
+	if result == nil || result.User != nil || result.Session == nil {
+		return nil, deniedAt(ctx, "strategy_result")
 	}
 	for _, configured := range p.Credentials {
 		key, e := p.Engine.APIKeyStore().GetAPIKey(ctx, configured.KeyID)
 		if e != nil || key == nil {
-			return nil, ErrDenied
+			return nil, deniedAt(ctx, "key_read")
 		}
 		if !apikey.VerifyKey(parts[1], key.KeyHash) {
 			continue
 		}
 		if !key.IsValid() || (key.EnvID.IsNil() || key.EnvID.String() != p.EnvironmentID) || !key.UserID.IsNil() || key.AppID.String() != p.Binding.AppID || key.ServiceAccountID != configured.AccountID || result.Session.ServiceAccountID != configured.AccountID || result.Session.AppID != key.AppID || result.Session.EnvID != key.EnvID || result.Session.PrincipalKind != principal.KindService {
-			return nil, ErrDenied
+			return nil, deniedAt(ctx, "key_binding")
 		}
 		resolved, e := p.Engine.ResolvePrincipal(ctx, principal.Ref{Kind: principal.KindService, ID: configured.AccountID.String()})
 		if e != nil || resolved == nil || !resolved.IsActive(time.Now()) || resolved.Kind != principal.KindService || resolved.ID != configured.AccountID.String() || resolved.AppID != key.AppID || (resolved.EnvID.IsNil() || resolved.EnvID.String() != p.EnvironmentID) || (!resolved.OrgID.IsNil() && resolved.OrgID.String() != p.Binding.OrgID) {
-			return nil, ErrDenied
+			return nil, deniedAt(ctx, "principal")
 		}
 		for _, scope := range key.Scopes {
 			if !slices.Contains(resolved.Scopes, scope) {
-				return nil, ErrDenied
+				return nil, deniedAt(ctx, "scope")
 			}
 		}
 		return &auth.AuthContext{Subject: configured.AccountID.String(), Claims: map[string]any{"principal_kind": "service_account", "principal_id": configured.AccountID.String()}, Scopes: slices.Clone(key.Scopes), Metadata: map[string]any{"credential_scheme": "bearer"}, Data: p.Binding}, nil
 	}
-	return nil, ErrDenied
+	return nil, deniedAt(ctx, "key_match")
 }
 
 type Checker interface {
