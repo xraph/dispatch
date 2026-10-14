@@ -16,6 +16,7 @@ import (
 	"github.com/xraph/forge"
 	"github.com/xraph/forge/extensions/auth"
 	"github.com/xraph/grove"
+	gdriver "github.com/xraph/grove/driver"
 	"github.com/xraph/grove/drivers/pgdriver"
 	"github.com/xraph/warden"
 	wpg "github.com/xraph/warden/store/postgres"
@@ -46,8 +47,9 @@ func (refuseCutover) VerifyOpen(context.Context, admission.State, admission.Open
 func openGrove(ctx context.Context, dsn string) (*grove.DB, error) {
 	bounded, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
+	// Each role has its own pool; reserve server capacity for authentication and control.
 	driver := pgdriver.New()
-	if operationErr := driver.Open(bounded, dsn); operationErr != nil {
+	if operationErr := driver.Open(bounded, dsn, gdriver.WithPoolSize(4)); operationErr != nil {
 		return nil, ErrRefused
 	}
 	return grove.Open(driver)

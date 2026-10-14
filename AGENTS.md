@@ -26,7 +26,9 @@ boundary and isolated Linux Docker custody executor against published dependenci
 In that directory, run `make f`, `make l` and
 `WRITERFLOOR_TEST_DSN=... make check` with a disposable PostgreSQL server. Its Linux
 Docker drill requires the exact isolated qualification VM described in its README.
-It does not certify the complete deployment or restore path.
+Its assembled campaign also runs real deployment, drain, restart, restore,
+promotion and guarded removal drills. See `qualification/writerfloor/QUALIFICATION.md`
+for the tested composition and operational limits.
 
 Because `qualification/` pins published code, a change you make in the root isn't visible there until it's pushed to `main` and you bump the require:
 
