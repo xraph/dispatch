@@ -3,15 +3,17 @@ title: Testing
 description: How to test jobs, workflows, and DWP integrations using the in-memory store and Go's testing package.
 ---
 
-Dispatch is designed to be testable out of the box. The in-memory store requires zero infrastructure, and all core packages accept interfaces so you can mock at any boundary.
+The in-memory store needs no infrastructure, so you can test jobs and workflows with plain `go test`. The examples below compile and pass against the current module.
 
 ## Quick start
 
-Every test follows the same pattern: create a `memory.Store`, build an engine, register handlers, and exercise them.
+Every test follows the same pattern: create a `memory.Store`, build an engine, register handlers, start it and exercise them.
 
 ```go
 import (
+    "context"
     "testing"
+    "time"
 
     "github.com/xraph/dispatch"
     "github.com/xraph/dispatch/engine"
@@ -20,44 +22,42 @@ import (
 )
 
 func TestSendEmail(t *testing.T) {
-    s := memory.New()
-    d, _ := dispatch.New(dispatch.WithStore(s))
+    d, _ := dispatch.New(dispatch.WithStore(memory.New()))
     eng, _ := engine.Build(d)
-
-    var called bool
+    called := make(chan struct{}, 1)
     engine.Register(eng, job.NewDefinition("send-email",
         func(ctx context.Context, p struct{ To string }) error {
-            called = true
+            called <- struct{}{}
             return nil
         },
     ))
-
-    ctx := context.Background()
-    eng.Start(ctx)
-    defer eng.Stop(ctx)
-
-    engine.Enqueue(ctx, eng, "send-email", struct{ To string }{To: "test@example.com"})
-
-    // Give the worker a moment to process.
-    time.Sleep(100 * time.Millisecond)
-
-    if !called {
+    ctx := t.Context()
+    if err := eng.Start(ctx); err != nil {
+        t.Fatal(err)
+    }
+    defer eng.Stop(context.Background())
+    if _, err := engine.Enqueue(ctx, eng, "send-email", struct{ To string }{To: "test@example.com"}); err != nil {
+        t.Fatal(err)
+    }
+    select {
+    case <-called:
+    case <-time.After(5 * time.Second):
         t.Fatal("handler was not called")
     }
 }
 ```
 
+A channel with a timeout beats a fixed `time.Sleep`: the test finishes as soon as the worker runs the job.
+
 ## Testing workflows
 
-Workflows are tested the same way. The in-memory store handles checkpoints, so replay semantics work correctly:
+`engine.StartWorkflow` runs the workflow in the calling goroutine, so by the time it returns the steps have run and you can assert right away:
 
 ```go
 func TestOrderPipeline(t *testing.T) {
-    s := memory.New()
-    d, _ := dispatch.New(dispatch.WithStore(s))
+    d, _ := dispatch.New(dispatch.WithStore(memory.New()))
     eng, _ := engine.Build(d)
-
-    steps := []string{}
+    var steps []string
     engine.RegisterWorkflow(eng, workflow.NewWorkflow("order-pipeline",
         func(wf *workflow.Workflow, input struct{ OrderID string }) error {
             if err := wf.Step("validate", func(ctx context.Context) error {
@@ -72,15 +72,18 @@ func TestOrderPipeline(t *testing.T) {
             })
         },
     ))
-
-    ctx := context.Background()
-    eng.Start(ctx)
-    defer eng.Stop(ctx)
-
-    run, _ := engine.StartWorkflow(ctx, eng, "order-pipeline",
-        struct{ OrderID string }{OrderID: "ORD-1"})
-    time.Sleep(500 * time.Millisecond)
-
+    ctx := t.Context()
+    if err := eng.Start(ctx); err != nil {
+        t.Fatal(err)
+    }
+    defer eng.Stop(context.Background())
+    run, err := engine.StartWorkflow(ctx, eng, "order-pipeline", struct{ OrderID string }{OrderID: "ORD-1"})
+    if err != nil {
+        t.Fatal(err)
+    }
+    if run.State != workflow.RunStateCompleted {
+        t.Fatalf("run state = %s", run.State)
+    }
     if len(steps) != 2 {
         t.Fatalf("expected 2 steps, got %d", len(steps))
     }
@@ -89,13 +92,13 @@ func TestOrderPipeline(t *testing.T) {
 
 ## Testing sagas with compensations
 
+When a step fails, the compensations of the steps that already succeeded run in reverse order. The failing step's own compensation doesn't run:
+
 ```go
 func TestBookingSaga_Rollback(t *testing.T) {
-    s := memory.New()
-    d, _ := dispatch.New(dispatch.WithStore(s))
+    d, _ := dispatch.New(dispatch.WithStore(memory.New()))
     eng, _ := engine.Build(d)
-
-    compensated := []string{}
+    var compensated []string
     engine.RegisterWorkflow(eng, workflow.NewWorkflow("booking",
         func(wf *workflow.Workflow, _ struct{}) error {
             if err := wf.StepWithCompensation("reserve-hotel",
@@ -107,8 +110,6 @@ func TestBookingSaga_Rollback(t *testing.T) {
             ); err != nil {
                 return err
             }
-
-            // This step fails, triggering compensation.
             return wf.StepWithCompensation("charge-payment",
                 func(ctx context.Context) error { return fmt.Errorf("card declined") },
                 func(ctx context.Context) error {
@@ -118,77 +119,124 @@ func TestBookingSaga_Rollback(t *testing.T) {
             )
         },
     ))
-
-    ctx := context.Background()
-    eng.Start(ctx)
-    defer eng.Stop(ctx)
-
-    engine.StartWorkflow(ctx, eng, "booking", struct{}{})
-    time.Sleep(500 * time.Millisecond)
-
-    // Compensation runs in reverse order.
-    if compensated[0] != "hotel" {
-        t.Fatalf("expected hotel to be compensated, got %v", compensated)
+    ctx := t.Context()
+    if err := eng.Start(ctx); err != nil {
+        t.Fatal(err)
+    }
+    defer eng.Stop(context.Background())
+    _, _ = engine.StartWorkflow(ctx, eng, "booking", struct{}{})
+    if len(compensated) != 1 || compensated[0] != "hotel" {
+        t.Fatalf("expected only hotel to be compensated, got %v", compensated)
     }
 }
 ```
 
 ## Testing DWP integration
 
-For integration tests that exercise the full DWP stack (WebSocket + auth + frame handling), use `httptest.NewServer` with a Forge test app:
+To exercise the full DWP stack (WebSocket, auth and frame handling), serve a Forge test app with `httptest.NewServer`. The DWP handler needs a security boundary, and mutating calls such as `job.enqueue` also need an activated audit service, so the helper builds an allow-all boundary first:
 
 ```go
 import (
+    "context"
     "net/http/httptest"
     "strings"
+    "testing"
 
+    "github.com/xraph/dispatch"
     "github.com/xraph/dispatch/client"
+    "github.com/xraph/dispatch/durable"
     "github.com/xraph/dispatch/dwp"
+    "github.com/xraph/dispatch/engine"
+    "github.com/xraph/dispatch/security"
+    "github.com/xraph/dispatch/store/memory"
     forgetesting "github.com/xraph/forge/testing"
+    "github.com/xraph/go-utils/log"
 )
 
-func setupDWPTest(t *testing.T) (*client.Client, *engine.Engine, func()) {
-    s := memory.New()
-    d, _ := dispatch.New(dispatch.WithStore(s), dispatch.WithConcurrency(2))
-    eng, _ := engine.Build(d, engine.WithStreamBroker())
+func allowAllBoundary(t *testing.T) security.Boundary {
+    t.Helper()
 
+    b := security.Boundary{
+        Resource: security.Resource{InstallationID: "test", PolicyTenant: "test"},
+        Authorizer: security.AuthorizerFunc(func(context.Context, security.Principal, string, security.Resource) error {
+            return nil
+        }),
+    }
+
+    // Mutating operations need an audit service bound to a store.
+    auditStore := memory.New()
+    cfg := durable.NamespaceConfig{
+        InstallationID: b.Resource.InstallationID,
+        TenantID:       b.Resource.PolicyTenant,
+        AppID:          "test",
+        Namespace:      "operator-audit",
+        RequireAudit:   true,
+        SchemaVersion:  durable.DeliverySchemaVersion,
+    }
+    if _, err := auditStore.RegisterNamespace(t.Context(), cfg); err != nil {
+        t.Fatal(err)
+    }
+    b.Audit = &security.AuditService{}
+    if err := b.Audit.Activate(t.Context(), auditStore, auditStore, b.Resource, cfg.Namespace, false); err != nil {
+        t.Fatal(err)
+    }
+
+    return b
+}
+
+func setupDWPTest(t *testing.T) (*client.Client, *engine.Engine) {
+    t.Helper()
+    ctx := t.Context()
+    logger := log.NewTestLogger()
+
+    d, _ := dispatch.New(dispatch.WithStore(memory.New()), dispatch.WithConcurrency(2))
+    eng, err := engine.Build(d, engine.WithStreamBroker())
+    if err != nil {
+        t.Fatal(err)
+    }
+
+    boundary := allowAllBoundary(t)
     broker := eng.StreamBroker()
-    handler := dwp.NewHandler(eng, broker, logger)
+    handler := dwp.NewHandler(eng, broker, logger, boundary)
     srv := dwp.NewServer(broker, handler,
         dwp.WithAuth(dwp.NewAPIKeyAuthenticator(dwp.APIKeyEntry{
             Token:    "test-token",
-            Identity: dwp.Identity{Subject: "test", Scopes: []string{dwp.ScopeAll}},
+            Identity: dwp.Identity{Subject: "test"},
         })),
+        dwp.WithSecurity(boundary),
+        dwp.WithLogger(logger),
     )
 
     app := forgetesting.NewTestApp("test", "0.1.0")
     srv.RegisterRoutes(app.Router())
     ts := httptest.NewServer(app.Router())
+    t.Cleanup(ts.Close)
+
+    if err := eng.Start(ctx); err != nil {
+        t.Fatal(err)
+    }
+    t.Cleanup(func() { _ = eng.Stop(context.Background()) })
 
     wsURL := "ws" + strings.TrimPrefix(ts.URL, "http") + "/dwp"
-    c, _ := client.DialContext(ctx, wsURL, client.WithToken("test-token"))
-
-    eng.Start(ctx)
-    return c, eng, func() {
-        c.Close()
-        eng.Stop(ctx)
-        ts.Close()
+    c, err := client.DialContext(ctx, wsURL, client.WithToken("test-token"))
+    if err != nil {
+        t.Fatal(err)
     }
+    t.Cleanup(func() { _ = c.Close() })
+
+    return c, eng
 }
 ```
 
 Then write tests against the client:
 
 ```go
-func TestDWP_EnqueueAndGet(t *testing.T) {
-    c, eng, cleanup := setupDWPTest(t)
-    defer cleanup()
-
+func TestDWP_Enqueue(t *testing.T) {
+    c, eng := setupDWPTest(t)
     engine.Register(eng, job.NewDefinition("ping", func(_ context.Context, _ struct{}) error {
         return nil
     }))
-
-    result, err := c.Enqueue(ctx, "ping", struct{}{})
+    result, err := c.Enqueue(t.Context(), "ping", struct{}{})
     if err != nil {
         t.Fatal(err)
     }
@@ -198,28 +246,26 @@ func TestDWP_EnqueueAndGet(t *testing.T) {
 }
 ```
 
-## Test suite overview
+## What the repo's own tests cover
 
-The Dispatch test suite covers all major packages:
-
-| Package | Tests | What's covered |
-|---------|-------|----------------|
-| `workflow` | Saga compensations, event waits, parallel steps, sleep, time-travel replay, versioning, child workflows, fan-out |
-| `dwp` | Frame codec roundtrips, server WebSocket/SSE/RPC handling, authentication, subscription lifecycle |
-| `client` | Full Go client integration (enqueue, get, cancel, workflows, subscribe, watch, stats, auth failure, context timeout) |
+| Package | What's covered |
+|---------|----------------|
+| `workflow` | Saga compensations, event waits, parallel steps, sleep, replay, versioning, child workflows, fan-out |
+| `dwp` | Frame codec roundtrips, WebSocket, SSE and RPC handling, authentication, subscriptions |
+| `client` | The Go client end to end (enqueue, get, cancel, workflows, subscribe, watch, stats, auth failure, timeouts) |
 | `engine` | Job processing, workflow execution, cron scheduling, DLQ |
 | `stream` | Broker pub/sub, channel management, backpressure |
+| `store/storetest` | Conformance suites every store runs |
 
-Run the full suite:
+Run the suite the way CI does:
 
 ```bash
-go test ./... -count=1 -timeout 120s
+GOWORK=off go test -race ./...
 ```
 
 ## Tips
 
-- **Use `memory.New()`** for fast, zero-infrastructure tests.
-- **Use `atomic` counters** instead of plain `int` when verifying handler call counts from concurrent workers.
-- **Add short sleeps** (`100-500ms`) after enqueue/start operations to let async workers process.
-- **Use `forgetesting.NewTestApp`** when testing DWP or any Forge-integrated feature.
-- **Use `httptest.NewServer(app.Router())`** to create a real HTTP server for client integration tests.
+- Use `memory.New()` for fast tests with no infrastructure.
+- Use `atomic` counters or channels instead of plain variables when a handler runs on a worker goroutine.
+- Wait on a channel with a timeout instead of sleeping after an enqueue.
+- Use `forgetesting.NewTestApp` and `httptest.NewServer(app.Router())` for DWP and other Forge-backed tests.

@@ -3,16 +3,19 @@ title: Configuration
 description: Functional options, the Config struct, and how to customize Dispatch behavior.
 ---
 
-Dispatch uses functional options for wiring dependencies and a `Config` struct for tuning runtime behavior.
+You configure Dispatch with functional options. `dispatch.New` takes the dispatcher options, `engine.Build` takes the engine options, and the Forge extension has its own set that maps onto both.
 
 ## Dispatcher options
 
-The `Dispatcher` is configured with functional options passed to `dispatch.New()`:
-
 ```go
+import (
+    "github.com/xraph/dispatch"
+    "github.com/xraph/go-utils/log"
+)
+
 d, err := dispatch.New(
     dispatch.WithStore(postgresStore),
-    dispatch.WithLogger(slog.Default()),
+    dispatch.WithLogger(log.NewProductionLogger()),
     dispatch.WithConcurrency(20),
     dispatch.WithQueues([]string{"default", "critical", "bulk"}),
 )
@@ -22,72 +25,76 @@ d, err := dispatch.New(
 
 | Option | Purpose | Default |
 |--------|---------|---------|
-| `WithStore(s)` | Set the persistence backend (required) | — |
-| `WithLogger(l)` | Set the structured logger | `slog.Default()` |
-| `WithConcurrency(n)` | Max concurrent jobs processed | `10` |
-| `WithQueues(q)` | Queues to poll | `["default"]` |
+| `WithStore(s)` | The persistence backend (required) | none |
+| `WithLogger(l)` | A go-utils `log.Logger` (`github.com/xraph/go-utils/log`) | a no-op logger |
+| `WithConcurrency(n)` | Max concurrent jobs | `10` |
+| `WithQueues(q)` | Queues the workers poll | `["default"]` |
+| `WithPollInterval(d)` | How often an idle worker polls | `1s` |
+| `WithMaxPollInterval(d)` | Ceiling for the idle poll backoff | `30s` |
+| `WithHeartbeatInterval(d)` | How often running jobs heartbeat (`0` turns heartbeats off) | `10s` |
+| `WithStaleJobThreshold(d)` | How often the reaper runs (`0` turns it off). With the built-in stores the reclaim window is the job's lease TTL | `30s` |
+| `WithWorkerStoreCallTimeout(d)` | Cap on one worker store call | `5s` |
+| `WithCronTickInterval`, `WithCronLeaderTTL`, `WithCronLockTTL`, `WithCronRefreshInterval`, `WithCronStoreCallTimeout` | Cron scheduler tuning | subsystem defaults |
+
+`WithLogger` takes a go-utils logger, not a `*slog.Logger`. Use `log.NewProductionLogger()`, `log.NewDevelopmentLogger()` or the logger your Forge app already has.
 
 ## Config struct
 
+`dispatch.Config` holds the values the options set. `DefaultConfig()` returns:
+
 ```go
-type Config struct {
-    Concurrency       int           // default: 10
-    Queues            []string      // default: ["default"]
-    PollInterval      time.Duration // default: 1s
-    ShutdownTimeout   time.Duration // default: 30s
-    HeartbeatInterval time.Duration // default: 10s
-    StaleJobThreshold time.Duration // default: 30s
+dispatch.Config{
+    Concurrency:       10,
+    Queues:            []string{"default"},
+    PollInterval:      1 * time.Second,
+    MaxPollInterval:   30 * time.Second,
+    ShutdownTimeout:   30 * time.Second,
+    HeartbeatInterval: 10 * time.Second,
+    StaleJobThreshold: 30 * time.Second,
 }
 ```
 
-`DefaultConfig()` returns a Config with these defaults.
+The other fields (`ReapInterval`, `DefaultLeaseTTL`, `WorkerStoreCallTimeout` and the `Cron*` timings) default to zero, which keeps each subsystem's own default. `d.Config()` returns a copy.
 
 ## Engine options
 
-Additional options are passed to `engine.Build()`:
+`engine.Build` returns `(*engine.Engine, error)` and takes engine options:
 
 ```go
-eng := engine.Build(d,
-    engine.WithExtension(metricsExt),
+eng, err := engine.Build(d,
+    engine.WithExtension(observability.NewMetricsExtension()),
     engine.WithMiddleware(middleware.Logging(logger)),
-    engine.WithBackoff(backoff.Exponential(
-        backoff.WithBase(5*time.Second),
-        backoff.WithMax(2*time.Hour),
-    )),
+    engine.WithBackoff(backoff.NewExponential(5*time.Second, 2*time.Hour)),
     engine.WithQueueConfig(queue.Config{
         Name:           "critical",
         MaxConcurrency: 20,
         RateLimit:      50,
     }),
     engine.WithTracerProvider(tracerProvider),
-    engine.WithMetricFactory(metricFactory),
 )
+if err != nil {
+    log.Fatal(err)
+}
 ```
+
+Besides those, `engine.WithMetricFactory`, `WithDurableWorkflows`, `WithStreamBroker`, `WithArtifacts`, `WithExecutor`, `WithScratchRoot` and the resource options (`WithResourceManager`, `WithWorkerCapacity`, `WithWorkerCustomKeys`, `WithResourceDefaults`, `WithEstimator`) turn on the matching subsystems.
 
 ## Forge extension config
 
-When using the Forge framework integration:
+The Forge extension takes `extension.ExtOption` values that map onto the options above:
 
 ```go
 ext := extension.New(
-    extension.WithStore(pgStore),
+    extension.WithGroveDatabase(""),
     extension.WithConcurrency(20),
     extension.WithQueues([]string{"default", "bulk"}),
-    extension.WithBasePath("/api/dispatch"),
-    extension.WithDisableRoutes(),
+    extension.WithBasePath("/dispatch"),
     extension.WithDisableMigrate(),
 )
 ```
 
-| Option | Purpose | Default |
-|--------|---------|---------|
-| `WithStore(s)` | Persistence backend | — |
-| `WithConcurrency(n)` | Max concurrent jobs | `10` |
-| `WithQueues(q)` | Queues to poll | `["default"]` |
-| `WithBasePath(p)` | HTTP API prefix | `"/api/dispatch"` |
-| `WithDisableRoutes()` | Skip HTTP route registration | `false` |
-| `WithDisableMigrate()` | Skip auto-migration at startup | `false` |
+It also reads YAML from `extensions.dispatch` or `dispatch`. Worker tuning has no YAML key; see the [Forge extension guide](/docs/guides/forge-extension) for the full option and key list.
 
 ## Required options
 
-The only required option is `WithStore()`. Without a store, `dispatch.New()` returns `ErrNoStore`.
+The only required option is `WithStore()`. Without a store, `engine.Build` returns `dispatch.ErrNoStore`.

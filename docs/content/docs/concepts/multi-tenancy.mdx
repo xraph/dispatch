@@ -3,7 +3,7 @@ title: Multi-Tenancy
 description: How Dispatch scopes jobs and workflows to app and organization contexts.
 ---
 
-Multi-tenancy support is built into Dispatch via the `scope` package and the `ScopeAppID` / `ScopeOrgID` fields on every entity. It integrates naturally with the Forge framework but degrades gracefully in standalone mode.
+Multi-tenancy support is built into Dispatch via the `scope` package and the `ScopeAppID` / `ScopeOrgID` fields on every entity. It reads the scope from Forge, and without Forge the fields stay empty.
 
 ## Scope fields on entities
 
@@ -20,13 +20,7 @@ These fields are populated automatically from the context at enqueue time via `s
 
 ## The scope middleware
 
-Add `middleware.Scope()` to the engine's middleware chain. It reads scope fields from the enqueued `Job` and injects them back into the handler's `context.Context`:
-
-```go
-eng := engine.Build(d,
-    engine.WithMiddleware(middleware.Scope()),
-)
-```
+`middleware.Scope()` reads the scope fields from the job and restores them into the handler's `context.Context`. `engine.Build` puts it in the default middleware stack, so you don't add it yourself.
 
 Inside a job handler, retrieve the scope:
 
@@ -42,29 +36,31 @@ func(ctx context.Context, input MyInput) error {
 
 ## The scope package
 
-In standalone mode, `scope.Capture` returns empty strings (no-op):
+`scope.Capture` returns empty strings when the context carries no scope:
 
 ```go
 import "github.com/xraph/dispatch/scope"
 
-appID, orgID := scope.Capture(ctx)        // "" in standalone mode
+appID, orgID := scope.Capture(ctx)        // "" when no scope is set
 ctx = scope.Restore(ctx, appID, orgID)    // inject into context
 ```
 
-When running inside the Forge framework, the scope package reads app and organization IDs from the Forge context automatically.
+The scope travels in the context through Forge's `forge.WithScope` and `forge.ScopeFrom`, so inside a Forge request handler the IDs are picked up automatically. `scope.Restore` sets them on any context.
 
 ## Per-queue tenant routing
 
 Combine scope with per-queue configuration to isolate tenant traffic:
 
 ```go
-eng := engine.Build(d,
+eng, err := engine.Build(d,
     engine.WithQueueConfig(
-        queue.Config{Name: "tenant-acme",  MaxConcurrency: 5},
-        queue.Config{Name: "tenant-beta",  MaxConcurrency: 2},
+        queue.Config{Name: "tenant-acme", MaxConcurrency: 5},
+        queue.Config{Name: "tenant-beta", MaxConcurrency: 2},
     ),
 )
 
 // Enqueue to a tenant-specific queue:
-engine.EnqueueOnQueue(ctx, eng, SendEmail, input, "tenant-acme")
+engine.Enqueue(ctx, eng, "send_email", input, job.WithQueue("tenant-acme"))
 ```
+
+Workers only poll the queues you list in `dispatch.WithQueues`, so add the tenant queues there too.

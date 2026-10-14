@@ -5,18 +5,18 @@ description: Install Dispatch and process your first job in under five minutes.
 
 ## Prerequisites
 
-- Go 1.25 or later
+- Go 1.26 or later
 - A Go module (`go mod init`)
 
 ## Install
 
 ```bash
-go get github.com/xraph/dispatch
+go get github.com/xraph/dispatch@latest
 ```
 
 ## Step 1: Create a Dispatcher
 
-Every Dispatcher requires a store backend. For development and testing, use the in-memory store:
+Every Dispatcher needs a store. For development and tests, use the in-memory store:
 
 ```go
 package main
@@ -34,18 +34,22 @@ func main() {
 
     d, err := dispatch.New(
         dispatch.WithStore(memory.New()),
+        dispatch.WithConcurrency(4),
     )
     if err != nil {
         log.Fatal(err)
     }
 
+    _ = ctx
     _ = d
 }
 ```
 
+If you leave out `WithStore`, `engine.Build` (the next step) returns `dispatch.ErrNoStore`.
+
 ## Step 2: Define a job
 
-A job definition is a typed Go function. The input struct is JSON-serialized at enqueue time and deserialized before execution:
+A job definition is a name and a typed Go function. Dispatch marshals the payload to JSON when you enqueue it and unmarshals it before your handler runs:
 
 ```go
 import (
@@ -68,12 +72,15 @@ var SendEmail = job.NewDefinition("send_email",
 
 ## Step 3: Build the engine and register jobs
 
-The `engine` package wires all subsystems. Register job definitions at startup:
+The `engine` package wires the subsystems together. `engine.Build` returns an error, so check it. Then register your definitions:
 
 ```go
 import "github.com/xraph/dispatch/engine"
 
-eng := engine.Build(d)
+eng, err := engine.Build(d)
+if err != nil {
+    log.Fatal(err)
+}
 engine.Register(eng, SendEmail)
 ```
 
@@ -86,39 +93,58 @@ if err := d.Start(ctx); err != nil {
 defer d.Stop(ctx)
 ```
 
-The engine starts polling for pending jobs and dispatching them to workers.
+The workers start polling for pending jobs.
 
 ## Step 5: Enqueue a job
 
+You enqueue by job name, not by definition:
+
 ```go
-engine.Enqueue(ctx, eng, SendEmail, EmailInput{
+j, err := engine.Enqueue(ctx, eng, "send_email", EmailInput{
     To:      "user@example.com",
     Subject: "Welcome to Acme",
     Body:    "Thanks for signing up!",
 })
+if err != nil {
+    log.Fatal(err)
+}
+log.Println("enqueued", j.ID)
 ```
 
-`Enqueue` serializes the input to JSON and persists the job in `pending` state. A worker picks it up on the next poll cycle.
+`Enqueue` marshals the payload to JSON and stores the job in the `pending` state. A worker picks it up on its next poll. If the name isn't registered, the job still goes into the store, but no worker can run it.
 
-## Step 6: Mount the admin API (optional)
+A job gets 3 retries, the `default` queue and a 5 minute timeout unless you pass options to `Enqueue`:
+
+```go
+_, err = engine.Enqueue(ctx, eng, "send_email", input,
+    job.WithQueue("critical"),
+    job.WithMaxRetries(5),
+    job.WithTimeout(time.Minute),
+)
+```
+
+Pass queue, priority, retries and timeout at enqueue time. `job.NewDefinition` accepts the same options, but `Enqueue` doesn't read them from the definition today (only lease TTL, resources and artifact inputs carry over), so on a definition they have no effect.
+
+## Step 6: The admin API (optional)
+
+The REST admin API in the `api` package is a set of Forge routes, and every route refuses a request unless you configure an authenticator and an authorization boundary. The easy way to get it is the [Forge extension](/docs/guides/forge-extension), which mounts it under `/dispatch/v1` with Forge auth and Warden. Outside Forge you can build the handler yourself:
 
 ```go
 import (
     "net/http"
+
     "github.com/xraph/dispatch/api"
 )
 
-mux := http.NewServeMux()
-api.RegisterRoutes(mux, eng)
-
-log.Fatal(http.ListenAndServe(":8080", mux))
+h := api.New(eng, nil, api.WithSecurity(authenticator, boundary)).Handler()
+log.Fatal(http.ListenAndServe(":8080", h))
 ```
 
-The admin API exposes HTTP endpoints for inspecting jobs, workflows, crons, DLQ entries, and stats.
+`authenticator` is a `security.Authenticator` and `boundary` a `security.Boundary` from `github.com/xraph/dispatch/security`. Without `WithSecurity`, every route answers 401.
 
 ## Next steps
 
-- [Architecture](/docs/architecture) — Understand how the packages fit together
-- [Jobs](/docs/subsystems/jobs) — Typed definitions, priorities, retries, and backoff
-- [Workflows](/docs/subsystems/workflows) — Durable multi-step functions with checkpointing
-- [Stores](/docs/stores/postgres) — Connect to PostgreSQL for production
+- [Architecture](/docs/architecture): how the packages fit together
+- [Jobs](/docs/subsystems/catalog): typed definitions, priorities, retries and backoff
+- [Workflows](/docs/subsystems/delivery): durable multi-step functions with checkpointing
+- [Stores](/docs/stores/postgres): connect to PostgreSQL for production

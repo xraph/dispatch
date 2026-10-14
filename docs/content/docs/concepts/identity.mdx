@@ -15,7 +15,7 @@ The `job` prefix identifies this as a job. The suffix is a base32-encoded UUIDv7
 
 ## The `id` package
 
-The `id` package wraps the [TypeID Go library](https://github.com/jetify-com/typeid-go) (v2) with a single `ID` struct. All entity types share the same struct -- the prefix distinguishes them.
+The `id` package wraps the [TypeID Go library](https://github.com/jetify-com/typeid-go) (v2) with a single `ID` struct. All entity types share the same struct, and `id.JobID`, `id.CronID` and the others are type aliases of it. The prefix is what distinguishes them.
 
 ### Creating IDs
 

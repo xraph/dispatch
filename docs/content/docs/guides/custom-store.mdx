@@ -12,11 +12,16 @@ import "github.com/xraph/dispatch/store"
 
 type Store interface {
     job.Store
+    job.Lister
     workflow.Store
+    workflow.PageLister
     cron.Store
     dlq.Store
+    dlq.PageLister
     event.Store
     cluster.Store
+    artifact.Store
+    artifact.PageLister
 
     Migrate(ctx context.Context) error
     Ping(ctx context.Context) error
@@ -24,21 +29,25 @@ type Store interface {
 }
 ```
 
-This composes six subsystem interfaces plus three lifecycle methods.
+That's the subsystem interfaces plus three lifecycle methods. Several features also look for optional interfaces on your store: `job.LeaseStore` (lease-based reclaiming, which all five built-in backends implement), `dlq.ReplayClaimer` (inside `dlq.Store`), `job.UsageRecorder`, and `durable.Store` for the durable workflow runtime.
 
 ## Key subsystem interfaces
+
+These are the core methods. Check `go doc` on each package for the full contracts, which spell out ordering and atomicity rules.
 
 ### job.Store
 
 ```go
 type Store interface {
     EnqueueJob(ctx context.Context, j *Job) error
-    DequeueJobs(ctx context.Context, queues []string, limit int) ([]*Job, error)
+    DequeueJobs(ctx context.Context, opts DequeueOpts) ([]*Job, error)
     GetJob(ctx context.Context, jobID id.JobID) (*Job, error)
     UpdateJob(ctx context.Context, j *Job) error
-    CancelJob(ctx context.Context, jobID id.JobID) error
-    ListJobs(ctx context.Context, opts ListOpts) ([]*Job, error)
-    CountJobs(ctx context.Context) (map[State]int, error)
+    DeleteJob(ctx context.Context, jobID id.JobID) error
+    ListJobsByState(ctx context.Context, state State, opts ListOpts) ([]*Job, error)
+    HeartbeatJob(ctx context.Context, jobID id.JobID, workerID id.WorkerID) error
+    ReapStaleJobs(ctx context.Context, threshold time.Duration) ([]*Job, error)
+    CountJobs(ctx context.Context, opts CountOpts) (int64, error)
 }
 ```
 
@@ -46,12 +55,15 @@ type Store interface {
 
 ```go
 type Store interface {
-    CreateRun(ctx context.Context, r *Run) error
+    CreateRun(ctx context.Context, run *Run) error
     GetRun(ctx context.Context, runID id.RunID) (*Run, error)
-    UpdateRun(ctx context.Context, r *Run) error
+    UpdateRun(ctx context.Context, run *Run) error
     ListRuns(ctx context.Context, opts ListOpts) ([]*Run, error)
-    SaveCheckpoint(ctx context.Context, cp *Checkpoint) error
-    GetCheckpoint(ctx context.Context, runID id.RunID, stepName string) (*Checkpoint, error)
+    SaveCheckpoint(ctx context.Context, runID id.RunID, stepName string, data []byte) error
+    GetCheckpoint(ctx context.Context, runID id.RunID, stepName string) ([]byte, error)
+    ListCheckpoints(ctx context.Context, runID id.RunID) ([]*Checkpoint, error)
+    ListChildRuns(ctx context.Context, parentRunID id.RunID) ([]*Run, error)
+    DeleteCheckpointsAfter(ctx context.Context, runID id.RunID, afterStep string) error
 }
 ```
 
@@ -59,38 +71,43 @@ type Store interface {
 
 ```go
 type Store interface {
-    CreateCron(ctx context.Context, e *Entry) error
-    GetCron(ctx context.Context, cronID id.CronID) (*Entry, error)
-    ListCrons(ctx context.Context, opts ListOpts) ([]*Entry, error)
-    UpdateCron(ctx context.Context, e *Entry) error
-    DeleteCron(ctx context.Context, cronID id.CronID) error
-    ListDueCrons(ctx context.Context, now time.Time) ([]*Entry, error)
+    RegisterCron(ctx context.Context, entry *Entry) error
+    GetCron(ctx context.Context, entryID id.CronID) (*Entry, error)
+    ListCrons(ctx context.Context) ([]*Entry, error)
+    AcquireCronLock(ctx context.Context, entryID id.CronID, workerID id.WorkerID, ttl time.Duration) (bool, error)
+    ReleaseCronLock(ctx context.Context, entryID id.CronID, workerID id.WorkerID) error
+    UpdateCronLastRun(ctx context.Context, entryID id.CronID, at time.Time) error
+    UpdateCronEntry(ctx context.Context, entry *Entry) error
+    DeleteCron(ctx context.Context, entryID id.CronID) error
 }
 ```
+
+`RegisterCron` must return `dispatch.ErrDuplicateCron` for a name that already exists, which `engine.RegisterCron` treats as success.
 
 ### cluster.Store
 
 ```go
 type Store interface {
     RegisterWorker(ctx context.Context, w *Worker) error
-    UpdateWorker(ctx context.Context, w *Worker) error
+    DeregisterWorker(ctx context.Context, workerID id.WorkerID) error
+    HeartbeatWorker(ctx context.Context, workerID id.WorkerID) error
+    GetWorker(ctx context.Context, workerID id.WorkerID) (*Worker, error)
     ListWorkers(ctx context.Context) ([]*Worker, error)
-    AcquireLeadership(ctx context.Context, workerID id.WorkerID, until time.Time) (bool, error)
-    RenewLeadership(ctx context.Context, workerID id.WorkerID, until time.Time) error
+    ReapDeadWorkers(ctx context.Context, threshold time.Duration) ([]*Worker, error)
+    DeleteStaleWorkers(ctx context.Context, threshold time.Duration) (int64, error)
+    AcquireLeadership(ctx context.Context, workerID id.WorkerID, ttl time.Duration) (bool, error)
+    RenewLeadership(ctx context.Context, workerID id.WorkerID, ttl time.Duration) (bool, error)
+    GetLeader(ctx context.Context) (*Worker, error)
 }
 ```
 
 ## Implementation tips
 
-1. Start with `store/memory/store.go` as a reference implementation.
-2. `DequeueJobs` should **atomically** claim jobs in `pending` state whose `RunAt <= now`, updating their state to `running` and setting `WorkerID`.
+1. Start with `store/memory` as a reference implementation.
+2. `DequeueJobs` must claim jobs atomically: pending (or retrying) jobs in the requested queues whose `RunAt` has passed, moved to `running` with `WorkerID` set. Read `job.DequeueOpts` closely, since an empty queue list isn't portable.
 3. `AcquireLeadership` should use optimistic locking or a database advisory lock.
-4. `Migrate` must be idempotent — safe to call multiple times.
-5. Run the existing test suite against your implementation:
-
-```bash
-go test ./store/... -run TestStore -v
-```
+4. `Migrate` must be idempotent, so it's safe to call on every start.
+5. Run the conformance suites in `store/storetest` against your store from a test: `RunDequeueSuite`, `RunLeaseSuite`, `RunListSuite`, `RunCronSuite`, `RunClusterSuite`, `RunDLQSuite`, `RunDLQReplaySuite`, `RunWorkflowSuite` and `RunCheckpointOrderSuite`. Each takes a `*testing.T` and a constructor for a fresh store.
 
 ## Testing with the memory store
 
@@ -102,7 +119,7 @@ import "github.com/xraph/dispatch/store/memory"
 store := memory.New()
 
 d, _ := dispatch.New(dispatch.WithStore(store))
-eng := engine.Build(d)
+eng, err := engine.Build(d)
 ```
 
 Use it in unit tests and integration tests that don't need persistence across restarts.

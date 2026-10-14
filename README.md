@@ -50,7 +50,6 @@ var SendWelcome = job.NewDefinition("send_welcome",
 		fmt.Println("job: welcome email to", in.Email)
 		return nil
 	},
-	job.WithMaxRetries(5),
 )
 
 var Onboard = workflow.NewWorkflow("onboard",
@@ -94,7 +93,7 @@ func main() {
 	defer d.Stop(ctx)
 
 	in := Signup{Email: "ada@example.com"}
-	if _, err := engine.Enqueue(ctx, eng, "send_welcome", in); err != nil {
+	if _, err := engine.Enqueue(ctx, eng, "send_welcome", in, job.WithMaxRetries(5)); err != nil {
 		log.Fatal(err)
 	}
 	if _, err := engine.StartWorkflow(ctx, eng, "onboard", in); err != nil {
@@ -155,20 +154,20 @@ var ResizeImage = job.NewDefinition("resize_image",
 		}
 		return resize(ctx, in)
 	},
-	job.WithQueue("media"),
-	job.WithMaxRetries(5),
-	job.WithTimeout(2*time.Minute),
 )
 
 engine.Register(eng, ResizeImage)
 
 _, err := engine.Enqueue(ctx, eng, "resize_image", ResizeInput{Width: 640},
+	job.WithQueue("media"),
+	job.WithMaxRetries(5),
+	job.WithTimeout(2*time.Minute),
 	job.WithPriority(10),
 	job.WithRunAt(time.Now().Add(time.Hour)),
 )
 ```
 
-Unless you say otherwise, your job gets 3 retries, the `default` queue and a 5 minute timeout. When it runs out of retries, or returns an error wrapping `dispatch.ErrPermanent`, it moves to the dead letter queue. Workers only poll the queues you give `dispatch.WithQueues`, and `engine.WithQueueConfig` adds per-queue rate limits and concurrency.
+Pass the queue, retries, timeout and priority to `Enqueue`. `job.NewDefinition` accepts the same options, but `Enqueue` doesn't read them from the definition today, so set them per call. Unless you say otherwise, your job gets 3 retries, the `default` queue and a 5 minute timeout. When it runs out of retries, or returns an error wrapping `dispatch.ErrPermanent`, it moves to the dead letter queue. Workers only poll the queues you give `dispatch.WithQueues`, and `engine.WithQueueConfig` adds per-queue rate limits and concurrency.
 
 ## Workflows
 
@@ -207,7 +206,7 @@ You hand the SQL and MongoDB stores a [Grove](https://github.com/xraph/grove) da
 
 ## Use it with Forge
 
-The `github.com/xraph/dispatch/extension` package plugs Dispatch into a [Forge](https://github.com/xraph/forge) app. It depends on the Grove extension, picks up the `*grove.DB` it provides (Postgres, SQLite or MongoDB), runs the store migrations on start, builds the engine and provides `*engine.Engine` through DI. It also mounts the REST admin API under `/dispatch`.
+The `github.com/xraph/dispatch/extension` package plugs Dispatch into a [Forge](https://github.com/xraph/forge) app. It depends on the Grove extension, picks up the `*grove.DB` it provides (Postgres, SQLite or MongoDB), runs the store migrations on start, builds the engine and provides `*engine.Engine` through DI. It also mounts the REST admin API under `/dispatch/v1`.
 
 ```go
 import (
@@ -257,7 +256,7 @@ err = app.Router().POST("/signup", func(ctx forge.Context) error {
 })
 ```
 
-`jobs.Engine()` is nil until the extension has registered, which is why the job registration sits in a `PhaseAfterRegister` hook. The admin routes (`/dispatch/jobs`, `/dispatch/workflows/runs`, `/dispatch/dlq`, `/dispatch/crons`, `/dispatch/stats` and their actions) authenticate through the Forge auth extension and authorize with [Warden](https://github.com/xraph/warden) by default. Pass `WithRemoteSecurity` to bring your own authenticator, or `WithDisableRoutes()` to mount nothing.
+`jobs.Engine()` is nil until the extension has registered, which is why the job registration sits in a `PhaseAfterRegister` hook. The admin routes (`/dispatch/v1/jobs`, `/dispatch/v1/workflows/runs`, `/dispatch/v1/dlq`, `/dispatch/v1/crons`, `/dispatch/v1/stats` and their actions) authenticate through the Forge auth extension and authorize with [Warden](https://github.com/xraph/warden) by default. Pass `WithRemoteSecurity` to bring your own authenticator, or `WithDisableRoutes()` to mount nothing.
 
 ### Configuration
 

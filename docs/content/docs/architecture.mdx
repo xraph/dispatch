@@ -19,48 +19,53 @@ Dispatch is organized as a set of focused Go packages. The root `dispatch` packa
 │           │           │              │  work stealing)    │
 ├───────────┴───────────┴──────────────┴────────────────────┤
 │                    middleware chain                        │
-│   Logging → Recover → Timeout → Tracing → Metrics → Scope │
+│   Logging, Recover, Timeout, Tracing, Metrics, Scope      │
 ├───────────────────────────────────────────────────────────┤
 │                    ext.Registry                            │
 │   OnJobCompleted, OnWorkflowFailed, OnCronFired, ...      │
 ├──────────────────────────────────────────────────────────┤
 │                      store.Store                          │
-│   (job + workflow + cron + dlq + event + cluster stores) │
-├──────────┬──────────┬──────────┬──────────────────────────┤
-│ Postgres │  Grove   │  SQLite  │  Memory (testing only)   │
-│ (pgx/v5) │  (ORM)   │          │                          │
-└──────────┴──────────┴──────────┴──────────────────────────┘
+│  (job, workflow, cron, dlq, event, cluster, artifact)    │
+├──────────┬──────────┬──────────┬──────────┬───────────────┤
+│ Postgres │  SQLite  │  MongoDB │  Redis   │    Memory     │
+│ (Grove)  │ (Grove)  │ (Grove)  │(Grove KV)│ (dev, tests)  │
+└──────────┴──────────┴──────────┴──────────┴───────────────┘
 ```
 
 ## The import-cycle problem and the engine layer
 
-The root `dispatch` package defines `Entity`, `Config`, and error sentinels. It is imported by every subsystem package (`job`, `workflow`, `cron`, etc.). This means the root package **cannot** import any subsystem package without creating a cycle.
+The root `dispatch` package defines `Entity`, `Config`, and error sentinels. It is imported by every subsystem package (`job`, `workflow`, `cron` and so on), so the root package can't import any subsystem package without creating a cycle.
 
 The `engine` package solves this: it sits above all subsystem packages and wires them together. Application code calls `engine.Build`, `engine.Register`, and `engine.Enqueue` rather than constructing subsystems manually.
 
 ## Job execution critical path
 
-When you call `engine.Enqueue(ctx, eng, SendEmail, input)`:
+When you call `engine.Enqueue(ctx, eng, "send_email", input)`:
 
-1. **Serialize** — The typed input is JSON-marshaled to `[]byte`.
-2. **Persist** — A `job.Job` record is created in `pending` state with `RunAt = now`.
-3. **Poll** — On the next `PollInterval` tick (default: 1s), the worker pool dequeues the job.
-4. **Middleware** — The job passes through the configured middleware chain.
-5. **Execute** — The `HandlerFunc` for the job name is called with the deserialized payload.
-6. **Outcome** — The job is marked `completed`, or transitions to `retrying` / `failed` / `dlq`.
+1. Serialize: the typed input is marshaled to JSON.
+2. Persist: a `job.Job` record is stored in the `pending` state with `RunAt` set to now (or the `job.WithRunAt` time).
+3. Poll: on the next `PollInterval` tick (1s by default), the worker pool dequeues the job.
+4. Middleware: the job passes through the configured middleware chain.
+5. Execute: the handler registered under the job name runs with the unmarshaled payload.
+6. Outcome: the job becomes `completed`, or moves to `retrying`. When it runs out of retries, or returns an error wrapping `dispatch.ErrPermanent`, it becomes `failed` and an entry goes into the dead letter queue.
 
 ## Store composition
 
-The `store.Store` interface composes six subsystem store interfaces:
+The `store.Store` interface composes the subsystem store interfaces:
 
 ```go
 type Store interface {
     job.Store
+    job.Lister
     workflow.Store
+    workflow.PageLister
     cron.Store
     dlq.Store
+    dlq.PageLister
     event.Store
     cluster.Store
+    artifact.Store
+    artifact.PageLister
 
     Migrate(ctx context.Context) error
     Ping(ctx context.Context) error
@@ -68,41 +73,46 @@ type Store interface {
 }
 ```
 
-Each subsystem defines its own store interface independently. A single backend implementation satisfies all of them. The memory, PostgreSQL, Grove, SQLite, and Redis backends all implement this interface.
+Each subsystem defines its own store interface. A single backend satisfies all of them, and the memory, PostgreSQL, SQLite, MongoDB and Redis backends all implement this interface.
 
 ## Extension and middleware composition
 
 Extensions and middleware are independent composition axes:
 
-- **Middleware** executes synchronously in-band with each job. It can short-circuit, add context, or measure latency.
-- **Extensions** are called out-of-band after state transitions (job completed, workflow failed, etc.). They are fire-and-forget.
+- Middleware runs in-band with each job. It can short-circuit, add context or measure latency.
+- Extensions are called after state transitions (job completed, workflow failed and so on). Their errors are logged, not returned to the job.
 
 ## Package index
 
 | Package | Description |
 |---------|-------------|
-| `dispatch` | Root — `Dispatcher`, `Config`, `Storer`, options, errors, `Entity` |
+| `dispatch` | Root: `Dispatcher`, `Config`, `Storer`, options, errors, `Entity` |
 | `engine` | Wires subsystems; `Build`, `Register`, `Enqueue`, `RegisterWorkflow`, `RegisterCron` |
 | `job` | `Job` entity, `State` machine, `Definition[T]`, `Registry` |
 | `workflow` | `Definition[T]`, `Run`, `RunState`, step checkpointing |
 | `cron` | `Entry`, `Scheduler`, distributed leader-elected cron |
-| `dlq` | `Entry`, `Service` — list, replay, purge |
+| `dlq` | `Entry`, `Service`: list, replay, purge |
 | `event` | `Event` entity and store interface |
 | `cluster` | `Worker`, leader election, heartbeats, work stealing |
-| `queue` | `Config`, `Manager` — per-queue rate limiting and concurrency |
+| `queue` | `Config`, `Manager`: per-queue rate limiting and concurrency |
 | `middleware` | `Middleware`, `Chain`, built-ins (Logging, Recover, Timeout, Tracing, Metrics, Scope) |
 | `ext` | Extension interface, lifecycle hook interfaces, `Registry` |
 | `backoff` | Retry backoff strategies |
 | `observability` | OpenTelemetry `MetricsExtension` for system-wide counters |
-| `id` | TypeID-based identifiers (`JobID`, `RunID`, `CronID`, `DLQID`, `WorkerID`, …) |
-| `api` | Forge-style HTTP admin API handlers |
-| `scope` | Forge scope helpers — tenant ID extraction from context |
+| `id` | TypeID-based identifiers (`JobID`, `RunID`, `CronID`, `DLQID`, `WorkerID` and more) |
+| `api` | The REST admin API as Forge routes |
+| `scope` | Forge scope helpers: app and org ID capture from context |
 | `relay_hook` | Relay webhook delivery extension |
 | `extension` | Forge framework integration adapter |
 | `store` | Composite `Store` interface |
 | `store/memory` | In-memory backend (development and testing) |
-| `store/postgres` | PostgreSQL backend (pgx/v5) |
-| `store/grovestore` | Grove ORM backend |
-| `store/sqlite` | SQLite backend |
-| `store/redis` | Redis backend |
-| `cluster/k8s` | Kubernetes consensus for leader election |
+| `store/postgres` | PostgreSQL backend over a `*grove.DB` |
+| `store/sqlite` | SQLite backend over a `*grove.DB` |
+| `store/mongo` | MongoDB backend over a `*grove.DB` |
+| `store/redis` | Redis backend over a Grove `*kv.Store` |
+| `store/storetest` | Conformance suites for store implementations |
+| `cluster/k8s` | Kubernetes Lease-based cluster store for leader election |
+| `durable`, `durable/runtime` | The history-based durable workflow runtime |
+| `artifact` | The artifact plane over Trove |
+| `audit_hook` | Audit log extension |
+| `dwp` | The Dispatch Wire Protocol server |

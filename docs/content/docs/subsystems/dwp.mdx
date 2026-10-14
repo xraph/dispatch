@@ -3,7 +3,7 @@ title: Dispatch Wire Protocol (DWP)
 description: Real-time client connectivity over WebSocket, SSE, and HTTP RPC using the frame-based Dispatch Wire Protocol.
 ---
 
-The `dwp` package provides a frame-based protocol for remote clients (browsers, mobile apps, CLI tools, or microservices) to interact with a Dispatch engine in real time. It supports three transports: **WebSocket**, **Server-Sent Events (SSE)**, and **HTTP RPC**.
+The `dwp` package provides a frame-based protocol for remote clients (browsers, mobile apps, CLI tools, or microservices) to interact with a Dispatch engine in real time. It supports three transports: WebSocket, Server-Sent Events (SSE) and HTTP RPC.
 
 ## Transports
 
@@ -15,7 +15,7 @@ The `dwp` package provides a frame-based protocol for remote clients (browsers, 
 
 ## Frames
 
-All communication uses **frames** — JSON (or msgpack) messages with a fixed envelope:
+All communication uses frames: JSON (or msgpack) messages with a fixed envelope.
 
 ```json
 {
@@ -32,10 +32,10 @@ All communication uses **frames** — JSON (or msgpack) messages with a fixed en
 
 | Type | Direction | Purpose |
 |------|-----------|---------|
-| `request` | Client &rarr; Server | Invoke an operation |
-| `response` | Server &rarr; Client | Reply with result data |
-| `error` | Server &rarr; Client | Report a failure |
-| `event` | Server &rarr; Client | Push subscription event |
+| `request` | Client to server | Invoke an operation |
+| `response` | Server to client | Reply with result data |
+| `error` | Server to client | Report a failure |
+| `event` | Server to client | Push subscription event |
 | `ping` / `pong` | Both | Keep-alive heartbeat |
 
 ### Methods
@@ -45,16 +45,27 @@ All communication uses **frames** — JSON (or msgpack) messages with a fixed en
 | `auth` | Authenticate and start a session |
 | `job.enqueue` | Enqueue a job |
 | `job.get` | Retrieve a job by ID |
-| `job.cancel` | Cancel a pending/running job |
+| `job.list` | List jobs |
+| `job.cancel` | Cancel a pending, retrying or running job |
 | `workflow.start` | Start a workflow run |
 | `workflow.get` | Retrieve a workflow run |
 | `workflow.event` | Publish an event to trigger `WaitForEvent` |
+| `workflow.cancel` | Cancel a workflow run |
 | `workflow.timeline` | Get step timeline for a run |
+| `workflow.replay` | Replay a run from a step |
+| `cron.list` | List cron entries |
+| `dlq.list` | List DLQ entries |
+| `dlq.replay` | Replay a DLQ entry |
 | `subscribe` | Subscribe to a stream channel |
 | `unsubscribe` | Unsubscribe from a channel |
-| `stats` | Get server/broker statistics |
+| `stats` | Get server and broker statistics |
+| `federation.enqueue`, `federation.event`, `federation.heartbeat` | Server-to-server federation |
 
 ## Server setup
+
+With the [Forge extension](/docs/guides/forge-extension), set `enable_dwp: true` (or pass `WithDWP(...)`) and it builds the broker, handler and server for you, authenticating through Forge auth and authorizing with the same Warden boundary as the admin API.
+
+To wire it yourself:
 
 ```go
 import (
@@ -62,12 +73,15 @@ import (
     "github.com/xraph/dispatch/engine"
 )
 
-// Build engine with stream broker enabled.
-eng, _ := engine.Build(d, engine.WithStreamBroker())
+// Build the engine with the stream broker on.
+eng, err := engine.Build(d, engine.WithStreamBroker())
+if err != nil {
+    return err
+}
 
-// Create DWP handler and server.
+// Create the DWP handler and server.
 broker := eng.StreamBroker()
-handler := dwp.NewHandler(eng, broker, logger)
+handler := dwp.NewHandler(eng, broker, logger, boundary)
 server := dwp.NewServer(broker, handler,
     dwp.WithAuth(dwp.NewAPIKeyAuthenticator(
         dwp.APIKeyEntry{
@@ -76,16 +90,18 @@ server := dwp.NewServer(broker, handler,
                 Subject: "my-app",
                 AppID:   "app-1",
                 OrgID:   "org-1",
-                Scopes:  []string{dwp.ScopeAll},
             },
         },
     )),
+    dwp.WithSecurity(boundary),
     dwp.WithLogger(logger),
 )
 
 // Register routes on your Forge router.
 server.RegisterRoutes(app.Router())
 ```
+
+`boundary` is a `security.Boundary` from `github.com/xraph/dispatch/security`. It decides what each authenticated identity may do, and a boundary that isn't fully configured denies everything. So without one, every frame after `auth` comes back as an error. Mutating methods (`job.enqueue`, `workflow.start` and so on) also need the boundary's `Audit` service activated against a store, or they fail with "audit acceptance unavailable". The [testing guide](/docs/guides/testing) shows a complete allow-all boundary. `logger` is a go-utils `log.Logger`.
 
 ## Authentication
 
@@ -101,16 +117,7 @@ Every connection must authenticate by sending an `auth` frame as the first messa
 
 ### Scopes
 
-Tokens can be restricted to specific operations via scopes:
-
-| Scope | Allows |
-|-------|--------|
-| `*` | All operations |
-| `job:read` | `job.get` |
-| `job:write` | `job.enqueue`, `job.cancel` |
-| `workflow:read` | `workflow.get`, `workflow.timeline` |
-| `workflow:write` | `workflow.start`, `workflow.event` |
-| `subscribe` | Stream subscriptions |
+`dwp.Identity` still has a `Scopes` field, and `dwp.RequiredScope(method)` maps each method to a scope name (`job:read`, `job:write`, `workflow:read`, `workflow:write`, `cron:read`, `dlq:read`, `dlq:write`, `stats:read`, `subscribe`, `admin`, `*`). That's the legacy vocabulary. Scopes don't grant anything any more: the security boundary authorizes every request.
 
 ## Subscriptions
 
@@ -132,7 +139,7 @@ Watch a specific workflow run:
 
 ## Codecs
 
-DWP supports two serialization formats, negotiated during authentication:
+DWP supports two serialization formats, picked by the `format` field of the `auth` request:
 
 | Format | Content-Type | Notes |
 |--------|-------------|-------|
@@ -153,7 +160,7 @@ c, _ := client.DialContext(ctx, "ws://localhost:8080/dwp",
 )
 defer c.Close()
 
-// Enqueue a job.
+// Enqueue a job. client.WithQueue and client.WithPriority are optional.
 result, _ := c.Enqueue(ctx, "send-email", map[string]any{
     "to": "user@example.com",
 })

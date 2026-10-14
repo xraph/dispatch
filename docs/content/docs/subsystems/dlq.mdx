@@ -3,11 +3,11 @@ title: Dead Letter Queue
 description: Failed job management, inspection, replay, and purge.
 ---
 
-The dead letter queue (DLQ) captures jobs that have permanently failed after exhausting all retry attempts.
+The dead letter queue (DLQ) holds jobs that failed for good: they used up their retries, or returned an error wrapping `dispatch.ErrPermanent`.
 
 ## How entries are created
 
-When a job's `RetryCount` reaches `MaxRetries` and the handler still returns an error, the executor calls `dlq.Service.Push` to create a DLQ entry preserving the full context:
+When a job's `RetryCount` passes `MaxRetries` and the handler still returns an error, the worker calls `dlq.Service.Push` to create an entry that keeps:
 
 - Original job name, queue, and payload
 - Final error message
@@ -25,22 +25,21 @@ entries, err := eng.DLQService().DLQStore().ListDLQ(ctx, dlq.ListOpts{
 })
 ```
 
-Or use the admin API:
+Or use the admin API (paths are under the extension's base path, `/dispatch` by default):
 
 ```bash
-GET /v1/dlq
-GET /v1/dlq/:entryId
-GET /v1/dlq/count
+GET /dispatch/v1/dlq
+GET /dispatch/v1/dlq/:entryId
+GET /dispatch/v1/dlq/count
 ```
 
 ## Replay
 
-Replay re-enqueues a DLQ entry as a new `pending` job with the original payload. The `ReplayedAt` field is set on the DLQ entry.
-
-Via admin API:
+Replay re-enqueues a DLQ entry as a new `pending` job with the original payload and sets `ReplayedAt` on the entry. From Go, call `eng.ReplayDLQ(ctx, entryID)`, or `eng.ReplayAllDLQ(ctx, opts)` for a bulk replay. Through the admin API:
 
 ```bash
-POST /v1/dlq/:entryId/replay
+POST /dispatch/v1/dlq/:entryId/replay
+POST /dispatch/v1/dlq/replay-all
 ```
 
 ## Purge
@@ -48,11 +47,11 @@ POST /v1/dlq/:entryId/replay
 Remove the entries that failed before a cutoff, 30 days ago unless you give `before` (RFC 3339) or `older_than` (a Go duration). Add `dry_run=true` to count them first:
 
 ```bash
-POST /v1/dlq/purge
-POST /v1/dlq/purge?older_than=168h&dry_run=true
+POST /dispatch/v1/dlq/purge
+POST /dispatch/v1/dlq/purge?older_than=168h&dry_run=true
 ```
 
-This is destructive and irreversible. Use with caution.
+From Go, `eng.PurgeDLQ(ctx, before)` deletes and `eng.CountDLQPurge(ctx, before)` counts. A purge can't be undone. `DELETE /dispatch/v1/dlq/:entryId` (or `eng.DeleteDLQ`) removes a single entry.
 
 ## DLQ service
 
@@ -61,10 +60,14 @@ The `dlq.Service` is accessible via the engine:
 ```go
 svc := eng.DLQService()
 
-// Push is called automatically by the executor.
+// Push is called by the worker; you rarely call it yourself.
 svc.Push(ctx, failedJob, err)
 
-// Access the store directly for list/count/purge.
+// Replay one entry.
+svc.Replay(ctx, entryID)
+
+// Use the store directly to list, count or purge.
 svc.DLQStore().ListDLQ(ctx, opts)
-svc.DLQStore().PurgeDLQ(ctx)
+svc.DLQStore().CountDLQ(ctx)
+svc.DLQStore().PurgeDLQ(ctx, time.Now().Add(-30*24*time.Hour))
 ```

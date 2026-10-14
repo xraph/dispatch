@@ -12,19 +12,21 @@ This is a reference map of every package in the module, what it exports, and whe
 | Export | Type | Purpose |
 |--------|------|---------|
 | `Dispatcher` | struct | Core dispatcher: store, worker pool, queue routing |
-| `New(opts...)` | func | Constructor. Requires `WithStore` unless using memory only |
+| `New(opts...)` | func | Constructor. You need `WithStore`, or `engine.Build` fails with `ErrNoStore` |
 | `Config` | struct | Runtime configuration (concurrency, queues, intervals) |
 | `DefaultConfig()` | func | Returns sensible defaults |
 | `Option` | type | Functional option type |
 | `WithStore(s)` | func | Set the backing store |
-| `WithLogger(l)` | func | Set structured logger |
+| `WithLogger(l)` | func | Set the go-utils `log.Logger` |
 | `WithConcurrency(n)` | func | Global worker concurrency |
-| `WithQueues(qs)` | func | Named queue list |
+| `WithQueues(qs)` | func | Queues the workers poll |
+| `WithPollInterval`, `WithMaxPollInterval`, `WithHeartbeatInterval`, `WithStaleJobThreshold`, `WithWorkerStoreCallTimeout`, `WithCron*` | func | Worker and cron tuning |
 | `Storer` | interface | Composite store interface the dispatcher needs |
 | `ErrJobNotFound`, `ErrRunNotFound`, `ErrCronNotFound`, `ErrDLQNotFound`, `ErrWorkflowNotFound`, `ErrEventNotFound` | errors | Not-found sentinels |
 | `ErrLeadershipLost` | error | Returned when a leader-only operation loses the lease |
-| `ErrJobAlreadyComplete`, `ErrJobNotCancellable` | errors | State transition errors |
-| `ErrNoStore` | error | Dispatcher created without a store |
+| `ErrInvalidState`, `ErrDLQAlreadyReplayed`, `ErrDuplicateCron` | errors | State and conflict errors |
+| `ErrPermanent` | error | Wrap it in a handler error to skip the remaining retries |
+| `ErrNoStore` | error | Returned by `engine.Build` (and `Start`) when there's no store |
 
 ## engine
 
@@ -35,19 +37,28 @@ The engine package is the import-cycle breaker. It composes all subsystems and i
 | Export | Type | Purpose |
 |--------|------|---------|
 | `Engine` | struct | Assembled runtime: dispatcher + extensions + middleware + workers |
-| `Build(d, opts...)` | func | Build an engine from a `*dispatch.Dispatcher` |
+| `Build(d, opts...)` | func | Build an engine from a `*dispatch.Dispatcher`; returns `(*Engine, error)` |
 | `Register[T](eng, def)` | func | Register a `job.Definition[T]` with the engine |
-| `Enqueue[T](ctx, eng, def, input)` | func | Enqueue a typed job |
+| `RegisterChecked[T](eng, def)` | func | Register and validate artifact inputs and execution policy |
+| `RegisterAll(eng, defs...)` | func | Validate and register several `job.Registrable` definitions |
+| `Enqueue[T](ctx, eng, name, payload, opts...)` | func | Enqueue a job by name; returns `(*job.Job, error)` |
+| `Bind(name, ref)` | func | A `job.Option` that binds an artifact to a declared input |
 | `RegisterWorkflow[T](eng, def)` | func | Register a `workflow.Definition[T]` |
-| `StartWorkflow[T](ctx, eng, def, input)` | func | Start a typed workflow run |
-| `RegisterCron[T](ctx, eng, name, schedule, def, input)` | func | Register a named cron entry |
+| `StartWorkflow[T](ctx, eng, name, input)` | func | Start a workflow by name; returns `(*workflow.Run, error)` |
+| `RegisterCron[T](ctx, eng, def)` | func | Register a `*cron.Definition[T]` (idempotent by name) |
 | `Option` | type | Engine option type |
 | `WithMiddleware(m)` | func | Add a middleware to the chain |
 | `WithExtension(x)` | func | Register an `ext.Extension` |
 | `WithBackoff(s)` | func | Override the retry backoff strategy |
 | `WithQueueConfig(cfgs...)` | func | Per-queue concurrency and rate limit settings |
-| `WithLeaderElector(le)` | func | Override the leader election implementation |
-| `WithMetricFactory(f)` | func | Provide an OTel metric factory (wired automatically in Forge) |
+| `WithTracerProvider(tp)` | func | OpenTelemetry tracer provider for the tracing middleware |
+| `WithMetricFactory(f)` | func | go-utils metric factory (the Forge extension passes the app's) |
+| `WithDurableWorkflows(opts)` | func | Turn on the durable workflow runtime |
+| `WithStreamBroker(opts...)` | func | Turn on the stream broker DWP needs |
+| `WithArtifacts(svc, cache)`, `WithExecutor(e)`, `WithScratchRoot(dir)` | func | Artifact plane and execution isolation |
+| `WithResourceManager`, `WithWorkerCapacity`, `WithWorkerCustomKeys`, `WithResourceDefaults`, `WithEstimator` | func | Resource-aware admission |
+
+`*Engine` methods cover operator actions (`CancelJob`, `RetryJob`, `ReplayDLQ`, `ReplayAllDLQ`, `PurgeDLQ`, `DeleteDLQ`, `EnableCron`, `DisableCron`, `DeleteCron`, `TriggerCron`, `ReplayWorkflowFrom`), lifecycle (`Start`, `Stop`, `Health`) and access to the subsystems (`Dispatcher`, `DLQService`, `EventBus`, `CronStore`, `ClusterStore`, `StreamBroker`, `Registry`).
 
 ## job
 
@@ -58,14 +69,15 @@ The engine package is the import-cycle breaker. It composes all subsystems and i
 | `Job` | struct | Persisted job entity |
 | `State` | string | Job state enum: `pending`, `running`, `completed`, `failed`, `retrying`, `cancelled` |
 | `Definition[T]` | struct | Typed job definition with handler |
-| `NewDefinition[T](name, fn)` | func | Create a job definition |
+| `NewDefinition[T](name, fn, opts...)` | func | Create a job definition |
 | `Registry` | struct | Holds all registered definitions |
 | `RegisterDefinition[T](r, def)` | func | Register a definition in a registry |
 | `HandlerFunc` | type | `func(ctx context.Context, payload []byte) error` |
 | `Store` | interface | Persistence interface for jobs |
 | `ListOpts` | struct | Pagination and filter options |
 | `CountOpts` | struct | Filter options for counting |
-| `EnqueueOpts` | struct | Options for enqueue: `Queue`, `RunAt`, `MaxAttempts`, `Timeout` |
+| `Option`, `Options` | type, struct | Job options: `WithQueue`, `WithPriority`, `WithMaxRetries`, `WithTimeout`, `WithRunAt`, `WithLeaseTTL`, `WithResources`, `WithExecution`, `WithArtifactInputs` and more. Pass the queue, priority, retry and timeout options to `Enqueue`; on a definition they aren't applied today |
+| `Registrable` | interface | Lets definitions with different payload types share a slice |
 
 ## workflow
 
@@ -87,9 +99,10 @@ The engine package is the import-cycle breaker. It composes all subsystems and i
 |--------|---------|
 | `Step(name, fn)` | Execute a step; replay checkpoint on re-run |
 | `StepWithCompensation(name, exec, compensate)` | Execute a step with saga compensation |
-| `Parallel(fns...)` | Execute steps in parallel; replay all checkpoints |
-| `WaitForEvent(name, timeout)` | Block until an external event is emitted |
-| `Sleep(duration)` | Durable sleep using a checkpoint |
+| `Parallel(groupName, fns...)` | Execute steps in parallel, each checkpointed |
+| `WaitForEvent(name, timeout)` | Block until a named event is published; `nil, nil` on timeout |
+| `WaitForAll(names, timeout)`, `WaitForAny(names, timeout)`, `WaitForMatch(name, timeout, fn)` | Wait on several events, or filter by payload |
+| `Sleep(name, duration)` | Durable sleep using a checkpoint |
 | `RunCompensations()` | Manually run all registered compensations |
 
 Package-level generic functions:
@@ -100,8 +113,7 @@ Package-level generic functions:
 | `StepWithResultAndCompensation[T](wf, name, exec, compensate)` | Typed step with compensation |
 | `RunChild[T, R](wf, name, input)` | Run a child workflow and wait for its result |
 | `SpawnChild[T](wf, name, input)` | Spawn a fire-and-forget child workflow |
-| `FanOut[T, R](wf, name, items, fn)` | Execute a function over multiple items in parallel |
-| `WaitForAny(wf, events...)` | Block until any of the listed events arrives |
+| `FanOut[T, R](wf, name, inputs)` | Start one child workflow per input and collect the results |
 
 ## cron
 
@@ -109,10 +121,11 @@ Package-level generic functions:
 
 | Export | Type | Purpose |
 |--------|------|---------|
-| `Entry` | struct | Cron entry entity (`ID`, `Name`, `Schedule`, `Enabled`, `LastFiredAt`, scope fields) |
+| `Definition[T]` | struct | What you pass to `engine.RegisterCron`: `Name`, `Schedule`, `JobName`, `Payload`, `Queue` |
+| `Entry` | struct | Stored cron entry (`ID`, `Name`, `Schedule`, `JobName`, `Enabled`, `LastRunAt`, `NextRunAt`, scope fields) |
 | `Scheduler` | struct | Leader-only cron firing service |
 | `Store` | interface | Persistence interface for cron entries |
-| `ListOpts` | struct | Pagination options |
+| `ParseSchedule(expr)`, `NextFires(expr, from, n)` | func | Parse a schedule, or preview its next fire times |
 
 ## dlq
 
@@ -121,9 +134,9 @@ Package-level generic functions:
 | Export | Type | Purpose |
 |--------|------|---------|
 | `Entry` | struct | Dead letter queue entry (`ID`, `JobID`, `JobName`, `Queue`, `Error`, `Payload`, scope fields) |
-| `Service` | struct | DLQ management: list, replay, purge |
-| `NewService(store, logger)` | func | Constructor |
-| `DLQStore` | interface | Persistence interface for DLQ entries |
+| `Service` | struct | DLQ management: `Push`, `Replay`, `ReplayEntry`, `DLQStore()` |
+| `NewService(store, jobStore, opts...)` | func | Constructor |
+| `Store` | interface | Persistence interface for DLQ entries |
 | `ListOpts` | struct | Pagination and filter options |
 
 ## event
@@ -132,9 +145,9 @@ Package-level generic functions:
 
 | Export | Type | Purpose |
 |--------|------|---------|
-| `Event` | struct | External event entity, used by `WaitForEvent` in workflows |
+| `Event` | struct | Named event, used by `WaitForEvent` in workflows |
+| `Bus` | struct | `Publish`, `Subscribe` and `Ack` over the event store; `eng.EventBus()` returns the engine's |
 | `Store` | interface | Persistence interface for events |
-| `ListOpts` | struct | Pagination options |
 
 ## cluster
 
@@ -150,11 +163,15 @@ Package-level generic functions:
 
 | Method | Purpose |
 |--------|---------|
-| `RegisterWorker(ctx, w)` | Register a new worker record |
-| `UpdateWorker(ctx, w)` | Update heartbeat / state |
-| `ListWorkers(ctx)` | List all worker records |
-| `AcquireLeadership(ctx, workerID, until)` | Attempt to become leader |
-| `RenewLeadership(ctx, workerID, until)` | Renew an existing leadership lease |
+| `RegisterWorker(ctx, w)`, `DeregisterWorker(ctx, id)` | Add or remove a worker record |
+| `HeartbeatWorker(ctx, id)` | Update `LastSeen` |
+| `ListWorkers(ctx)`, `GetWorker(ctx, id)` | Read worker records |
+| `ReapDeadWorkers(ctx, threshold)` | Find workers that stopped heartbeating |
+| `AcquireLeadership(ctx, workerID, ttl)` | Attempt to become leader |
+| `RenewLeadership(ctx, workerID, ttl)` | Renew an existing leadership lease |
+| `GetLeader(ctx)` | The current leader |
+
+`cluster/k8s` provides a Kubernetes-based `cluster.Store` (`k8s.New(client, namespace, opts...)`).
 
 ## queue
 
@@ -163,10 +180,11 @@ Package-level generic functions:
 | Export | Type | Purpose |
 |--------|------|---------|
 | `Config` | struct | Per-queue settings: `Name`, `MaxConcurrency`, `RateLimit`, `RateBurst` |
-| `Manager` | struct | Concurrent access controller per queue |
+| `TenantConfig` | struct | Per-tenant limits within a queue |
+| `Manager` | struct | Concurrency and rate limit controller per queue |
 | `NewManager(configs...)` | func | Constructor |
-| `Acquire(ctx, queue)` | func | Claim a slot (blocks if at capacity) |
-| `Release(queue)` | func | Release a slot |
+| `Acquire(queue, tenantID)` | method | Try to claim a slot; returns `false` at capacity |
+| `Release(queue, tenantID)` | method | Release a slot |
 
 ## middleware
 
@@ -174,15 +192,17 @@ Package-level generic functions:
 
 | Export | Type | Purpose |
 |--------|------|---------|
-| `Middleware` | type | `func(Handler) Handler` |
-| `Handler` | type | `func(ctx context.Context, j *job.Job) error` |
-| `Chain(mws...)` | func | Compose multiple middlewares (applied right-to-left) |
-| `Logging(logger)` | func | Structured log on job start/complete/fail |
-| `Recover()` | func | Catch panics and convert to errors |
-| `Timeout(d)` | func | Wrap handler with a deadline |
-| `Tracing()` | func | OpenTelemetry span per job |
-| `Metrics()` | func | OTel job duration and error counters |
-| `Scope()` | func | Injects Forge scope (app/org IDs) from `job.Job` into context |
+| `Middleware` | type | `func(ctx context.Context, j *job.Job, next Handler) error` |
+| `Handler` | type | `func(ctx context.Context) error` |
+| `Chain(mws...)` | func | Compose middleware; the first one is outermost |
+| `Logging(logger)` | func | Log job start and completion |
+| `Recover(logger)` | func | Catch panics and convert them to errors |
+| `Timeout(logger)` | func | Apply the job's `Timeout` as a context deadline |
+| `Tracing()`, `TracingWithTracer(t)` | func | OpenTelemetry span per job |
+| `Metrics()`, `MetricsWithFactory(f)` | func | Job duration histogram and execution counter |
+| `Scope()` | func | Restores the job's app and org IDs into the context |
+
+`engine.Build` installs all six by default; `engine.WithMiddleware` adds yours after them.
 
 ## ext
 
@@ -198,6 +218,7 @@ Package-level generic functions:
 | `JobFailed` | interface | `OnJobFailed(ctx, *job.Job, err) error` |
 | `JobRetrying` | interface | `OnJobRetrying(ctx, *job.Job, attempt, nextRunAt) error` |
 | `JobDLQ` | interface | `OnJobDLQ(ctx, *job.Job, err) error` |
+| `JobCancelled` | interface | `OnJobCancelled(ctx, *job.Job) error` |
 | `WorkflowStarted` | interface | `OnWorkflowStarted(ctx, *workflow.Run) error` |
 | `WorkflowStepCompleted` | interface | `OnWorkflowStepCompleted(ctx, *workflow.Run, step, elapsed) error` |
 | `WorkflowStepFailed` | interface | `OnWorkflowStepFailed(ctx, *workflow.Run, step, err) error` |
@@ -205,6 +226,7 @@ Package-level generic functions:
 | `WorkflowFailed` | interface | `OnWorkflowFailed(ctx, *workflow.Run, err) error` |
 | `CronFired` | interface | `OnCronFired(ctx, entryName, jobID) error` |
 | `Shutdown` | interface | `OnShutdown(ctx) error` |
+| `OperatorActionObserver` | interface | `OnOperatorAction(ctx, ext.Action) error` |
 
 ## backoff
 
@@ -225,33 +247,37 @@ Package-level generic functions:
 
 | Export | Type | Purpose |
 |--------|------|---------|
-| `MetricsExtension` | struct | OTel metrics extension: job/workflow/cron counters and histograms |
-| `New(factory)` | func | Constructor; pass OTel `metric.MeterProvider` factory |
+| `MetricsExtension` | struct | Lifecycle counters for jobs, workflows and crons (`engine.Build` registers one) |
+| `NewMetricsExtension()` | func | Constructor with its own go-utils metrics collector |
+| `NewMetricsExtensionWithFactory(f)` | func | Constructor over a go-utils `MetricFactory` |
 
 ## id
 
 **Import:** `github.com/xraph/dispatch/id`
 
-Type-safe, K-sortable (UUIDv7) identifiers. Each entity has its own type alias.
+K-sortable (UUIDv7) TypeIDs. Every entity shares one `ID` struct; the per-entity names are type aliases of it, so the prefix is what tells them apart.
 
 | Export | Purpose |
 |--------|---------|
-| `JobID`, `RunID`, `CronID`, `DLQID`, `EventID`, `WorkerID`, `CheckpointID` | Typed ID aliases |
-| `NewJobID()`, `NewRunID()`, etc. | Generate a new typed ID |
-| `ParseJobID(s)`, `ParseRunID(s)`, etc. | Parse a TypeID string with prefix validation |
-| `MustParseJobID(s)`, etc. | Parse or panic |
+| `ID`, `JobID`, `RunID`, `WorkflowID`, `CronID`, `DLQID`, `EventID`, `WorkerID`, `CheckpointID`, `ArtifactID`, `UsageID` | The ID type and its aliases |
+| `New(prefix)`, `NewJobID()`, `NewRunID()`, etc. | Generate a new ID |
+| `Parse(s)`, `ParseWithPrefix(s, prefix)`, `ParseJobID(s)`, etc. | Parse a TypeID string, with prefix validation for the typed ones |
+| `MustParse(s)`, `MustParseWithPrefix(s, prefix)` | Parse or panic |
 
 Prefix constants:
 
 | Constant | Prefix |
 |----------|--------|
 | `PrefixJob` | `job` |
-| `PrefixRun` | `run` |
+| `PrefixWorkflow` | `wf` |
+| `PrefixRun` | `wfrun` |
+| `PrefixCheckpoint` | `ckpt` |
 | `PrefixCron` | `cron` |
 | `PrefixDLQ` | `dlq` |
 | `PrefixEvent` | `evt` |
 | `PrefixWorker` | `wkr` |
-| `PrefixCheckpoint` | `chk` |
+| `PrefixArtifact` | `art` |
+| `PrefixUsage` | `use` |
 
 ## api
 
@@ -260,7 +286,8 @@ Prefix constants:
 | Export | Type | Purpose |
 |--------|------|---------|
 | `API` | struct | HTTP admin API handler |
-| `New(eng, router)` | func | Create API from engine and Forge router |
+| `New(eng, router, opts...)` | func | Create the API from an engine and a Forge router (`nil` for a fresh one) |
+| `WithSecurity(auth, boundary)` | func | The authenticator and boundary every route checks; without it every route answers 401 |
 | `RegisterRoutes(router) error` | method | Mount all `/v1` routes on the router; the error names every route forge refused |
 | `Handler()` | method | Returns a standalone `http.Handler`; registers the routes on the first call and panics if forge refuses one |
 
@@ -272,7 +299,7 @@ See [HTTP Admin API](/docs/api-reference/http-api) for route details.
 
 | Export | Purpose |
 |--------|---------|
-| `Capture(ctx)` | Extract `(appID, orgID)` from a Forge context |
+| `Capture(ctx)` | Extract `(appID, orgID)` from the context's Forge scope |
 | `Restore(ctx, appID, orgID)` | Inject app/org IDs into a plain context |
 
 ## relay_hook
@@ -283,12 +310,12 @@ Bridges Dispatch lifecycle events to [Relay](https://github.com/xraph/relay) for
 
 | Export | Type | Purpose |
 |--------|------|---------|
-| `Extension` | struct | Implements 13 `ext` lifecycle interfaces |
+| `Extension` | struct | Implements the `ext` lifecycle and operator-action interfaces |
 | `New(relay, opts...)` | func | Create an extension from a `*relay.Relay` |
 | `RegisterAll(ctx, relay)` | func | Register all event types in the Relay catalog |
 | `AllDefinitions()` | func | Returns all `catalog.WebhookDefinition` values |
 | `Option` | type | Extension option type |
-| `WithEnabledEvents(names...)` | func | Restrict which event types are emitted |
+| `WithEvents(names...)` | func | Restrict which event types are emitted |
 | `WithPayloadFunc(eventType, fn)` | func | Override payload for a specific event type |
 
 Event type constants:
@@ -301,12 +328,14 @@ Event type constants:
 | `EventJobFailed` | `dispatch.job.failed` |
 | `EventJobRetrying` | `dispatch.job.retrying` |
 | `EventJobDLQ` | `dispatch.job.dlq` |
+| `EventJobCancelled` | `dispatch.job.cancelled` |
 | `EventWorkflowStarted` | `dispatch.workflow.started` |
 | `EventWorkflowStepCompleted` | `dispatch.workflow.step_completed` |
 | `EventWorkflowStepFailed` | `dispatch.workflow.step_failed` |
 | `EventWorkflowCompleted` | `dispatch.workflow.completed` |
 | `EventWorkflowFailed` | `dispatch.workflow.failed` |
 | `EventCronFired` | `dispatch.cron.fired` |
+| `EventOperator*` | `dispatch.operator.*`, one per operator action |
 
 ## extension
 
@@ -319,13 +348,20 @@ Forge adapter for embedding Dispatch in a Forge application.
 | `Extension` | struct | Implements `forge.Extension` |
 | `New(opts...)` | func | Constructor |
 | `ExtOption` | type | Option type |
-| `WithDispatchOptions(opts...)` | func | Pass `dispatch.Option` values |
-| `WithEngineExtension(x)` | func | Add an `ext.Extension` |
+| `WithStore(s)`, `WithGroveDatabase(name)`, `WithGroveKV(name)`, `WithKVKeyPrefix(p)` | func | Where the store comes from |
+| `WithConcurrency`, `WithQueues`, `WithPollInterval`, `WithHeartbeatInterval`, `WithStaleJobThreshold`, `WithCron*` | func | Dispatcher tuning |
+| `WithExtension(x)` | func | Add an `ext.Extension` |
 | `WithMiddleware(m)` | func | Add a middleware |
-| `WithBackoff(s)` | func | Override backoff strategy |
-| `WithDisableRoutes(b)` | func | Skip automatic HTTP route registration |
-| `WithDisableMigrate(b)` | func | Skip auto-migration on start |
-| `Engine()` | method | Returns `*engine.Engine` after initialization |
+| `WithBackoff(s)` | func | Override the backoff strategy |
+| `WithLogger(l)` | func | go-utils logger for the dispatcher |
+| `WithBasePath(p)`, `WithDisableRoutes()`, `WithDisableMigrate()` | func | Routes and migrations |
+| `WithRemoteSecurity(auth, boundary)`, `WithOperatorSecurity(cfg)` | func | Admin route security |
+| `WithDWP(opts...)` | func | Turn on the Dispatch Wire Protocol |
+| `WithResources()`, `WithArtifacts(name)`, `WithDurableWorkflows(opts)` | func | Optional subsystems |
+| `WithConfig(cfg)`, `WithRequireConfig(b)` | func | Set the whole config, or require YAML |
+| `Engine()` | method | Returns `*engine.Engine` once the extension has registered |
+
+See the [Forge extension guide](/docs/guides/forge-extension).
 
 ## dwp
 
@@ -338,18 +374,20 @@ The Dispatch Wire Protocol package provides a frame-based protocol for remote cl
 | `Server` | struct | DWP server managing transports and connections |
 | `NewServer(broker, handler, opts...)` | func | Create a DWP server |
 | `Handler` | struct | Dispatches incoming DWP frames to engine methods |
-| `NewHandler(eng, broker, logger)` | func | Create a DWP handler |
+| `NewHandler(eng, broker, logger, boundary...)` | func | Create a DWP handler; without a configured boundary every frame is denied |
 | `Frame` | struct | Protocol frame envelope (`ID`, `Type`, `Method`, `Data`, etc.) |
 | `FrameType` | string | Frame type enum: `request`, `response`, `event`, `error`, `ping`, `pong` |
 | `Codec` | interface | Serialization codec (JSON, msgpack) |
 | `Identity` | struct | Authenticated client identity (`Subject`, `AppID`, `OrgID`, `Scopes`) |
 | `APIKeyEntry` | struct | API key configuration (`Token`, `Identity`) |
 | `NewAPIKeyAuthenticator(entries...)` | func | Create a token-based authenticator |
-| `ServerOption` | type | Server option type |
+| `Option` | type | Server option type |
 | `WithAuth(auth)` | func | Set the authenticator |
+| `WithSecurity(boundary)` | func | Set the authorization boundary |
+| `WithCodec(c)`, `WithPath(p)`, `WithFederation(f)` | func | Codec, base path (`/dwp`) and federation |
 | `WithLogger(l)` | func | Set the logger |
 
-Scope constants:
+Scope constants (legacy vocabulary; the boundary authorizes requests, not scopes):
 
 | Constant | Value | Description |
 |----------|-------|-------------|
@@ -369,7 +407,7 @@ Native Go client for communicating with a Dispatch server over DWP WebSocket. Se
 | Export | Type | Purpose |
 |--------|------|---------|
 | `Client` | struct | DWP WebSocket client |
-| `DialContext(ctx, url, opts...)` | func | Connect, authenticate, and return a client |
+| `Dial(url, opts...)`, `DialContext(ctx, url, opts...)` | func | Connect, authenticate, and return a client |
 | `Enqueue(ctx, name, payload, opts...)` | method | Enqueue a job |
 | `GetJob(ctx, jobID)` | method | Retrieve a job by ID |
 | `CancelJob(ctx, jobID)` | method | Cancel a job |
@@ -377,7 +415,7 @@ Native Go client for communicating with a Dispatch server over DWP WebSocket. Se
 | `GetWorkflow(ctx, runID)` | method | Retrieve a workflow run |
 | `PublishEvent(ctx, name, payload)` | method | Publish an event |
 | `Subscribe(ctx, channel)` | method | Subscribe to a stream channel |
-| `Unsubscribe(ctx, subID)` | method | Unsubscribe from a channel |
+| `Unsubscribe(ctx, channel)` | method | Unsubscribe from a channel |
 | `Watch(ctx, runID)` | method | Watch a workflow run |
 | `Stats(ctx)` | method | Get server statistics |
 | `Close()` | method | Close the connection |
@@ -385,7 +423,7 @@ Native Go client for communicating with a Dispatch server over DWP WebSocket. Se
 | `WithToken(t)` | func | Set the auth token |
 | `WithFormat(f)` | func | Set serialization format (`json` or `msgpack`) |
 | `WithLogger(l)` | func | Set the logger |
-| `WithReconnect(b)` | func | Enable automatic reconnection |
+| `WithReconnect(maxRetries, baseDelay)` | func | Enable automatic reconnection |
 
 ## stream
 
@@ -396,11 +434,11 @@ In-process event broker for pub/sub channels used by DWP subscriptions and real-
 | Export | Type | Purpose |
 |--------|------|---------|
 | `Broker` | struct | In-process pub/sub broker |
-| `NewBroker(logger)` | func | Create a broker |
-| `Publish(channel, event)` | method | Publish an event to a channel |
-| `Subscribe(channel, handler)` | method | Register a handler for a channel |
-| `Unsubscribe(channel, id)` | method | Remove a subscription |
-| `Close()` | method | Shut down the broker |
+| `NewBroker(logger, opts...)` | func | Create a broker (`engine.WithStreamBroker` does this for you) |
+| `Event`, `EventType` | struct, string | A lifecycle event published on a topic |
+| `JobTopic(id)`, `WorkflowTopic(id)`, `QueueTopic(name)` | func | Topic names (`job:<id>`, `workflow:<id>`, ...) |
+
+The broker implements the `ext` hooks, so engine lifecycle events are published to topics automatically.
 
 ## store
 
@@ -408,16 +446,17 @@ In-process event broker for pub/sub channels used by DWP subscriptions and real-
 
 | Export | Purpose |
 |--------|---------|
-| `Store` | Composite interface: `job.Store + workflow.Store + cron.Store + dlq.Store + event.Store + cluster.Store + Migrate + Ping + Close` |
+| `Store` | Composite interface of the job, workflow, cron, DLQ, event, cluster and artifact stores (plus their listers), with `Migrate`, `Ping` and `Close` |
 
 Backend packages:
 
 | Package | Driver |
 |---------|--------|
-| `store/memory` | In-memory (zero-dependency, for tests) |
-| `store/postgres` | PostgreSQL via `pgx/v5` |
-| `store/grovestore` | PostgreSQL / MySQL / SQLite via Grove ORM |
-| `store/sqlite` | SQLite via `modernc.org/sqlite` |
-| `store/redis` | Redis via `go-redis/v9` |
+| `store/memory` | In-memory (`memory.New()`), for development and tests |
+| `store/postgres` | PostgreSQL over a Grove database (`postgres.New(*grove.DB)`) |
+| `store/sqlite` | SQLite over a Grove database (`sqlite.New(*grove.DB)`) |
+| `store/mongo` | MongoDB over a Grove database (`mongo.New(*grove.DB)`) |
+| `store/redis` | Redis over a Grove KV store (`redis.New(*kv.Store)`) |
+| `store/storetest` | Conformance suites for store implementations |
 
-All backends expose a `New(ctx, dsn)` constructor and satisfy `store.Store`.
+Every backend satisfies `store.Store`. Only `store/memory` and `store/postgres` implement `durable.Store` for the durable workflow runtime.

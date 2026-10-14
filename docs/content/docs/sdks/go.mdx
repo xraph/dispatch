@@ -47,7 +47,7 @@ c, err := client.DialContext(ctx, "wss://api.example.com/dwp",
     client.WithToken("dk_live_abc123"),
     client.WithFormat("json"),     // or "msgpack"
     client.WithLogger(logger),
-    client.WithReconnect(true),
+    client.WithReconnect(5, time.Second), // max retries, base delay
 )
 ```
 
@@ -65,14 +65,14 @@ result, err := c.Enqueue(ctx, "send-email", payload,
     client.WithPriority(10),
 )
 
-// Get a job by ID.
-job, err := c.GetJob(ctx, jobID)
+// Get a job by ID (the raw JSON the server returns).
+raw, err := c.GetJob(ctx, jobID)
 
 // Cancel a job.
 err := c.CancelJob(ctx, jobID)
 ```
 
-### EnqueueResult
+### JobResult
 
 | Field | Type | Description |
 |-------|------|-------------|
@@ -86,7 +86,7 @@ err := c.CancelJob(ctx, jobID)
 // Start a workflow.
 run, err := c.StartWorkflow(ctx, "order-pipeline", input)
 
-// Get a workflow run.
+// Get a workflow run (raw JSON).
 details, err := c.GetWorkflow(ctx, runID)
 
 // Publish an event (triggers WaitForEvent in a workflow).
@@ -104,25 +104,29 @@ err := c.PublishEvent(ctx, "payment-received", eventPayload)
 ## Subscriptions
 
 ```go
-// Subscribe to a channel.
-sub, err := c.Subscribe(ctx, "jobs")
-defer c.Unsubscribe(ctx, sub.ID)
+// Subscribe to a channel. Events arrive on the returned channel.
+events, err := c.Subscribe(ctx, "jobs")
+defer c.Unsubscribe(ctx, "jobs")
 
-// Watch a specific workflow run.
-sub, err := c.Watch(ctx, runID)
+for evt := range events {
+    fmt.Println(evt.Type)
+}
+
+// Watch a specific workflow run (the "workflow:<runID>" channel).
+runEvents, err := c.Watch(ctx, runID)
 ```
 
 ## Stats
 
 ```go
-stats, err := c.Stats(ctx)
+stats, err := c.Stats(ctx) // raw JSON
 ```
 
 ## API reference
 
 | Method | Description |
 |--------|-------------|
-| `DialContext(ctx, url, opts...)` | Connect and authenticate |
+| `Dial(url, opts...)`, `DialContext(ctx, url, opts...)` | Connect and authenticate |
 | `Close()` | Close the connection |
 | `Enqueue(ctx, name, payload, opts...)` | Enqueue a job |
 | `GetJob(ctx, jobID)` | Get job by ID |
@@ -131,6 +135,9 @@ stats, err := c.Stats(ctx)
 | `GetWorkflow(ctx, runID)` | Get workflow run by ID |
 | `PublishEvent(ctx, name, payload)` | Publish a workflow event |
 | `Subscribe(ctx, channel)` | Subscribe to stream events |
-| `Unsubscribe(ctx, subID)` | Unsubscribe |
+| `Unsubscribe(ctx, channel)` | Unsubscribe from a channel |
+| `SessionID()` | The session ID the server assigned |
 | `Watch(ctx, runID)` | Watch a workflow run |
 | `Stats(ctx)` | Get server statistics |
+
+The server decides what each call may do through its security boundary, so a valid token is necessary but not enough. See [DWP](/docs/subsystems/dwp).

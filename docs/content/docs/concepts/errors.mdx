@@ -28,10 +28,15 @@ var (
     // Conflict errors
     ErrJobAlreadyExists = errors.New("dispatch: job already exists")
     ErrDuplicateCron    = errors.New("dispatch: duplicate cron entry")
+    ErrDLQAlreadyExists   = errors.New("dispatch: dlq entry already exists")
+    ErrDLQAlreadyReplayed = errors.New("dispatch: dlq entry already replayed")
 
     // State errors
     ErrInvalidState       = errors.New("dispatch: invalid state transition")
     ErrMaxRetriesExceeded = errors.New("dispatch: max retries exceeded")
+
+    // Wrap this in a handler error to skip the remaining retries
+    ErrPermanent = errors.New("dispatch: permanent failure")
 
     // Cluster errors
     ErrLeadershipLost = errors.New("dispatch: leadership lost")
@@ -42,9 +47,24 @@ var (
 ## Checking errors
 
 ```go
-err := engine.Enqueue(ctx, eng, SendEmail, input)
+eng, err := engine.Build(d)
 if errors.Is(err, dispatch.ErrNoStore) {
-    // dispatcher has no store configured
+    // the dispatcher has no store configured
+}
+
+_, err = eng.CancelJob(ctx, jobID)
+if errors.Is(err, dispatch.ErrInvalidState) {
+    // the job is already completed, failed or cancelled
+}
+```
+
+## Permanent failures
+
+A job handler that knows a retry can't help wraps `dispatch.ErrPermanent`. The job skips its remaining retries and goes straight to the dead letter queue:
+
+```go
+if in.Width <= 0 {
+    return fmt.Errorf("bad width %d: %w", in.Width, dispatch.ErrPermanent)
 }
 ```
 

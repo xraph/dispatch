@@ -3,34 +3,35 @@ title: Introduction
 description: Composable durable execution engine for Go.
 ---
 
-Dispatch is a Go library for background job processing, durable workflow orchestration, cron scheduling, and distributed worker coordination. Import it into your Go program — no separate binary, no DSL, no YAML.
+Dispatch is a Go library for background jobs, durable workflows, cron scheduling and distributed worker coordination. You import it into your Go program. There's no separate binary, no DSL and no YAML you have to write.
 
-Dispatch is a **library** — not a service. You bring your own database, HTTP server, and process lifecycle. Dispatch provides the execution plumbing.
+Dispatch is a library, not a service. You bring your own database, HTTP server and process lifecycle, and Dispatch provides the execution plumbing.
 
 ## What it does
 
-- **Background jobs** — Define typed handlers, enqueue with priority, retry with configurable backoff.
-- **Durable workflows** — Multi-step Go functions that checkpoint progress and resume after failure.
-- **Distributed cron** — Leader-elected cron scheduling with per-tenant support and runtime enable/disable.
-- **Dead letter queue** — Jobs that exhaust retries land in the DLQ for inspection, replay, or purge.
-- **Distributed workers** — Worker registration, heartbeats, leader election, and automatic work stealing.
-- **Middleware** — Composable chain for logging, tracing, metrics, panic recovery, and Forge scope injection.
-- **Extension hooks** — Opt-in lifecycle interfaces for every job, workflow, cron, and shutdown event.
-- **OpenTelemetry** — Built-in metrics and tracing via the `observability` and `middleware` packages.
-- **Relay integration** — Emit typed webhook events at every lifecycle point via `relay_hook`.
-- **Pluggable storage** — Memory, PostgreSQL (pgx/v5), Grove ORM, SQLite, Redis. Implement `store.Store` for anything else.
+- Background jobs: typed handlers, queues, priority, delayed `RunAt`, retries with configurable backoff.
+- Checkpointed workflows: multi-step Go functions that record each step and resume after a crash.
+- A durable workflow runtime: deterministic replay with activities, timers, signals, queries and child workflows (`durable` and `durable/runtime`).
+- Distributed cron: leader-elected cron, stored so every worker agrees, with runtime enable and disable.
+- Dead letter queue: jobs that run out of retries land in the DLQ, where you can inspect, replay or purge them.
+- Distributed workers: worker registration, heartbeats, leader election and reclaiming jobs from workers that stop heartbeating.
+- Middleware: a chain for logging, tracing, metrics, panic recovery, timeouts and Forge scope injection.
+- Extension hooks: opt-in lifecycle interfaces for job, workflow, cron and shutdown events.
+- OpenTelemetry: metrics and tracing through the `observability` and `middleware` packages.
+- Relay integration: typed webhook events at every lifecycle point through `relay_hook`.
+- Pluggable storage: memory, PostgreSQL, SQLite and MongoDB through Grove, and Redis through Grove KV. Implement `store.Store` for anything else.
 
 ## Design philosophy
 
-**Library, not framework.** Dispatch is a set of Go packages you import. You control the `main` function, the HTTP server, and the process lifecycle.
+**Library, not framework.** Dispatch is a set of Go packages you import. You control the `main` function, the HTTP server and the process lifecycle.
 
-**Interfaces over implementations.** Every subsystem defines a Go interface. Swap any storage backend with a single type change.
+**Interfaces over implementations.** Every subsystem defines a Go interface, so you can swap the storage backend without touching your jobs.
 
-**Composable stores.** Each subsystem has its own store interface. The aggregate `store.Store` composes them all. One backend satisfies every subsystem.
+**Composable stores.** Each subsystem has its own store interface. The aggregate `store.Store` composes them all, and one backend satisfies every subsystem.
 
-**Workflows as ordinary Go functions.** No YAML, no protobuf, no external scheduler. A workflow is a function; a step is a closure.
+**Workflows as ordinary Go functions.** No YAML, no protobuf, no external scheduler. A workflow is a function and a step is a closure.
 
-**TypeID everywhere.** All entities use type-prefixed, K-sortable, UUIDv7-based identifiers. Passing a `CronID` where a `JobID` is expected is a compile error.
+**TypeID everywhere.** Every entity uses a type-prefixed, K-sortable, UUIDv7-based identifier. `JobID`, `CronID` and the rest are aliases of one `id.ID` type, so the prefix (checked by the `Parse*ID` functions) is what tells them apart, not the compiler.
 
 ## Quick look
 
@@ -67,16 +68,23 @@ func main() {
         log.Fatal(err)
     }
 
-    eng := engine.Build(d)
+    eng, err := engine.Build(d)
+    if err != nil {
+        log.Fatal(err)
+    }
     engine.Register(eng, SendEmail)
 
-    d.Start(ctx)
+    if err := d.Start(ctx); err != nil {
+        log.Fatal(err)
+    }
     defer d.Stop(ctx)
 
-    engine.Enqueue(ctx, eng, SendEmail, EmailInput{
+    if _, err := engine.Enqueue(ctx, eng, "send_email", EmailInput{
         To:      "user@example.com",
         Subject: "Welcome!",
-    })
+    }); err != nil {
+        log.Fatal(err)
+    }
 }
 ```
 

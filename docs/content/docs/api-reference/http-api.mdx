@@ -3,29 +3,28 @@ title: HTTP Admin API
 description: Complete reference for the Dispatch admin API endpoints.
 ---
 
-The admin API is served by `api.New(eng, router)`. All routes are mounted under `/v1`. Requests and responses use JSON.
+The admin API is served by `api.New(eng, router, opts...)`. All routes are mounted under `/v1`, relative to wherever you mount the API. With the Forge extension that's its base path, so `/v1/jobs` below is `/dispatch/v1/jobs` by default. Requests and responses use JSON.
 
 ## Setup
 
 ```go
 import (
     "github.com/xraph/dispatch/api"
-    "github.com/xraph/dispatch/engine"
 )
 
-// With Forge router. RegisterRoutes returns an error naming every route
+// With a Forge router. RegisterRoutes returns an error naming every route
 // forge refused, so check it at startup:
-a := api.New(eng, forgeRouter)
+a := api.New(eng, forgeRouter, api.WithSecurity(authenticator, boundary))
 if err := a.RegisterRoutes(forgeRouter); err != nil {
     return err
 }
 
 // Standalone (net/http). Handler registers the routes on a fresh Forge
-// router the first time it is called, and panics if forge refuses one:
-http.Handle("/", api.New(eng, nil).Handler())
+// router the first time it's called, and panics if forge refuses one:
+http.Handle("/", api.New(eng, nil, api.WithSecurity(authenticator, boundary)).Handler())
 ```
 
-Using the Forge extension auto-registers routes unless `WithDisableRoutes(true)` is set. `Register` fails if forge refuses a route.
+Every route goes through a guard that authenticates the request and checks it against the boundary. Without `api.WithSecurity`, every route answers `401`. The Forge extension registers the routes for you, with Forge auth and Warden, unless you pass `WithDisableRoutes()`. Its `Register` fails if forge refuses a route.
 
 The four list routes (`GET /v1/jobs`, `/v1/workflows/runs`, `/v1/dlq`, `/v1/crons`) answer a bare JSON array, `[]` when nothing matches. Every query parameter on them is optional, and they list oldest first.
 
@@ -56,17 +55,22 @@ Query parameters:
     "name": "send_email",
     "queue": "default",
     "state": "completed",
-    "payload": {"to":"user@example.com","subject":"Welcome"},
-    "attempt": 1,
-    "max_attempts": 3,
+    "payload": "eyJ0byI6InVzZXJAZXhhbXBsZS5jb20ifQ==",
+    "priority": 0,
+    "max_retries": 3,
+    "retry_count": 0,
+    "scope_org_id": "org_01h455vb",
     "run_at": "2025-01-15T10:00:00Z",
     "started_at": "2025-01-15T10:00:01Z",
     "completed_at": "2025-01-15T10:00:02Z",
-    "scope_app_id": "",
-    "scope_org_id": "org_01h455vb"
+    "timeout": 300000000000,
+    "created_at": "2025-01-15T10:00:00Z",
+    "updated_at": "2025-01-15T10:00:02Z"
   }
 ]
 ```
+
+`payload` is the job's JSON payload as base64, because the field is a `[]byte`. `timeout` is in nanoseconds. Empty optional fields (`last_error`, `scope_app_id`, `worker_id` and so on) are left out.
 
 ### Get job
 
@@ -76,7 +80,7 @@ GET /v1/jobs/{jobId}
 
 **Response `200 OK`:** Single job object (same schema as above).
 
-**Response `404 Not Found`:** `{"error": "job not found"}`
+**Response `404 Not Found`:** the job doesn't exist (`dispatch: job not found`).
 
 ### Cancel job
 
@@ -162,14 +166,17 @@ Query parameters:
     "id": "run_01h455vb4pex5vsknk084sn02q",
     "name": "onboard_user",
     "state": "running",
-    "current_step": "send-welcome",
+    "input": "eyJlbWFpbCI6ImFkYUBleGFtcGxlLmNvbSJ9",
+    "scope_org_id": "org_01h455vb",
     "started_at": "2025-01-15T10:00:00Z",
-    "completed_at": null,
-    "scope_app_id": "",
-    "scope_org_id": "org_01h455vb"
+    "replay_generation": 0,
+    "created_at": "2025-01-15T10:00:00Z",
+    "updated_at": "2025-01-15T10:00:00Z"
   }
 ]
 ```
+
+`input` and `output` are base64. A finished run also has `completed_at`, and a failed one `error`.
 
 ### Get workflow run
 
@@ -179,7 +186,7 @@ GET /v1/workflows/runs/{runId}
 
 **Response `200 OK`:** Single run object.
 
-**Response `404 Not Found`:** `{"error": "run not found"}`
+**Response `404 Not Found`:** the run doesn't exist (`dispatch: run not found`).
 
 ### Plan a replay
 
@@ -245,10 +252,13 @@ Query parameters:
     "job_id": "job_01h455vb4pex5vsknk084sn02q",
     "job_name": "send_email",
     "queue": "default",
+    "payload": "eyJ0byI6InVzZXJAZXhhbXBsZS5jb20ifQ==",
     "error": "dial tcp: connection refused",
-    "payload": {"to":"user@example.com"},
+    "retry_count": 4,
+    "max_retries": 3,
+    "scope_org_id": "org_01h455vb",
     "failed_at": "2025-01-15T10:05:00Z",
-    "scope_org_id": "org_01h455vb"
+    "created_at": "2025-01-15T10:05:00Z"
   }
 ]
 ```
@@ -375,11 +385,13 @@ Query parameters:
     "id": "cron_01h455vb4pex5vsknk084sn02q",
     "name": "daily-cleanup",
     "schedule": "0 3 * * *",
-    "enabled": true,
-    "last_fired_at": "2025-01-15T03:00:00Z",
+    "job_name": "cleanup",
+    "payload": "e30=",
+    "last_run_at": "2025-01-15T03:00:00Z",
     "next_run_at": "2025-01-16T03:00:00Z",
-    "scope_app_id": "",
-    "scope_org_id": ""
+    "enabled": true,
+    "created_at": "2025-01-01T00:00:00Z",
+    "updated_at": "2025-01-15T03:00:00Z"
   }
 ]
 ```
@@ -466,18 +478,21 @@ GET /v1/stats
 
 ## Error responses
 
-All errors return a JSON object:
+Errors return a JSON object with an `error` message. The security guard's own responses use `api.ErrorResponse`:
 
 ```json
 {
-  "error": "job not found"
+  "code": 0,
+  "error": "authentication required"
 }
 ```
 
 | Scenario | Status Code |
 |----------|-------------|
+| Not authenticated | `401` |
+| Denied by the boundary | `403` |
 | Resource not found | `404` |
 | Invalid input | `400` |
 | Refused in the current state | `409` |
-| Engine shutting down | `503` |
+| Engine shutting down, or authorizer unreachable | `503` |
 | Internal error | `500` |

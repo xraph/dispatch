@@ -3,9 +3,9 @@ title: Extensions
 description: Lifecycle hooks for jobs, workflows, cron, and shutdown events.
 ---
 
-Extensions are notified of lifecycle events and can react to them — recording metrics, emitting webhooks, writing audit logs, etc.
+Extensions are notified of lifecycle events and can react to them: recording metrics, emitting webhooks, writing audit logs and so on.
 
-Each lifecycle hook is a **separate interface**. Extensions only implement the interfaces they care about, and the `ext.Registry` fans events out to all registered extensions.
+Each lifecycle hook is a separate interface. Extensions only implement the interfaces they care about, and the `ext.Registry` fans events out to all registered extensions.
 
 ## Implementing an extension
 
@@ -16,19 +16,19 @@ import (
 )
 
 type AuditExtension struct {
-    logger *slog.Logger
+    logger log.Logger // github.com/xraph/go-utils/log
 }
 
 func (e *AuditExtension) Name() string { return "audit" }
 
 // Job hooks (opt in by implementing the interface)
 func (e *AuditExtension) OnJobCompleted(ctx context.Context, j *job.Job, elapsed time.Duration) error {
-    e.logger.Info("job completed", "name", j.Name, "elapsed", elapsed)
+    e.logger.Info("job completed", log.String("name", j.Name), log.Duration("elapsed", elapsed))
     return nil
 }
 
 func (e *AuditExtension) OnJobFailed(ctx context.Context, j *job.Job, err error) error {
-    e.logger.Error("job failed", "name", j.Name, "error", err)
+    e.logger.Error("job failed", log.String("name", j.Name), log.Error(err))
     return nil
 }
 ```
@@ -36,13 +36,12 @@ func (e *AuditExtension) OnJobFailed(ctx context.Context, j *job.Job, err error)
 ## Registering an extension
 
 ```go
-eng := engine.Build(d,
-    engine.WithExtension(&AuditExtension{logger: slog.Default()}),
-    engine.WithExtension(observability.NewMetricsExtension()),
+eng, err := engine.Build(d,
+    engine.WithExtension(&AuditExtension{logger: log.NewProductionLogger()}),
 )
 ```
 
-Multiple extensions can be registered. They are called in registration order for each event.
+You can register several extensions. They're called in registration order for each event, and a hook's error is logged, never returned to the job. `engine.Build` already registers `observability.MetricsExtension`, so don't add it again.
 
 ## Available hooks
 
@@ -53,9 +52,10 @@ Multiple extensions can be registered. They are called in registration order for
 | `ext.JobEnqueued` | `OnJobEnqueued` | Job is accepted into the queue |
 | `ext.JobStarted` | `OnJobStarted` | Worker begins executing |
 | `ext.JobCompleted` | `OnJobCompleted` | Job finishes successfully |
-| `ext.JobFailed` | `OnJobFailed` | Job fails with no retries remaining |
+| `ext.JobFailed` | `OnJobFailed` | Job fails with no retries remaining (or permanently), or is lost to a reclaim |
 | `ext.JobRetrying` | `OnJobRetrying` | Job fails and is scheduled for retry |
 | `ext.JobDLQ` | `OnJobDLQ` | Job is moved to the DLQ |
+| `ext.JobCancelled` | `OnJobCancelled` | Job reaches `cancelled` |
 
 ### Workflow lifecycle
 
@@ -73,10 +73,12 @@ Multiple extensions can be registered. They are called in registration order for
 |-----------|--------|----------------|
 | `ext.CronFired` | `OnCronFired` | A cron entry fires and a job is enqueued |
 | `ext.Shutdown` | `OnShutdown` | The dispatcher shuts down gracefully |
+| `ext.OperatorActionObserver` | `OnOperatorAction` | An operator action (cancel, retry, replay, purge, cron change) goes through the engine |
 
 ## Built-in extensions
 
 | Extension | Package | Purpose |
 |-----------|---------|---------|
-| `MetricsExtension` | `observability` | OpenTelemetry counters for every lifecycle event |
-| `RelayHookExtension` | `relay_hook` | Emit typed webhook events via Relay |
+| `MetricsExtension` | `observability` | Counters for every lifecycle event (registered by `engine.Build`) |
+| `relay_hook.Extension` | `relay_hook` | Emits typed webhook events through Relay |
+| `audit_hook.Extension` | `audit_hook` | Records audit events through a `Recorder` |

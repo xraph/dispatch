@@ -14,7 +14,12 @@ import (
     "github.com/xraph/dispatch/store/postgres"
 )
 
-db, err := grove.Open(pgdriver.Open("postgres://user:pass@localhost:5432/dispatch?sslmode=disable"))
+pg := pgdriver.New()
+if err := pg.Open(ctx, "postgres://user:pass@localhost:5432/dispatch?sslmode=disable"); err != nil {
+    log.Fatal(err)
+}
+
+db, err := grove.Open(pg)
 if err != nil {
     log.Fatal(err)
 }
@@ -29,7 +34,7 @@ d, err := dispatch.New(dispatch.WithStore(s))
 
 ## Migrations
 
-Call `s.Migrate(ctx)` before first use. This creates all required tables and indexes. Migrations are idempotent -- safe to run on every startup.
+Call `s.Migrate(ctx)` before first use. This creates all required tables and indexes. Migrations are idempotent, so it's safe to run them on every startup. The Forge extension runs them for you on start. `postgres.Migrations` is the `migrate.Group` if you'd rather run them with Grove's orchestrator.
 
 ## Internals
 
@@ -39,10 +44,11 @@ Call `s.Migrate(ctx)` before first use. This creates all required tables and ind
 | Migrations | grove orchestrator with embedded SQL migrations |
 | Transactions | Database-level ACID |
 | Ping | `db.Ping(ctx)` |
-| Close | No-op -- caller owns the `*grove.DB` lifecycle |
+| Close | No-op: you own the `*grove.DB` lifecycle |
 
 ## When to use
 
 - Production deployments requiring ACID transactions and full SQL query power.
 - Multi-process environments with connection pooling.
-- When you need durable storage for jobs, workflows, and events.
+- When you need durable storage for jobs, workflows and events.
+- When you want the durable workflow runtime (`engine.WithDurableWorkflows`), which only the PostgreSQL and memory stores support.

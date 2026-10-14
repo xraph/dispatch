@@ -14,7 +14,12 @@ import (
     "github.com/xraph/dispatch/store/mongo"
 )
 
-db, err := grove.Open(mongodriver.Open("mongodb://localhost:27017", "dispatch"))
+mdrv := mongodriver.New()
+if err := mdrv.Open(ctx, "mongodb://localhost:27017", mongodriver.WithDatabase("dispatch")); err != nil {
+    log.Fatal(err)
+}
+
+db, err := grove.Open(mdrv)
 if err != nil {
     log.Fatal(err)
 }
@@ -32,14 +37,14 @@ d, err := dispatch.New(dispatch.WithStore(s))
 | Aspect | Detail |
 |--------|--------|
 | Driver | grove ORM + mongodriver |
-| Migrations | Grove migrations with JSON Schema validation + indexes |
-| Transactions | MongoDB sessions (replica-set required for multi-doc txns) |
-| Collections | `dispatch_jobs`, `dispatch_workflow_runs`, `dispatch_checkpoints`, `dispatch_cron_entries`, `dispatch_dlq`, `dispatch_events`, `dispatch_workers` |
-| Close | No-op -- caller owns the `*grove.DB` lifecycle |
+| Migrations | `Migrate` creates the collections' indexes |
+| Transactions | A MongoDB session for leadership changes (needs a replica set) |
+| Collections | `dispatch_jobs`, `dispatch_workflow_runs`, `dispatch_checkpoints`, `dispatch_cron_entries`, `dispatch_dlq`, `dispatch_events`, `dispatch_workers`, `dispatch_artifacts`, `dispatch_artifact_links`, `dispatch_job_usage` |
+| Close | No-op: you own the `*grove.DB` lifecycle |
 
 ## Grove Migrations
 
-The store exports a `Migrations` group for use with Grove's migration orchestrator. This enables tracked, versioned migrations across all stores in your application:
+The store also exports a `Migrations` group for Grove's migration orchestrator, if you track migrations across all the stores in your application:
 
 ```go
 import mongostore "github.com/xraph/dispatch/store/mongo"
@@ -53,3 +58,5 @@ import mongostore "github.com/xraph/dispatch/store/mongo"
 - Document-oriented workloads where MongoDB is the primary data store.
 - Horizontally-scaled environments requiring sharding.
 - Teams already running MongoDB in their infrastructure.
+
+The MongoDB store doesn't implement `durable.Store`, so the durable workflow runtime isn't available on it.

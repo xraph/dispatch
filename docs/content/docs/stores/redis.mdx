@@ -14,7 +14,12 @@ import (
     "github.com/xraph/dispatch/store/redis"
 )
 
-kvStore, err := kv.Open(redisdriver.Open("redis://localhost:6379/0"))
+rdb := redisdriver.New()
+if err := rdb.Open(ctx, "redis://localhost:6379/0"); err != nil {
+    log.Fatal(err)
+}
+
+kvStore, err := kv.Open(rdb)
 if err != nil {
     log.Fatal(err)
 }
@@ -51,10 +56,12 @@ carry on unchanged.
 | Migrations | No-op (schemaless) |
 | Data structures | Sorted Sets for job queues, Streams for events, JSON for entities |
 | Ping | `kv.Ping(ctx)` |
-| Close | No-op -- caller owns the `*kv.Store` lifecycle |
+| Close | No-op: you own the `*kv.Store` lifecycle |
 
 ## When to use
 
 - High-throughput, low-latency job processing.
 - Ephemeral workloads where persistence is not critical.
 - Environments already running Redis for caching or pub/sub.
+
+The Redis store doesn't implement `durable.Store`, so the durable workflow runtime isn't available on it. `redis.MissingCapabilities(kvStore)` lists any Redis features the store needs that your server lacks.

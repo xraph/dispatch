@@ -3,195 +3,205 @@ title: Forge Extension
 description: Mount Dispatch into a Forge application.
 ---
 
-Dispatch includes an extension adapter for the [Forge](https://github.com/xraph/forge) framework. It handles store wiring, migration, route registration, and lifecycle management automatically.
+The `github.com/xraph/dispatch/extension` package plugs Dispatch into a [Forge](https://github.com/xraph/forge) app. It picks up a Grove database from the container (or the store you pass), runs the store migrations on start, builds the engine, provides `*engine.Engine` through DI and mounts the REST admin API.
 
 ## Setup
 
 ```go
 import (
-    "github.com/xraph/dispatch/extension"
-    "github.com/xraph/dispatch/store/postgres"
+    "context"
+    "net/http"
+
+    "github.com/xraph/dispatch/cron"
+    "github.com/xraph/dispatch/engine"
+    dispatchext "github.com/xraph/dispatch/extension"
+    "github.com/xraph/forge"
+    _ "github.com/xraph/grove/drivers/pgdriver"
+    groveext "github.com/xraph/grove/extension"
 )
 
-store, _ := postgres.New(ctx, os.Getenv("DATABASE_URL"))
-
-ext := extension.New(
-    extension.WithStore(store),
-    extension.WithConcurrency(20),
-    extension.WithQueues([]string{"default", "critical"}),
-    extension.WithBasePath("/api/dispatch"),
+jobs := dispatchext.New(
+    dispatchext.WithConcurrency(8),
+    dispatchext.WithQueues([]string{"default", "critical"}),
 )
+
+app := forge.NewApp(forge.AppConfig{
+    Name:        "accounts",
+    HTTPAddress: ":8080",
+    Extensions: []forge.Extension{
+        groveext.New(groveext.WithDSN("postgres", "postgres://localhost:5432/accounts?sslmode=disable")),
+        jobs,
+    },
+})
+
+err := app.RegisterHook(forge.PhaseAfterRegister, func(ctx context.Context, _ forge.App) error {
+    eng := jobs.Engine()
+    engine.Register(eng, SendWelcome)
+
+    return engine.RegisterCron(ctx, eng, &cron.Definition[Signup]{
+        Name:     "nightly-digest",
+        Schedule: "0 2 * * *",
+        JobName:  "send_welcome",
+        Payload:  Signup{Email: "team@example.com"},
+    })
+}, forge.LifecycleHookOptions{Name: "register-jobs"})
 ```
 
-Register the extension with your Forge app:
+`jobs.Engine()` is nil until the extension has registered, which is why job registration sits in a `PhaseAfterRegister` hook. The extension declares a dependency on the `grove` extension, so Forge registers Grove first. If you don't run Grove, Forge skips that dependency.
 
-```go
-app := forge.New()
-app.RegisterExtension(ext)
-```
-
-Forge will call `ext.Start(ctx)` on application start and `ext.Stop(ctx)` on shutdown.
+Forge calls `Start` when the app starts (that's when migrations run and workers begin polling) and `Stop` on shutdown.
 
 ## Extension options
 
 | Option | Purpose | Default |
 |--------|---------|---------|
-| `WithStore(s)` | Persistence backend (required) | — |
+| `WithStore(s)` | Use this store instead of a Grove one | none |
+| `WithGroveDatabase(name)` | Resolve a `*grove.DB` from DI by name (`""` for the default) | auto-discovers the default `*grove.DB` |
+| `WithGroveKV(name)` | Resolve a Grove `*kv.Store` from DI and use the Redis store | off |
+| `WithKVKeyPrefix(prefix)` | Prefix every Redis key (Grove KV path only) | `""` |
 | `WithConcurrency(n)` | Max concurrent jobs | `10` |
 | `WithQueues(q)` | Queues to poll | `["default"]` |
-| `WithBasePath(p)` | HTTP API prefix | `"/api/dispatch"` |
-| `WithExtension(x)` | Register a lifecycle extension | — |
-| `WithMiddleware(m)` | Add job execution middleware | — |
-| `WithBackoff(b)` | Retry backoff strategy | exponential |
-| `WithDisableRoutes()` | Skip HTTP route registration | `false` |
-| `WithDisableMigrate()` | Skip auto-migration at startup | `false` |
-| `WithGroveDatabase(name)` | Resolve a grove.DB from DI by name | `""` |
-| `WithGroveKV(name)` | Resolve a grove KV store from DI by name | `""` |
-| `WithKVKeyPrefix(prefix)` | Namespace the Redis store's keys per tenant (grove KV path only) | `""` |
+| `WithPollInterval`, `WithMaxPollInterval`, `WithHeartbeatInterval`, `WithStaleJobThreshold`, `WithWorkerStoreCallTimeout` | Worker tuning | see [Configuration](/docs/concepts/configuration) |
+| `WithCronTickInterval`, `WithCronLeaderTTL`, `WithCronLockTTL`, `WithCronRefreshInterval`, `WithCronStoreCallTimeout` | Cron tuning | subsystem defaults |
+| `WithBasePath(p)` | Prefix for the REST routes | `"/dispatch"` |
+| `WithDisableRoutes()` | Mount no HTTP routes | off |
+| `WithDisableMigrate()` | Skip store migrations on start | off |
+| `WithExtension(x)` | Register a lifecycle extension | none |
+| `WithMiddleware(m)` | Add job middleware | none |
+| `WithBackoff(b)` | Retry backoff strategy | exponential with jitter |
+| `WithLogger(l)` | A go-utils `log.Logger` for the dispatcher | the app's logger |
+| `WithDWP(opts...)` | Turn on the Dispatch Wire Protocol | off |
+| `WithRemoteSecurity(auth, boundary)` | Your own authenticator and boundary for the admin routes | Forge auth plus Warden |
+| `WithOperatorSecurity(cfg)` | Which auth providers and Warden resource the stock security uses | none |
+| `WithConfig(cfg)`, `WithRequireConfig(bool)` | Set the whole `Config`, or fail when no YAML config exists | |
 
-## Auto-migration
+The resource, artifact and durable runtime options (`WithResources`, `WithArtifacts`, `WithDurableWorkflows` and friends) are covered on their own pages.
 
-By default, `extension.New()` runs `store.Migrate(ctx)` during `Start`. Disable this if you manage migrations externally:
+## Migrations
+
+`Start` runs `Migrate` on the store unless you pass `WithDisableMigrate()` or set `disable_migrate: true`:
 
 ```go
-ext := extension.New(
-    extension.WithStore(store),
-    extension.WithDisableMigrate(),
+jobs := dispatchext.New(
+    dispatchext.WithGroveDatabase(""),
+    dispatchext.WithDisableMigrate(),
 )
 ```
 
-## Accessing the engine from Forge context
+## Getting the engine
 
-When using Forge dependency injection, retrieve the engine from context:
+The extension provides `*engine.Engine` in the container, so a handler can inject it:
 
 ```go
-eng := extension.EngineFromContext(ctx)
-engine.Enqueue(ctx, eng, SendEmail, input)
+err = app.Router().POST("/signup", func(ctx forge.Context) error {
+    eng, err := forge.Inject[*engine.Engine](app.Container())
+    if err != nil {
+        return err
+    }
+
+    j, err := engine.Enqueue(ctx.Context(), eng, "send_welcome", Signup{Email: "ada@example.com"})
+    if err != nil {
+        return err
+    }
+
+    return ctx.JSON(http.StatusAccepted, map[string]string{"job_id": j.ID.String()})
+})
 ```
 
-## Grove database integration
+You can also keep the `*extension.Extension` around and call `jobs.Engine()` once the app has registered.
 
-When your Forge app uses the [Grove extension](https://github.com/xraph/grove) to manage database connections, Dispatch can automatically resolve a `grove.DB` from the DI container and construct the correct store backend based on the driver type.
+## Grove integration
 
-### Using the default grove database
+When your app runs the [Grove extension](https://github.com/xraph/grove), Dispatch resolves a `*grove.DB` from the container and builds the matching store from the driver name: `pg` gives the PostgreSQL store, `sqlite` the SQLite store and `mongo` the MongoDB store. Any other driver fails registration.
 
-If the Grove extension registers a single database (or a default in multi-DB mode), use `WithGroveDatabase` with an empty name:
+### The default database
+
+If Grove registers one database (or a default in multi-DB mode), you don't need an option at all: the extension finds the default `*grove.DB` on its own. `WithGroveDatabase("")` does the same thing but fails registration when there's no default database, instead of moving on.
+
+### A named database
 
 ```go
-ext := extension.New(
-    extension.WithGroveDatabase(""),
+jobs := dispatchext.New(
+    dispatchext.WithGroveDatabase("jobs"),
 )
 ```
 
-### Using a named grove database
+### A Grove KV store
 
-In multi-database setups, reference a specific database by name:
+`WithGroveKV` resolves a `*kv.Store` and wraps it in the Redis store:
 
 ```go
-ext := extension.New(
-    extension.WithGroveDatabase("jobs"),
+jobs := dispatchext.New(
+    dispatchext.WithGroveKV("dispatch-kv"),
 )
 ```
 
-This resolves the grove.DB named `"jobs"` from the DI container and auto-constructs the matching store. The driver type is detected automatically -- you do not need to import individual store packages.
-
-### Using the default grove KV store
-
-If the Grove extension registers a KV store, use `WithGroveKV` with an empty name:
+When several Dispatch instances share one Redis, give each its own key prefix. Every key, stream and pub/sub channel the store touches goes under it (`ws_acme:dispatch:job:<id>`), so instances never see each other's queues, cron locks or leadership. Leave it empty for a single instance and the keys stay `dispatch:*`:
 
 ```go
-ext := extension.New(
-    extension.WithGroveKV(""),
+jobs := dispatchext.New(
+    dispatchext.WithGroveKV("dispatch-kv"),
+    dispatchext.WithKVKeyPrefix("ws_acme:"),
 )
 ```
 
-### Using a named grove KV store
+### How the store is chosen
 
-In multi-KV setups, reference a specific KV store by name:
+The extension picks its store during `Register`:
 
-```go
-ext := extension.New(
-    extension.WithGroveKV("dispatch-kv"),
-)
-```
+1. Grove database, if you called `WithGroveDatabase` or set `grove_database`.
+2. Otherwise Grove KV, if you called `WithGroveKV` or set `grove_kv`.
+3. Otherwise the default `*grove.DB`, if one is in the container.
+4. Otherwise the store you passed with `WithStore`.
 
-When several dispatch instances share one Redis, give each its own key
-prefix. Every key, stream and pub/sub channel the store touches goes under
-it (`ws_acme:dispatch:job:<id>`), so instances never see each other's
-queues, cron locks or leadership. Leave it empty for a single instance and
-the keys stay `dispatch:*` as before:
-
-```go
-ext := extension.New(
-    extension.WithGroveKV("dispatch-kv"),
-    extension.WithKVKeyPrefix("ws_acme:"),
-)
-```
-
-### Store resolution order
-
-The extension resolves its store in this order:
-
-1. **Explicit store** -- if `WithStore(s)` was called, it is used directly and grove is ignored.
-2. **Grove database** -- if `WithGroveDatabase(name)` was called (or `grove_database` is set in YAML), the named or default `grove.DB` is resolved from DI.
-3. **Grove KV** -- if `WithGroveKV(name)` was called (or `grove_kv` is set in YAML), the named or default grove KV store is resolved from DI.
-4. **In-memory fallback** -- if none of the above is configured, an in-memory store is used.
+There's no in-memory fallback. With none of these, registration fails with `dispatch: no store configured`. A store found through Grove is applied after `WithStore`, so if a Grove database is in the container it wins even when you also passed `WithStore`.
 
 ## YAML configuration
 
-The Dispatch extension automatically loads configuration from your Forge app's YAML config files. It looks for the key `extensions.dispatch` first, then falls back to `dispatch`:
+The extension reads `extensions.dispatch` first and falls back to a top-level `dispatch` key:
 
 ```yaml
-# forge.yaml (or app.yaml, config.yaml, etc.)
 extensions:
   dispatch:
-    base_path: /api/dispatch
+    base_path: /dispatch
     grove_database: jobs
-    grove_kv: dispatch-kv
-    key_prefix: "ws_acme:"
-    concurrency: 20
-    queues:
-      - default
-      - critical
     disable_routes: false
     disable_migrate: false
+    enable_dwp: false
 ```
 
-Or at the top level:
+Or with the Redis store:
 
 ```yaml
 dispatch:
-  base_path: /api/dispatch
-  grove_database: ""
-  grove_kv: ""
-  concurrency: 10
-  queues:
-    - default
+  grove_kv: dispatch-kv
+  key_prefix: "ws_acme:"
 ```
 
 ### Configuration reference
 
 | Field | YAML key | Type | Default | Description |
 |-------|----------|------|---------|-------------|
-| `BasePath` | `base_path` | `string` | `"/api/dispatch"` | URL prefix for all dispatch HTTP routes |
-| `GroveDatabase` | `grove_database` | `string` | `""` | Name of the grove.DB to resolve from DI; empty uses the default DB |
-| `GroveKV` | `grove_kv` | `string` | `""` | Name of the grove KV store to resolve from DI; empty uses the default KV |
-| `KeyPrefix` | `key_prefix` | `string` | `""` | Tenant prefix for every Redis key the grove KV store writes; empty keeps `dispatch:*` |
-| `Concurrency` | `concurrency` | `int` | `10` | Max concurrent jobs |
-| `Queues` | `queues` | `[]string` | `["default"]` | Queues to poll |
+| `BasePath` | `base_path` | `string` | `"/dispatch"` | Prefix for the REST routes, which live under `<base_path>/v1` |
+| `GroveDatabase` | `grove_database` | `string` | `""` | Name of the `*grove.DB` to resolve from DI |
+| `GroveKV` | `grove_kv` | `string` | `""` | Name of the Grove `*kv.Store` to resolve from DI |
+| `KeyPrefix` | `key_prefix` | `string` | `""` | Prefix for every Redis key the Grove KV store writes |
 | `DisableRoutes` | `disable_routes` | `bool` | `false` | Skip HTTP route registration |
-| `DisableMigrate` | `disable_migrate` | `bool` | `false` | Skip auto-migration at startup |
+| `DisableMigrate` | `disable_migrate` | `bool` | `false` | Skip migrations on start |
+| `EnableDWP` | `enable_dwp` | `bool` | `false` | Turn on the Dispatch Wire Protocol |
+| `DWPBasePath` | `dwp_base_path` | `string` | `""` (DWP uses `/dwp`) | Prefix for the DWP endpoints |
+| `Resources` | `resources.*` | | off | Resource-aware admission |
+| `Artifacts` | `artifacts.*` | | off | The artifact plane over a Trove store |
+| `Execution` | `execution.subprocess.*` | | off | The subprocess execution rung |
+| `Durable` | `durable.*` | | off | The history-based durable runtime |
+| `Security` | `security.installation_id`, `policy_tenant`, `providers` | | | Which auth providers and Warden resource the admin routes use |
 
-## Standalone usage (without Forge)
+Worker tuning (concurrency, queues, poll and heartbeat intervals, cron timings) is code-only. Use the `With*` options above. A `dispatch:` block nested under the extension key (`extensions.dispatch.dispatch.concurrency` and so on) parses without error, but nothing reads it, so it has no effect.
 
-The extension works without Forge too:
+## Admin routes and security
 
-```go
-ext := extension.New(extension.WithStore(store))
-ext.Start(ctx)
-defer ext.Stop(ctx)
+With routes on, the extension mounts the admin API under `<base_path>/v1`: `/dispatch/v1/jobs`, `/dispatch/v1/workflows/runs`, `/dispatch/v1/dlq`, `/dispatch/v1/crons`, `/dispatch/v1/stats` and their actions. Every route authenticates through the Forge auth extension and authorizes with [Warden](https://github.com/xraph/warden) by default, so your app needs both registered. Pass `WithRemoteSecurity` to bring your own authenticator and boundary, or `WithDisableRoutes()` to mount nothing. See the [HTTP API reference](/docs/api-reference/http-api) for every route.
 
-eng := ext.Engine()
-engine.Register(eng, SendEmail)
-engine.Enqueue(ctx, eng, SendEmail, input)
-```
+## Without Forge
+
+The extension only works inside a Forge app: `Start` fails with `dispatch: extension not initialized` until Forge has called `Register`. Outside Forge, build the dispatcher and engine yourself as shown in [Getting Started](/docs/getting-started).

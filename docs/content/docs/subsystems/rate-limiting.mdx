@@ -3,37 +3,40 @@ title: Middleware
 description: Composable job execution middleware for logging, tracing, metrics, recovery, and scope.
 ---
 
-Middleware wraps each job execution with cross-cutting logic. It is composed into a chain using `middleware.Chain` and applied synchronously before and after each job runs.
+Middleware wraps each job execution with cross-cutting logic. Each one is a `func(ctx, *job.Job, next middleware.Handler) error` that runs in-band around the handler.
 
 ## Built-in middleware
 
 | Middleware | Function | Purpose |
 |-----------|----------|---------|
-| Logging | `middleware.Logging(logger)` | Logs job name, queue, duration, and outcome |
-| Recover | `middleware.Recover()` | Catches panics and converts them to errors |
-| Timeout | `middleware.Timeout()` | Cancels the job context after `job.Timeout` |
-| Tracing | `middleware.Tracing()` | Wraps execution in an OpenTelemetry span |
-| Metrics | `middleware.Metrics()` | Records per-job duration and outcome counters |
-| Scope | `middleware.Scope()` | Injects Forge app/org IDs from job into context |
+| Logging | `middleware.Logging(logger)` | Logs job start and completion |
+| Recover | `middleware.Recover(logger)` | Turns panics into errors and logs the stack |
+| Timeout | `middleware.Timeout(logger)` | Cancels the job context after `job.Timeout` |
+| Tracing | `middleware.Tracing()`, `middleware.TracingWithTracer(t)` | Wraps execution in an OpenTelemetry span |
+| Metrics | `middleware.Metrics()`, `middleware.MetricsWithFactory(f)` | Records per-job duration and outcome |
+| Scope | `middleware.Scope()` | Restores the job's Forge app and org IDs into the context |
 
-## Registering middleware
+## The default stack
+
+`engine.Build` always installs all six, in this order (outermost first):
+
+```
+Recover -> Tracing -> Metrics -> Logging -> Scope -> Timeout -> handler
+```
+
+The tracing and metrics middleware use the tracer provider and metric factory you pass with `engine.WithTracerProvider` and `engine.WithMetricFactory`. You don't need to register any of them yourself, and adding them again runs them twice.
+
+## Adding your own
+
+`engine.WithMiddleware` appends to the chain, inside the default stack:
 
 ```go
-eng := engine.Build(d,
-    engine.WithMiddleware(middleware.Logging(slog.Default())),
-    engine.WithMiddleware(middleware.Recover()),
-    engine.WithMiddleware(middleware.Timeout()),
-    engine.WithMiddleware(middleware.Tracing()),
-    engine.WithMiddleware(middleware.Metrics()),
-    engine.WithMiddleware(middleware.Scope()),
+eng, err := engine.Build(d,
+    engine.WithMiddleware(RateLimitMiddleware(limiter)),
 )
 ```
 
-Middleware are applied **right-to-left** (last registered = outermost wrapper). With the list above, execution order is:
-
-```
-Logging → Recover → Timeout → Tracing → Metrics → Scope → handler
-```
+Middleware you add runs in the order you add it, first one outermost.
 
 ## Writing custom middleware
 
@@ -48,16 +51,17 @@ func RateLimitMiddleware(limiter *rate.Limiter) middleware.Middleware {
 }
 ```
 
-Custom middleware must call `next(ctx)` to continue the chain, unless intentionally short-circuiting.
+Call `next(ctx)` to continue the chain, unless you mean to short-circuit.
+
+For per-queue rate limits you don't need middleware: `engine.WithQueueConfig(queue.Config{Name: "email", RateLimit: 10, RateBurst: 5})` limits dequeues from that queue.
 
 ## Composing manually
 
 ```go
 chain := middleware.Chain(
     middleware.Logging(logger),
-    middleware.Recover(),
-    middleware.Timeout(),
+    middleware.Recover(logger),
 )
 ```
 
-`Chain` returns a single `Middleware` that applies each middleware in order.
+`Chain` returns a single `Middleware`. The first one in the list is the outermost wrapper.

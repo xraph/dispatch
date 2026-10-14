@@ -3,25 +3,24 @@ title: Kitchen-Sink Example
 description: A comprehensive example application demonstrating jobs, workflows, sagas, child workflows, cron, and the DWP server.
 ---
 
-The kitchen-sink example in `_examples/kitchen-sink/` demonstrates every major Dispatch feature in a single runnable application. It's the best starting point for understanding how all the pieces fit together.
+The kitchen-sink example in `_examples/kitchen-sink/` demonstrates every major Dispatch feature in a single runnable application. It shows how the pieces fit together. The Go tool skips `_examples/` in `./...`, so build it by path.
 
 ## What's included
 
 | Feature | Description |
 |---------|-------------|
-| **Jobs** | `send-email`, `process-image`, `charge-payment` with typed inputs |
-| **Multi-step workflow** | `order-pipeline` with `StepWithResult` for typed intermediate values |
-| **Saga workflow** | `booking-saga` with `StepWithCompensation` for automatic rollback |
-| **Child workflows** | `batch-process` spawns `process-item` children via `SpawnChild` |
-| **Cron scheduling** | Daily cleanup cron with `RegisterCron` |
-| **DWP server** | WebSocket, SSE, and HTTP RPC endpoints with token auth |
-| **Forge integration** | Full Forge app with HTTP server |
+| Jobs | `send-email`, `process-image`, `charge-payment` with typed inputs |
+| Multi-step workflow | `order-pipeline` with `StepWithResult` for typed intermediate values |
+| Saga workflow | `booking-saga` with `StepWithCompensation` for automatic rollback |
+| Child workflows | `batch-process` spawns `process-item` children via `SpawnChild` |
+| Cron scheduling | Daily cleanup cron with `RegisterCron` |
+| DWP server | WebSocket, SSE, and HTTP RPC endpoints with token auth |
+| Forge integration | A Forge app (`forge.New`) serving the DWP routes |
 
 ## Running it
 
 ```bash
-cd _examples/kitchen-sink
-go run .
+GOWORK=off go run ./_examples/kitchen-sink
 ```
 
 The server starts on port 8080 and logs all activity:
@@ -34,6 +33,10 @@ Dispatch kitchen-sink example running
 ```
 
 ## Interacting via HTTP RPC
+
+<Callout type="warn">
+The example builds its DWP handler without a security boundary (`dwp.NewHandler(eng, broker, logger)`), and a boundary that isn't configured denies everything. As written, every request below gets an "access unavailable or denied" error frame. Pass a configured `security.Boundary` to `dwp.NewHandler` and `dwp.WithSecurity` before you try them. See [DWP](/docs/subsystems/dwp).
+</Callout>
 
 Enqueue a job:
 
@@ -118,7 +121,7 @@ async def main():
 asyncio.run(main())
 ```
 
-See `sdk/python/examples/basic.py` for a complete script.
+See `sdk/python/examples/basic.py` for a complete script. The Python package is `dispatch-sdk` on the packaging side and imports as `dispatch`.
 
 ## Code walkthrough
 
@@ -149,7 +152,7 @@ total, err := workflow.StepWithResult[float64](wf, "calculate-total",
 
 ### Saga compensation
 
-The `booking-saga` workflow uses `StepWithCompensation` to register rollback functions that run automatically if a later step fails:
+The `booking-saga` workflow uses `StepWithCompensation` to register rollback functions that run if a later step fails:
 
 ```go
 if err := wf.StepWithCompensation("reserve-hotel",
@@ -174,7 +177,7 @@ for _, itemID := range input.ItemIDs {
 
 ### DWP server
 
-The DWP server is configured with token-based authentication and registered on the Forge router:
+The DWP server is configured with token authentication and registered on the Forge router. It has no security boundary yet, which is why the requests above are denied:
 
 ```go
 broker := eng.StreamBroker()

@@ -1,86 +1,61 @@
 ---
 title: Observability
-description: OpenTelemetry metrics and tracing for Dispatch.
+description: Metrics and OpenTelemetry tracing for Dispatch.
 ---
 
-Dispatch provides two layers of observability:
+Dispatch gives you two layers of observability, and `engine.Build` turns both on for you:
 
-1. **System-wide metrics** via `observability.MetricsExtension` — counters for every lifecycle event.
-2. **Per-job tracing and metrics** via `middleware.Tracing()` and `middleware.Metrics()` — spans and histograms per execution.
+1. System-wide counters through `observability.MetricsExtension`, one per lifecycle event.
+2. Per-job tracing and metrics through the `Tracing` and `Metrics` middleware in the default stack.
 
-## System-wide metrics (extension)
-
-Register `MetricsExtension` as a lifecycle extension:
+You choose where they report with two engine options:
 
 ```go
-import "github.com/xraph/dispatch/observability"
-
-metricsExt := observability.NewMetricsExtension(
-    observability.WithTracerProvider(tp),
-    observability.WithMetricFactory(factory),
-)
-
-eng := engine.Build(d,
-    engine.WithExtension(metricsExt),
+eng, err := engine.Build(d,
+    engine.WithTracerProvider(tp),        // an OpenTelemetry trace.TracerProvider
+    engine.WithMetricFactory(factory),    // a go-utils metrics.MetricFactory
 )
 ```
 
-### Metrics recorded
+Without `WithTracerProvider`, the tracing middleware uses the global OpenTelemetry tracer provider. Without `WithMetricFactory`, Dispatch creates its own go-utils metrics collector named `dispatch`. The Forge extension passes the app's metrics, so counters show up next to the rest of your app's.
 
-| Event | Metric | Labels |
-|-------|--------|--------|
-| Job enqueued | `dispatch_jobs_enqueued_total` | `name`, `queue` |
-| Job completed | `dispatch_jobs_completed_total` | `name`, `queue` |
-| Job failed | `dispatch_jobs_failed_total` | `name`, `queue` |
-| Job retrying | `dispatch_jobs_retried_total` | `name`, `queue` |
-| Job DLQ | `dispatch_jobs_dlq_total` | `name`, `queue` |
-| Workflow started | `dispatch_workflows_started_total` | `name` |
-| Workflow completed | `dispatch_workflows_completed_total` | `name` |
-| Workflow failed | `dispatch_workflows_failed_total` | `name` |
-| Cron fired | `dispatch_crons_fired_total` | `name` |
+## System-wide counters
 
-## Per-job tracing (middleware)
+`engine.Build` registers an `observability.MetricsExtension` built on the metric factory. Don't register another one, or every event counts twice. If you build one yourself for another engine, use `observability.NewMetricsExtension()` or `observability.NewMetricsExtensionWithFactory(factory)`.
 
-Add `middleware.Tracing()` to the engine:
+### Counters recorded
 
-```go
-eng := engine.Build(d,
-    engine.WithMiddleware(middleware.Tracing()),
-    engine.WithTracerProvider(tp),
-)
-```
+| Event | Counter |
+|-------|---------|
+| Job enqueued | `dispatch.job.enqueued` |
+| Job completed | `dispatch.job.completed` |
+| Job failed | `dispatch.job.failed` |
+| Job retrying | `dispatch.job.retried` |
+| Job moved to the DLQ | `dispatch.job.dlq` |
+| Workflow started | `dispatch.workflow.started` |
+| Workflow completed | `dispatch.workflow.completed` |
+| Workflow failed | `dispatch.workflow.failed` |
+| Cron fired | `dispatch.cron.fired` |
 
-Each job execution creates an OpenTelemetry span with attributes:
-- `dispatch.job.name`
-- `dispatch.job.queue`
+The counters carry no labels. How the dotted names appear in your backend depends on the exporter (Prometheus, for example, turns dots into underscores).
+
+## Per-job tracing
+
+Each job execution creates a span named `dispatch.job.execute` with these attributes:
+
 - `dispatch.job.id`
-- `dispatch.job.retry_count`
-- `error` (if the job failed)
+- `dispatch.job.name`
+- `dispatch.queue`
+- `dispatch.retry_count`
+- `dispatch.scope.app_id`
+- `dispatch.scope.org_id`
 
-## Per-job metrics (middleware)
+When the handler returns an error, the span records it and gets an error status.
 
-Add `middleware.Metrics()` to the engine:
+## Per-job metrics
 
-```go
-eng := engine.Build(d,
-    engine.WithMiddleware(middleware.Metrics()),
-    engine.WithMetricFactory(factory),
-)
-```
+The metrics middleware records a histogram `dispatch.job.duration` (seconds) and a counter `dispatch.job.executions`. Neither has labels.
 
-Records a histogram `dispatch_job_duration_seconds` labelled by `name`, `queue`, and `status` (`completed` / `failed`).
+## Building the middleware yourself
 
-## Combining both layers
-
-For full observability, use both:
-
-```go
-eng := engine.Build(d,
-    engine.WithExtension(observability.NewMetricsExtension(
-        observability.WithTracerProvider(tp),
-    )),
-    engine.WithMiddleware(middleware.Tracing()),
-    engine.WithMiddleware(middleware.Metrics()),
-    engine.WithTracerProvider(tp),
-)
-```
+`middleware.Tracing()`, `middleware.TracingWithTracer(tracer)`, `middleware.Metrics()` and `middleware.MetricsWithFactory(factory)` are exported if you compose a chain outside the engine. Inside an engine they're already in the default stack, so adding them with `engine.WithMiddleware` records everything twice.

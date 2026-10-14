@@ -3,7 +3,7 @@ title: Full Example
 description: Build a complete background job processor with Dispatch.
 ---
 
-This guide walks through building a complete Dispatch server with jobs, workflows, crons, a PostgreSQL store, and the admin API.
+This guide builds a standalone Dispatch server with a job, a workflow, a cron, the PostgreSQL store and a small HTTP endpoint that starts work. It doesn't use Forge. If you want the REST admin API too, run Dispatch through the [Forge extension](/docs/guides/forge-extension), which mounts it with authentication and authorization.
 
 ## Complete server
 
@@ -12,22 +12,25 @@ package main
 
 import (
     "context"
-    "log"
-    "log/slog"
+    "encoding/json"
+    "errors"
+    stdlog "log"
     "net/http"
     "os"
     "os/signal"
     "time"
 
     "github.com/xraph/dispatch"
-    "github.com/xraph/dispatch/api"
     "github.com/xraph/dispatch/backoff"
+    "github.com/xraph/dispatch/cron"
     "github.com/xraph/dispatch/engine"
     "github.com/xraph/dispatch/job"
-    "github.com/xraph/dispatch/middleware"
     "github.com/xraph/dispatch/queue"
     "github.com/xraph/dispatch/store/postgres"
     "github.com/xraph/dispatch/workflow"
+    "github.com/xraph/go-utils/log"
+    "github.com/xraph/grove"
+    "github.com/xraph/grove/drivers/pgdriver"
 )
 
 // Job definition.
@@ -38,7 +41,7 @@ type EmailInput struct {
 
 var SendEmail = job.NewDefinition("send_email",
     func(ctx context.Context, input EmailInput) error {
-        log.Printf("sending email to %s: %s", input.To, input.Subject)
+        stdlog.Printf("sending email to %s: %s", input.To, input.Subject)
         return nil
     },
 )
@@ -51,14 +54,15 @@ type OnboardInput struct {
 
 var OnboardUser = workflow.NewWorkflow("onboard_user",
     func(wf *workflow.Workflow, input OnboardInput) error {
-        if err := wf.Step("send-welcome", func() error {
-            log.Printf("sending welcome to %s", input.Email)
+        if err := wf.Step("send-welcome", func(ctx context.Context) error {
+            stdlog.Printf("sending welcome to %s", input.Email)
             return nil
         }); err != nil {
             return err
         }
-        return wf.Step("setup-account", func() error {
-            log.Printf("setting up account for user %s", input.UserID)
+
+        return wf.Step("setup-account", func(ctx context.Context) error {
+            stdlog.Printf("setting up account for user %s", input.UserID)
             return nil
         })
     },
@@ -68,18 +72,25 @@ func main() {
     ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
     defer stop()
 
-    logger := slog.Default()
+    logger := log.NewProductionLogger()
 
-    // Connect to PostgreSQL.
-    store, err := postgres.New(ctx, os.Getenv("DATABASE_URL"))
+    // Connect to PostgreSQL through Grove.
+    pg := pgdriver.New()
+    if err := pg.Open(ctx, os.Getenv("DATABASE_URL")); err != nil {
+        stdlog.Fatal(err)
+    }
+    db, err := grove.Open(pg)
     if err != nil {
-        log.Fatal(err)
+        stdlog.Fatal(err)
     }
+    defer db.Close()
+
+    store := postgres.New(db)
     if err := store.Migrate(ctx); err != nil {
-        log.Fatal(err)
+        stdlog.Fatal(err)
     }
 
-    // Create dispatcher.
+    // Create the dispatcher.
     d, err := dispatch.New(
         dispatch.WithStore(store),
         dispatch.WithLogger(logger),
@@ -87,82 +98,93 @@ func main() {
         dispatch.WithQueues([]string{"default", "critical", "bulk"}),
     )
     if err != nil {
-        log.Fatal(err)
+        stdlog.Fatal(err)
     }
 
-    // Build engine with middleware and queue configs.
-    eng := engine.Build(d,
-        engine.WithMiddleware(middleware.Logging(logger)),
-        engine.WithMiddleware(middleware.Recover()),
-        engine.WithMiddleware(middleware.Tracing()),
-        engine.WithBackoff(backoff.Exponential(
-            backoff.WithBase(5*time.Second),
-            backoff.WithMax(2*time.Hour),
-        )),
+    // Build the engine with a backoff strategy and per-queue limits.
+    eng, err := engine.Build(d,
+        engine.WithBackoff(backoff.NewExponential(5*time.Second, 2*time.Hour)),
         engine.WithQueueConfig(
             queue.Config{Name: "critical", MaxConcurrency: 20},
             queue.Config{Name: "bulk", RateLimit: 10, RateBurst: 20},
         ),
     )
+    if err != nil {
+        stdlog.Fatal(err)
+    }
 
     // Register jobs and workflows.
     engine.Register(eng, SendEmail)
     engine.RegisterWorkflow(eng, OnboardUser)
 
-    // Register a cron.
-    engine.RegisterCron(ctx, eng, "daily-cleanup", "0 3 * * *",
-        SendEmail, EmailInput{To: "admin@example.com", Subject: "Daily cleanup report"})
+    // Register a cron. Registering the same name again is a no-op.
+    if err := engine.RegisterCron(ctx, eng, &cron.Definition[EmailInput]{
+        Name:     "daily-cleanup",
+        Schedule: "0 3 * * *",
+        JobName:  "send_email",
+        Payload:  EmailInput{To: "admin@example.com", Subject: "Daily cleanup report"},
+    }); err != nil {
+        stdlog.Fatal(err)
+    }
 
     // Start processing.
     if err := d.Start(ctx); err != nil {
-        log.Fatal(err)
+        stdlog.Fatal(err)
     }
-    defer d.Stop(ctx)
+    defer d.Stop(context.Background())
 
-    // Mount the admin API.
+    // A small HTTP endpoint that enqueues a welcome email and starts onboarding.
     mux := http.NewServeMux()
-    api.RegisterRoutes(mux, eng)
+    mux.HandleFunc("POST /signup", func(w http.ResponseWriter, r *http.Request) {
+        var in OnboardInput
+        if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
+            http.Error(w, err.Error(), http.StatusBadRequest)
+            return
+        }
 
-    // Enqueue some test jobs.
-    engine.Enqueue(ctx, eng, SendEmail, EmailInput{
-        To:      "user@example.com",
-        Subject: "Welcome to Acme",
-    })
-    engine.StartWorkflow(ctx, eng, OnboardUser, OnboardInput{
-        UserID: "usr_01h455vb4pex5vsknk084sn02q",
-        Email:  "newuser@example.com",
+        j, err := engine.Enqueue(r.Context(), eng, "send_email",
+            EmailInput{To: in.Email, Subject: "Welcome to Acme"},
+            job.WithQueue("critical"),
+            job.WithMaxRetries(5),
+        )
+        if err != nil {
+            http.Error(w, err.Error(), http.StatusInternalServerError)
+            return
+        }
+
+        run, err := engine.StartWorkflow(r.Context(), eng, "onboard_user", in)
+        if err != nil {
+            http.Error(w, err.Error(), http.StatusInternalServerError)
+            return
+        }
+
+        _ = json.NewEncoder(w).Encode(map[string]string{
+            "job_id": j.ID.String(),
+            "run_id": run.ID.String(),
+        })
     })
 
-    log.Println("listening on :8080")
+    stdlog.Println("listening on :8080")
     srv := &http.Server{Addr: ":8080", Handler: mux}
     go func() {
         <-ctx.Done()
-        srv.Shutdown(context.Background())
+        _ = srv.Shutdown(context.Background())
     }()
-    if err := srv.ListenAndServe(); err != http.ErrServerClosed {
-        log.Fatal(err)
+    if err := srv.ListenAndServe(); !errors.Is(err, http.ErrServerClosed) {
+        stdlog.Fatal(err)
     }
 }
 ```
 
-## Testing it
+Set `DATABASE_URL` and run it. `log` is the go-utils logger the dispatcher takes, and `stdlog` is the standard library one used for printing.
+
+## Trying it
 
 ```bash
-# List jobs
-curl -s http://localhost:8080/v1/jobs | jq
-
-# Job counts by state
-curl -s http://localhost:8080/v1/jobs/counts | jq
-
-# List workflow runs
-curl -s http://localhost:8080/v1/workflows/runs | jq
-
-# List cron entries
-curl -s http://localhost:8080/v1/crons | jq
-
-# Check DLQ
-curl -s http://localhost:8080/v1/dlq | jq
-
-# View stats
-curl -s http://localhost:8080/v1/stats | jq
+curl -s -X POST http://localhost:8080/signup \
+  -d '{"user_id":"usr_01h455vb4pex5vsknk084sn02q","email":"newuser@example.com"}'
 ```
+
+The response carries the job ID and the workflow run ID. The workflow runs inside the request (`StartWorkflow` returns once it finishes), and the email job runs on one of the 20 workers.
+
+To list jobs, runs, crons and DLQ entries over HTTP, use the admin API from the [Forge extension](/docs/guides/forge-extension), or read them from Go through `eng.DLQService()`, `eng.CronStore()` and the store's list methods.

@@ -9,50 +9,51 @@
 //
 //	var ProcessOrder = workflow.NewWorkflow("process_order",
 //	    func(wf *workflow.Workflow, input OrderInput) error {
-//	        if err := wf.Step("validate", func() error {
-//	            return validateOrder(input)
+//	        if err := wf.Step("validate", func(ctx context.Context) error {
+//	            return validateOrder(ctx, input)
 //	        }); err != nil {
 //	            return err
 //	        }
 //
-//	        if err := wf.Step("charge", func() error {
-//	            return chargeCard(input.PaymentToken, input.Amount)
+//	        if err := wf.Step("charge", func(ctx context.Context) error {
+//	            return chargeCard(ctx, input.PaymentToken, input.Amount)
 //	        }); err != nil {
 //	            return err
 //	        }
 //
-//	        return wf.Step("fulfill", func() error {
-//	            return fulfillOrder(input.OrderID)
+//	        return wf.Step("fulfill", func(ctx context.Context) error {
+//	            return fulfillOrder(ctx, input.OrderID)
 //	        })
 //	    },
 //	)
 //
 // # Parallel Steps
 //
-// Use [Workflow.Parallel] to run independent steps concurrently:
+// Use [Workflow.Parallel] to run independent steps concurrently. The first
+// argument names the group, so the checkpoint survives a restart:
 //
-//	wf.Parallel(
-//	    func() error { return sendConfirmationEmail(input.Email) },
-//	    func() error { return updateInventory(input.Items) },
+//	err := wf.Parallel("notify",
+//	    func(ctx context.Context) error { return sendConfirmationEmail(ctx, input.Email) },
+//	    func(ctx context.Context) error { return updateInventory(ctx, input.Items) },
 //	)
 //
 // # Waiting for Events
 //
 // A workflow can pause until an external event arrives:
 //
-//	payload, err := wf.WaitForEvent(ctx, "payment.confirmed", 24*time.Hour)
+//	evt, err := wf.WaitForEvent("payment.confirmed", 24*time.Hour)
 //
 // # State Machine
 //
 // A [Run] moves through these states:
 //
-//	running → completed
-//	running → failed
+//	running -> completed
+//	running -> failed
 //
 // # Key Types
 //
-//   - [Definition] — typed workflow descriptor with Name and Handler
-//   - [Run] — a single workflow execution record
-//   - [RunState] — running, completed, or failed
-//   - [Registry] — maps workflow names to type-erased runner functions
+//   - [Definition]: typed workflow descriptor with Name and Handler
+//   - [Run]: a single workflow execution record
+//   - [RunState]: running, completed, or failed
+//   - [Registry]: maps workflow names to type-erased runner functions
 package workflow

@@ -16,13 +16,13 @@ type Entity struct {
 }
 ```
 
-IDs are separate, type-safe TypeID values assigned at creation time. See [Identity](/docs/concepts/identity).
+IDs are TypeID values assigned at creation time. See [Identity](/docs/concepts/identity).
 
 ## Domain entities
 
 ### Job
 
-Defined in `job/job.go`. A unit of background work:
+Defined in `job/job.go`. A unit of background work. The struct below leaves out the lease, resource and artifact fields:
 
 ```go
 type Job struct {
@@ -55,12 +55,12 @@ type Job struct {
 | `running` | Currently executing |
 | `completed` | Finished successfully |
 | `retrying` | Failed but scheduled for retry |
-| `failed` | Failed terminally (no more retries) |
-| `cancelled` | Explicitly cancelled |
+| `failed` | Failed terminally (no more retries, or `dispatch.ErrPermanent`) |
+| `cancelled` | Cancelled |
 
 ### Workflow Run
 
-Defined in `workflow/run.go`. A single execution of a workflow definition:
+Defined in `workflow/run.go`. A single execution of a workflow definition (abridged, without `Version`, `ReplayGeneration` and `ParentRunID`):
 
 ```go
 type Run struct {
@@ -105,7 +105,7 @@ type Entry struct {
 
 ### DLQ Entry
 
-Defined in `dlq/entry.go`. A job that exhausted its retry budget:
+Defined in `dlq/entry.go`. A job that failed for good (abridged, without `ReplayedJobID`, `Priority` and the resource fields):
 
 ```go
 type Entry struct {

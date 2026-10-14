@@ -8,12 +8,12 @@ The `cluster` package enables multiple Dispatch instances to coordinate work. On
 ## How it works
 
 1. Every Dispatch instance registers a `cluster.Worker` record at startup with its hostname, queues, and concurrency.
-2. Workers send **heartbeats** on `HeartbeatInterval` (default: 10s) to update `LastSeen`.
-3. The **leader** is determined by `AcquireLeadership` using optimistic locking in the store. Leadership is renewed before it expires.
+2. Workers send heartbeats every `HeartbeatInterval` (10s by default) to update `LastSeen`.
+3. The leader is chosen by `AcquireLeadership`, with optimistic locking in the store. Leadership is renewed before it expires.
 4. The leader periodically:
    - Fires due cron entries
-   - Scans for **stale workers** (workers whose heartbeat has been missing longer than `StaleJobThreshold`)
-   - Reclaims stale workers' in-flight jobs and re-enqueues them (work stealing)
+   - Scans for stale workers (workers whose heartbeat has been missing for too long)
+   - Reclaims their in-flight jobs and re-enqueues them (work stealing)
 
 ## Worker states
 
@@ -30,26 +30,25 @@ Only the leader performs:
 - Stale-job recovery
 - Work rebalancing
 
-If leadership is lost mid-operation, `dispatch.ErrLeadershipLost` is returned. This is normal and safe to ignore — another worker will acquire leadership shortly.
+If leadership is lost mid-operation, `dispatch.ErrLeadershipLost` is returned. That's normal and safe to ignore: another worker takes leadership shortly.
 
 ## Kubernetes consensus
 
-For Kubernetes deployments, use `cluster/k8s` which implements leader election via the Kubernetes API (client-go):
+`cluster/k8s` is a `cluster.Store` built on the Kubernetes API. Workers are discovered through Pod annotations and leadership uses a `coordination/v1` Lease:
 
 ```go
 import "github.com/xraph/dispatch/cluster/k8s"
 
-leaderElector := k8s.NewLeaderElector(kubeClient, namespace, leaseName)
-eng := engine.Build(d,
-    engine.WithLeaderElector(leaderElector),
+provider := k8s.New(kubeClient, "my-namespace",
+    k8s.WithLeaseName("dispatch-leader"),
 )
 ```
 
-This ensures correct behavior across pod restarts and rolling updates.
+There's no engine option for it. The engine takes its cluster store from your dispatcher's store, so to use the provider you wrap your store in a type that embeds it and delegates the `cluster.Store` methods to `provider`, then pass that wrapper to `dispatch.WithStore`.
 
 ## Configuration
 
 | Config field | Default | Meaning |
 |-------------|---------|---------|
-| `HeartbeatInterval` | `10s` | How often workers update `LastSeen` |
-| `StaleJobThreshold` | `30s` | How long before a worker is considered dead |
+| `HeartbeatInterval` | `10s` | How often running jobs heartbeat and workers update `LastSeen` |
+| `StaleJobThreshold` | `30s` | How often the reaper runs. With the built-in stores, a job is reclaimed once its lease TTL lapses |

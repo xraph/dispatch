@@ -3,22 +3,30 @@ title: Admin API
 description: HTTP admin API for managing Dispatch jobs, workflows, crons, and the DLQ.
 ---
 
-The `api` package provides a Forge-style RESTful HTTP API for managing all Dispatch entities. Routes are prefixed at `/v1` by default.
+The `api` package provides a REST API for managing Dispatch jobs, workflow runs, crons and the DLQ. Its routes are Forge routes grouped under `/v1`, and every one of them goes through an authentication and authorization guard.
 
 ## Setup
 
+With the [Forge extension](/docs/guides/forge-extension) you don't call anything: it mounts the routes under its base path (`/dispatch` by default), so jobs live at `/dispatch/v1/jobs`. The guard authenticates through the Forge auth extension and authorizes with Warden. `WithRemoteSecurity(authenticator, boundary)` swaps in your own, and `WithDisableRoutes()` mounts nothing.
+
+Outside the extension, build the handler yourself and give it security:
+
 ```go
-import "github.com/xraph/dispatch/api"
+import (
+    "net/http"
 
-mux := http.NewServeMux()
-api.RegisterRoutes(mux, eng)
+    "github.com/xraph/dispatch/api"
+)
 
-log.Fatal(http.ListenAndServe(":8080", mux))
+a := api.New(eng, nil, api.WithSecurity(authenticator, boundary))
+log.Fatal(http.ListenAndServe(":8080", a.Handler()))
 ```
 
-When using the Forge extension, routes are registered automatically under the configured `BasePath` (default: `/api/dispatch`).
+`api.New(eng, router, opts...)` takes a `forge.Router`. Pass `nil` and `Handler()` creates one. To mount into a router you already have, call `a.RegisterRoutes(router)`. Without `api.WithSecurity`, every route answers 401.
 
 ## Routes
+
+Paths below are relative to the mount point, so with the extension's defaults `/v1/jobs` is `/dispatch/v1/jobs`.
 
 ### Jobs
 
@@ -71,8 +79,4 @@ When using the Forge extension, routes are registered automatically under the co
 
 ## Error responses
 
-All errors return JSON:
-
-```json
-{"error": "job not found"}
-```
+Errors come back as JSON with an `error` message. The guard answers 401 when there's no authenticated principal, 403 when Warden denies the request and 503 when the authorizer can't be reached.

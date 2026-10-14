@@ -3,11 +3,11 @@ title: Cron
 description: Distributed cron scheduling with leader election and per-tenant support.
 ---
 
-The `cron` package provides distributed cron scheduling. Only the cluster leader fires cron entries, guaranteeing at-most-once job enqueue even when multiple Dispatch instances are running.
+The `cron` package provides distributed cron scheduling. Only the cluster leader fires cron entries, so a tick enqueues one job even when several Dispatch instances are running.
 
 ## Registering a cron
 
-Use `engine.RegisterCron` at startup:
+Use `engine.RegisterCron` at startup. A cron names a registered job and the payload to enqueue on each tick:
 
 ```go
 type ReportInput struct {
@@ -16,30 +16,38 @@ type ReportInput struct {
 
 var GenerateReport = job.NewDefinition("generate_report",
     func(ctx context.Context, input ReportInput) error {
-        return generateDailyReport(input.Format)
+        return generateDailyReport(ctx, input.Format)
     },
 )
 
+engine.Register(eng, GenerateReport)
+
 // Run every day at 9 AM
-engine.RegisterCron(ctx, eng, "daily-report", "0 9 * * *",
-    GenerateReport, ReportInput{Format: "pdf"})
+err := engine.RegisterCron(ctx, eng, &cron.Definition[ReportInput]{
+    Name:     "daily-report",
+    Schedule: "0 9 * * *",
+    JobName:  "generate_report",
+    Payload:  ReportInput{Format: "pdf"},
+})
 ```
 
-The cron entry is persisted in the store. If an entry with the same name already exists, `ErrDuplicateCron` is returned (unless `UpsertOnConflict` is used).
+The entry is stored. Registering a name that already exists returns nil and leaves the stored entry alone, so you can call `RegisterCron` on every start. That also means changing the schedule in code doesn't update an existing entry. `RegisterCron` returns an error for an invalid expression or one that never fires (30 February). Set `Queue` on the definition to enqueue onto another queue.
 
 ## Schedule format
 
-Dispatch uses standard 5-field cron expressions (via `robfig/cron/v3`):
+Dispatch parses standard 5-field cron expressions with `robfig/cron/v3`:
 
 ```
-┌───────────── minute (0–59)
-│ ┌─────────── hour (0–23)
-│ │ ┌───────── day of month (1–31)
-│ │ │ ┌─────── month (1–12)
-│ │ │ │ ┌───── day of week (0–6, Sunday=0)
-│ │ │ │ │
 * * * * *
+| | | | |
+| | | | +-- day of week (0 to 6, Sunday = 0)
+| | | +---- month (1 to 12)
+| | +------ day of month (1 to 31)
+| +-------- hour (0 to 23)
++---------- minute (0 to 59)
 ```
+
+Descriptors such as `@hourly`, `@daily` and `@every 30s` work too, and a `CRON_TZ=` prefix sets the time zone.
 
 Common expressions:
 
@@ -52,18 +60,20 @@ Common expressions:
 | `@hourly` | Every hour (alias) |
 | `@daily` | Every day at midnight (alias) |
 
-## Enable / Disable
+## Enable and disable
 
-Cron entries can be toggled at runtime:
+Cron entries can be toggled at runtime with `eng.EnableCron(ctx, cronID)` and `eng.DisableCron(ctx, cronID)`, or through the admin API:
 
 ```bash
-POST /v1/crons/:cronId/enable
-POST /v1/crons/:cronId/disable
+POST /dispatch/v1/crons/:cronId/enable
+POST /dispatch/v1/crons/:cronId/disable
 ```
 
 Disabled entries are skipped by the scheduler without being deleted.
 
 ## Admin API
+
+Paths are relative to the extension's base path (`/dispatch` by default).
 
 | Method | Path | Description |
 |--------|------|-------------|

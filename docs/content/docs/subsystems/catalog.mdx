@@ -35,84 +35,80 @@ engine.Register(eng, GenerateReport)
 engine.Register(eng, ProcessPayment)
 ```
 
-Internally, `Register` calls `job.RegisterDefinition` on the engine's `*job.Registry`, converting the typed handler to a type-erased `HandlerFunc`.
+Internally, `Register` calls `job.RegisterDefinition` on the engine's `*job.Registry`, converting the typed handler to a type-erased `HandlerFunc`. `engine.RegisterChecked` does the same and returns an error when the definition's artifact inputs or execution policy can't be satisfied, and `engine.RegisterAll(eng, defs...)` registers several definitions at once.
 
 ## Enqueueing a job
 
+You enqueue by the job's name:
+
 ```go
-engine.Enqueue(ctx, eng, SendEmail, EmailInput{
+j, err := engine.Enqueue(ctx, eng, "send_email", EmailInput{
     To:      "user@example.com",
     Subject: "Welcome!",
 })
 ```
 
-Additional enqueue options:
+`Enqueue` returns the stored `*job.Job`. Pass `job.Option` values to change how this one job runs:
 
 ```go
 // Schedule for the future
-engine.EnqueueAt(ctx, eng, SendEmail, input, time.Now().Add(10*time.Minute))
+engine.Enqueue(ctx, eng, "send_email", input, job.WithRunAt(time.Now().Add(10*time.Minute)))
 
-// Set priority (higher = dequeued first)
-engine.EnqueueWithPriority(ctx, eng, SendEmail, input, 10)
+// Set priority (higher is dequeued first)
+engine.Enqueue(ctx, eng, "send_email", input, job.WithPriority(10))
 
 // Target a specific queue
-engine.EnqueueOnQueue(ctx, eng, SendEmail, input, "critical")
+engine.Enqueue(ctx, eng, "send_email", input, job.WithQueue("critical"))
 ```
+
+`eng.EnqueueRaw(ctx, name, payload, opts...)` takes a payload you've already marshaled.
+
+Without options, a job gets 3 retries, the `default` queue, priority 0 and a 5 minute timeout. Pass `WithQueue`, `WithPriority`, `WithMaxRetries` and `WithTimeout` at enqueue time. `job.NewDefinition` accepts them too, but `Enqueue` doesn't read them from the definition today (it only carries over the lease TTL, resources and artifact inputs), so on a definition they have no effect.
 
 ## State machine
 
-A job progresses through these states:
+A job moves through these states:
 
 ```
-pending → running → completed
-pending → running → retrying → pending → running → ...
-pending → running → failed
-pending → running → failed → dlq
-pending → cancelled
+pending -> running -> completed
+pending -> running -> retrying -> running -> ...
+pending -> running -> failed (and a DLQ entry)
+pending, retrying or running -> cancelled
 ```
 
 | State | Meaning |
 |-------|---------|
 | `pending` | Waiting to be picked up |
-| `running` | Currently executing |
+| `running` | Executing |
 | `completed` | Finished successfully |
-| `retrying` | Failed but scheduled for retry |
-| `failed` | Failed terminally (no retries remain) |
-| `cancelled` | Explicitly cancelled |
+| `retrying` | Failed, with a retry scheduled at `RunAt` |
+| `failed` | Out of retries, or failed with `dispatch.ErrPermanent`. A copy goes to the dead letter queue |
+| `cancelled` | Cancelled through `eng.CancelJob` or the admin API |
 
 ## Retries and backoff
 
-Configure retries on the job definition:
+Set the retry budget when you enqueue:
 
 ```go
-var SendEmail = job.NewDefinition("send_email",
-    handler,
-    job.WithMaxRetries(5),
+engine.Enqueue(ctx, eng, "send_email", input, job.WithMaxRetries(5))
+```
+
+Set the backoff strategy on the engine:
+
+```go
+eng, err := engine.Build(d,
+    engine.WithBackoff(backoff.NewExponential(5*time.Second, 2*time.Hour)),
 )
 ```
 
-Configure the backoff strategy on the engine:
-
-```go
-eng := engine.Build(d,
-    engine.WithBackoff(backoff.Exponential(
-        backoff.WithBase(5*time.Second),
-        backoff.WithMax(2*time.Hour),
-    )),
-)
-```
-
-After `MaxRetries` is exhausted, the job is moved to the DLQ.
+The `backoff` package has `NewConstant`, `NewLinear`, `NewExponential` and `NewExponentialWithJitter`. The default is exponential with jitter from 1s to 1m. Once `MaxRetries` is used up the job moves to the DLQ. Return an error that wraps `dispatch.ErrPermanent` to skip the remaining retries.
 
 ## Job timeout
 
 Set a per-job execution deadline:
 
 ```go
-var SendEmail = job.NewDefinition("send_email",
-    handler,
-    job.WithTimeout(30*time.Second),
-)
+engine.Enqueue(ctx, eng, "send_email", input, job.WithTimeout(30*time.Second))
 ```
 
-The `middleware.Timeout()` middleware enforces this via context cancellation.
+The worker hands the deadline to the executor, which cancels the handler's context when it passes. `middleware.Timeout(logger)` does the same from inside the middleware chain.

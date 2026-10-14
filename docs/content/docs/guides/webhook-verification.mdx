@@ -3,7 +3,7 @@ title: Relay Hook
 description: Emit typed webhook events at every Dispatch lifecycle point using relay_hook.
 ---
 
-The `relay_hook` package bridges Dispatch lifecycle events to [Relay](https://github.com/xraph/relay) for webhook delivery. When registered as a Dispatch extension, it emits a typed webhook event at every job, workflow, cron, and shutdown lifecycle point.
+The `relay_hook` package bridges Dispatch lifecycle events to [Relay](https://github.com/xraph/relay) for webhook delivery. When registered as a Dispatch extension, it emits a typed webhook event at every job, workflow and cron lifecycle point, and for every operator action.
 
 ## Setup
 
@@ -15,16 +15,21 @@ import (
 )
 
 // Create a Relay instance.
-r, _ := relay.New(relay.WithStore(memory.New()))
+r, err := relay.New(relay.WithStore(memory.New()))
+if err != nil {
+    return err
+}
 
 // Register the event types Dispatch will emit.
-relay_hook.RegisterAll(ctx, r)
+if err := relay_hook.RegisterAll(ctx, r); err != nil {
+    return err
+}
 
 // Create the hook extension.
 hook := relay_hook.New(r)
 
-// Register with the engine.
-eng := engine.Build(d,
+// Register it with the engine.
+eng, err := engine.Build(d,
     engine.WithExtension(hook),
 )
 ```
@@ -39,13 +44,15 @@ eng := engine.Build(d,
 | `dispatch.job.failed` | Job fails terminally |
 | `dispatch.job.retrying` | Job fails, scheduled for retry |
 | `dispatch.job.dlq` | Job moved to DLQ |
+| `dispatch.job.cancelled` | Job cancelled |
 | `dispatch.workflow.started` | Workflow run begins |
-| `dispatch.workflow.step.completed` | Workflow step completes |
-| `dispatch.workflow.step.failed` | Workflow step fails |
+| `dispatch.workflow.step_completed` | Workflow step completes |
+| `dispatch.workflow.step_failed` | Workflow step fails |
 | `dispatch.workflow.completed` | Workflow run completes |
 | `dispatch.workflow.failed` | Workflow run fails |
 | `dispatch.cron.fired` | Cron entry fires |
-| `dispatch.shutdown` | Dispatcher shuts down |
+
+Operator actions get their own events: `dispatch.operator.job_cancelled`, `job_retried`, `dlq_replayed`, `dlq_deleted`, `dlq_purged`, `cron_enabled`, `cron_disabled`, `cron_deleted`, `cron_triggered` and `workflow_replayed`, all under the `dispatch.operator.` prefix. There's no shutdown event.
 
 ## Filtering events
 
@@ -64,18 +71,20 @@ hook := relay_hook.New(r,
 
 ## Event payload
 
-Each webhook event carries a JSON payload with the full entity at the time of the lifecycle event. For example, `dispatch.job.completed` includes:
+Each webhook event carries a small JSON payload describing the entity. For example, `dispatch.job.completed` sends:
 
 ```json
 {
   "job_id": "job_01h2xcejqtf2nbrexx3vqjhp41",
-  "name": "send_email",
+  "job_name": "send_email",
   "queue": "default",
-  "elapsed_ms": 142,
-  "completed_at": "2025-01-15T09:00:00Z"
+  "scope_org_id": "org_01h455vb",
+  "elapsed_ms": 142
 }
 ```
 
+`relay_hook.WithPayloadFunc(eventType, fn)` replaces the payload for one event type.
+
 ## Tenant routing
 
-Webhook events are routed to Relay endpoints matching the job's `ScopeOrgID` as the `TenantID`. If `ScopeOrgID` is empty, events are routed to a global tenant.
+Webhook events are routed to Relay endpoints matching the job's `ScopeOrgID` as the `TenantID`. If `ScopeOrgID` is empty, the event goes out with an empty tenant ID.
