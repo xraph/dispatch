@@ -2,6 +2,7 @@ package ecosystem_test
 
 import (
 	"context"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"sync"
@@ -70,5 +71,39 @@ func TestRemoteCarriesTraceparentButNoBaggage(t *testing.T) {
 	}
 	if clients != 1 {
 		t.Errorf("client spans under the delivery = %d, want 1", clients)
+	}
+}
+
+func TestRemoteCloseDropsIdleConnections(t *testing.T) {
+	closed := make(chan struct{}, 1)
+	server := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}))
+	server.Config.ConnState = func(_ net.Conn, state http.ConnState) {
+		if state == http.StateClosed {
+			select {
+			case closed <- struct{}{}:
+			default:
+			}
+		}
+	}
+	server.Start()
+	defer server.Close()
+	remote, err := ecosystem.NewRemote(server.URL, "private-bearer", time.Second, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, d := envelope(t, durable.DestinationRelay)
+	req, _ := ecosystem.RelayRequest(b, d)
+	if _, err = remote.SendReliable(t.Context(), req); err == nil {
+		t.Fatal("a 503 should fail the call")
+	}
+
+	// The connection is idle in the pool now; Close must hang it up.
+	remote.Close()
+	select {
+	case <-closed:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Close left the idle connection open")
 	}
 }
