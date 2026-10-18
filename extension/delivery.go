@@ -105,7 +105,7 @@ func (e *Extension) prepareDelivery(ctx context.Context) error {
 			return errors.New("dispatch: audited worker namespace is required")
 		}
 	}
-	p, err := delivery.New(outbox, cfg.Publisher, cfg.Sinks)
+	p, err := delivery.New(outbox, cfg.Publisher, cfg.Sinks, delivery.WithTelemetry(e.eng.Telemetry()))
 	if err != nil {
 		return fmt.Errorf("dispatch: publisher configuration: %w", err)
 	}

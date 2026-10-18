@@ -36,8 +36,10 @@ func (w *Worker) processEffect(ctx context.Context, task durable.Task, lease *ta
 		if handler == nil {
 			return fmt.Errorf("%w: activity %q", ErrHandlerNotFound, command.Name)
 		}
-		outcome, err = callActivity(ctx, handler, ActivityInfo{Key: task.Key, CommandID: command.ID,
+		activityCtx, activitySpan := w.startActivity(ctx, command.Name)
+		outcome, err = callActivity(activityCtx, handler, ActivityInfo{Key: task.Key, CommandID: command.ID,
 			BuildID: execution.BuildID, Attempt: task.Attempt}, command.Input)
+		endActivity(activitySpan, outcome, err)
 		if err != nil {
 			return err
 		}

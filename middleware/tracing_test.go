@@ -3,6 +3,7 @@ package middleware_test
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 
 	"go.opentelemetry.io/otel/attribute"
@@ -51,8 +52,8 @@ func TestTracing_CreatesSpan(t *testing.T) {
 		t.Fatalf("expected 1 span, got %d", len(spans))
 	}
 
-	if spans[0].Name() != "dispatch.job.execute" {
-		t.Errorf("expected span name %q, got %q", "dispatch.job.execute", spans[0].Name())
+	if spans[0].Name() != "run job handler" {
+		t.Errorf("expected span name %q, got %q", "run job handler", spans[0].Name())
 	}
 }
 
@@ -102,7 +103,7 @@ func TestTracing_SpanAttributes(t *testing.T) {
 	}
 }
 
-func TestTracing_Success_SetsOkStatus(t *testing.T) {
+func TestTracing_Success_LeavesStatusUnset(t *testing.T) {
 	sr, tracer := setupTestTracer()
 	m := mw.TracingWithTracer(tracer)
 	j := newTestJob()
@@ -116,8 +117,8 @@ func TestTracing_Success_SetsOkStatus(t *testing.T) {
 		t.Fatalf("expected 1 span, got %d", len(spans))
 	}
 
-	if spans[0].Status().Code != codes.Ok {
-		t.Errorf("expected status Ok, got %v", spans[0].Status().Code)
+	if spans[0].Status().Code != codes.Unset {
+		t.Errorf("expected status Unset, got %v", spans[0].Status().Code)
 	}
 }
 
@@ -126,7 +127,7 @@ func TestTracing_Error_SetsErrorStatus(t *testing.T) {
 	m := mw.TracingWithTracer(tracer)
 	j := newTestJob()
 
-	handlerErr := errors.New("handler failed")
+	handlerErr := errors.New("charge alice@example.com failed")
 	err := m(context.Background(), j, func(_ context.Context) error {
 		return handlerErr
 	})
@@ -142,22 +143,32 @@ func TestTracing_Error_SetsErrorStatus(t *testing.T) {
 	if spans[0].Status().Code != codes.Error {
 		t.Errorf("expected status Error, got %v", spans[0].Status().Code)
 	}
-	if spans[0].Status().Description != "handler failed" {
-		t.Errorf("expected status description %q, got %q", "handler failed", spans[0].Status().Description)
+	if spans[0].Status().Description != "handler error" {
+		t.Errorf("expected status description %q, got %q", "handler error", spans[0].Status().Description)
 	}
 
-	// Verify error event was recorded.
+	// The exception event names the error's type and nothing else: a
+	// handler error can quote its payload.
 	events := spans[0].Events()
 	found := false
 	for _, ev := range events {
-		if ev.Name == "exception" {
-			found = true
-			break
+		if ev.Name != "exception" {
+			continue
+		}
+		found = true
+		for _, a := range ev.Attributes {
+			if a.Key == "exception.message" || a.Key == "exception.stacktrace" {
+				t.Errorf("exception event carries %s", a.Key)
+			}
+			if a.Key == "exception.type" && a.Value.AsString() != "*errors.errorString" {
+				t.Errorf("exception.type = %q", a.Value.AsString())
+			}
 		}
 	}
 	if !found {
 		t.Error("expected 'exception' event to be recorded on span")
 	}
+	assertNoValue(t, spans[0], "alice@example.com")
 }
 
 func TestTracing_PropagatesContext(t *testing.T) {
@@ -201,4 +212,61 @@ func TestTracing_DefaultNoopSafe(t *testing.T) {
 	if !called {
 		t.Error("handler was not called")
 	}
+}
+
+// assertNoValue fails when s carries needle in its status, any attribute or
+// any event attribute.
+func assertNoValue(t *testing.T, s sdktrace.ReadOnlySpan, needle string) {
+	t.Helper()
+	if strings.Contains(s.Status().Description, needle) {
+		t.Errorf("span %q status quotes %q", s.Name(), needle)
+	}
+	for _, a := range s.Attributes() {
+		if strings.Contains(a.Value.String(), needle) {
+			t.Errorf("span %q attribute %s quotes %q", s.Name(), a.Key, needle)
+		}
+	}
+	for _, ev := range s.Events() {
+		for _, a := range ev.Attributes {
+			if strings.Contains(a.Value.String(), needle) {
+				t.Errorf("span %q event %q attribute %s quotes %q", s.Name(), ev.Name, a.Key, needle)
+			}
+		}
+	}
+}
+
+func TestTracing_PanicMarksSpanAndKeepsPanicking(t *testing.T) {
+	sr, tracer := setupTestTracer()
+	m := mw.TracingWithTracer(tracer)
+
+	func() {
+		defer func() {
+			if r := recover(); r != "card alice@example.com declined" {
+				t.Errorf("recovered %v, want the original panic", r)
+			}
+		}()
+		_ = m(context.Background(), newTestJob(), func(context.Context) error {
+			panic("card alice@example.com declined")
+		})
+	}()
+
+	spans := sr.Ended()
+	if len(spans) != 1 {
+		t.Fatalf("expected 1 span, got %d", len(spans))
+	}
+	if spans[0].Status().Code != codes.Error || spans[0].Status().Description != "panic" {
+		t.Errorf("status = %+v, want an error with class panic", spans[0].Status())
+	}
+	var excType string
+	for _, ev := range spans[0].Events() {
+		for _, a := range ev.Attributes {
+			if a.Key == "exception.type" {
+				excType = a.Value.AsString()
+			}
+		}
+	}
+	if excType != "panic" {
+		t.Errorf("exception.type = %q", excType)
+	}
+	assertNoValue(t, spans[0], "alice@example.com")
 }

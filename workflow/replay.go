@@ -184,13 +184,16 @@ func (r *Runner) replayFrom(ctx context.Context, runID id.RunID, fromStep string
 	r.emitter.EmitWorkflowStarted(ctx, &run)
 
 	launched = true
+	// WithoutCancel keeps the caller's span, which ends when ReplayFrom
+	// returns; the replayed run is its own trace, linked back to it.
+	detached, spanOpts := detachedRun(context.WithoutCancel(ctx))
 	go func() {
 		defer r.inflight.Done()
-		bg, cancel := context.WithCancel(context.WithoutCancel(ctx))
+		bg, cancel := context.WithCancel(detached)
 		defer cancel()
 		stop := context.AfterFunc(r.life, cancel)
 		defer stop()
-		r.executeRun(bg, &run, runner, run.Input)
+		r.executeRun(bg, &run, runner, run.Input, spanOpts...)
 	}()
 
 	return plan, nil

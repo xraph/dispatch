@@ -8,14 +8,17 @@ import (
 	"github.com/xraph/dispatch/durable"
 )
 
-func (w *Worker) runExecutionTimeout(ctx context.Context, operation *claimOperation) (bool, error) {
+func (w *Worker) runExecutionTimeout(ctx context.Context, operation *claimOperation) (_ bool, err error) {
 	grant, err := storeCall(ctx, w, func(callCtx context.Context) (*durable.ExecutionTimeoutTask, error) {
 		return w.store.ClaimExecutionTimeout(callCtx, durable.ExecutionTimeoutClaimRequest{Namespace: w.options.Namespace, Owner: w.options.Owner, LeaseDuration: w.options.LeaseDuration})
 	})
 	w.claimReturned(operation, err)
+	w.recordPoll(TaskExecutionTimeout, grant != nil, err)
 	if err != nil || grant == nil {
 		return false, err
 	}
+	ctx, finish := w.startTask(ctx, TaskExecutionTimeout, w.options.Queue, grant.Attempt, attrTimeoutKind.String(string(grant.Kind)))
+	defer func() { finish(err) }()
 	metadata := durable.ExecutionTimeout{Version: 1, Kind: grant.Kind, DeadlineAt: grant.DeadlineAt}
 	if grant.Validate() != nil || grant.Namespace != w.options.Namespace || grant.Owner != w.options.Owner || grant.Epoch < 1 || grant.Attempt < 1 || grant.LeaseUntil.IsZero() || metadata.Validate() != nil {
 		return true, fmt.Errorf("%w: timeout grant does not match worker routing", durable.ErrInvalid)

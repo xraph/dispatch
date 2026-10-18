@@ -18,6 +18,7 @@ import (
 	"time"
 
 	log "github.com/xraph/go-utils/log"
+	"go.opentelemetry.io/otel/trace"
 
 	"github.com/xraph/dispatch"
 	"github.com/xraph/dispatch/artifact"
@@ -28,6 +29,7 @@ import (
 	"github.com/xraph/dispatch/id"
 	"github.com/xraph/dispatch/job"
 	"github.com/xraph/dispatch/middleware"
+	"github.com/xraph/dispatch/telemetry"
 )
 
 // maxLaunchAttempts bounds how many times one job may fail to launch on this
@@ -114,6 +116,9 @@ type Runner struct {
 	// living on the job value.
 	launchMu sync.Mutex
 	launches map[string]launchAttempt
+
+	// tel records attempt and dead letter metrics. Nil records none.
+	tel *telemetry.Telemetry
 }
 
 // launchAttempt is one job's running launch-failure count on this worker.
@@ -163,6 +168,17 @@ func NewRunner(
 func (r *Runner) WithArtifacts(svc *artifact.Service, scratchRoot string) *Runner {
 	r.artifacts = svc
 	r.scratchRoot = scratchRoot
+
+	return r
+}
+
+// WithTelemetry sets where the runner records attempt and dead letter
+// metrics, and returns r so callers can chain it onto NewRunner. Its spans
+// (one per terminal path, plus "commit job outputs") nest under whatever
+// span the attempt's context carries, the pool's "process job" span in
+// practice, and are not started without one.
+func (r *Runner) WithTelemetry(t *telemetry.Telemetry) *Runner {
+	r.tel = t
 
 	return r
 }
@@ -247,6 +263,23 @@ func (r *Runner) Close() error {
 //     cancelled it, or JobFailed otherwise, so extensions still observe
 //     the loss.
 func (r *Runner) Execute(ctx context.Context, j *job.Job) error {
+	started := time.Now()
+	rec := attemptFrom(ctx)
+	if rec == nil {
+		rec = &attempt{}
+		ctx = withAttempt(ctx, rec)
+	}
+	defer func() {
+		if rec.outcome != "" {
+			r.tel.Jobs().Attempt(r.tel.QueueLabel(j.Queue), rec.outcome, time.Since(started))
+		}
+	}()
+
+	return r.execute(ctx, j)
+}
+
+// execute is Execute without the attempt bookkeeping.
+func (r *Runner) execute(ctx context.Context, j *job.Job) error {
 	at := &attemptUsage{}
 
 	terminal, err := r.terminalFor(j, at)
@@ -330,6 +363,9 @@ func (r *Runner) terminalFor(j *job.Job, at *attemptUsage) (middleware.Handler, 
 	}
 
 	return func(ctx context.Context) error {
+		if a := attemptFrom(ctx); a != nil {
+			a.executor = executor.Name()
+		}
 		req := r.request(j, policy)
 
 		// A rung above in-process gets a scratch directory to write its
@@ -741,9 +777,18 @@ func (r *Runner) commitOutputs(ctx context.Context, j *job.Job, req *exec.Reques
 		return nil
 	}
 
+	ctx, span := telemetry.StartChild(ctx, "commit job outputs",
+		trace.WithAttributes(attrOutputs.Int(len(entries))))
+	defer span.End()
+
 	owner := artifact.OwnerRef{Kind: artifact.OwnerJob, ID: j.ID.String()}
 
-	return r.commitOutputEntries(ctx, owner, j.RetryCount, fenceToken(ctx), entries)
+	err = r.commitOutputEntries(ctx, owner, j.RetryCount, fenceToken(ctx), entries)
+	if err != nil {
+		telemetry.Fail(span, "commit failed", jobErrorType(err))
+	}
+
+	return err
 }
 
 // collectOutputEntries walks dir for the regular files a sandbox left
@@ -1029,9 +1074,13 @@ func (r *Runner) updateJob(ctx context.Context, j *job.Job) error {
 // has just cancelled, and a read through it would fail on every backend
 // that honours the context.
 func (r *Runner) abandonLostLease(ctx context.Context, j *job.Job, cause error) error {
+	ctx, span := telemetry.StartChild(ctx, "abandon job")
+	defer span.End()
+
 	detached := context.WithoutCancel(ctx)
 
 	if cur := r.cancelledRow(detached, j.ID); cur != nil {
+		setOutcome(ctx, telemetry.OutcomeCancelled, nil)
 		r.logger.Info("job cancelled while running, discarding terminal write",
 			log.String("job_id", j.ID.String()),
 			log.String("job_name", j.Name),
@@ -1042,6 +1091,7 @@ func (r *Runner) abandonLostLease(ctx context.Context, j *job.Job, cause error) 
 		return cause
 	}
 
+	setOutcome(ctx, telemetry.OutcomeLeaseLost, nil)
 	r.logger.Warn("lease lost, discarding terminal write",
 		log.String("job_id", j.ID.String()),
 		log.String("job_name", j.Name),
@@ -1075,6 +1125,9 @@ func (r *Runner) cancelledRow(ctx context.Context, jobID id.JobID) *job.Job {
 
 // handleSuccess marks the job as completed and emits the lifecycle event.
 func (r *Runner) handleSuccess(ctx context.Context, j *job.Job, now time.Time, elapsed time.Duration) error {
+	ctx, span := telemetry.StartChild(ctx, "complete job")
+	defer span.End()
+
 	r.forgetLaunchFailures(j.ID.String())
 
 	j.State = job.StateCompleted
@@ -1085,6 +1138,7 @@ func (r *Runner) handleSuccess(ctx context.Context, j *job.Job, now time.Time, e
 			return r.abandonLostLease(ctx, j, updateErr)
 		}
 
+		r.storeFailed(ctx, span, updateErr)
 		r.logger.Error("failed to update job after success",
 			log.String("job_id", j.ID.String()),
 			log.String("job_name", j.Name),
@@ -1093,8 +1147,24 @@ func (r *Runner) handleSuccess(ctx context.Context, j *job.Job, now time.Time, e
 		return updateErr
 	}
 
+	setOutcome(ctx, telemetry.OutcomeCompleted, nil)
 	r.extensions.EmitJobCompleted(ctx, j, elapsed)
 	return nil
+}
+
+// storeFailed reports a terminal write that failed for a reason other than
+// a lost lease. When the attempt's own context is done, the pool is
+// stopping (Pool.Stop cancels every in-flight attempt) and the write failed
+// because its context did, not because the store did: that is reported as
+// cancelled, with no error status, so a deploy does not look like a store
+// outage.
+func (r *Runner) storeFailed(ctx context.Context, span trace.Span, err error) {
+	if ctx.Err() != nil {
+		setOutcome(ctx, telemetry.OutcomeCancelled, nil)
+		return
+	}
+	setOutcome(ctx, telemetry.OutcomeStoreError, err)
+	telemetry.Fail(span, "store error", jobErrorType(err))
 }
 
 // handleFailure either requeues the job or increments the retry counter and
@@ -1124,10 +1194,10 @@ func (r *Runner) handleFailure(ctx context.Context, j *job.Job, handlerErr error
 				dispatch.ErrPermanent, j.Name, n, j.LastError)
 			j.LastError = capped.Error()
 
-			return r.sendToDLQ(ctx, j, capped)
+			return r.sendToDLQ(ctx, j, capped, telemetry.DeadLetterLaunchFailures)
 		}
 
-		return r.requeueAfterLaunchFailure(ctx, j, now)
+		return r.requeueAfterLaunchFailure(ctx, j, now, handlerErr)
 	}
 
 	j.RetryCount++
@@ -1145,14 +1215,14 @@ func (r *Runner) handleFailure(ctx context.Context, j *job.Job, handlerErr error
 			log.String("error", handlerErr.Error()),
 		)
 
-		return r.sendToDLQ(ctx, j, handlerErr)
+		return r.sendToDLQ(ctx, j, handlerErr, telemetry.DeadLetterPermanent)
 	}
 
 	if j.RetryCount <= j.MaxRetries {
-		return r.scheduleRetry(ctx, j, now)
+		return r.scheduleRetry(ctx, j, now, handlerErr)
 	}
 
-	return r.sendToDLQ(ctx, j, handlerErr)
+	return r.sendToDLQ(ctx, j, handlerErr, telemetry.DeadLetterRetriesExhausted)
 }
 
 // recordLaunchFailure counts one launch failure for a job and returns the
@@ -1190,7 +1260,10 @@ func (r *Runner) forgetLaunchFailures(jobID string) {
 
 // requeueAfterLaunchFailure returns the job to pending with a backoff
 // delay derived from the retry count without advancing it.
-func (r *Runner) requeueAfterLaunchFailure(ctx context.Context, j *job.Job, now time.Time) error {
+func (r *Runner) requeueAfterLaunchFailure(ctx context.Context, j *job.Job, now time.Time, cause error) error {
+	ctx, span := telemetry.StartChild(ctx, "requeue job")
+	defer span.End()
+
 	delay := r.backoff.Delay(j.RetryCount + 1)
 	j.RunAt = now.Add(delay)
 	j.State = job.StatePending
@@ -1201,6 +1274,7 @@ func (r *Runner) requeueAfterLaunchFailure(ctx context.Context, j *job.Job, now 
 			return r.abandonLostLease(ctx, j, updateErr)
 		}
 
+		r.storeFailed(ctx, span, updateErr)
 		r.logger.Error("failed to requeue job after launch failure",
 			log.String("job_id", j.ID.String()),
 			log.String("error", updateErr.Error()),
@@ -1208,6 +1282,8 @@ func (r *Runner) requeueAfterLaunchFailure(ctx context.Context, j *job.Job, now 
 
 		return updateErr
 	}
+
+	setOutcome(ctx, telemetry.OutcomeRequeued, cause)
 
 	r.logger.Warn("sandbox launch failed; requeued without consuming a retry",
 		log.String("job_id", j.ID.String()),
@@ -1220,7 +1296,10 @@ func (r *Runner) requeueAfterLaunchFailure(ctx context.Context, j *job.Job, now 
 }
 
 // scheduleRetry sets the job to StateRetrying with a backoff delay.
-func (r *Runner) scheduleRetry(ctx context.Context, j *job.Job, now time.Time) error {
+func (r *Runner) scheduleRetry(ctx context.Context, j *job.Job, now time.Time, cause error) error {
+	ctx, span := telemetry.StartChild(ctx, "schedule job retry")
+	defer span.End()
+
 	// The attempt reached the handler, so whatever launch trouble this job
 	// had is behind it.
 	r.forgetLaunchFailures(j.ID.String())
@@ -1235,6 +1314,7 @@ func (r *Runner) scheduleRetry(ctx context.Context, j *job.Job, now time.Time) e
 			return r.abandonLostLease(ctx, j, updateErr)
 		}
 
+		r.storeFailed(ctx, span, updateErr)
 		r.logger.Error("failed to update job for retry",
 			log.String("job_id", j.ID.String()),
 			log.String("error", updateErr.Error()),
@@ -1242,6 +1322,7 @@ func (r *Runner) scheduleRetry(ctx context.Context, j *job.Job, now time.Time) e
 		return updateErr
 	}
 
+	setOutcome(ctx, telemetry.OutcomeRetry, cause)
 	r.extensions.EmitJobRetrying(ctx, j, j.RetryCount, nextRunAt)
 
 	r.logger.Info("job scheduled for retry",
@@ -1256,7 +1337,12 @@ func (r *Runner) scheduleRetry(ctx context.Context, j *job.Job, now time.Time) e
 }
 
 // sendToDLQ marks the job as failed, pushes it to the DLQ, and emits events.
-func (r *Runner) sendToDLQ(ctx context.Context, j *job.Job, handlerErr error) error {
+// reason is why it went there, for the dead letter metric.
+func (r *Runner) sendToDLQ(ctx context.Context, j *job.Job, handlerErr error, reason string) error {
+	ctx, span := telemetry.StartChild(ctx, "dead-letter job",
+		trace.WithAttributes(attrDLQReason.String(reason)))
+	defer span.End()
+
 	r.forgetLaunchFailures(j.ID.String())
 
 	j.State = job.StateFailed
@@ -1266,6 +1352,7 @@ func (r *Runner) sendToDLQ(ctx context.Context, j *job.Job, handlerErr error) er
 			return r.abandonLostLease(ctx, j, updateErr)
 		}
 
+		r.storeFailed(ctx, span, updateErr)
 		r.logger.Error("failed to update job as failed",
 			log.String("job_id", j.ID.String()),
 			log.String("error", updateErr.Error()),
@@ -1273,8 +1360,15 @@ func (r *Runner) sendToDLQ(ctx context.Context, j *job.Job, handlerErr error) er
 		return updateErr
 	}
 
+	setOutcome(ctx, telemetry.OutcomeDeadLettered, handlerErr)
+	if a := attemptFrom(ctx); a != nil {
+		a.dlqReason = reason
+	}
+	r.tel.Jobs().DeadLettered(r.tel.QueueLabel(j.Queue), reason)
+
 	if r.dlqService != nil {
 		if dlqErr := r.dlqService.Push(ctx, j, handlerErr); dlqErr != nil {
+			telemetry.Fail(span, "dead letter push failed", jobErrorType(dlqErr))
 			r.logger.Error("failed to push job to DLQ",
 				log.String("job_id", j.ID.String()),
 				log.String("error", dlqErr.Error()),

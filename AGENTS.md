@@ -114,7 +114,8 @@ The same file adds four jobs. Native query removal guard compatibility starts a 
 | `store/` | Aggregate `Store`, plus `memory`, `sqlite`, `postgres`, `mongo`, `redis` and `storetest` |
 | `ext/` | Opt-in lifecycle hook interfaces |
 | `audit_hook/`, `relay_hook/` | Hooks that send lifecycle events to an audit recorder and to relay |
-| `middleware/`, `observability/`, `backoff/`, `scope/`, `paging/` | Job middleware, OpenTelemetry, retry delays, tenant scope, cursor paging |
+| `middleware/`, `observability/`, `backoff/`, `scope/`, `paging/` | Job middleware, the legacy lifecycle counters, retry delays, tenant scope, cursor paging |
+| `telemetry/` | The spans and labelled metrics every subsystem records through. A leaf: exec must not import it |
 | `api/`, `dwp/`, `client/`, `stream/` | REST handlers, the Dispatch Wire Protocol, the Go client, the event broker |
 | `security/`, `operator/` | Remote operator authentication and authorization, payload-safe durable reads and commands |
 | `extension/` | The Forge extension, with the dashboard contract in `extension/contract/` |

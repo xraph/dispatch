@@ -8,8 +8,11 @@ import (
 	"time"
 
 	log "github.com/xraph/go-utils/log"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
 
 	"github.com/xraph/dispatch/artifact"
+	"github.com/xraph/dispatch/telemetry"
 )
 
 // Defaults for a sweeper built without options.
@@ -55,6 +58,7 @@ type Sweeper struct {
 	enabled     bool
 	isLeader    func() bool
 	observer    Observer
+	tel         *telemetry.Telemetry
 	stopCh      chan struct{}
 	stopOnce    sync.Once
 	wg          sync.WaitGroup
@@ -108,6 +112,14 @@ func WithObserver(o Observer) Option {
 	return func(s *Sweeper) { s.observer = o }
 }
 
+// WithTelemetry sets where the sweeper records its spans and metrics: a
+// root "sweep artifacts" span per pass that does work, and the swept,
+// purged and bytes reclaimed counters. The Forge extension passes the
+// engine's own.
+func WithTelemetry(t *telemetry.Telemetry) Option {
+	return func(s *Sweeper) { s.tel = t }
+}
+
 // WithLogger sets the logger.
 func WithLogger(l log.Logger) Option {
 	return func(s *Sweeper) { s.logger = l }
@@ -154,11 +166,16 @@ func (s *Sweeper) active() bool {
 // retention has elapsed, then orphans — artifacts with no links at all,
 // which can only result from a partial failure during creation.
 func (s *Sweeper) SweepOnce(ctx context.Context) (Result, error) {
-	var res Result
-
 	if !s.active() {
-		return res, nil
+		return Result{}, nil
 	}
+
+	return s.sweep(ctx)
+}
+
+// sweep is SweepOnce without the leadership check.
+func (s *Sweeper) sweep(ctx context.Context) (Result, error) {
+	var res Result
 
 	eligible, err := s.store.SweepEphemeral(ctx, artifact.SweepOpts{
 		Retention: s.retention,
@@ -169,7 +186,11 @@ func (s *Sweeper) SweepOnce(ctx context.Context) (Result, error) {
 		return res, fmt.Errorf("dispatch/artifact/sweeper: sweep ephemeral: %w", err)
 	}
 
-	res.Swept += s.report(ctx, eligible, "retention")
+	retention := s.report(ctx, eligible, "retention")
+	res.Swept += retention
+	if !s.dryRun {
+		s.tel.Artifacts().Swept("retention", retention)
+	}
 
 	cutoff := time.Now().UTC().Add(-s.orphanGrace())
 
@@ -179,7 +200,9 @@ func (s *Sweeper) SweepOnce(ctx context.Context) (Result, error) {
 			return res, fmt.Errorf("dispatch/artifact/sweeper: sweep orphans: %w", oerr)
 		}
 
-		res.Swept += s.report(ctx, orphans, "orphan")
+		orphaned := s.report(ctx, orphans, "orphan")
+		res.Swept += orphaned
+		s.tel.Artifacts().Swept("orphan", orphaned)
 	}
 
 	return res, nil
@@ -238,11 +261,21 @@ func (s *Sweeper) report(ctx context.Context, artifacts []*artifact.Artifact, re
 // one unreachable object cannot stall reclamation of everything else. The
 // next pass retries it.
 func (s *Sweeper) PurgeOnce(ctx context.Context) (Result, error) {
-	var res Result
-
 	if !s.active() || s.dryRun {
-		return res, nil
+		return Result{}, nil
 	}
+
+	return s.purge(ctx)
+}
+
+// purge is PurgeOnce without the leadership and dry-run checks.
+func (s *Sweeper) purge(ctx context.Context) (Result, error) {
+	var res Result
+	defer func() {
+		s.tel.Artifacts().Purged(telemetry.PurgeOK, res.Purged)
+		s.tel.Artifacts().Purged(telemetry.PurgeSkipped, res.Skipped)
+		s.tel.Artifacts().BytesReclaimed(res.BytesReclaimed)
+	}()
 
 	purgeable, err := s.store.ListPurgeable(ctx, s.purgeGrace, s.batchSize)
 	if err != nil {
@@ -298,15 +331,42 @@ func (s *Sweeper) PurgeOnce(ctx context.Context) (Result, error) {
 }
 
 // RunOnce performs a sweep followed by a purge.
-func (s *Sweeper) RunOnce(ctx context.Context) (Result, error) {
-	swept, err := s.SweepOnce(ctx)
+//
+// A pass that does work (this instance leads and the sweeper is enabled)
+// runs under one "sweep artifacts" span, a child of ctx's span if it has
+// one. The background loop gives it none, so each pass is its own trace.
+// A follower's pass does nothing and starts no span.
+func (s *Sweeper) RunOnce(ctx context.Context) (res Result, err error) {
+	if !s.active() {
+		return Result{}, nil
+	}
+
+	ctx, span := s.tel.Start(ctx, "sweep artifacts",
+		trace.WithAttributes(attribute.Bool("dispatch.artifact.dry_run", s.dryRun)))
+	defer func() {
+		span.SetAttributes(
+			attribute.Int("dispatch.artifact.swept", res.Swept),
+			attribute.Int("dispatch.artifact.purged", res.Purged),
+			attribute.Int("dispatch.artifact.skipped", res.Skipped),
+			attribute.Int64("dispatch.artifact.bytes_reclaimed", res.BytesReclaimed),
+		)
+		if err != nil {
+			telemetry.Fail(span, "sweep failed", telemetry.ErrorType(err))
+		}
+		span.End()
+	}()
+
+	swept, err := s.sweep(ctx)
 	if err != nil {
 		return swept, err
 	}
 
-	purged, err := s.PurgeOnce(ctx)
-	if err != nil {
-		return swept, err
+	var purged Result
+	if !s.dryRun {
+		purged, err = s.purge(ctx)
+		if err != nil {
+			return swept, err
+		}
 	}
 
 	return Result{
@@ -322,7 +382,10 @@ func (s *Sweeper) Start(ctx context.Context) error {
 	s.startedOnce.Do(func() {
 		s.wg.Add(1)
 
-		go s.loop(ctx)
+		// The loop runs for the life of the process. The span ctx carries
+		// (a Forge extension's boot span) does not: each pass is its own
+		// trace.
+		go s.loop(telemetry.Detach(ctx))
 	})
 
 	return nil

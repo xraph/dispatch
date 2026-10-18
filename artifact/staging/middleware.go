@@ -6,12 +6,15 @@ import (
 	"fmt"
 
 	log "github.com/xraph/go-utils/log"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
 
 	"github.com/xraph/dispatch"
 	"github.com/xraph/dispatch/artifact"
 	"github.com/xraph/dispatch/artifact/cache"
 	"github.com/xraph/dispatch/job"
 	"github.com/xraph/dispatch/middleware"
+	"github.com/xraph/dispatch/telemetry"
 )
 
 // SpecLookup resolves a job name to its declared inputs. The engine
@@ -72,7 +75,15 @@ func Middleware(
 			return verr
 		}
 
-		staged, release, serr := stageInputs(ctx, svc, c, specs, bindings, cfg.Logger)
+		// Nested under the attempt's span when there is one, and absent
+		// when there is not: staging has no Telemetry of its own.
+		stageCtx, span := telemetry.StartChild(ctx, "stage job inputs",
+			trace.WithAttributes(attribute.Int("dispatch.job.inputs", len(bindings))))
+		staged, release, serr := stageInputs(stageCtx, svc, c, specs, bindings, cfg.Logger)
+		if serr != nil {
+			telemetry.Fail(span, "staging failed", telemetry.ErrorType(serr))
+		}
+		span.End()
 
 		// Release before returning whatever happens — including a panic
 		// unwinding through here — or a failed job would pin cache entries

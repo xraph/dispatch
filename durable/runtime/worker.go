@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/xraph/dispatch/durable"
+	"github.com/xraph/dispatch/telemetry"
 )
 
 // ErrHandlerNotFound leaves a task available for a worker with compatible code.
@@ -58,6 +59,11 @@ type Options struct {
 	Concurrency   int
 	Workflows     map[string]WorkflowFunc
 	Activities    map[string]ActivityFunc
+	// Telemetry receives the worker's spans and metrics: one root "process
+	// durable task" span per claimed task, and the task, poll and replay
+	// metrics. Nil starts spans on the global tracer provider and records no
+	// metrics. engine.WithDurableWorkflows fills it with the engine's own.
+	Telemetry *telemetry.Telemetry
 }
 
 // Worker claims durable tasks. Multiple workers may share a queue and store.
@@ -146,6 +152,11 @@ func (w *Worker) StartExecution(ctx context.Context, request durable.StartReques
 // Processing errors are returned to the supervisor, never silently discarded.
 // Cancellation leaves unfinished tasks for replacement workers after expiry.
 func (w *Worker) Run(ctx context.Context) (result error) {
+	// Run polls for as long as ctx lives. Whatever span ctx carries (a Forge
+	// extension's boot span, a request) ended long ago by the time most
+	// polls run, so the pollers keep none of it; each claimed task starts
+	// its own root.
+	ctx = telemetry.Detach(ctx)
 	if err := w.startRun(ctx); err != nil {
 		return err
 	}
@@ -227,9 +238,12 @@ func (w *Worker) runOnce(ctx context.Context, kind durable.TaskKind, runOwned bo
 			LeaseDuration: w.options.LeaseDuration})
 	})
 	w.claimReturned(operation, err)
+	w.recordPoll(kind, task != nil, err)
 	if err != nil || task == nil {
 		return false, err
 	}
+	ctx, finish := w.startTask(ctx, kind, task.Queue, task.Attempt)
+	defer func() { finish(err) }()
 	lease := newTaskLease(ctx, w, *task)
 	defer lease.close()
 	if kind == durable.TaskWorkflow {

@@ -12,11 +12,14 @@ import (
 	cronlib "github.com/robfig/cron/v3"
 
 	log "github.com/xraph/go-utils/log"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
 
 	"github.com/xraph/dispatch"
 	"github.com/xraph/dispatch/cluster"
 	"github.com/xraph/dispatch/id"
 	"github.com/xraph/dispatch/job"
+	"github.com/xraph/dispatch/telemetry"
 )
 
 // isTransientStoreErr reports whether err is a transient store failure —
@@ -93,6 +96,13 @@ func WithSchedulerStoreCallTimeout(d time.Duration) SchedulerOption {
 	return func(s *Scheduler) { s.storeCallTimeout = d }
 }
 
+// WithTelemetry sets where the scheduler records its spans and metrics: one
+// root "fire cron entry" span per due entry, the fire counter and lag
+// histogram, and the leadership gauge. engine.Build passes the engine's own.
+func WithTelemetry(t *telemetry.Telemetry) SchedulerOption {
+	return func(s *Scheduler) { s.tel = t }
+}
+
 // cronParser supports standard 5-field cron and descriptors like "@every 30s".
 var cronParser = cronlib.NewParser(
 	cronlib.Minute | cronlib.Hour | cronlib.Dom | cronlib.Month | cronlib.Dow | cronlib.Descriptor,
@@ -119,6 +129,8 @@ type Scheduler struct {
 	emitter      Emitter
 	workerID     id.WorkerID
 	logger       log.Logger
+
+	tel *telemetry.Telemetry
 
 	tickInterval        time.Duration
 	lockTTL             time.Duration
@@ -222,6 +234,7 @@ func (s *Scheduler) Stop(_ context.Context) error {
 			s.cancelFunc()
 		}
 		s.wg.Wait()
+		s.tel.Cron().Leader(false)
 		s.logger.Info("cron scheduler stopped")
 	})
 	return nil
@@ -252,14 +265,22 @@ func (s *Scheduler) leaderLoop() {
 // stalled driver session can't hold a pool connection beyond the
 // scheduler's own tick budget. Mirrors worker.Pool.callCtx.
 func (s *Scheduler) callCtx() (context.Context, context.CancelFunc) {
+	return s.callCtxFrom(s.cancelCtx)
+}
+
+// callCtxFrom is callCtx for a call that belongs to one fire: it bounds
+// the call the same way but keeps ctx's span, so the fire's queries and its
+// enqueue nest under it. ctx descends from s.cancelCtx, so Stop still
+// cancels it.
+func (s *Scheduler) callCtxFrom(ctx context.Context) (context.Context, context.CancelFunc) {
 	if s.storeCallTimeout < 0 {
-		return s.cancelCtx, func() {}
+		return ctx, func() {}
 	}
 	d := s.storeCallTimeout
 	if d == 0 {
 		d = defaultStoreCallTimeout
 	}
-	return context.WithTimeout(s.cancelCtx, d)
+	return context.WithTimeout(ctx, d)
 }
 
 // amLeader reports whether this instance holds a still-valid leadership
@@ -278,6 +299,7 @@ func (s *Scheduler) setLeader(leading bool, until time.Time) {
 	s.isLeader = leading
 	s.leaderUntil = until
 	s.leaderMu.Unlock()
+	s.tel.Cron().Leader(leading)
 
 	if leading && !wasLeader {
 		// Fresh leadership: re-list entries before the first tick fires.
@@ -429,11 +451,35 @@ func (s *Scheduler) tick() {
 		if due == nil || due.After(now) {
 			continue
 		}
-		s.fireEntry(s.cancelCtx, entry.ID, now)
+		s.fire(entry, *due, now)
 	}
 }
 
-// fireEntry fires one entry the cache says is due.
+// fire handles one entry the cache says is due, under its own root span.
+// s.cancelCtx descends from context.Background, so no boot or request span
+// can parent it; idle ticks never get this far and start nothing.
+func (s *Scheduler) fire(entry *Entry, due, now time.Time) {
+	ctx, span := s.tel.Start(s.cancelCtx, "fire cron entry",
+		trace.WithNewRoot(),
+		trace.WithAttributes(
+			attribute.String("dispatch.cron.id", entry.ID.String()),
+			attribute.String("dispatch.cron.name", entry.Name),
+			attribute.String("dispatch.cron.job_name", entry.JobName),
+		),
+	)
+	defer span.End()
+
+	result := s.fireEntry(ctx, entry.ID, due, now)
+	span.SetAttributes(attribute.String("dispatch.cron.result", result))
+	if result == telemetry.CronError {
+		telemetry.Fail(span, "cron fire failed", "")
+	}
+	s.tel.Cron().Fire(result)
+}
+
+// fireEntry fires one entry the cache says is due and reports what
+// happened: fired, locked (another worker holds the entry), skipped (the
+// store says it is no longer due) or error.
 //
 // The cache can be cronRefreshInterval old, and an operator acting
 // through another node invalidates only that node's cache, so a cached
@@ -443,35 +489,39 @@ func (s *Scheduler) tick() {
 // lands after the re-read still sees the fire it raced go out, but
 // nothing here can undo the disable: the post-fire writes are
 // UpdateCronLastRun and UpdateCronNextRun, and neither touches enabled.
-func (s *Scheduler) fireEntry(ctx context.Context, cronID id.CronID, now time.Time) {
+//
+// due is when the cached entry said it was due, for the lag metric, which
+// is taken the moment the job is enqueued: the lock release, bookkeeping
+// writes and hooks that follow are not lag.
+func (s *Scheduler) fireEntry(ctx context.Context, cronID id.CronID, due, now time.Time) string {
 	// Acquire per-entry lock under a bounded subcontext.
-	acqCtx, acqCancel := s.callCtx()
+	acqCtx, acqCancel := s.callCtxFrom(ctx)
 	acquired, err := s.cronStore.AcquireCronLock(acqCtx, cronID, s.workerID, s.lockTTL)
 	acqCancel()
 	if err != nil {
 		s.logCronErr("acquire cron lock error", cronID, err)
-		return
+		return storeResult(err)
 	}
 	if !acquired {
-		return // Another worker got it.
+		return telemetry.CronLocked // Another worker got it.
 	}
 
-	getCtx, getCancel := s.callCtx()
+	getCtx, getCancel := s.callCtxFrom(ctx)
 	entry, err := s.cronStore.GetCron(getCtx, cronID)
 	getCancel()
 	if err != nil {
 		s.logCronErr("re-read cron entry error", cronID, err)
 		if !errors.Is(err, dispatch.ErrCronNotFound) {
-			s.releaseCronLock(cronID)
+			s.releaseCronLock(ctx, cronID)
 		}
-		return
+		return storeResult(err)
 	}
 	if !entry.Enabled || entry.NextRunAt == nil || entry.NextRunAt.After(now) {
 		// Disabled, or fired or rescheduled since the cache was listed.
 		// Re-list on the next tick so the cache stops offering it.
 		s.cronDirty.Store(true)
-		s.releaseCronLock(cronID)
-		return
+		s.releaseCronLock(ctx, cronID)
+		return telemetry.CronSkipped
 	}
 
 	// Enqueue the job with optional queue override.
@@ -479,7 +529,7 @@ func (s *Scheduler) fireEntry(ctx context.Context, cronID id.CronID, now time.Ti
 	if entry.Queue != "" {
 		enqOpts = append(enqOpts, job.WithQueue(entry.Queue))
 	}
-	enqCtx, enqCancel := s.callCtx()
+	enqCtx, enqCancel := s.callCtxFrom(ctx)
 	jobID, enqErr := s.enqueue(enqCtx, entry.JobName, entry.Payload, enqOpts...)
 	enqCancel()
 	if enqErr != nil {
@@ -488,13 +538,14 @@ func (s *Scheduler) fireEntry(ctx context.Context, cronID id.CronID, now time.Ti
 			log.String("job_name", entry.JobName),
 			log.String("error", enqErr.Error()),
 		)
-		s.releaseCronLock(cronID)
-		return
+		s.releaseCronLock(ctx, cronID)
+		return telemetry.CronError
 	}
+	s.tel.Cron().Lag(time.Since(due))
 
 	// Record the fire with targeted writes only. A whole-row write here
 	// would put back whatever enabled was when the row was read.
-	lrCtx, lrCancel := s.callCtx()
+	lrCtx, lrCancel := s.callCtxFrom(ctx)
 	err = s.cronStore.UpdateCronLastRun(lrCtx, cronID, now)
 	lrCancel()
 	if err != nil {
@@ -511,7 +562,7 @@ func (s *Scheduler) fireEntry(ctx context.Context, cronID id.CronID, now time.Ti
 	} else {
 		next := sched.Next(now)
 		s.nextRuns[cronID.String()] = next
-		nrCtx, nrCancel := s.callCtx()
+		nrCtx, nrCancel := s.callCtxFrom(ctx)
 		err = s.cronStore.UpdateCronNextRun(nrCtx, cronID, next)
 		nrCancel()
 		if err != nil {
@@ -519,7 +570,7 @@ func (s *Scheduler) fireEntry(ctx context.Context, cronID id.CronID, now time.Ti
 		}
 	}
 
-	s.releaseCronLock(cronID)
+	s.releaseCronLock(ctx, cronID)
 
 	// Emit hook.
 	if s.emitter != nil {
@@ -531,11 +582,23 @@ func (s *Scheduler) fireEntry(ctx context.Context, cronID id.CronID, now time.Ti
 		log.String("job_name", entry.JobName),
 		log.String("job_id", jobID.String()),
 	)
+
+	return telemetry.CronFired
+}
+
+// storeResult classifies a failed store call while firing. An entry deleted
+// since the cache listed it is ordinary, so it counts as skipped.
+func storeResult(err error) string {
+	if errors.Is(err, dispatch.ErrCronNotFound) {
+		return telemetry.CronSkipped
+	}
+
+	return telemetry.CronError
 }
 
 // releaseCronLock gives up this worker's lock on an entry.
-func (s *Scheduler) releaseCronLock(cronID id.CronID) {
-	relCtx, relCancel := s.callCtx()
+func (s *Scheduler) releaseCronLock(ctx context.Context, cronID id.CronID) {
+	relCtx, relCancel := s.callCtxFrom(ctx)
 	err := s.cronStore.ReleaseCronLock(relCtx, cronID, s.workerID)
 	relCancel()
 	if err != nil {

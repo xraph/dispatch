@@ -62,7 +62,6 @@ The other fields (`ReapInterval`, `DefaultLeaseTTL`, `WorkerStoreCallTimeout` an
 
 ```go
 eng, err := engine.Build(d,
-    engine.WithExtension(observability.NewMetricsExtension()),
     engine.WithMiddleware(middleware.Logging(logger)),
     engine.WithBackoff(backoff.NewExponential(5*time.Second, 2*time.Hour)),
     engine.WithQueueConfig(queue.Config{
@@ -71,6 +70,7 @@ eng, err := engine.Build(d,
         RateLimit:      50,
     }),
     engine.WithTracerProvider(tracerProvider),
+    engine.WithMetricFactory(metricFactory),
 )
 if err != nil {
     log.Fatal(err)

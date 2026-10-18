@@ -9,7 +9,11 @@ import (
 	"sync/atomic"
 	"time"
 
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
+
 	"github.com/xraph/dispatch/durable"
+	"github.com/xraph/dispatch/telemetry"
 )
 
 // Sink accepts an immutable envelope durably. Identical retries, including after
@@ -88,9 +92,20 @@ type Publisher struct {
 	draining    atomic.Bool
 	stopGate    chan struct{}
 	interrupted bool
+	tel         *telemetry.Telemetry
 }
 
-func New(store durable.OutboxStore, config Config, sinks map[durable.Destination]Sink) (*Publisher, error) {
+// Option configures a Publisher beyond its Config.
+type Option func(*Publisher)
+
+// WithTelemetry sets where the publisher records its spans and metrics: one
+// root "deliver outbox event" span per claimed delivery, and the delivery
+// duration and lag histograms. The Forge extension passes the engine's own.
+func WithTelemetry(t *telemetry.Telemetry) Option {
+	return func(p *Publisher) { p.tel = t }
+}
+
+func New(store durable.OutboxStore, config Config, sinks map[durable.Destination]Sink, opts ...Option) (*Publisher, error) {
 	c := config.defaults()
 	if store == nil || !durable.DeliveryIdentifier(c.Owner) || !durable.DeliveryIdentifier(c.InstallationID) || c.Concurrency < 1 || c.Concurrency > durable.MaxDeliveryBatch || c.PollInterval <= 0 || c.CallTimeout <= 0 || c.CallTimeout >= 5*time.Minute || c.StoreTimeout <= 0 || c.StoreTimeout >= 5*time.Minute || c.LeaseDuration < time.Millisecond || c.LeaseDuration <= c.CallTimeout+c.StoreTimeout || c.LeaseDuration > 5*time.Minute || c.RetryMin <= 0 || c.RetryMax < c.RetryMin || c.RetryMax > 24*time.Hour || len(sinks) == 0 {
 		return nil, durable.ErrInvalid
@@ -109,6 +124,9 @@ func New(store durable.OutboxStore, config Config, sinks map[durable.Destination
 			return nil, durable.ErrInvalid
 		}
 		p.sinks[destination] = sink
+	}
+	for _, opt := range opts {
+		opt(p)
 	}
 	return p, nil
 }
@@ -232,6 +250,32 @@ func (p *Publisher) run(ctx context.Context, d durable.Destination, sink Sink) {
 	}
 }
 func (p *Publisher) publish(ctx context.Context, d durable.Destination, sink Sink, record durable.DeliveryRecord) {
+	// One root span per claimed delivery. ctx descends from
+	// context.Background (startWorkers), and an empty claim never gets
+	// here, so idle polling starts no traces.
+	ctx, span := p.tel.Start(ctx, "deliver outbox event",
+		trace.WithNewRoot(),
+		trace.WithSpanKind(trace.SpanKindProducer),
+		trace.WithAttributes(
+			attribute.String("dispatch.outbox.destination", string(d)),
+			attribute.String("dispatch.outbox.delivery_id", record.Delivery.ID),
+			attribute.Int64("dispatch.outbox.attempt", record.Attempts),
+		),
+	)
+	started := time.Now()
+	// Every path that returns early does so because Stop cancelled ctx, so
+	// that is the starting result. The success path and the failure
+	// categories overwrite it.
+	result := telemetry.OutboxCancelled
+	defer func() {
+		span.SetAttributes(attribute.String("dispatch.outbox.result", result))
+		if result != telemetry.OutboxAcknowledged && result != telemetry.OutboxCancelled {
+			telemetry.Fail(span, "delivery "+result, "")
+		}
+		p.tel.Outbox().Delivery(string(d), result, time.Since(started))
+		span.End()
+	}()
+
 	category := ""
 	envelope := record.Delivery
 	if envelope.Destination != d || envelope.InstallationID != p.config.InstallationID || envelope.Verify() != nil {
@@ -266,11 +310,16 @@ func (p *Publisher) publish(ctx context.Context, d durable.Destination, sink Sin
 			ackErr := p.store.AcknowledgeDelivery(ackCtx, record.Token(), receipt)
 			ackCancel()
 			if ackErr == nil {
+				result = telemetry.OutboxAcknowledged
+				if !record.AcceptedAt.IsZero() {
+					p.tel.Outbox().Lag(string(d), time.Since(record.AcceptedAt))
+				}
 				return
 			}
 			category = "unavailable"
 		}
 	}
+	result = category
 	if ctx.Err() != nil {
 		return
 	}

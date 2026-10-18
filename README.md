@@ -137,7 +137,7 @@ Most job queues give you jobs, and you build workflows, schedules and failure ha
 | More than one worker | Worker registration, heartbeats and reassignment of jobs from workers that stop heartbeating, plus a Kubernetes Lease-based cluster store in `cluster/k8s` |
 | Big jobs next to small ones | Resource-aware admission: jobs declare CPU, memory, disk or custom resources and workers only take what fits |
 | Large inputs and outputs | An artifact plane that tracks objects in [Trove](https://github.com/xraph/trove) and stages them to a local cache |
-| Visibility | Logging, recovery, timeout, OpenTelemetry tracing and metrics middleware, plus lifecycle hooks for audit logs and [Relay](https://github.com/xraph/relay) webhooks |
+| Visibility | OpenTelemetry spans and labelled metrics for job attempts, cron, workflows, the durable runtime, the outbox and the artifact sweeper, plus lifecycle hooks for audit logs and [Relay](https://github.com/xraph/relay) webhooks |
 | An admin surface | REST routes for jobs, workflow runs, the DLQ and crons, the Dispatch Wire Protocol over WebSocket, and Go, TypeScript and Python clients |
 
 The [architecture guide](https://www.xraph.com/docs/dispatch/architecture) shows how the dispatcher, the engine, the worker pool and the stores fit together.

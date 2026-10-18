@@ -8,6 +8,7 @@ import (
 
 	"github.com/xraph/dispatch/event"
 	"github.com/xraph/dispatch/id"
+	"github.com/xraph/dispatch/telemetry"
 )
 
 // StepEmitter is called by the Workflow to emit step lifecycle events.
@@ -60,6 +61,10 @@ type Workflow struct {
 	// compensations is a LIFO stack of undo actions. On workflow failure,
 	// these are executed in reverse order.
 	compensations []Compensation
+
+	// tel is the runner's telemetry, for step spans and metrics. Nil starts
+	// spans on the global provider and records no metrics.
+	tel *telemetry.Telemetry
 }
 
 // NewWorkflowContext creates a new Workflow execution context.
@@ -122,7 +127,10 @@ func (w *Workflow) RunCompensations() error {
 
 		// Execute compensation.
 		start := time.Now()
-		if compErr := comp.Compensate(w.ctx); compErr != nil {
+		cctx, done := w.startStep(stepKindCompensate, stepName)
+		compErr := comp.Compensate(cctx)
+		done(compErr)
+		if compErr != nil {
 			w.emitter.EmitStepFailed(w.ctx, w.run, stepName, compErr)
 			w.logger.Error("compensation failed",
 				log.String("step", comp.StepName),

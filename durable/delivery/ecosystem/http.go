@@ -14,6 +14,8 @@ import (
 
 	ca "github.com/xraph/chronicle/acceptance"
 	ra "github.com/xraph/relay/acceptance"
+	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
+	"go.opentelemetry.io/otel/baggage"
 )
 
 const MaxResponseBytes = 256 << 10
@@ -32,9 +34,10 @@ type ConflictResponse struct {
 // Remote owns a fixed destination and never accepts URLs from delivery content.
 // Credentials are private and error messages contain no request or response data.
 type Remote struct {
-	endpoint string
-	bearer   string
-	client   *http.Client
+	endpoint  string
+	bearer    string
+	client    *http.Client
+	transport *http.Transport
 }
 
 func NewRemote(endpoint, bearer string, timeout time.Duration, localLoopbackHTTP bool) (*Remote, error) {
@@ -49,16 +52,23 @@ func NewRemote(endpoint, bearer string, timeout time.Duration, localLoopbackHTTP
 		}
 	}
 	transport := &http.Transport{Proxy: nil, DialContext: (&net.Dialer{Timeout: timeout}).DialContext, TLSClientConfig: &tls.Config{MinVersion: tls.VersionTLS12}, TLSHandshakeTimeout: timeout, ResponseHeaderTimeout: timeout, MaxIdleConnsPerHost: 4, IdleConnTimeout: time.Minute}
-	client := &http.Client{Timeout: timeout, Transport: transport, CheckRedirect: func(_ *http.Request, _ []*http.Request) error { return http.ErrUseLastResponse }}
-	return &Remote{endpoint: endpoint, bearer: bearer, client: client}, nil
+	// The traced transport adds a client span and traceparent around the
+	// same policy. call drops baggage, so nothing a caller's caller put
+	// there reaches the remote host.
+	client := &http.Client{Timeout: timeout, Transport: otelhttp.NewTransport(transport), CheckRedirect: func(_ *http.Request, _ []*http.Request) error { return http.ErrUseLastResponse }}
+	return &Remote{endpoint: endpoint, bearer: bearer, client: client, transport: transport}, nil
 }
-func (r *Remote) Close() { r.client.CloseIdleConnections() }
+
+// Close drops idle connections. It goes to the *http.Transport directly:
+// the traced wrapper around it has no CloseIdleConnections, so
+// http.Client.CloseIdleConnections would not reach it.
+func (r *Remote) Close() { r.transport.CloseIdleConnections() }
 func (r *Remote) call(ctx context.Context, request any, expected ConflictResponse, out any) (bool, error) {
 	raw, err := json.Marshal(request)
 	if err != nil {
 		return false, ErrTransport
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, r.endpoint, bytes.NewReader(raw))
+	req, err := http.NewRequestWithContext(baggage.ContextWithoutBaggage(ctx), http.MethodPost, r.endpoint, bytes.NewReader(raw))
 	if err != nil {
 		return false, ErrTransport
 	}

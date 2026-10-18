@@ -9,11 +9,13 @@ import (
 	"time"
 
 	log "github.com/xraph/go-utils/log"
+	"go.opentelemetry.io/otel/trace"
 
 	"github.com/xraph/dispatch/ext"
 	"github.com/xraph/dispatch/id"
 	"github.com/xraph/dispatch/job"
 	"github.com/xraph/dispatch/resource"
+	"github.com/xraph/dispatch/telemetry"
 )
 
 // isTransientStoreErr reports whether err is a transient store failure —
@@ -136,6 +138,10 @@ type Pool struct {
 	// customKeys are the custom resource keys this worker advertises,
 	// overriding the keys derived from the manager's capacity.
 	customKeys []string
+
+	// tel is where the pool's spans and metrics go. Nil records no metrics
+	// and starts spans on the global tracer provider.
+	tel *telemetry.Telemetry
 
 	stopCh     chan struct{}
 	wakeCh     chan struct{}      // nudges the fetcher out of its idle backoff
@@ -265,6 +271,14 @@ func WithResourceManager(m resource.Manager) PoolOption {
 // The slice is copied, so the caller keeps no handle on pool state.
 func WithWorkerCustomKeys(keys []string) PoolOption {
 	return func(p *Pool) { p.customKeys = slices.Clone(keys) }
+}
+
+// WithTelemetry sets where the pool records its spans and metrics: one
+// root "process job" span per attempt, and the poll, requeue, lease and
+// reclaim counters. engine.Build passes the engine's own; without it the
+// pool records no metrics and starts spans on the global tracer provider.
+func WithTelemetry(t *telemetry.Telemetry) PoolOption {
+	return func(p *Pool) { p.tel = t }
 }
 
 // WithStoreCallTimeout caps a single store roundtrip. Pass a positive
@@ -587,6 +601,7 @@ func (p *Pool) fetchLoop() {
 			if p.cancelCtx.Err() != nil {
 				return // Clean exit during shutdown
 			}
+			p.tel.Jobs().Poll(telemetry.PollError)
 			p.logger.Error("dequeue error", log.String("error", err.Error()))
 			// Back off on errors too; hot-spinning at pollInterval only
 			// piles onto a struggling store.
@@ -599,6 +614,12 @@ func (p *Pool) fetchLoop() {
 				interval = p.pollInterval
 			}
 			continue
+		}
+
+		if len(jobs) == 0 {
+			p.tel.Jobs().Poll(telemetry.PollEmpty)
+		} else {
+			p.tel.Jobs().Poll(telemetry.PollWork)
 		}
 
 		// dispatched counts jobs actually handed to a worker, which is what
@@ -747,6 +768,13 @@ func clearJobAssignment(j *job.Job) {
 // requeueRateLimited returns a job the queue manager refused to pending
 // with a small delay.
 func (p *Pool) requeueRateLimited(j *job.Job) {
+	p.requeueDelayed(j, telemetry.RequeueRateLimited)
+}
+
+// requeueDelayed returns a claimed job to pending one poll interval out,
+// counting it under reason.
+func (p *Pool) requeueDelayed(j *job.Job, reason string) {
+	p.tel.Jobs().Requeued(p.tel.QueueLabel(j.Queue), reason)
 	j.State = job.StatePending
 	j.RunAt = time.Now().Add(p.pollInterval)
 	clearJobAssignment(j)
@@ -765,6 +793,7 @@ func (p *Pool) requeueRateLimited(j *job.Job) {
 // pending during shutdown so it isn't stranded in the running state with no
 // heartbeat. Uses a fresh context: the pool's own contexts are already done.
 func (p *Pool) requeueUndispatched(j *job.Job) {
+	p.tel.Jobs().Requeued(p.tel.QueueLabel(j.Queue), telemetry.RequeueShutdown)
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 	j.State = job.StatePending
@@ -805,10 +834,35 @@ func (p *Pool) runJob(a admitted) {
 
 	j := a.job
 
-	p.extensions.EmitJobStarted(p.cancelCtx, j)
+	// The attempt's root span. It is started here rather than in the
+	// middleware chain so the terminal write, the dead letter push and
+	// every lifecycle hook (including JobStarted below) fall inside it.
+	// p.cancelCtx descends from context.Background, so nothing inherited
+	// can parent it.
+	spanCtx, span := p.startAttemptSpan(j)
+	defer span.End()
 
-	ctx, cancel := context.WithCancelCause(p.cancelCtx)
-	p.trackJob(j.ID.String(), cancel, a.lease, j.LeaseEpoch, p.leaseTTLFor(j))
+	if !j.RunAt.IsZero() {
+		p.tel.Jobs().QueueWait(p.tel.QueueLabel(j.Queue), time.Since(j.RunAt))
+	}
+
+	rec := &attempt{}
+	spanCtx = withAttempt(spanCtx, rec)
+	returned := false
+	defer func() {
+		// Without a Recover middleware a handler's panic unwinds through
+		// here; the span says so before it ends.
+		if !returned {
+			telemetry.Fail(span, "panic", "panic")
+			return
+		}
+		endAttemptSpan(span, rec)
+	}()
+
+	p.extensions.EmitJobStarted(spanCtx, j)
+
+	ctx, cancel := context.WithCancelCause(spanCtx)
+	p.trackJob(j.ID.String(), cancel, a.lease, j.LeaseEpoch, p.leaseTTLFor(j), span)
 
 	// A fenced terminal write needs the store's lease capability, this
 	// pool's worker ID, and the epoch j.LeaseEpoch carries from the
@@ -828,6 +882,7 @@ func (p *Pool) runJob(a admitted) {
 	}
 
 	execErr := p.executor.Execute(ctx, j)
+	returned = true
 	if execErr != nil {
 		p.logger.Debug("job execution failed",
 			log.String("job_id", j.ID.String()),
@@ -898,7 +953,10 @@ func (p *Pool) sendHeartbeats() {
 			hbCtx, hbCancel := p.callCtx()
 			err := p.store.HeartbeatJob(hbCtx, parsedID, p.workerID)
 			hbCancel()
-			if err != nil {
+			if err == nil {
+				p.tel.Jobs().Renewal(telemetry.RenewalOK)
+			} else {
+				p.tel.Jobs().Renewal(telemetry.RenewalError)
 				p.logger.Warn("heartbeat failed",
 					log.String("job_id", snap.jobID),
 					log.String("error", err.Error()),
@@ -913,16 +971,20 @@ func (p *Pool) sendHeartbeats() {
 		)
 		hbCancel()
 		if renewErr == nil {
+			p.tel.Jobs().Renewal(telemetry.RenewalOK)
 			continue
 		}
 
 		if errors.Is(renewErr, job.ErrLeaseLost) {
+			p.tel.Jobs().Renewal(telemetry.RenewalLost)
 			p.logger.Warn("lease lost, cancelling job",
 				log.String("job_id", snap.jobID),
 			)
 			p.cancelJob(snap.jobID, job.ErrLeaseLost)
 			continue
 		}
+
+		p.tel.Jobs().Renewal(telemetry.RenewalError)
 
 		// A transient store blip must not cancel a healthy job; only a
 		// definitive ErrLeaseLost above does that.
@@ -972,6 +1034,7 @@ func (p *Pool) reapStaleJobs() {
 // does the claim and the read in one statement, so unlike the legacy
 // path two pools cannot both reset the same job.
 func (p *Pool) reclaimExpiredLeases() {
+	started := time.Now()
 	reapCtx, reapCancel := p.callCtx()
 	reclaimed, err := p.leaseStore.ReclaimExpiredLeases(reapCtx, DefaultReclaimBatch)
 	reapCancel()
@@ -984,6 +1047,8 @@ func (p *Pool) reclaimExpiredLeases() {
 
 		return
 	}
+
+	p.recordReclaim(started, len(reclaimed))
 
 	for _, j := range reclaimed {
 		p.logger.Info("reclaimed expired lease",
@@ -1000,6 +1065,7 @@ func (p *Pool) reclaimExpiredLeases() {
 }
 
 func (p *Pool) reapStaleJobsLegacy() {
+	started := time.Now()
 	reapCtx, reapCancel := p.callCtx()
 	stale, err := p.store.ReapStaleJobs(reapCtx, p.staleJobThreshold)
 	reapCancel()
@@ -1039,11 +1105,31 @@ func (p *Pool) reapStaleJobsLegacy() {
 		)
 	}
 
+	p.recordReclaim(started, reset)
+
 	// The reset jobs are pending again; wake the fetcher so they are
 	// retried now rather than after the idle poll backoff.
 	if reset > 0 {
 		p.Wake()
 	}
+}
+
+// recordReclaim counts jobs a reaper pass returned to pending and, when there
+// were any, leaves a root span for the pass. An empty pass, the usual case,
+// records nothing: the reaper ticks every few seconds, and a trace per tick
+// would bury the ones that matter. The span starts when the pass did, so
+// its duration is the pass's own.
+func (p *Pool) recordReclaim(started time.Time, n int) {
+	if n == 0 {
+		return
+	}
+	p.tel.Jobs().Reclaimed(n)
+	_, span := p.tel.Start(p.cancelCtx, "reclaim job leases",
+		trace.WithNewRoot(),
+		trace.WithTimestamp(started),
+		trace.WithAttributes(attrReclaimed.Int(n)),
+	)
+	span.End()
 }
 
 // trackJob records one job's cancel func, resource lease, and job-lease
@@ -1058,6 +1144,7 @@ func (p *Pool) trackJob(
 	lease resource.Lease,
 	leaseEpoch int,
 	leaseTTL time.Duration,
+	span trace.Span,
 ) {
 	p.activeMu.Lock()
 	p.activeJobs[jobID] = &inflight{
@@ -1065,7 +1152,9 @@ func (p *Pool) trackJob(
 		lease:      lease,
 		leaseEpoch: leaseEpoch,
 		leaseTTL:   leaseTTL,
+		span:       span,
 	}
+	p.tel.Jobs().Active(len(p.activeJobs))
 	p.activeMu.Unlock()
 }
 
@@ -1081,6 +1170,7 @@ func (p *Pool) untrackJob(jobID string) *inflight {
 	}
 
 	delete(p.activeJobs, jobID)
+	p.tel.Jobs().Active(len(p.activeJobs))
 
 	return rec
 }
@@ -1106,5 +1196,8 @@ func (p *Pool) cancelJob(jobID string, cause error) {
 		return
 	}
 
+	if rec.span != nil && errors.Is(cause, job.ErrLeaseLost) {
+		rec.span.AddEvent("lease lost")
+	}
 	rec.cancel(cause)
 }

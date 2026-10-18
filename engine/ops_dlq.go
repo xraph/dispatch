@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"time"
 
+	"go.opentelemetry.io/otel/trace"
+
 	"github.com/xraph/dispatch"
 	"github.com/xraph/dispatch/dlq"
 	"github.com/xraph/dispatch/ext"
@@ -21,6 +23,9 @@ func (eng *Engine) commitEnqueue(ctx context.Context, j *job.Job) error {
 	if err := eng.jobStore.EnqueueJob(ctx, j); err != nil {
 		return err
 	}
+
+	eng.tel.Jobs().Enqueued(eng.tel.QueueLabel(j.Queue))
+	eng.tel.RememberEnqueue(j.ID.String(), trace.SpanContextFromContext(ctx))
 
 	if eng.pool != nil {
 		eng.pool.Wake()
@@ -46,13 +51,22 @@ func (eng *Engine) commitEnqueue(ctx context.Context, j *job.Job) error {
 // the job's name. EnqueueRaw never has: the worker that claims the job
 // may run a build this process does not.
 func (eng *Engine) enqueuePrepared(ctx context.Context, j *job.Job) error {
+	ctx, span := eng.startEnqueueSpan(ctx, j)
+	defer span.End()
+
 	if len(j.Resources) > 0 {
 		if err := resource.CheckSchedulable(j.Resources, eng.MaxWorkerCapacity(ctx)); err != nil {
+			failEnqueue(span, err)
 			return err
 		}
 	}
 
-	return eng.commitEnqueue(ctx, j)
+	if err := eng.commitEnqueue(ctx, j); err != nil {
+		failEnqueue(span, err)
+		return err
+	}
+
+	return nil
 }
 
 // ReplayDLQ turns a dead letter entry back into work: a new pending job

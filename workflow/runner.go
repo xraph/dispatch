@@ -8,11 +8,14 @@ import (
 	"time"
 
 	log "github.com/xraph/go-utils/log"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
 
 	"github.com/xraph/dispatch"
 	"github.com/xraph/dispatch/event"
 	"github.com/xraph/dispatch/id"
 	"github.com/xraph/dispatch/scope"
+	"github.com/xraph/dispatch/telemetry"
 )
 
 // RunEmitter emits workflow-level lifecycle events.
@@ -44,6 +47,8 @@ type Runner struct {
 	lifeMu   sync.Mutex
 	closed   bool
 	inflight sync.WaitGroup
+
+	tel *telemetry.Telemetry
 }
 
 // NewRunner creates a workflow runner.
@@ -119,14 +124,21 @@ func (r *Runner) StartRaw(ctx context.Context, name string, input []byte) (*Run,
 // executeRun runs the workflow handler and handles completion/failure.
 // It injects the Runner itself as the ChildStarter, and triggers saga
 // compensations on workflow failure.
-func (r *Runner) executeRun(ctx context.Context, run *Run, runner RunnerFunc, input []byte) {
+//
+// The run gets a "run workflow" span: a child of ctx's span for a run the
+// caller waits on, or its own root when opts say so (see detachedRun).
+func (r *Runner) executeRun(ctx context.Context, run *Run, runner RunnerFunc, input []byte, opts ...trace.SpanStartOption) {
 	// Restore scope into context.
 	ctx = scope.Restore(ctx, run.ScopeAppID, run.ScopeOrgID)
+
+	ctx, span := r.startRun(ctx, run, opts...)
+	defer span.End()
 
 	start := time.Now()
 
 	wf := NewWorkflowContext(ctx, run, r.store, r.eventStore, r.emitter, r.logger)
 	wf.SetChildStarter(r) // Inject self as child starter.
+	wf.tel = r.tel
 
 	err := runner(wf, input)
 	elapsed := time.Since(start)
@@ -134,6 +146,8 @@ func (r *Runner) executeRun(ctx context.Context, run *Run, runner RunnerFunc, in
 	now := time.Now().UTC()
 
 	if err != nil {
+		telemetry.Fail(span, "workflow failed", telemetry.ErrorType(err))
+		r.tel.Workflows().Run("failed", elapsed)
 		// Run saga compensations before marking as failed.
 		if len(wf.Compensations()) > 0 {
 			r.logger.Info("running saga compensations",
@@ -161,6 +175,7 @@ func (r *Runner) executeRun(ctx context.Context, run *Run, runner RunnerFunc, in
 		return
 	}
 
+	r.tel.Workflows().Run("completed", elapsed)
 	run.State = RunStateCompleted
 	run.CompletedAt = &now
 	if updateErr := r.store.UpdateRun(ctx, run); updateErr != nil {
@@ -240,8 +255,10 @@ func (r *Runner) SpawnChildRaw(ctx context.Context, parentRunID id.RunID, name s
 
 	r.emitter.EmitWorkflowStarted(ctx, run)
 
-	// Execute in background goroutine.
-	go r.executeRun(ctx, run, runner, input)
+	// Execute in background goroutine. The parent step's span ends before
+	// the child does, so the child is its own trace, linked back to it.
+	bg, opts := detachedRun(ctx)
+	go r.executeRun(bg, run, runner, input, opts...)
 
 	return run, nil
 }
@@ -250,6 +267,10 @@ func (r *Runner) SpawnChildRaw(ctx context.Context, parentRunID id.RunID, name s
 // It re-executes the handler; steps with checkpoints are skipped automatically.
 // The run continues on its stamped version (not necessarily the latest).
 func (r *Runner) Resume(ctx context.Context, runID id.RunID) error {
+	return r.resume(ctx, runID)
+}
+
+func (r *Runner) resume(ctx context.Context, runID id.RunID, opts ...trace.SpanStartOption) error {
 	run, err := r.store.GetRun(ctx, runID)
 	if err != nil {
 		return fmt.Errorf("get run %s: %w", runID, err)
@@ -264,7 +285,7 @@ func (r *Runner) Resume(ctx context.Context, runID id.RunID) error {
 		return fmt.Errorf("no workflow registered for %q version %d (run %s)", run.Name, run.Version, runID)
 	}
 
-	r.executeRun(ctx, run, runner, run.Input)
+	r.executeRun(ctx, run, runner, run.Input, opts...)
 	return nil
 }
 
@@ -308,12 +329,17 @@ func (r *Runner) ResumeAll(ctx context.Context) error {
 		return fmt.Errorf("list running workflow runs: %w", err)
 	}
 
+	// Each resumed run is its own trace, linked to whatever called this
+	// (the engine's boot span at startup), rather than a long child of it.
+	bg, opts := detachedRun(ctx)
+	opts = append(opts, trace.WithAttributes(attribute.Bool("dispatch.workflow.resumed", true)))
+
 	for _, run := range runs {
 		r.logger.Info("resuming workflow run",
 			log.String("run_id", run.ID.String()),
 			log.String("workflow", run.Name),
 		)
-		if resumeErr := r.Resume(ctx, run.ID); resumeErr != nil {
+		if resumeErr := r.resume(bg, run.ID, opts...); resumeErr != nil {
 			r.logger.Error("failed to resume workflow run",
 				log.String("run_id", run.ID.String()),
 				log.String("error", resumeErr.Error()),

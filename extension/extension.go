@@ -465,6 +465,7 @@ func (e *Extension) startSweeper(ctx context.Context) {
 		sweeper.WithPurgeGrace(cfg.PurgeGrace),
 		sweeper.WithLogger(logger),
 		sweeper.WithLeaderCheck(e.isClusterLeader),
+		sweeper.WithTelemetry(e.eng.Telemetry()),
 	)
 
 	if serr := e.sweeper.Start(ctx); serr != nil {
