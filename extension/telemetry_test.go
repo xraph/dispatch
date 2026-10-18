@@ -34,6 +34,27 @@ func scrape(t *testing.T, app forge.App) string {
 	return string(body)
 }
 
+// scrapeUntil scrapes app's metrics until the body holds every line in
+// wants or the timeout passes, and returns the last body it read.
+func scrapeUntil(t *testing.T, app forge.App, wants []string, timeout time.Duration) string {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for {
+		body := scrape(t, app)
+		missing := false
+		for _, want := range wants {
+			if !strings.Contains(body, want) {
+				missing = true
+				break
+			}
+		}
+		if !missing || time.Now().After(deadline) {
+			return body
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
 func TestExtensionRecordsThroughForge(t *testing.T) {
 	prevTP, prevProp := otel.GetTracerProvider(), otel.GetTextMapPropagator()
 	t.Cleanup(func() {
@@ -79,8 +100,7 @@ func TestExtensionRecordsThroughForge(t *testing.T) {
 		}
 	}
 
-	body := scrape(t, app)
-	for _, want := range []string{
+	wants := []string{
 		`forge_dispatch_jobs_enqueued_total{queue="default"} 1`,
 		`forge_dispatch_job_attempt_duration_seconds_count{outcome="completed",queue="default"} 1`,
 		`forge_dispatch_job_queue_wait_seconds_count{queue="default"} 1`,
@@ -89,7 +109,12 @@ func TestExtensionRecordsThroughForge(t *testing.T) {
 		`forge_dispatch_cron_leader`,
 		// The legacy counters keep their names.
 		`forge_dispatch_job_enqueued 1`,
-	} {
+	}
+	// The worker drops jobs_active back to 0 just after the "process job"
+	// span ends, so a scrape taken the moment the span is seen can still
+	// read 1. Scrape until every series has settled, then check.
+	body := scrapeUntil(t, app, wants, 5*time.Second)
+	for _, want := range wants {
 		if !strings.Contains(body, want) {
 			t.Errorf("scrape is missing %s", want)
 		}
