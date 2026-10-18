@@ -123,7 +123,7 @@ func TestStopDuringADeliveryIsRecordedAsCancelled(t *testing.T) {
 	f := metricstest.New()
 	entered := make(chan struct{})
 	var once atomic.Bool
-	sink := sinkFunc(func(ctx context.Context, d durable.Delivery) (durable.SinkReceipt, error) {
+	sink := sinkFunc(func(ctx context.Context, _ durable.Delivery) (durable.SinkReceipt, error) {
 		if once.CompareAndSwap(false, true) {
 			close(entered)
 		}
