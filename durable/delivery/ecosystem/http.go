@@ -15,6 +15,7 @@ import (
 	ca "github.com/xraph/chronicle/acceptance"
 	ra "github.com/xraph/relay/acceptance"
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
+	"go.opentelemetry.io/otel/baggage"
 )
 
 const MaxResponseBytes = 256 << 10
@@ -51,8 +52,8 @@ func NewRemote(endpoint, bearer string, timeout time.Duration, localLoopbackHTTP
 	}
 	transport := &http.Transport{Proxy: nil, DialContext: (&net.Dialer{Timeout: timeout}).DialContext, TLSClientConfig: &tls.Config{MinVersion: tls.VersionTLS12}, TLSHandshakeTimeout: timeout, ResponseHeaderTimeout: timeout, MaxIdleConnsPerHost: 4, IdleConnTimeout: time.Minute}
 	// The traced transport adds a client span and traceparent around the
-	// same policy. Calls run on the publisher's background context, which
-	// never carries inbound baggage to forward.
+	// same policy. call drops baggage, so nothing a caller's caller put
+	// there reaches the remote host.
 	client := &http.Client{Timeout: timeout, Transport: otelhttp.NewTransport(transport), CheckRedirect: func(_ *http.Request, _ []*http.Request) error { return http.ErrUseLastResponse }}
 	return &Remote{endpoint: endpoint, bearer: bearer, client: client}, nil
 }
@@ -62,7 +63,7 @@ func (r *Remote) call(ctx context.Context, request any, expected ConflictRespons
 	if err != nil {
 		return false, ErrTransport
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, r.endpoint, bytes.NewReader(raw))
+	req, err := http.NewRequestWithContext(baggage.ContextWithoutBaggage(ctx), http.MethodPost, r.endpoint, bytes.NewReader(raw))
 	if err != nil {
 		return false, ErrTransport
 	}

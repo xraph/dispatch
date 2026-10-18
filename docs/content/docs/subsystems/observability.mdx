@@ -62,7 +62,7 @@ All spans use the instrumentation scope `github.com/xraph/dispatch`.
 
 Lifecycle hooks run inside these spans. `JobStarted` runs under `process job`, `JobCompleted` under `complete job`, `JobDLQ` under `dead-letter job`, and a workflow step's hooks under its step, so the Relay and Chronicle calls `relay_hook` and `audit_hook` make land in the right trace.
 
-The remote Chronicle and Relay sink in `durable/delivery/ecosystem` wraps its transport with `otelhttp`, so a delivery to a remote host gets an HTTP client span and carries `traceparent`.
+The remote Chronicle and Relay sink in `durable/delivery/ecosystem` wraps its transport with `otelhttp`, so a delivery to a remote host gets an HTTP client span and carries `traceparent`. It drops baggage first, so nothing a caller put there reaches the remote host.
 
 ## Metrics
 
