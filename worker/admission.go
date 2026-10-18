@@ -5,9 +5,11 @@ import (
 	"time"
 
 	log "github.com/xraph/go-utils/log"
+	"go.opentelemetry.io/otel/trace"
 
 	"github.com/xraph/dispatch/job"
 	"github.com/xraph/dispatch/resource"
+	"github.com/xraph/dispatch/telemetry"
 )
 
 // admitted is a claimed job together with the local resource lease held
@@ -49,6 +51,11 @@ type inflight struct {
 	// defaults. Held here so the renewal loop does not issue a GetJob per
 	// job per interval purely to recover a duration it already knew.
 	leaseTTL time.Duration
+
+	// span is the attempt's "process job" span, so the heartbeat loop can
+	// note a lost lease on the attempt it cancels. Nil when the attempt was
+	// tracked without one.
+	span trace.Span
 }
 
 // dequeueBudget is the capacity ceiling this worker offers the store,
@@ -237,7 +244,7 @@ func (p *Pool) requeueLocalMisfit(j *job.Job, cause error) {
 		log.String("error", cause.Error()),
 	)
 
-	p.requeueRateLimited(j)
+	p.requeueDelayed(j, telemetry.RequeueNoCapacity)
 }
 
 // releaseQueueSlot returns the queue/tenant token acquired for j, if the

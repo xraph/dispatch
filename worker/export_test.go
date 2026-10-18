@@ -32,7 +32,7 @@ func (p *Pool) ReclaimOnce(ctx context.Context) {
 // without running the pool's goroutines or the executor.
 func (p *Pool) TrackJob(jobID string, leaseEpoch int, leaseTTL time.Duration) context.Context {
 	ctx, cancel := context.WithCancelCause(context.Background())
-	p.trackJob(jobID, cancel, nil, leaseEpoch, leaseTTL)
+	p.trackJob(jobID, cancel, nil, leaseEpoch, leaseTTL, nil)
 
 	return ctx
 }
