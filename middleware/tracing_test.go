@@ -234,3 +234,39 @@ func assertNoValue(t *testing.T, s sdktrace.ReadOnlySpan, needle string) {
 		}
 	}
 }
+
+func TestTracing_PanicMarksSpanAndKeepsPanicking(t *testing.T) {
+	sr, tracer := setupTestTracer()
+	m := mw.TracingWithTracer(tracer)
+
+	func() {
+		defer func() {
+			if r := recover(); r != "card alice@example.com declined" {
+				t.Errorf("recovered %v, want the original panic", r)
+			}
+		}()
+		_ = m(context.Background(), newTestJob(), func(context.Context) error {
+			panic("card alice@example.com declined")
+		})
+	}()
+
+	spans := sr.Ended()
+	if len(spans) != 1 {
+		t.Fatalf("expected 1 span, got %d", len(spans))
+	}
+	if spans[0].Status().Code != codes.Error || spans[0].Status().Description != "panic" {
+		t.Errorf("status = %+v, want an error with class panic", spans[0].Status())
+	}
+	var excType string
+	for _, ev := range spans[0].Events() {
+		for _, a := range ev.Attributes {
+			if a.Key == "exception.type" {
+				excType = a.Value.AsString()
+			}
+		}
+	}
+	if excType != "panic" {
+		t.Errorf("exception.type = %q", excType)
+	}
+	assertNoValue(t, spans[0], "alice@example.com")
+}

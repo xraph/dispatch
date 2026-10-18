@@ -848,7 +848,16 @@ func (p *Pool) runJob(a admitted) {
 
 	rec := &attempt{}
 	spanCtx = withAttempt(spanCtx, rec)
-	defer func() { endAttemptSpan(span, rec) }()
+	returned := false
+	defer func() {
+		// Without a Recover middleware a handler's panic unwinds through
+		// here; the span says so before it ends.
+		if !returned {
+			telemetry.Fail(span, "panic", "panic")
+			return
+		}
+		endAttemptSpan(span, rec)
+	}()
 
 	p.extensions.EmitJobStarted(spanCtx, j)
 
@@ -873,6 +882,7 @@ func (p *Pool) runJob(a admitted) {
 	}
 
 	execErr := p.executor.Execute(ctx, j)
+	returned = true
 	if execErr != nil {
 		p.logger.Debug("job execution failed",
 			log.String("job_id", j.ID.String()),

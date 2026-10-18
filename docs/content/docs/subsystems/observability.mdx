@@ -32,7 +32,7 @@ Background work is traced one unit at a time. A job attempt, a cron fire, a dura
 
 A job crosses the store between enqueue and execution, so its attempt is its own trace. When the process that enqueued the job also runs it, the `process job` span links to the `enqueue job` span. Nothing about the trace is stored with the job, so a job enqueued by an older writer, or claimed by another worker, starts without a link. A workflow run that outlives its caller (a resumed run, a replay, a spawned child) is its own trace with a link back, the same way.
 
-Spans never carry payloads, error messages, user IDs or anything that names a person. A failed span gets an `Error` status with a short class such as `handler error, retrying`, and an `exception` event whose only attribute is `exception.type`: a sentinel's name (`dispatch.ErrPermanent`, `context.DeadlineExceeded`) or the error's Go type. Durable workflow and run IDs are chosen by whoever starts the workflow, so they stay off spans too.
+Spans never carry payloads, error messages, user IDs or anything that names a person. A failed span gets an `Error` status with a short class such as `handler error, retrying`, and an `exception` event whose only attribute is `exception.type`: a sentinel's name (`dispatch.ErrPermanent`, `context.DeadlineExceeded`) or the error's Go type. A handler that panics marks `run job handler` (and `process job`, if no Recover middleware catches it) with the class `panic` and `exception.type` `panic`. Durable workflow and run IDs are chosen by whoever starts the workflow, so they stay off spans too.
 
 ## Spans
 
