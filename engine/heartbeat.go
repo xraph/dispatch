@@ -10,6 +10,7 @@ import (
 
 	"github.com/xraph/dispatch"
 	"github.com/xraph/dispatch/cluster"
+	"github.com/xraph/dispatch/telemetry"
 )
 
 // defaultWorkerHeartbeat is the row heartbeat's interval when
@@ -63,7 +64,10 @@ func (eng *Engine) startHeartbeat(ctx context.Context) {
 		return
 	}
 
-	hbCtx, cancel := context.WithCancel(context.WithoutCancel(ctx))
+	// Detached as well as uncancelled: the loop outlives Start, and
+	// WithoutCancel alone keeps the boot span Start's ctx carries, which
+	// would put every beat's query in that finished trace.
+	hbCtx, cancel := context.WithCancel(telemetry.Detach(context.WithoutCancel(ctx)))
 	done := make(chan struct{})
 	eng.heartbeatCancel = cancel
 	eng.heartbeatDone = done

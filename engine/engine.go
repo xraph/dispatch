@@ -42,6 +42,7 @@ import (
 	"github.com/xraph/dispatch/scope"
 	"github.com/xraph/dispatch/store"
 	"github.com/xraph/dispatch/stream"
+	"github.com/xraph/dispatch/telemetry"
 	"github.com/xraph/dispatch/worker"
 	"github.com/xraph/dispatch/workflow"
 )
@@ -162,6 +163,10 @@ type Engine struct {
 	// metricFactory is the go-utils MetricFactory for engine-level metrics.
 	// nil means use gu.NewMetricsCollector default.
 	metricFactory gu.MetricFactory
+
+	// tel is built from tracerProvider and metricFactory once the options
+	// have run, and handed to every subsystem Build constructs.
+	tel *telemetry.Telemetry
 
 	// executors is the registry job attempts are dispatched through. It
 	// always has the in-process executor as its default.
@@ -306,8 +311,10 @@ func WithWorkerCustomKeys(keys []string) Option {
 }
 
 // WithTracerProvider sets a custom OTel TracerProvider for the engine.
-// When set, the tracing middleware uses this provider instead of the global one.
-// If not set, the global otel.GetTracerProvider() is used.
+// When set, every span the engine and its subsystems start (job attempts,
+// enqueues, cron fires, workflow runs, durable tasks, the tracing
+// middleware) uses this provider instead of the global one. If not set,
+// the global otel.GetTracerProvider() is used.
 func WithTracerProvider(tp trace.TracerProvider) Option {
 	return func(eng *Engine) {
 		eng.tracerProvider = tp
@@ -316,7 +323,9 @@ func WithTracerProvider(tp trace.TracerProvider) Option {
 
 // WithMetricFactory sets the go-utils MetricFactory for engine-level metrics.
 // Use fapp.Metrics() in forge applications to integrate with the forge metrics system.
-// If not set, a default metrics collector is used.
+// If not set, a default metrics collector is used for the legacy counters and
+// the labelled dispatch_* metrics (see the telemetry package) are off: the
+// default collector keys series by name alone and would fold their labels.
 func WithMetricFactory(factory gu.MetricFactory) Option {
 	return func(eng *Engine) {
 		eng.metricFactory = factory
@@ -391,6 +400,11 @@ func Build(d *dispatch.Dispatcher, opts ...Option) (*Engine, error) {
 	for _, opt := range opts {
 		opt(eng)
 	}
+	eng.tel = telemetry.New(
+		telemetry.WithMetrics(eng.metricFactory),
+		telemetry.WithTracerProvider(eng.tracerProvider),
+		telemetry.WithQueues(eng.configuredQueues()...),
+	)
 	if err := eng.buildDurable(st); err != nil {
 		return nil, err
 	}
@@ -420,7 +434,7 @@ func Build(d *dispatch.Dispatcher, opts ...Option) (*Engine, error) {
 	emitter := &extRunEmitter{r: eng.extensions}
 	eng.wfRegistry = workflow.NewRegistry()
 	eng.eventBus = event.NewBus(es)
-	eng.wfRunner = workflow.NewRunner(eng.wfRegistry, ws, es, emitter, logger)
+	eng.wfRunner = workflow.NewRunner(eng.wfRegistry, ws, es, emitter, logger).WithTelemetry(eng.tel)
 
 	// Build tracing middleware (custom provider or global).
 	var tracingMw mw.Middleware
@@ -458,7 +472,7 @@ func Build(d *dispatch.Dispatcher, opts ...Option) (*Engine, error) {
 	runner := worker.NewRunner(
 		eng.registry, eng.extensions, eng.jobStore, eng.dlqService,
 		eng.bo, eng.executors, logger, allMws...,
-	)
+	).WithTelemetry(eng.tel)
 
 	// An out-of-process rung gets a scratch directory regardless of
 	// whether this runs — worker.Runner creates one for any attempt whose
@@ -488,6 +502,7 @@ func Build(d *dispatch.Dispatcher, opts ...Option) (*Engine, error) {
 		worker.WithPollInterval(config.PollInterval),
 		worker.WithHeartbeatInterval(config.HeartbeatInterval),
 		worker.WithStaleJobThreshold(config.StaleJobThreshold),
+		worker.WithTelemetry(eng.tel),
 	}
 	if config.MaxPollInterval > 0 {
 		poolOpts = append(poolOpts, worker.WithMaxPollInterval(config.MaxPollInterval))
@@ -570,7 +585,7 @@ func Build(d *dispatch.Dispatcher, opts ...Option) (*Engine, error) {
 	// Translate dispatch.Config cron tunables into scheduler options.
 	// Zero values leave the scheduler's own defaults in place; only
 	// non-zero values override.
-	var schedOpts []cron.SchedulerOption
+	schedOpts := []cron.SchedulerOption{cron.WithTelemetry(eng.tel)}
 	if config.CronTickInterval > 0 {
 		schedOpts = append(schedOpts, cron.WithTickInterval(config.CronTickInterval))
 	}
@@ -704,7 +719,11 @@ func (eng *Engine) EnqueueRaw(ctx context.Context, name string, payload []byte, 
 		j.RunAt = jobOpts.RunAt
 	}
 
+	ctx, span := eng.startEnqueueSpan(ctx, j)
+	defer span.End()
+
 	if err := eng.applyBindings(ctx, j, jobOpts.Bindings); err != nil {
+		failEnqueue(span, err)
 		return nil, err
 	}
 
@@ -712,10 +731,12 @@ func (eng *Engine) EnqueueRaw(ctx context.Context, name string, payload []byte, 
 	// validated; before EnqueueJob, so an unschedulable job never
 	// reaches the store.
 	if err := eng.resolveResources(ctx, j, jobOpts); err != nil {
+		failEnqueue(span, err)
 		return nil, err
 	}
 
 	if err := eng.commitEnqueue(ctx, j); err != nil {
+		failEnqueue(span, err)
 		return nil, err
 	}
 
@@ -772,7 +793,9 @@ func (eng *Engine) Start(ctx context.Context) (startErr error) {
 	// enqueues so jobs are picked up without waiting out the idle poll
 	// backoff. Best-effort: polling remains the correctness mechanism.
 	if wn, ok := eng.jobStore.(store.WakeNotifier); ok {
-		stop, err := wn.StartWakeListener(ctx, eng.pool.Wake)
+		// The listener outlives Start and reconnects on its own, so it
+		// must not keep the boot span Start's ctx carries.
+		stop, err := wn.StartWakeListener(telemetry.Detach(ctx), eng.pool.Wake)
 		if err != nil {
 			eng.logger.Warn("wake listener unavailable; relying on polling",
 				log.String("error", err.Error()),
@@ -946,6 +969,12 @@ func (eng *Engine) ClusterStore() cluster.Store { return eng.clusterStore }
 
 // WorkerID returns this engine's unique worker identifier.
 func (eng *Engine) WorkerID() id.WorkerID { return eng.pool.WorkerID() }
+
+// Telemetry returns the spans and metrics the engine records through, built
+// from WithMetricFactory and WithTracerProvider. The Forge extension hands it
+// to the outbox publisher and artifact sweeper it builds; do the same for any
+// subsystem you assemble beside the engine.
+func (eng *Engine) Telemetry() *telemetry.Telemetry { return eng.tel }
 
 // StreamBroker returns the real-time event broker, or nil if not enabled.
 func (eng *Engine) StreamBroker() *stream.Broker { return eng.broker }

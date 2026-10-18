@@ -10,6 +10,7 @@ import (
 
 	"github.com/xraph/dispatch/durable"
 	drt "github.com/xraph/dispatch/durable/runtime"
+	"github.com/xraph/dispatch/telemetry"
 )
 
 // Durable configuration errors prevent fallback to checkpoint execution.
@@ -45,6 +46,9 @@ func (eng *Engine) buildDurable(store any) error {
 	backend, ok := store.(durable.Store)
 	if !ok {
 		return ErrDurableUnsupported
+	}
+	if eng.durable.options.Telemetry == nil {
+		eng.durable.options.Telemetry = eng.tel
 	}
 	worker, err := drt.NewWorker(backend, eng.durable.options)
 	if err != nil {
@@ -149,7 +153,9 @@ func (eng *Engine) startDurable(ctx context.Context) error {
 	if d.done != nil {
 		return d.err
 	}
-	workCtx, cancel := context.WithCancel(ctx)
+	// The worker polls for the life of the engine; it must not keep the
+	// boot span Start's ctx carries. Each claimed task starts its own root.
+	workCtx, cancel := context.WithCancel(telemetry.Detach(ctx))
 	d.cancel, d.done = cancel, make(chan struct{})
 	go func() {
 		err := d.worker.Run(workCtx)
