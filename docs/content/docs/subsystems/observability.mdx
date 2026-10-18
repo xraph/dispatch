@@ -1,61 +1,144 @@
 ---
 title: Observability
-description: Metrics and OpenTelemetry tracing for Dispatch.
+description: OpenTelemetry spans and metrics for jobs, cron, workflows, the durable runtime, the outbox and the artifact sweeper.
 ---
 
-Dispatch gives you two layers of observability, and `engine.Build` turns both on for you:
+In a Forge app you don't configure anything. The extension passes `app.Metrics()` to the engine, forge installs the global tracer provider, and every span and metric below shows up next to the rest of your app's. Scrape `/_/metrics` and look for `forge_dispatch_`.
 
-1. System-wide counters through `observability.MetricsExtension`, one per lifecycle event.
-2. Per-job tracing and metrics through the `Tracing` and `Metrics` middleware in the default stack.
-
-You choose where they report with two engine options:
+Outside Forge, give the engine a tracer provider and a go-utils metric factory:
 
 ```go
 eng, err := engine.Build(d,
-    engine.WithTracerProvider(tp),        // an OpenTelemetry trace.TracerProvider
-    engine.WithMetricFactory(factory),    // a go-utils metrics.MetricFactory
+    engine.WithTracerProvider(tp),     // an OpenTelemetry trace.TracerProvider
+    engine.WithMetricFactory(factory), // a go-utils metrics.MetricFactory
 )
 ```
 
-Without `WithTracerProvider`, the tracing middleware uses the global OpenTelemetry tracer provider. Without `WithMetricFactory`, Dispatch creates its own go-utils metrics collector named `dispatch`. The Forge extension passes the app's metrics, so counters show up next to the rest of your app's.
+Without `WithTracerProvider`, spans go to the global provider. Without `WithMetricFactory`, the legacy counters go to a private go-utils collector and the labelled `dispatch_*` metrics are off. That collector keys series by name alone, so it would fold every label into one series.
 
-## System-wide counters
+`engine.Build` hands the same settings to everything it builds: the worker pool and runner, the cron scheduler, the checkpoint workflow runner and the durable runtime. The Forge extension also hands them to the outbox publisher and the artifact sweeper. If you build one of those yourself, pass `eng.Telemetry()`:
 
-`engine.Build` registers an `observability.MetricsExtension` built on the metric factory. Don't register another one, or every event counts twice. If you build one yourself for another engine, use `observability.NewMetricsExtension()` or `observability.NewMetricsExtensionWithFactory(factory)`.
+```go
+p, err := delivery.New(outbox, cfg, sinks, delivery.WithTelemetry(eng.Telemetry()))
+s := sweeper.New(store, backend, sweeper.WithTelemetry(eng.Telemetry()))
+w, err := runtime.NewWorker(store, runtime.Options{ /* ... */ Telemetry: eng.Telemetry()})
+```
 
-### Counters recorded
+Database calls are traced and timed by Grove (`db.client` spans and `db.client.operation.duration`), HTTP routes by Forge, and the calls into Chronicle and Relay by those libraries. Dispatch adds nothing on top of those.
 
-| Event | Counter |
-|-------|---------|
-| Job enqueued | `dispatch.job.enqueued` |
-| Job completed | `dispatch.job.completed` |
-| Job failed | `dispatch.job.failed` |
-| Job retrying | `dispatch.job.retried` |
-| Job moved to the DLQ | `dispatch.job.dlq` |
-| Workflow started | `dispatch.workflow.started` |
-| Workflow completed | `dispatch.workflow.completed` |
-| Workflow failed | `dispatch.workflow.failed` |
-| Cron fired | `dispatch.cron.fired` |
+## How the traces fit together
 
-The counters carry no labels. How the dotted names appear in your backend depends on the exporter (Prometheus, for example, turns dots into underscores).
+Background work is traced one unit at a time. A job attempt, a cron fire, a durable task, an outbox delivery and a sweeper pass each start their own root span, and a poll that finds nothing starts none. The pollers and heartbeats that outlive `Start` drop the `start dispatch` boot span forge puts on its context, so their queries never land in a finished trace.
 
-## Per-job tracing
+A job crosses the store between enqueue and execution, so its attempt is its own trace. When the process that enqueued the job also runs it, the `process job` span links to the `enqueue job` span. Nothing about the trace is stored with the job, so a job enqueued by an older writer, or claimed by another worker, starts without a link. A workflow run that outlives its caller (a resumed run, a replay, a spawned child) is its own trace with a link back, the same way.
 
-Each job execution creates a span named `dispatch.job.execute` with these attributes:
+Spans never carry payloads, error messages, user IDs or anything that names a person. A failed span gets an `Error` status with a short class such as `handler error, retrying`, and an `exception` event whose only attribute is `exception.type`: a sentinel's name (`dispatch.ErrPermanent`, `context.DeadlineExceeded`) or the error's Go type. Durable workflow and run IDs are chosen by whoever starts the workflow, so they stay off spans too.
 
-- `dispatch.job.id`
-- `dispatch.job.name`
-- `dispatch.queue`
-- `dispatch.retry_count`
-- `dispatch.scope.app_id`
-- `dispatch.scope.org_id`
+## Spans
 
-When the handler returns an error, the span records it and gets an error status.
+All spans use the instrumentation scope `github.com/xraph/dispatch`.
 
-## Per-job metrics
+| Span | Kind | Parent | Attributes |
+|------|------|--------|------------|
+| `enqueue job` | Producer | the caller's span, if any | `messaging.system=dispatch`, `messaging.operation.type=send`, `messaging.operation.name=enqueue`, `messaging.destination.name` (queue), `messaging.message.id` (job ID), `dispatch.job.name`, `dispatch.job.priority`, `dispatch.job.delayed` |
+| `process job` | Consumer | root, links to `enqueue job` | `messaging.system`, `messaging.operation.type=process`, `messaging.destination.name`, `messaging.message.id`, `dispatch.job.name`, `dispatch.job.attempt`, `dispatch.job.max_retries`, `dispatch.job.lease_epoch`, `dispatch.scope.app_id`, `dispatch.scope.org_id`, `dispatch.job.outcome`, `dispatch.job.exec_status`, `dispatch.job.executor`, `dispatch.job.dlq_reason`; a `lease lost` event when the heartbeat cancels the attempt |
+| `run job handler` | Internal | `process job` | `dispatch.job.id`, `dispatch.job.name`, `dispatch.queue`, `dispatch.retry_count`, `dispatch.scope.app_id`, `dispatch.scope.org_id` (the tracing middleware) |
+| `stage job inputs` | Internal | `run job handler` | `dispatch.job.inputs` |
+| `commit job outputs` | Internal | `run job handler` | `dispatch.job.outputs` |
+| `complete job` | Internal | `process job` | none |
+| `schedule job retry` | Internal | `process job` | none |
+| `dead-letter job` | Internal | `process job` | `dispatch.job.dlq_reason` |
+| `requeue job` | Internal | `process job` | none (a launch failure, which does not use up a retry) |
+| `abandon job` | Internal | `process job` or a terminal span | none (the lease moved on, or an operator cancelled the job) |
+| `reclaim job leases` | Internal | root | `dispatch.lease.reclaimed`; only for a reaper pass that reclaimed something |
+| `fire cron entry` | Internal | root | `dispatch.cron.id`, `dispatch.cron.name`, `dispatch.cron.job_name`, `dispatch.cron.result` |
+| `run workflow` | Internal | the caller's span, or root with a link | `dispatch.workflow.name`, `dispatch.workflow.run_id`, `dispatch.workflow.version`, `dispatch.workflow.resumed` |
+| `run workflow step` | Internal | `run workflow` | `dispatch.workflow.step.kind`, `dispatch.workflow.step.name`; none for a step replayed from its checkpoint |
+| `process durable task` | Consumer | root | `messaging.system`, `messaging.operation.type=process`, `messaging.destination.name` (queue), `dispatch.durable.task.kind`, `dispatch.durable.task.attempt`, `dispatch.durable.namespace`, `dispatch.durable.build_id`, `dispatch.durable.task.result`, plus `dispatch.durable.timeout.kind` or `dispatch.durable.child_delivery.kind` |
+| `replay workflow history` | Internal | `process durable task` | `dispatch.durable.history.events` |
+| `run activity` | Internal | `process durable task` | `dispatch.durable.activity.name` |
+| `deliver outbox event` | Producer | root | `dispatch.outbox.destination`, `dispatch.outbox.delivery_id`, `dispatch.outbox.attempt`, `dispatch.outbox.result` |
+| `sweep artifacts` | Internal | root, or the caller's span for `RunOnce` | `dispatch.artifact.dry_run`, `dispatch.artifact.swept`, `dispatch.artifact.purged`, `dispatch.artifact.skipped`, `dispatch.artifact.bytes_reclaimed` |
 
-The metrics middleware records a histogram `dispatch.job.duration` (seconds) and a counter `dispatch.job.executions`. Neither has labels.
+Lifecycle hooks run inside these spans. `JobStarted` runs under `process job`, `JobCompleted` under `complete job`, `JobDLQ` under `dead-letter job`, and a workflow step's hooks under its step, so the Relay and Chronicle calls `relay_hook` and `audit_hook` make land in the right trace.
+
+The remote Chronicle and Relay sink in `durable/delivery/ecosystem` wraps its transport with `otelhttp`, so a delivery to a remote host gets an HTTP client span and carries `traceparent`.
+
+## Metrics
+
+Names are as forge scrapes them. Every label takes only the values listed, so no series grows per job, tenant, URL or error message. The `queue` label is the queue's name when you configured it (the queues your workers poll, and the ones with limits or resource defaults) and `other` for anything else.
+
+### Jobs
+
+| Metric | Type | Labels |
+|--------|------|--------|
+| `forge_dispatch_jobs_enqueued_total` | counter | `queue` |
+| `forge_dispatch_job_attempt_duration_seconds` | histogram | `queue`; `outcome`: `completed`, `retry`, `dead_lettered`, `requeued`, `lease_lost`, `cancelled`, `store_error` |
+| `forge_dispatch_jobs_dead_lettered_total` | counter | `queue`; `reason`: `retries_exhausted`, `permanent`, `launch_failures` |
+| `forge_dispatch_job_queue_wait_seconds` | histogram | `queue` (time from a job becoming due to a worker starting it) |
+| `forge_dispatch_job_polls_total` | counter | `result`: `work`, `empty`, `error` |
+| `forge_dispatch_jobs_requeued_total` | counter | `queue`; `reason`: `rate_limited`, `no_capacity`, `shutdown` |
+| `forge_dispatch_job_lease_renewals_total` | counter | `result`: `ok`, `lost`, `error` |
+| `forge_dispatch_jobs_reclaimed_total` | counter | none |
+| `forge_dispatch_jobs_active` | gauge | none (attempts running on this worker) |
+
+An attempt's duration runs from the start of the attempt to its terminal write.
+
+### Cron and checkpoint workflows
+
+| Metric | Type | Labels |
+|--------|------|--------|
+| `forge_dispatch_cron_fires_total` | counter | `result`: `fired`, `locked`, `skipped`, `error` |
+| `forge_dispatch_cron_fire_lag_seconds` | histogram | none (due time to enqueue) |
+| `forge_dispatch_cron_leader` | gauge | none (1 while this scheduler leads) |
+| `forge_dispatch_workflow_run_duration_seconds` | histogram | `result`: `completed`, `failed` |
+| `forge_dispatch_workflow_step_duration_seconds` | histogram | `kind`: `step`, `parallel`, `fan_out`, `child`, `spawn`, `wait_event`, `wait_all`, `wait_any`, `wait_match`, `sleep`, `compensate`; `result`: `ok`, `error` |
+
+### Durable runtime, outbox and artifacts
+
+| Metric | Type | Labels |
+|--------|------|--------|
+| `forge_dispatch_durable_task_duration_seconds` | histogram | `kind`: `workflow`, `activity`, `timer`, `timeout`, `child_delivery`, `execution_timeout`; `result`: `ok`, `contention`, `lease_lost`, `no_handler`, `cancelled`, `error` |
+| `forge_dispatch_durable_polls_total` | counter | `kind` as above; `result`: `work`, `empty`, `error` |
+| `forge_dispatch_durable_replay_duration_seconds` | histogram | none |
+| `forge_dispatch_outbox_delivery_duration_seconds` | histogram | `destination`: `chronicle`, `relay`; `result`: `acknowledged`, `rejected`, `timeout`, `conflict`, `unavailable`, `invalid_receipt` |
+| `forge_dispatch_outbox_delivery_lag_seconds` | histogram | `destination` (acceptance to acknowledgement) |
+| `forge_dispatch_artifacts_swept_total` | counter | `reason`: `retention`, `orphan` |
+| `forge_dispatch_artifacts_purged_total` | counter | `result`: `ok`, `skipped` |
+| `forge_dispatch_artifact_bytes_reclaimed_total` | counter | none |
+
+A few queries to start from:
+
+```text
+# Attempts failing, by queue
+sum by (queue) (rate(forge_dispatch_job_attempt_duration_seconds_count{outcome=~"retry|dead_lettered"}[5m]))
+
+# p95 time a due job waits for a worker
+histogram_quantile(0.95, sum by (le, queue) (rate(forge_dispatch_job_queue_wait_seconds_bucket[5m])))
+
+# Outbox deliveries that are not getting through
+sum by (destination, result) (rate(forge_dispatch_outbox_delivery_duration_seconds_count{result!="acknowledged"}[5m]))
+```
+
+### Legacy counters
+
+`engine.Build` still registers `observability.MetricsExtension` and the metrics middleware, so these keep their names and carry no labels. Don't register another `MetricsExtension`, or every event counts twice.
+
+| Event | Metric |
+|-------|--------|
+| Job enqueued | `forge_dispatch_job_enqueued` |
+| Job completed | `forge_dispatch_job_completed` |
+| Job failed (including a lost lease) | `forge_dispatch_job_failed` |
+| Job retrying | `forge_dispatch_job_retried` |
+| Job moved to the DLQ | `forge_dispatch_job_dlq` |
+| Workflow started, completed, failed | `forge_dispatch_workflow_started`, `_completed`, `_failed` |
+| Cron fired | `forge_dispatch_cron_fired` |
+| Handler duration and executions (middleware) | `forge_dispatch_job_duration` histogram, `forge_dispatch_job_executions` counter |
+
+Outside Forge the names are `dispatch.job.enqueued` and so on, and how the dots appear depends on your exporter. The labelled metrics above say more, so prefer them for new dashboards.
 
 ## Building the middleware yourself
 
 `middleware.Tracing()`, `middleware.TracingWithTracer(tracer)`, `middleware.Metrics()` and `middleware.MetricsWithFactory(factory)` are exported if you compose a chain outside the engine. Inside an engine they're already in the default stack, so adding them with `engine.WithMiddleware` records everything twice.
+
+If you assemble a `worker.Pool` and `worker.Runner` without the engine, build a `telemetry.Telemetry` with `telemetry.New(telemetry.WithMetrics(f), telemetry.WithQueues("default"))` and pass it with `worker.WithTelemetry` and `Runner.WithTelemetry`.

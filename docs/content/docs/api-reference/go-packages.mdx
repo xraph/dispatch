@@ -51,8 +51,9 @@ The engine package is the import-cycle breaker. It composes all subsystems and i
 | `WithExtension(x)` | func | Register an `ext.Extension` |
 | `WithBackoff(s)` | func | Override the retry backoff strategy |
 | `WithQueueConfig(cfgs...)` | func | Per-queue concurrency and rate limit settings |
-| `WithTracerProvider(tp)` | func | OpenTelemetry tracer provider for the tracing middleware |
-| `WithMetricFactory(f)` | func | go-utils metric factory (the Forge extension passes the app's) |
+| `WithTracerProvider(tp)` | func | OpenTelemetry tracer provider for every span the engine and its subsystems start |
+| `WithMetricFactory(f)` | func | go-utils metric factory for the legacy counters and the labelled `dispatch_*` metrics (the Forge extension passes the app's) |
+| `(*Engine).Telemetry()` | method | The `*telemetry.Telemetry` built from those two, for subsystems you assemble beside the engine |
 | `WithDurableWorkflows(opts)` | func | Turn on the durable workflow runtime |
 | `WithStreamBroker(opts...)` | func | Turn on the stream broker DWP needs |
 | `WithArtifacts(svc, cache)`, `WithExecutor(e)`, `WithScratchRoot(dir)` | func | Artifact plane and execution isolation |
@@ -198,7 +199,7 @@ Package-level generic functions:
 | `Logging(logger)` | func | Log job start and completion |
 | `Recover(logger)` | func | Catch panics and convert them to errors |
 | `Timeout(logger)` | func | Apply the job's `Timeout` as a context deadline |
-| `Tracing()`, `TracingWithTracer(t)` | func | OpenTelemetry span per job |
+| `Tracing()`, `TracingWithTracer(t)` | func | A `run job handler` span around the rest of the chain |
 | `Metrics()`, `MetricsWithFactory(f)` | func | Job duration histogram and execution counter |
 | `Scope()` | func | Restores the job's app and org IDs into the context |
 
@@ -250,6 +251,18 @@ Package-level generic functions:
 | `MetricsExtension` | struct | Lifecycle counters for jobs, workflows and crons (`engine.Build` registers one) |
 | `NewMetricsExtension()` | func | Constructor with its own go-utils metrics collector |
 | `NewMetricsExtensionWithFactory(f)` | func | Constructor over a go-utils `MetricFactory` |
+
+## telemetry
+
+**Import:** `github.com/xraph/dispatch/telemetry`
+
+| Export | Type | Purpose |
+|--------|------|---------|
+| `Telemetry` | struct | The tracer provider and metric instruments the subsystems record through. A nil `*Telemetry` uses the global provider and records no metrics |
+| `New(opts...)` | func | Build one; `engine.Build` does this for you |
+| `WithMetrics(f)`, `WithTracerProvider(tp)`, `WithQueues(names...)` | func | Options: the metric factory, the tracer provider, and the queues allowed as a label value |
+| `Detach(ctx)` | func | Drop the span and baggage from a long-lived loop's context |
+| `Metric*` | const | The registered metric names, such as `MetricJobAttemptDuration` |
 
 ## id
 

@@ -12,7 +12,7 @@ Middleware wraps each job execution with cross-cutting logic. Each one is a `fun
 | Logging | `middleware.Logging(logger)` | Logs job start and completion |
 | Recover | `middleware.Recover(logger)` | Turns panics into errors and logs the stack |
 | Timeout | `middleware.Timeout(logger)` | Cancels the job context after `job.Timeout` |
-| Tracing | `middleware.Tracing()`, `middleware.TracingWithTracer(t)` | Wraps execution in an OpenTelemetry span |
+| Tracing | `middleware.Tracing()`, `middleware.TracingWithTracer(t)` | Wraps the rest of the chain in a `run job handler` span |
 | Metrics | `middleware.Metrics()`, `middleware.MetricsWithFactory(f)` | Records per-job duration and outcome |
 | Scope | `middleware.Scope()` | Restores the job's Forge app and org IDs into the context |
 
@@ -24,7 +24,7 @@ Middleware wraps each job execution with cross-cutting logic. Each one is a `fun
 Recover -> Tracing -> Metrics -> Logging -> Scope -> Timeout -> handler
 ```
 
-The tracing and metrics middleware use the tracer provider and metric factory you pass with `engine.WithTracerProvider` and `engine.WithMetricFactory`. You don't need to register any of them yourself, and adding them again runs them twice.
+The tracing and metrics middleware use the tracer provider and metric factory you pass with `engine.WithTracerProvider` and `engine.WithMetricFactory`. You don't need to register any of them yourself, and adding them again runs them twice. The worker pool wraps the whole attempt, terminal write included, in a `process job` span, and the tracing middleware's span sits under it. See [Observability](/docs/subsystems/observability).
 
 ## Adding your own
 

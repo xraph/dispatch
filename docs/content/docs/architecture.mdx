@@ -98,7 +98,8 @@ Extensions and middleware are independent composition axes:
 | `middleware` | `Middleware`, `Chain`, built-ins (Logging, Recover, Timeout, Tracing, Metrics, Scope) |
 | `ext` | Extension interface, lifecycle hook interfaces, `Registry` |
 | `backoff` | Retry backoff strategies |
-| `observability` | OpenTelemetry `MetricsExtension` for system-wide counters |
+| `observability` | The legacy `MetricsExtension` lifecycle counters |
+| `telemetry` | The spans and labelled metrics every subsystem records through (a leaf package) |
 | `id` | TypeID-based identifiers (`JobID`, `RunID`, `CronID`, `DLQID`, `WorkerID` and more) |
 | `api` | The REST admin API as Forge routes |
 | `scope` | Forge scope helpers: app and org ID capture from context |

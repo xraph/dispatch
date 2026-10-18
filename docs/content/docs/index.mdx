@@ -17,7 +17,7 @@ Dispatch is a library, not a service. You bring your own database, HTTP server a
 - Distributed workers: worker registration, heartbeats, leader election and reclaiming jobs from workers that stop heartbeating.
 - Middleware: a chain for logging, tracing, metrics, panic recovery, timeouts and Forge scope injection.
 - Extension hooks: opt-in lifecycle interfaces for job, workflow, cron and shutdown events.
-- OpenTelemetry: metrics and tracing through the `observability` and `middleware` packages.
+- OpenTelemetry: a span per job attempt, cron fire, durable task, outbox delivery and sweeper pass, and labelled metrics for each, through the `telemetry` package. See [Observability](/docs/subsystems/observability).
 - Relay integration: typed webhook events at every lifecycle point through `relay_hook`.
 - Pluggable storage: memory, PostgreSQL, SQLite and MongoDB through Grove, and Redis through Grove KV. Implement `store.Store` for anything else.
 
