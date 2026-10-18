@@ -156,3 +156,51 @@ func TestIdleCronTicksStartNoSpans(t *testing.T) {
 		t.Errorf("idle scheduler started %d spans", len(spans))
 	}
 }
+
+// lagCheckingEmitter records how many lag observations existed when the
+// fire hook ran.
+type lagCheckingEmitter struct {
+	f    *metricstest.Factory
+	seen chan uint64
+}
+
+func (e *lagCheckingEmitter) EmitCronFired(context.Context, string, id.JobID) {
+	n, _ := e.f.HistogramCount(telemetry.MetricCronFireLag)
+	select {
+	case e.seen <- n:
+	default:
+	}
+}
+
+func TestCronLagIsTakenAtTheEnqueueNotAfterTheHooks(t *testing.T) {
+	mem := memory.New()
+	f := metricstest.New()
+	ctx := context.Background()
+	workerID := id.NewWorkerID()
+	if err := mem.RegisterWorker(ctx, &cluster.Worker{ID: workerID, Hostname: "test", State: cluster.WorkerActive,
+		LastSeen: time.Now().UTC(), CreatedAt: time.Now().UTC()}); err != nil {
+		t.Fatal(err)
+	}
+	if ok, err := mem.AcquireLeadership(ctx, workerID, 30*time.Second); err != nil || !ok {
+		t.Fatalf("AcquireLeadership: %v %v", ok, err)
+	}
+	emitter := &lagCheckingEmitter{f: f, seen: make(chan uint64, 1)}
+	sched := cron.NewScheduler(mem, mem, (&spanEnqueuer{}).Fn(), emitter, workerID, nil,
+		cron.WithTickInterval(10*time.Millisecond),
+		cron.WithTelemetry(telemetry.New(telemetry.WithMetrics(f))),
+	)
+	t.Cleanup(func() { _ = sched.Stop(context.Background()) })
+	registerDueEntry(t, mem, "hourly", "rollup")
+
+	if err := sched.Start(ctx); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case n := <-emitter.seen:
+		if n != 1 {
+			t.Errorf("lag observations when the fire hook ran = %d, want 1", n)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the entry never fired")
+	}
+}

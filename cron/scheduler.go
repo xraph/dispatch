@@ -469,13 +469,10 @@ func (s *Scheduler) fire(entry *Entry, due, now time.Time) {
 	)
 	defer span.End()
 
-	result := s.fireEntry(ctx, entry.ID, now)
+	result := s.fireEntry(ctx, entry.ID, due, now)
 	span.SetAttributes(attribute.String("dispatch.cron.result", result))
 	if result == telemetry.CronError {
 		telemetry.Fail(span, "cron fire failed", "")
-	}
-	if result == telemetry.CronFired {
-		s.tel.Cron().Lag(time.Since(due))
 	}
 	s.tel.Cron().Fire(result)
 }
@@ -492,7 +489,11 @@ func (s *Scheduler) fire(entry *Entry, due, now time.Time) {
 // lands after the re-read still sees the fire it raced go out, but
 // nothing here can undo the disable: the post-fire writes are
 // UpdateCronLastRun and UpdateCronNextRun, and neither touches enabled.
-func (s *Scheduler) fireEntry(ctx context.Context, cronID id.CronID, now time.Time) string {
+//
+// due is when the cached entry said it was due, for the lag metric, which
+// is taken the moment the job is enqueued: the lock release, bookkeeping
+// writes and hooks that follow are not lag.
+func (s *Scheduler) fireEntry(ctx context.Context, cronID id.CronID, due, now time.Time) string {
 	// Acquire per-entry lock under a bounded subcontext.
 	acqCtx, acqCancel := s.callCtxFrom(ctx)
 	acquired, err := s.cronStore.AcquireCronLock(acqCtx, cronID, s.workerID, s.lockTTL)
@@ -540,6 +541,7 @@ func (s *Scheduler) fireEntry(ctx context.Context, cronID id.CronID, now time.Ti
 		s.releaseCronLock(ctx, cronID)
 		return telemetry.CronError
 	}
+	s.tel.Cron().Lag(time.Since(due))
 
 	// Record the fire with targeted writes only. A whole-row write here
 	// would put back whatever enabled was when the row was read.

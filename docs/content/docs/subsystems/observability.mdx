@@ -89,7 +89,7 @@ An attempt's duration runs from the start of the attempt to its terminal write. 
 | Metric | Type | Labels |
 |--------|------|--------|
 | `forge_dispatch_cron_fires_total` | counter | `result`: `fired`, `locked`, `skipped`, `error` |
-| `forge_dispatch_cron_fire_lag_seconds` | histogram | none (due time to enqueue) |
+| `forge_dispatch_cron_fire_lag_seconds` | histogram | none (from the entry's due time until its job is enqueued) |
 | `forge_dispatch_cron_leader` | gauge | none (1 while this scheduler leads) |
 | `forge_dispatch_workflow_run_duration_seconds` | histogram | `result`: `completed`, `failed` |
 | `forge_dispatch_workflow_step_duration_seconds` | histogram | `kind`: `step`, `parallel`, `fan_out`, `child`, `spawn`, `wait_event`, `wait_all`, `wait_any`, `wait_match`, `sleep`, `compensate`; `result`: `ok`, `error` |
