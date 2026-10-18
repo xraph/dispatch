@@ -66,8 +66,10 @@ func (w *Worker) processActivity(ctx context.Context, task durable.Task, payload
 		}
 		heartbeats := newHeartbeatSession(attemptCtx, w, task)
 		handoff := &handoffSession{worker: w, lease: lease, heartbeats: heartbeats, task: task, payload: payload, buildID: execution.BuildID, attempt: attempt.Attempt}
-		outcome, callErr := callActivity(heartbeats.ctx, handler, ActivityInfo{Key: task.Key, CommandID: command.ID, BuildID: execution.BuildID, Attempt: attempt.Attempt,
+		activityCtx, activitySpan := w.startActivity(heartbeats.ctx, command.Name)
+		outcome, callErr := callActivity(activityCtx, handler, ActivityInfo{Key: task.Key, CommandID: command.ID, BuildID: execution.BuildID, Attempt: attempt.Attempt,
 			deferCompletion: handoff.deferCompletion, heartbeat: heartbeats.record, heartbeatDetails: bytes.Clone(task.Progress)}, command.Input)
+		endActivity(activitySpan, outcome, callErr)
 		cancelAttempt()
 		heartbeats.close()
 		if heartbeats.detached {

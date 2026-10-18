@@ -26,7 +26,7 @@ func (w *Worker) processWorkflow(ctx context.Context, task durable.Task, lease *
 		if handler == nil {
 			return fmt.Errorf("%w: workflow %q", ErrHandlerNotFound, execution.WorkflowType)
 		}
-		decision, err := Evaluate(execution, events, handler)
+		decision, err := w.replay(ctx, execution, events, handler)
 		if err != nil {
 			return err
 		}

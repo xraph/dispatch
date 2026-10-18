@@ -113,14 +113,17 @@ func childDecisionWithFailures(queue string, original durable.CommitRequest, fai
 	return candidate, nil
 }
 
-func (w *Worker) runChildDelivery(ctx context.Context, operation *claimOperation) (bool, error) {
+func (w *Worker) runChildDelivery(ctx context.Context, operation *claimOperation) (_ bool, err error) {
 	delivery, err := storeCall(ctx, w, func(callCtx context.Context) (*durable.ChildDelivery, error) {
 		return w.store.ClaimChildDelivery(callCtx, durable.ChildDeliveryClaimRequest{Namespace: w.options.Namespace, BuildID: w.options.BuildID, Owner: w.options.Owner, LeaseDuration: w.options.LeaseDuration})
 	})
 	w.claimReturned(operation, err)
+	w.recordPoll(TaskChildDelivery, delivery != nil, err)
 	if err != nil || delivery == nil {
 		return false, err
 	}
+	ctx, finish := w.startTask(ctx, TaskChildDelivery, w.options.Queue, delivery.Attempt, attrDeliveryKind.String(string(delivery.Kind)))
+	defer func() { finish(err) }()
 	// Close/cancel claims follow the current child build. Their saved routing
 	// still identifies the original invocation, even after it continues.
 	toParent := delivery.Kind == durable.ChildDeliveryResult || delivery.Kind == durable.ChildDeliveryCancelAck
