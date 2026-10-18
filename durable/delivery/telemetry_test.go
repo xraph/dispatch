@@ -116,3 +116,53 @@ func (s *pollSignalStore) ClaimDeliveries(ctx context.Context, claim durable.Del
 	}
 	return s.OutboxStore.ClaimDeliveries(ctx, claim)
 }
+
+func TestStopDuringADeliveryIsRecordedAsCancelled(t *testing.T) {
+	sr := oteltest.Record(t)
+	s := fixture(t, 1)
+	f := metricstest.New()
+	entered := make(chan struct{})
+	var once atomic.Bool
+	sink := sinkFunc(func(ctx context.Context, d durable.Delivery) (durable.SinkReceipt, error) {
+		if once.CompareAndSwap(false, true) {
+			close(entered)
+		}
+		<-ctx.Done()
+		return durable.SinkReceipt{}, ctx.Err()
+	})
+	cfg := config("one")
+	cfg.Concurrency, cfg.CallTimeout, cfg.LeaseDuration = 1, 2*time.Second, 5*time.Second
+	p, err := delivery.New(s, cfg, map[durable.Destination]delivery.Sink{durable.DestinationChronicle: sink},
+		delivery.WithTelemetry(telemetry.New(telemetry.WithMetrics(f))))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = p.Start(); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the sink was never called")
+	}
+	// A deadline shorter than the sink call: Stop cancels the attempt.
+	stopCtx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	if err = p.Stop(stopCtx); !errors.Is(err, delivery.ErrIncompleteShutdown) {
+		t.Fatalf("Stop = %v, want an incomplete shutdown", err)
+	}
+
+	span := sr.WaitFor(t, "deliver outbox event", 1, 5*time.Second)[0]
+	if got, _ := oteltest.Attr(span, "dispatch.outbox.result"); got != telemetry.OutboxCancelled {
+		t.Errorf("result = %q, want cancelled", got)
+	}
+	if span.Status().Code != codes.Unset {
+		t.Errorf("status = %+v, want unset", span.Status())
+	}
+	if n, ok := f.HistogramCount(telemetry.MetricOutboxDeliveryDuration, "destination", "chronicle", "result", telemetry.OutboxCancelled); !ok || n != 1 {
+		t.Errorf("cancelled deliveries = %d, %v", n, ok)
+	}
+	if _, ok := f.HistogramCount(telemetry.MetricOutboxDeliveryDuration, "destination", "chronicle", "result", telemetry.OutboxAcknowledged); ok {
+		t.Error("a cancelled delivery was recorded as acknowledged")
+	}
+}

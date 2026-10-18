@@ -110,10 +110,13 @@ const (
 )
 
 // Outbox delivery results, the result label on
-// dispatch_outbox_delivery_duration_seconds. All but acknowledged are the
-// failure categories the publisher already persists on a retry.
+// dispatch_outbox_delivery_duration_seconds. Rejected through
+// invalid_receipt are the failure categories the publisher already persists
+// on a retry; cancelled means Stop interrupted the attempt, which leaves the
+// delivery to be claimed again.
 const (
 	OutboxAcknowledged   = "acknowledged"
+	OutboxCancelled      = "cancelled"
 	OutboxRejected       = "rejected"
 	OutboxTimeout        = "timeout"
 	OutboxConflict       = "conflict"
@@ -140,7 +143,7 @@ var (
 	taskKinds    = []string{"workflow", "activity", "timer", "timeout", "child_delivery", "execution_timeout"}
 	taskResults  = []string{DurableOK, DurableContention, DurableLeaseLost, DurableNoHandler, DurableCancelled, DurableError}
 	destinations = []string{"chronicle", "relay"}
-	outboxResult = []string{OutboxAcknowledged, OutboxRejected, OutboxTimeout, OutboxConflict, OutboxUnavailable, OutboxInvalidReceipt}
+	outboxResult = []string{OutboxAcknowledged, OutboxCancelled, OutboxRejected, OutboxTimeout, OutboxConflict, OutboxUnavailable, OutboxInvalidReceipt}
 	sweepReasons = []string{"retention", "orphan"}
 	purgeResults = []string{PurgeOK, PurgeSkipped}
 

@@ -263,10 +263,13 @@ func (p *Publisher) publish(ctx context.Context, d durable.Destination, sink Sin
 		),
 	)
 	started := time.Now()
-	result := telemetry.OutboxAcknowledged
+	// Every path that returns early does so because Stop cancelled ctx, so
+	// that is the starting result. The success path and the failure
+	// categories overwrite it.
+	result := telemetry.OutboxCancelled
 	defer func() {
 		span.SetAttributes(attribute.String("dispatch.outbox.result", result))
-		if result != telemetry.OutboxAcknowledged {
+		if result != telemetry.OutboxAcknowledged && result != telemetry.OutboxCancelled {
 			telemetry.Fail(span, "delivery "+result, "")
 		}
 		p.tel.Outbox().Delivery(string(d), result, time.Since(started))
@@ -307,6 +310,7 @@ func (p *Publisher) publish(ctx context.Context, d durable.Destination, sink Sin
 			ackErr := p.store.AcknowledgeDelivery(ackCtx, record.Token(), receipt)
 			ackCancel()
 			if ackErr == nil {
+				result = telemetry.OutboxAcknowledged
 				if !record.AcceptedAt.IsZero() {
 					p.tel.Outbox().Lag(string(d), time.Since(record.AcceptedAt))
 				}

@@ -101,7 +101,7 @@ An attempt's duration runs from the start of the attempt to its terminal write.
 | `forge_dispatch_durable_task_duration_seconds` | histogram | `kind`: `workflow`, `activity`, `timer`, `timeout`, `child_delivery`, `execution_timeout`; `result`: `ok`, `contention`, `lease_lost`, `no_handler`, `cancelled`, `error` |
 | `forge_dispatch_durable_polls_total` | counter | `kind` as above; `result`: `work`, `empty`, `error` |
 | `forge_dispatch_durable_replay_duration_seconds` | histogram | none |
-| `forge_dispatch_outbox_delivery_duration_seconds` | histogram | `destination`: `chronicle`, `relay`; `result`: `acknowledged`, `rejected`, `timeout`, `conflict`, `unavailable`, `invalid_receipt` |
+| `forge_dispatch_outbox_delivery_duration_seconds` | histogram | `destination`: `chronicle`, `relay`; `result`: `acknowledged`, `cancelled` (Stop interrupted it; the delivery is claimed again later), `rejected`, `timeout`, `conflict`, `unavailable`, `invalid_receipt` |
 | `forge_dispatch_outbox_delivery_lag_seconds` | histogram | `destination` (acceptance to acknowledgement) |
 | `forge_dispatch_artifacts_swept_total` | counter | `reason`: `retention`, `orphan` |
 | `forge_dispatch_artifacts_purged_total` | counter | `result`: `ok`, `skipped` |
