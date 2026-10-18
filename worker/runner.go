@@ -1153,8 +1153,16 @@ func (r *Runner) handleSuccess(ctx context.Context, j *job.Job, now time.Time, e
 }
 
 // storeFailed reports a terminal write that failed for a reason other than
-// a lost lease.
+// a lost lease. When the attempt's own context is done, the pool is
+// stopping (Pool.Stop cancels every in-flight attempt) and the write failed
+// because its context did, not because the store did: that is reported as
+// cancelled, with no error status, so a deploy does not look like a store
+// outage.
 func (r *Runner) storeFailed(ctx context.Context, span trace.Span, err error) {
+	if ctx.Err() != nil {
+		setOutcome(ctx, telemetry.OutcomeCancelled, nil)
+		return
+	}
 	setOutcome(ctx, telemetry.OutcomeStoreError, err)
 	telemetry.Fail(span, "store error", jobErrorType(err))
 }

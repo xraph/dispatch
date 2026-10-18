@@ -42,7 +42,8 @@ const (
 
 // Job attempt outcomes, the outcome label on
 // dispatch_job_attempt_duration_seconds and the dispatch.job.outcome span
-// attribute.
+// attribute. Cancelled covers an operator's cancel and a worker shutting
+// down mid-attempt; store_error means the store refused the terminal write.
 const (
 	OutcomeCompleted    = "completed"
 	OutcomeRetry        = "retry"

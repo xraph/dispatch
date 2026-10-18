@@ -381,3 +381,54 @@ func TestRequeueCountsItsReason(t *testing.T) {
 		t.Errorf("shutdown = %v, %v", v, ok)
 	}
 }
+
+// ctxHonouringStore fails writes whose context is done, as the SQL and
+// Mongo backends do.
+type ctxHonouringStore struct{ *memory.Store }
+
+func (s ctxHonouringStore) UpdateJob(ctx context.Context, j *job.Job) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	return s.Store.UpdateJob(ctx, j)
+}
+
+func TestShutdownDuringTheTerminalWriteIsCancelledNotStoreError(t *testing.T) {
+	sr := oteltest.Record(t)
+	mem := memory.New()
+	s := ctxHonouringStore{Store: mem}
+	f := metricstest.New()
+	tel := telemetry.New(telemetry.WithMetrics(f), telemetry.WithQueues("default"))
+	logger := log.NewNoopLogger()
+	reg := job.NewRegistry()
+	// The handler finishes after its attempt's context is cancelled, as an
+	// in-flight job does when Pool.Stop cancels it.
+	ctx, cancel := context.WithCancel(context.Background())
+	job.RegisterDefinition(reg, job.NewDefinition("slow", func(context.Context, struct{}) error {
+		cancel()
+		return nil
+	}))
+	runner := worker.NewExecutor(reg, ext.NewRegistry(logger), s, dlq.NewService(mem, mem),
+		backoff.NewConstant(time.Hour), logger).WithTelemetry(tel)
+	now := time.Now().UTC()
+	j := &job.Job{ID: id.NewJobID(), Name: "slow", Queue: "default", Payload: []byte(`{}`),
+		State: job.StateRunning, MaxRetries: 3, RunAt: now}
+
+	attemptCtx, attempt := tel.Tracer().Start(ctx, "process job")
+	if err := runner.Execute(attemptCtx, j); err == nil {
+		t.Fatal("the terminal write should have failed")
+	}
+	attempt.End()
+
+	if n, ok := f.HistogramCount(telemetry.MetricJobAttemptDuration, "queue", "default", "outcome", telemetry.OutcomeCancelled); !ok || n != 1 {
+		t.Errorf("cancelled attempts = %d, %v", n, ok)
+	}
+	if _, ok := f.HistogramCount(telemetry.MetricJobAttemptDuration, "queue", "default", "outcome", telemetry.OutcomeStoreError); ok {
+		t.Error("a shutdown was recorded as a store error")
+	}
+	for _, span := range oteltest.Named(sr.Ended(), "complete job") {
+		if span.Status().Code != codes.Unset {
+			t.Errorf("complete job status = %+v, want unset", span.Status())
+		}
+	}
+}

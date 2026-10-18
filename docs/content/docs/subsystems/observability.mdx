@@ -82,7 +82,7 @@ Names are as forge scrapes them. Every label takes only the values listed, so no
 | `forge_dispatch_jobs_reclaimed_total` | counter | none |
 | `forge_dispatch_jobs_active` | gauge | none (attempts running on this worker) |
 
-An attempt's duration runs from the start of the attempt to its terminal write.
+An attempt's duration runs from the start of the attempt to its terminal write. `cancelled` covers an operator cancelling a running job and a worker shutting down mid-attempt (Pool.Stop cancels the attempt, so its terminal write fails with its context); neither is an error. `store_error` means the store itself refused the write.
 
 ### Cron and checkpoint workflows
 
