@@ -14,14 +14,14 @@ require (
 	github.com/testcontainers/testcontainers-go/modules/redis v0.44.0
 	github.com/vmihailenco/msgpack/v5 v5.4.1
 	github.com/xraph/chronicle v1.9.0
-	github.com/xraph/forge v1.12.9
+	github.com/xraph/forge v1.12.10
 	github.com/xraph/forge/extensions/auth v1.12.9
-	github.com/xraph/grove v1.8.0
-	github.com/xraph/grove/drivers/mongodriver v1.8.0
-	github.com/xraph/grove/drivers/pgdriver v1.8.0
-	github.com/xraph/grove/drivers/sqlitedriver v1.8.0
-	github.com/xraph/grove/kv v1.8.0
-	github.com/xraph/grove/kv/drivers/redisdriver v1.8.0
+	github.com/xraph/grove v1.9.0
+	github.com/xraph/grove/drivers/mongodriver v1.9.0
+	github.com/xraph/grove/drivers/pgdriver v1.9.0
+	github.com/xraph/grove/drivers/sqlitedriver v1.9.0
+	github.com/xraph/grove/kv v1.9.0
+	github.com/xraph/grove/kv/drivers/redisdriver v1.9.0
 	github.com/xraph/relay v1.8.0
 	github.com/xraph/trove v1.7.0
 	github.com/xraph/vessel v1.0.4
