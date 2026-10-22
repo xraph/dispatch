@@ -3,6 +3,7 @@ package runtime_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"reflect"
 	"testing"
 	"time"
@@ -208,12 +209,24 @@ func TestWorkerExecutionTimeoutRejectsMalformedGrant(t *testing.T) {
 	}
 }
 func TestWorkerExecutionTimeoutPollerFailure(t *testing.T) {
-	failure := errors.New("timeout claim unavailable")
-	s := &timeoutClaimStore{Store: memory.New(), failure: failure}
+	// A claim the store doesn't answer is retried and reported, not fatal.
 	options := workerOptions(t)
-	ctx, cancel := context.WithTimeout(t.Context(), time.Second)
+	w := newWorker(t, &timeoutClaimStore{Store: memory.New(), failure: errors.New("timeout claim unavailable")}, options)
+	ctx, cancel := context.WithTimeout(t.Context(), 100*time.Millisecond)
 	defer cancel()
-	if err := newWorker(t, s, options).Run(ctx); !errors.Is(err, failure) {
+	if err := w.Run(ctx); err != nil {
+		t.Fatalf("unanswered timeout claims stopped Run: %v", err)
+	}
+	for _, claims := range w.Status().Claims {
+		if claims.Kind == drt.TaskExecutionTimeout && (claims.Failures == 0 || claims.FailingSince.IsZero()) {
+			t.Fatalf("timeout poller hid failure: %+v", claims)
+		}
+	}
+	// A claim the store refuses still stops the worker.
+	rejected := fmt.Errorf("timeout claim rejected: %w", durable.ErrInvalid)
+	ctx, cancel = context.WithTimeout(t.Context(), time.Second)
+	defer cancel()
+	if err := newWorker(t, &timeoutClaimStore{Store: memory.New(), failure: rejected}, options).Run(ctx); !errors.Is(err, rejected) {
 		t.Fatalf("timeout poller hid failure: %v", err)
 	}
 }

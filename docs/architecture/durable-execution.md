@@ -135,7 +135,8 @@ activity handlers must observe it. Arbitrary blocking Go code cannot be preempte
 Workers renew grants while processing. Result publication and the workflow wakeup
 share one transaction. Unknown commit outcomes retry the same request, and an
 explicit revision conflict reloads the latest history. Polls filter by pinned build
-inside the store. Engine health surfaces a failed durable worker. Polling is bounded
+inside the store. Engine health surfaces a failed durable worker, and a worker
+whose claims the store isn't answering. Polling is bounded
 and configurable; partition scheduling and long polling remain separate work.
 
 2026-10-08: evaluator tests cover saved activity results and typed failures,

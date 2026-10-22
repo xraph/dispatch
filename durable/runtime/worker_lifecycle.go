@@ -3,6 +3,7 @@ package runtime
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync"
 	"time"
 
@@ -25,6 +26,10 @@ var (
 	ErrWorkerDraining  = errors.New("durable runtime: worker claim admission closed")
 	ErrDrainIncomplete = errors.New("durable runtime: drain incomplete")
 	ErrDrainDeadline   = errors.New("durable runtime: first drain acceptance deadline passed")
+	// ErrClaimUnknown wraps a claim the store didn't answer, such as a
+	// timeout. The task may be leased to this worker; it returns to the
+	// queue when the lease expires. Run retries these claims with backoff.
+	ErrClaimUnknown = errors.New("durable runtime: claim outcome unknown")
 )
 
 // DrainRequest fixes the operation deadline independently of any observer.
@@ -41,10 +46,14 @@ type DrainHandle struct {
 }
 
 // ClaimStatus counts local calls, including claims awaiting a database response.
+// Failures counts this kind's consecutive ErrClaimUnknown claims since
+// FailingSince; both reset when one of its claims gets an answer.
 type ClaimStatus struct {
-	Kind       durable.TaskKind
-	Claiming   int64
-	Processing int64
+	Kind         durable.TaskKind
+	Claiming     int64
+	Processing   int64
+	Failures     int64
+	FailingSince time.Time
 }
 
 // WorkerStatus reports process facts. Zero local work does not prove a build
@@ -58,8 +67,13 @@ type WorkerStatus struct {
 	Claims                       []ClaimStatus
 	UnknownClaims                int64
 	Failure                      string
-	Drain                        *DrainHandle
-	ObservedAt                   time.Time
+	// ClaimFailures is the longest run of ErrClaimUnknown claims among the
+	// task kinds, and ClaimFailingSince when the oldest current run began.
+	// Claims has each kind's own run.
+	ClaimFailures     int64
+	ClaimFailingSince time.Time
+	Drain             *DrainHandle
+	ObservedAt        time.Time
 }
 
 // DrainResult separates the immutable operation outcome from current quiescence.
@@ -72,6 +86,11 @@ type DrainResult struct {
 	InFlight        int64
 	UnknownClaims   int64
 	ObservedAt      time.Time
+}
+
+type claimFailure struct {
+	count int64
+	since time.Time
 }
 
 type claimOperation struct {
@@ -100,12 +119,15 @@ type workerLifecycle struct {
 	unknown   int64
 	failure   string
 	drain     *drainOperation
+
+	// failing holds each kind whose last claim got no answer.
+	failing map[durable.TaskKind]claimFailure
 }
 
 var claimKinds = [...]durable.TaskKind{durable.TaskWorkflow, durable.TaskActivity, durable.TaskTimer, TaskTimeout, TaskChildDelivery, TaskExecutionTimeout}
 
 func newWorkerLifecycle() workerLifecycle {
-	return workerLifecycle{state: WorkerNotStarted, admission: make(chan struct{}), changed: make(chan struct{}), active: make(map[*claimOperation]struct{})}
+	return workerLifecycle{state: WorkerNotStarted, admission: make(chan struct{}), changed: make(chan struct{}), active: make(map[*claimOperation]struct{}), failing: make(map[durable.TaskKind]claimFailure)}
 }
 
 // Status returns a private snapshot and never calls storage or user code.
@@ -118,7 +140,14 @@ func (w *Worker) Status() WorkerStatus {
 		Ready: l.state == WorkerRunning && !l.closed, AdmissionClosed: l.closed, InFlight: int64(len(l.active)),
 		UnknownClaims: l.unknown, Failure: l.failure, ObservedAt: time.Now().UTC()}
 	for _, kind := range claimKinds {
-		entry := ClaimStatus{Kind: kind}
+		failure := l.failing[kind]
+		entry := ClaimStatus{Kind: kind, Failures: failure.count, FailingSince: failure.since}
+		if failure.count > 0 {
+			s.ClaimFailures = max(s.ClaimFailures, failure.count)
+			if s.ClaimFailingSince.IsZero() || failure.since.Before(s.ClaimFailingSince) {
+				s.ClaimFailingSince = failure.since
+			}
+		}
 		for op := range l.active {
 			if op.kind == kind {
 				if op.claiming {
@@ -342,7 +371,11 @@ func (w *Worker) enterClaim(ctx context.Context, kind durable.TaskKind) (context
 	l.active[op] = struct{}{}
 	return workCtx, op, nil
 }
-func (w *Worker) claimReturned(op *claimOperation, err error) {
+
+// claimReturned ends a claim's store call. A claim the store didn't answer
+// counts as unknown, so a drain can't report success, and comes back as
+// ErrClaimUnknown so Run retries it.
+func (w *Worker) claimReturned(ctx context.Context, op *claimOperation, err error) error {
 	l := &w.lifecycle
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -350,6 +383,36 @@ func (w *Worker) claimReturned(op *claimOperation, err error) {
 	if err != nil && !definitiveCommitError(err) {
 		l.unknown++
 	}
+	return l.answered(ctx, op.kind, err)
+}
+
+// readinessReturned classifies the compatibility read before a claim the
+// same way, but nothing was claimed, so it adds no unknown claim.
+func (w *Worker) readinessReturned(ctx context.Context, op *claimOperation, err error) error {
+	l := &w.lifecycle
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.answered(ctx, op.kind, err)
+}
+
+// answered tracks a run of store calls that got no answer for kind, and
+// wraps each in ErrClaimUnknown. A cancelled call is the worker stopping,
+// not the store failing, so it isn't counted. The caller holds mu.
+func (l *workerLifecycle) answered(ctx context.Context, kind durable.TaskKind, err error) error {
+	if err == nil || definitiveCommitError(err) {
+		delete(l.failing, kind)
+		return err
+	}
+	if ctx.Err() != nil {
+		return err
+	}
+	failure := l.failing[kind]
+	if failure.count == 0 {
+		failure.since = time.Now().UTC()
+	}
+	failure.count++
+	l.failing[kind] = failure
+	return fmt.Errorf("%w: %w", ErrClaimUnknown, err)
 }
 func (w *Worker) leaveClaim(op *claimOperation, err error, failed bool) {
 	op.cancel(nil)
@@ -369,8 +432,8 @@ func (w *Worker) leaveClaim(op *claimOperation, err error, failed bool) {
 	l.finishIdle()
 }
 
-func (w *Worker) pollWait(ctx context.Context) error {
-	timer := time.NewTimer(w.options.PollInterval)
+func (w *Worker) pollWait(ctx context.Context, d time.Duration) error {
+	timer := time.NewTimer(d)
 	defer timer.Stop()
 	select {
 	case <-ctx.Done():

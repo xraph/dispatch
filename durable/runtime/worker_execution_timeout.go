@@ -12,7 +12,7 @@ func (w *Worker) runExecutionTimeout(ctx context.Context, operation *claimOperat
 	grant, err := storeCall(ctx, w, func(callCtx context.Context) (*durable.ExecutionTimeoutTask, error) {
 		return w.store.ClaimExecutionTimeout(callCtx, durable.ExecutionTimeoutClaimRequest{Namespace: w.options.Namespace, Owner: w.options.Owner, LeaseDuration: w.options.LeaseDuration})
 	})
-	w.claimReturned(operation, err)
+	err = w.claimReturned(ctx, operation, err)
 	w.recordPoll(TaskExecutionTimeout, grant != nil, err)
 	if err != nil || grant == nil {
 		return false, err
