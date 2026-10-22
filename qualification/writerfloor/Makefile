@@ -1,5 +1,5 @@
 export GOWORK := off
-export GOTOOLCHAIN := go1.26.9
+export GOTOOLCHAIN := go1.26.10
 export GOMAXPROCS := 2
 export GOFLAGS := -p=1
 
