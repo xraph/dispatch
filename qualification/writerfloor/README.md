@@ -22,7 +22,7 @@ The current snapshot validates the complete finite delegation chain before mutat
 
 ## Checks
 
-Resolve the published module graph with `GOWORK=off GOTOOLCHAIN=go1.26.9 go mod tidy`. There are no replacements. The Ctrlplane pin includes the published protected marker and Docker custody implementation. The pin also includes guarded recovery and independently retained provision receipts. The assembled Linux campaign below exercises the complete guarded recovery path.
+Resolve the published module graph with `GOWORK=off GOTOOLCHAIN=go1.26.10 go mod tidy`. There are no replacements. The Ctrlplane pin includes the published protected marker and Docker custody implementation. The pin also includes guarded recovery and independently retained provision receipts. The assembled Linux campaign below exercises the complete guarded recovery path.
 
 Use a disposable PostgreSQL server, then run `make f`, `make l` and `WRITERFLOOR_TEST_DSN=... make check`. Tests create a fresh schema and clean it up. `WRITERFLOOR_REQUIRED=1` turns a missing server into a failure; the Makefile sets it for the test target.
 
@@ -73,7 +73,7 @@ separate rootful launcher. Never point these tests at a shared or production
 server. They create disposable databases, restart processes, remove their own
 containers and networks, restore backups and promote a physical replica.
 
-Build the service image from `cmd/managed-lifecycle-qualify` with Go 1.26.9,
+Build the service image from `cmd/managed-lifecycle-qualify` with Go 1.26.10,
 `GOWORK=off`, `GOOS=linux`, the VM's `GOARCH` and `CGO_ENABLED=0`. Install it as
 `/app/workload` in a scratch image running as UID 10001, then push to your isolated
 registry and select its exact repository digest. Workers use the configured

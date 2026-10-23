@@ -1,13 +1,13 @@
 # Dispatch host qualification
 
-Run the credential regression from the repository root with Go 1.26.9:
+Run the credential regression from the repository root with Go 1.26.10:
 
 ```sh
 make qualification-lint qualification-check
 ```
 
 This separate Go module consumes published Dispatch, Forge auth, Authsome and
-Warden versions. You can run `GOWORK=off GOTOOLCHAIN=go1.26.9 go test -race
+Warden versions. You can run `GOWORK=off GOTOOLCHAIN=go1.26.10 go test -race
 -count=1 ./...` from this directory. Keep local replacements out of `go.mod`;
 the CI job rejects them and checks the nested module independently.
 
@@ -44,7 +44,7 @@ go install golang.org/x/vuln/cmd/govulncheck@latest
 make qualification-process-check
 ```
 
-You need Docker and Go 1.26.9. The gate builds the actual `cmd/sinkhost` executable,
+You need Docker and Go 1.26.10. The gate builds the actual `cmd/sinkhost` executable,
 records its compiler/module metadata, scans the program and binary, and starts
 one private PostgreSQL 17 container capped at 512 MiB, one CPU and 128 PIDs.
 Chronicle, Relay, Dispatch and the webhook receiver run as separate native
@@ -119,7 +119,7 @@ Build and start it from this directory:
 
 ```sh
 operator_dir=$(mktemp -d)
-GOWORK=off GOTOOLCHAIN=go1.26.9 go build -o "$operator_dir/operatorhost" ./cmd/operatorhost
+GOWORK=off GOTOOLCHAIN=go1.26.10 go build -o "$operator_dir/operatorhost" ./cmd/operatorhost
 "$operator_dir/operatorhost" --state-file "$operator_dir/state.json" &
 operator_pid=$!
 ```
@@ -293,7 +293,7 @@ with a private state directory and delayed worker activation:
 
 ```sh
 operator_dir=$(mktemp -d)
-GOWORK=off GOTOOLCHAIN=go1.26.9 go build -o "$operator_dir/operatorhost" ./cmd/operatorhost
+GOWORK=off GOTOOLCHAIN=go1.26.10 go build -o "$operator_dir/operatorhost" ./cmd/operatorhost
 "$operator_dir/operatorhost" --state-file "$operator_dir/state.json" \
   --lifecycle-instance=deferral-demo --activation-file="$operator_dir/activate" &
 operator_pid=$!

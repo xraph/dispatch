@@ -117,7 +117,7 @@ func (w *Worker) runChildDelivery(ctx context.Context, operation *claimOperation
 	delivery, err := storeCall(ctx, w, func(callCtx context.Context) (*durable.ChildDelivery, error) {
 		return w.store.ClaimChildDelivery(callCtx, durable.ChildDeliveryClaimRequest{Namespace: w.options.Namespace, BuildID: w.options.BuildID, Owner: w.options.Owner, LeaseDuration: w.options.LeaseDuration})
 	})
-	w.claimReturned(operation, err)
+	err = w.claimReturned(ctx, operation, err)
 	w.recordPoll(TaskChildDelivery, delivery != nil, err)
 	if err != nil || delivery == nil {
 		return false, err

@@ -10,7 +10,7 @@ drain. These runs used real Docker processes and PostgreSQL persistence.
 - Isolated Ubuntu 24.04.5 ARM64 VM, Linux 6.8, four CPUs and 6 GiB RAM.
 - Rootless Docker provider, separate rootful launcher and private mTLS channels.
 - PostgreSQL 17.11, capped at 384 MiB and one CPU, with durable writes enabled.
-- Go 1.26.9 with workspace overrides disabled and no module replacements.
+- Go 1.26.10 with workspace overrides disabled and no module replacements.
 - Dispatch `de3621a604dd`, Ctrlplane `87291467f279`, and the published
   qualification module at `e43a3e4229e0`. Exact versions are retained in `go.mod`.
 - Test executable SHA256:

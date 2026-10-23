@@ -3,6 +3,7 @@ package engine_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"reflect"
 	"sync"
 	"sync/atomic"
@@ -374,7 +375,8 @@ func TestStopWorkersKeepsPublisherAndStoreLive(t *testing.T) {
 }
 
 func TestStopWorkersRetainsWorkerErrorAndFinalCleanup(t *testing.T) {
-	failure := errors.New("durable polling unavailable")
+	// Unanswered claims are retried; a refused one stops the worker.
+	failure := fmt.Errorf("durable polling rejected: %w", durable.ErrInvalid)
 	s := &strictLifecycleStore{base: memory.New(), claimError: failure}
 	d, err := dispatch.New(dispatch.WithStore(s), dispatch.WithConcurrency(1), dispatch.WithPollInterval(time.Millisecond))
 	if err != nil {

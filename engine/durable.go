@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+	"time"
 
 	log "github.com/xraph/go-utils/log"
 
@@ -198,6 +199,21 @@ func (eng *Engine) stopDurable(ctx context.Context) error {
 	case <-ctx.Done():
 		return ctx.Err()
 	}
+}
+
+// durableClaimError reports claims the store hasn't been answering. The
+// worker keeps retrying them; this makes the outage visible meanwhile.
+func (eng *Engine) durableClaimError() error {
+	worker := eng.DurableWorker()
+	if worker == nil {
+		return nil
+	}
+	status := worker.Status()
+	if status.ClaimFailures == 0 {
+		return nil
+	}
+	return fmt.Errorf("%w: %d consecutive claims failed since %s", drt.ErrClaimUnknown,
+		status.ClaimFailures, status.ClaimFailingSince.Format(time.RFC3339))
 }
 
 func (eng *Engine) durableError() error {

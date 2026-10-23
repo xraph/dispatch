@@ -744,8 +744,13 @@ func (eng *Engine) EnqueueRaw(ctx context.Context, name string, payload []byte, 
 }
 
 // Health checks the health of the engine by pinging the dispatcher's store.
+// It also fails while the durable worker has stopped or its claims go
+// unanswered, since durable work isn't being picked up then.
 func (eng *Engine) Health(ctx context.Context) error {
 	if err := eng.durableError(); err != nil {
+		return fmt.Errorf("durable workflow worker: %w", err)
+	}
+	if err := eng.durableClaimError(); err != nil {
 		return fmt.Errorf("durable workflow worker: %w", err)
 	}
 	return eng.d.Store().Ping(ctx)

@@ -8,7 +8,7 @@ cleanup() {
   rm -rf "$operator_dir"
 }
 trap cleanup EXIT
-export GOWORK=off GOTOOLCHAIN=go1.26.9
+export GOWORK=off GOTOOLCHAIN=go1.26.10
 cd "$operator_root"
 
 # Metadata survives private binary and credential cleanup, including failed runs.

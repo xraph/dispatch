@@ -33,7 +33,7 @@ def main():
     output = args.output.absolute()
     output.mkdir(mode=0o700)
     module = Path(__file__).resolve().parents[1]
-    env = dict(os.environ, GOWORK="off", GOTOOLCHAIN="go1.26.9", GOOS="linux",
+    env = dict(os.environ, GOWORK="off", GOTOOLCHAIN="go1.26.10", GOOS="linux",
                GOARCH=args.arch, CGO_ENABLED="1" if args.race else "0",
                GOMAXPROCS="2", GOFLAGS="-p=1")
     binary = output / "managedhost.test"
