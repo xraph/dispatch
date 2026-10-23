@@ -358,6 +358,6 @@ The `integration` tests start containers and fail without Docker, and CI never r
 
 ## License
 
-See the [Dispatch repository](https://github.com/xraph/dispatch) for license terms.
+MIT. See [LICENSE](LICENSE).
 
 Built by [Rex Raphael](https://github.com/juicycleff) and [contributors](https://github.com/xraph/dispatch/graphs/contributors), as part of the [Forge](https://github.com/xraph/forge) forgery stack.
