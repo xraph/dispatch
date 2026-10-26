@@ -15,6 +15,28 @@ namespace-wide execution timeouts. `Claims` separates calls waiting on a claim
 response from calls processing their returned work. These counters belong to one
 Worker; they are not persisted build-retirement facts.
 
+## Claims the store doesn't answer
+
+A claim can end without an answer: the store times out, the connection drops, or
+the reply is lost after the grant committed. `Run` keeps polling through these.
+Each poller backs off with full jitter, from `PollInterval` up to five seconds,
+and starts over once a claim gets an answer. The compatibility read that gates
+claims under retirement options works the same way. You'll see the error wrapped
+in `ErrClaimUnknown` from `RunOnce`.
+
+Nothing was processed, so retrying can't run a task twice. A grant that committed
+while its reply was lost keeps its lease, and the next claim after expiry takes a
+new epoch, the same recovery a replacement worker relies on. The lost claim still
+counts in `UnknownClaims`, so a drain can't report success.
+
+While a kind's claims keep failing, its `ClaimStatus` carries `Failures` and
+`FailingSince`. `WorkerStatus.ClaimFailures` is the longest run among the kinds,
+and `Engine.Health` fails for as long as one lasts. An error the store can't
+classify, such as a missing table, is retried like a timeout, so watch health
+for it. A claim the store refuses with a definitive error, such as `ErrInvalid` or
+`ErrWriterCompatibility`, still stops `Run` unless it's ordinary lease contention.
+So does any error while processing a claimed task.
+
 ## Begin and observe a drain
 
 You supply a stable operation ID and explicit deadline:

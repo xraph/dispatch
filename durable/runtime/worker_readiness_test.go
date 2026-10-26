@@ -201,3 +201,35 @@ func TestRetirementReadinessBoundsStorageObservation(t *testing.T) {
 		t.Fatalf("bounded readiness: %+v %v", r, err)
 	}
 }
+
+// Unavailable compatibility is retried like an unanswered claim, while an
+// incompatible deployment still stops the worker before any claim.
+func TestRetirementRunRetriesUnavailableReadiness(t *testing.T) {
+	s, _, options := readinessFixture(t)
+	s.failure = context.DeadlineExceeded
+	options.PollInterval = time.Millisecond
+	w, err := drt.NewWorker(s, options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- w.Run(ctx) }()
+	for s.inspections.Load() < 3 || w.Status().ClaimFailures == 0 {
+		select {
+		case err = <-done:
+			t.Fatalf("Run stopped on unavailable readiness: %v", err)
+		case <-ctx.Done():
+			t.Fatal("readiness was not retried")
+		case <-time.After(time.Millisecond):
+		}
+	}
+	if status := w.Status(); status.State != drt.WorkerRunning || status.UnknownClaims != 0 || s.claims.Load() != 0 {
+		t.Fatalf("status while readiness is unavailable: %+v", status)
+	}
+	cancel()
+	if err = <-done; err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+}

@@ -255,14 +255,14 @@ i: install
 # overrides disabled so these checks exercise the pinned host composition.
 .PHONY: qualification-check qualification-lint
 qualification-lint:
-	cd qualification && GOWORK=off GOTOOLCHAIN=go1.26.9 golangci-lint run --allow-serial-runners --max-same-issues=0 --max-issues-per-linter=0 ./...
+	cd qualification && GOWORK=off GOTOOLCHAIN=go1.26.10 golangci-lint run --allow-serial-runners --max-same-issues=0 --max-issues-per-linter=0 ./...
 
 qualification-check:
-	cd qualification && GOWORK=off GOTOOLCHAIN=go1.26.9 go mod tidy -diff
-	cd qualification && GOWORK=off GOTOOLCHAIN=go1.26.9 go mod verify
-	cd qualification && GOWORK=off GOTOOLCHAIN=go1.26.9 go vet ./...
-	cd qualification && GOWORK=off GOTOOLCHAIN=go1.26.9 go test -race -count=1 ./...
-	cd qualification && GOWORK=off GOTOOLCHAIN=go1.26.9 go build ./...
+	cd qualification && GOWORK=off GOTOOLCHAIN=go1.26.10 go mod tidy -diff
+	cd qualification && GOWORK=off GOTOOLCHAIN=go1.26.10 go mod verify
+	cd qualification && GOWORK=off GOTOOLCHAIN=go1.26.10 go vet ./...
+	cd qualification && GOWORK=off GOTOOLCHAIN=go1.26.10 go test -race -count=1 ./...
+	cd qualification && GOWORK=off GOTOOLCHAIN=go1.26.10 go build ./...
 
 .PHONY: qualification-process-check
 qualification-process-check:
@@ -277,10 +277,10 @@ qualification-queryguard-check:
 	@test -n "$$DISPATCH_LIFECYCLE_TEST_DSN" || { echo "DISPATCH_LIFECYCLE_TEST_DSN is required"; exit 1; }
 	@set -eu; scratch=$$(mktemp -d "$${TMPDIR:-/tmp}/dispatch-queryguard.XXXXXX"); \
 	trap 'rm -rf "$$scratch"' EXIT; \
-	(cd qualification/oldwriter && GOWORK=off GOTOOLCHAIN=go1.26.9 go build -p=1 -o "$$scratch/oldwriter" .); \
-	(cd qualification/protocolone && GOWORK=off GOTOOLCHAIN=go1.26.9 go build -p=1 -o "$$scratch/protocolone" .); \
-	(cd qualification/querypreguard && GOWORK=off GOTOOLCHAIN=go1.26.9 go build -p=1 -o "$$scratch/querypreguard" .); \
-	GOWORK=off GOTOOLCHAIN=go1.26.9 DISPATCH_LIFECYCLE_REQUIRED=1 DISPATCH_QUERY_REQUIRED=1 \
+	(cd qualification/oldwriter && GOWORK=off GOTOOLCHAIN=go1.26.10 go build -p=1 -o "$$scratch/oldwriter" .); \
+	(cd qualification/protocolone && GOWORK=off GOTOOLCHAIN=go1.26.10 go build -p=1 -o "$$scratch/protocolone" .); \
+	(cd qualification/querypreguard && GOWORK=off GOTOOLCHAIN=go1.26.10 go build -p=1 -o "$$scratch/querypreguard" .); \
+	GOWORK=off GOTOOLCHAIN=go1.26.10 DISPATCH_LIFECYCLE_REQUIRED=1 DISPATCH_QUERY_REQUIRED=1 \
 	DISPATCH_OLDWRITER_BINARY="$$scratch/oldwriter" DISPATCH_PROTOCOL_ONE_BINARY="$$scratch/protocolone" \
 	DISPATCH_QUERYPREGUARD_BINARY="$$scratch/querypreguard" \
 	go test -p=1 -race -count=1 ./store/postgres -run 'TestQueryRemovalGuard|TestRetirementNativeOldWriter|TestQueryNativeProtocolOne'

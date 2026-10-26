@@ -11,6 +11,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/xraph/dispatch/backoff"
 	"github.com/xraph/dispatch/durable"
 	"github.com/xraph/dispatch/telemetry"
 )
@@ -150,6 +151,9 @@ func (w *Worker) StartExecution(ctx context.Context, request durable.StartReques
 
 // Run polls each task kind until cancellation or the first processing error.
 // Processing errors are returned to the supervisor, never silently discarded.
+// A claim the store doesn't answer (ErrClaimUnknown) is retried with backoff
+// and reported through Status, since nothing was processed and a task it may
+// have taken returns to the queue when its lease expires.
 // Cancellation leaves unfinished tasks for replacement workers after expiry.
 func (w *Worker) Run(ctx context.Context) (result error) {
 	// Run polls for as long as ctx lives. Whatever span ctx carries (a Forge
@@ -170,11 +174,20 @@ func (w *Worker) Run(ctx context.Context) (result error) {
 	for _, kind := range claimKinds {
 		for range w.options.Concurrency {
 			group.Go(func() {
+				retries := 0
 				for workCtx.Err() == nil {
 					worked, err := w.runOnce(workCtx, kind, true)
 					if errors.Is(err, ErrWorkerDraining) || errors.Is(err, ErrDrainIncomplete) {
 						return
 					}
+					if errors.Is(err, ErrClaimUnknown) {
+						retries = min(retries+1, maxClaimRetries)
+						if w.pollWait(workCtx, w.claimRetryDelay(retries)) != nil {
+							return
+						}
+						continue
+					}
+					retries = 0
 					if err != nil && !normalContention(err) {
 						if workCtx.Err() == nil {
 							select {
@@ -186,7 +199,7 @@ func (w *Worker) Run(ctx context.Context) (result error) {
 						}
 						return
 					}
-					if !worked && w.pollWait(workCtx) != nil {
+					if !worked && w.pollWait(workCtx, w.options.PollInterval) != nil {
 						return
 					}
 				}
@@ -216,11 +229,11 @@ func (w *Worker) runOnce(ctx context.Context, kind durable.TaskKind, runOwned bo
 	defer func() {
 		// Publish a supervisor-owned failure before dropping the final work
 		// registration. A drain may be accepted before Run sees this return value.
-		failed := runOwned && err != nil && ctx.Err() == nil && !normalContention(err)
+		failed := runOwned && err != nil && ctx.Err() == nil && !normalContention(err) && !errors.Is(err, ErrClaimUnknown)
 		w.leaveClaim(operation, err, failed)
 	}()
 	if compatibilityErr := w.checkRetirement(ctx); compatibilityErr != nil {
-		return false, compatibilityErr
+		return false, w.readinessReturned(ctx, operation, compatibilityErr)
 	}
 
 	if kind == TaskExecutionTimeout {
@@ -237,7 +250,7 @@ func (w *Worker) runOnce(ctx context.Context, kind durable.TaskKind, runOwned bo
 			Queue: w.options.Queue, BuildID: w.options.BuildID, Kind: kind, Owner: w.options.Owner,
 			LeaseDuration: w.options.LeaseDuration})
 	})
-	w.claimReturned(operation, err)
+	err = w.claimReturned(ctx, operation, err)
 	w.recordPoll(kind, task != nil, err)
 	if err != nil || task == nil {
 		return false, err
@@ -255,6 +268,20 @@ func (w *Worker) runOnce(ctx context.Context, kind durable.TaskKind, runOwned bo
 		return true, context.Cause(lease.ctx)
 	}
 	return true, err
+}
+
+const (
+	// maxClaimRetryDelay bounds how long a poller backs off while the store
+	// doesn't answer claims, so work resumes soon after the store recovers.
+	maxClaimRetryDelay = 5 * time.Second
+	maxClaimRetries    = 32
+)
+
+// claimRetryDelay spreads retries with full jitter, so every poller of a
+// worker, and every worker on the store, doesn't retry at once.
+func (w *Worker) claimRetryDelay(attempt int) time.Duration {
+	limit := max(w.options.PollInterval, maxClaimRetryDelay)
+	return max(w.options.PollInterval, backoff.NewExponentialWithJitter(w.options.PollInterval, limit).Delay(attempt))
 }
 
 func storeCall[T any](ctx context.Context, w *Worker, call func(context.Context) (T, error)) (T, error) {
