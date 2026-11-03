@@ -25,6 +25,8 @@ jobs:
     with:
       go-versions: '["1.26.10"]'
       os: '["ubuntu-latest"]'
+    secrets:
+      CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
 
   qualification:
     name: Published host qualification
