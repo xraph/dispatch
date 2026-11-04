@@ -118,9 +118,9 @@ require (
 	github.com/xdg-go/scram v1.2.0 // indirect
 	github.com/xdg-go/stringprep v1.0.4 // indirect
 	github.com/xlab/treeprint v1.2.0 // indirect
-	github.com/xraph/chronicle v1.8.0 // indirect
+	github.com/xraph/chronicle v1.11.0 // indirect
 	github.com/xraph/confy v1.0.3 // indirect
-	github.com/xraph/go-utils v1.3.0 // indirect
+	github.com/xraph/go-utils v1.5.0 // indirect
 	github.com/xraph/grove/drivers/mongodriver v1.7.3 // indirect
 	github.com/xraph/grove/drivers/sqlitedriver v1.7.3 // indirect
 	github.com/xraph/keysmith v1.7.0 // indirect
@@ -139,7 +139,7 @@ require (
 	go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracehttp v1.46.0 // indirect
 	go.opentelemetry.io/otel/log v1.47.0 // indirect
 	go.opentelemetry.io/otel/metric v1.47.0 // indirect
-	go.opentelemetry.io/otel/sdk v1.46.0 // indirect
+	go.opentelemetry.io/otel/sdk v1.47.0 // indirect
 	go.opentelemetry.io/otel/trace v1.47.0 // indirect
 	go.opentelemetry.io/proto/otlp v1.11.0 // indirect
 	go.uber.org/atomic v1.11.0 // indirect

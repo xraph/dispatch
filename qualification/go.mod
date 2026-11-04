@@ -7,15 +7,16 @@ toolchain go1.26.10
 require (
 	github.com/gobwas/ws v1.4.0
 	github.com/golang-jwt/jwt/v5 v5.3.1
-	github.com/jackc/pgx/v5 v5.11.0
+	github.com/jackc/pgx/v5 v5.12.0
 	github.com/xraph/authsome v1.7.3-0.20261009205819-7b694db1b80a
-	github.com/xraph/chronicle v1.8.0
+	github.com/xraph/chronicle v1.11.0
+	github.com/xraph/chronicle/store/postgres v1.11.0
 	github.com/xraph/dispatch v1.8.1-0.20261013152932-9cc8451d1cb1
 	github.com/xraph/forge v1.12.7
 	github.com/xraph/forge/extensions/auth v1.12.7
-	github.com/xraph/go-utils v1.3.0
-	github.com/xraph/grove v1.7.3
-	github.com/xraph/grove/drivers/pgdriver v1.7.3
+	github.com/xraph/go-utils v1.5.0
+	github.com/xraph/grove v1.10.2
+	github.com/xraph/grove/drivers/pgdriver v1.10.2
 	github.com/xraph/relay v1.7.2
 	github.com/xraph/warden v1.7.1
 )
@@ -73,7 +74,7 @@ require (
 	github.com/hashicorp/serf v0.10.4 // indirect
 	github.com/jackc/pgpassfile v1.0.0 // indirect
 	github.com/jackc/pgservicefile v0.0.0-20240606120523-5a60cdf6a761 // indirect
-	github.com/jackc/puddle/v2 v2.2.2 // indirect
+	github.com/jackc/puddle/v2 v2.2.3 // indirect
 	github.com/json-iterator/go v1.1.12 // indirect
 	github.com/klauspost/compress v1.19.2 // indirect
 	github.com/klauspost/cpuid/v2 v2.4.0 // indirect
@@ -123,7 +124,7 @@ require (
 	go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracehttp v1.46.0 // indirect
 	go.opentelemetry.io/otel/log v1.47.0 // indirect
 	go.opentelemetry.io/otel/metric v1.47.0 // indirect
-	go.opentelemetry.io/otel/sdk v1.46.0 // indirect
+	go.opentelemetry.io/otel/sdk v1.47.0 // indirect
 	go.opentelemetry.io/otel/trace v1.47.0 // indirect
 	go.opentelemetry.io/proto/otlp v1.11.0 // indirect
 	go.uber.org/atomic v1.11.0 // indirect
