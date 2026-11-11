@@ -8,7 +8,7 @@ cleanup() {
   rm -rf "$process_dir"
 }
 trap cleanup EXIT
-export GOWORK=off GOTOOLCHAIN=go1.26.10
+export GOWORK=off GOTOOLCHAIN=go1.26.11
 cd "$root"
 
 # Metadata survives private binary and credential cleanup, including failed runs.

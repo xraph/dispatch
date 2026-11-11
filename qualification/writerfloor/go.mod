@@ -4,18 +4,18 @@ go 1.26.9
 
 require (
 	github.com/containerd/errdefs v1.0.0
-	github.com/jackc/pgx/v5 v5.11.0
+	github.com/jackc/pgx/v5 v5.12.0
 	github.com/moby/moby/api v1.56.1
 	github.com/moby/moby/client v0.6.2
-	github.com/xraph/authsome v1.7.3-0.20261009205819-7b694db1b80a
-	github.com/xraph/ctrlplane v1.7.1-0.20261014163146-87291467f279
-	github.com/xraph/dispatch v1.8.1-0.20261014161829-de3621a604dd
+	github.com/xraph/authsome v1.9.3
+	github.com/xraph/ctrlplane v1.8.1
+	github.com/xraph/dispatch v1.9.4
 	github.com/xraph/dispatch/qualification v0.0.0-20261014165349-e43a3e4229e0
-	github.com/xraph/forge v1.12.7
-	github.com/xraph/forge/extensions/auth v1.12.7
-	github.com/xraph/grove v1.7.3
-	github.com/xraph/grove/drivers/pgdriver v1.7.3
-	github.com/xraph/warden v1.7.1
+	github.com/xraph/forge v1.13.6
+	github.com/xraph/forge/extensions/auth v1.13.6
+	github.com/xraph/grove v1.10.2
+	github.com/xraph/grove/drivers/pgdriver v1.10.2
+	github.com/xraph/warden v1.8.2
 	golang.org/x/mod v0.41.0
 )
 
@@ -40,7 +40,7 @@ require (
 	github.com/felixge/httpsnoop v1.1.0 // indirect
 	github.com/fsnotify/fsnotify v1.10.1 // indirect
 	github.com/fxamacker/cbor/v2 v2.9.2 // indirect
-	github.com/gabriel-vasile/mimetype v1.4.15 // indirect
+	github.com/gabriel-vasile/mimetype v1.4.16 // indirect
 	github.com/go-errors/errors v1.4.2 // indirect
 	github.com/go-logr/logr v1.4.4 // indirect
 	github.com/go-logr/stdr v1.2.2 // indirect
@@ -69,6 +69,8 @@ require (
 	github.com/golang-jwt/jwt/v5 v5.3.1 // indirect
 	github.com/google/gnostic-models v0.7.1 // indirect
 	github.com/google/uuid v1.6.0 // indirect
+	github.com/grafana/pyroscope-go v1.4.3 // indirect
+	github.com/grafana/pyroscope-go/godeltaprof v0.1.11 // indirect
 	github.com/grpc-ecosystem/grpc-gateway/v2 v2.30.0 // indirect
 	github.com/hashicorp/consul/api v1.34.4 // indirect
 	github.com/hashicorp/errwrap v1.1.0 // indirect
@@ -82,9 +84,9 @@ require (
 	github.com/hashicorp/serf v0.10.4 // indirect
 	github.com/jackc/pgpassfile v1.0.0 // indirect
 	github.com/jackc/pgservicefile v0.0.0-20240606120523-5a60cdf6a761 // indirect
-	github.com/jackc/puddle/v2 v2.2.2 // indirect
+	github.com/jackc/puddle/v2 v2.2.3 // indirect
 	github.com/json-iterator/go v1.1.12 // indirect
-	github.com/klauspost/compress v1.19.2 // indirect
+	github.com/klauspost/compress v1.20.2 // indirect
 	github.com/klauspost/cpuid/v2 v2.4.0 // indirect
 	github.com/leodido/go-urn v1.5.0 // indirect
 	github.com/mattn/go-colorable v0.1.15 // indirect
@@ -119,14 +121,14 @@ require (
 	github.com/xdg-go/stringprep v1.0.4 // indirect
 	github.com/xlab/treeprint v1.2.0 // indirect
 	github.com/xraph/chronicle v1.11.0 // indirect
-	github.com/xraph/confy v1.0.3 // indirect
+	github.com/xraph/confy v1.1.0 // indirect
 	github.com/xraph/go-utils v1.5.0 // indirect
-	github.com/xraph/grove/drivers/mongodriver v1.7.3 // indirect
-	github.com/xraph/grove/drivers/sqlitedriver v1.7.3 // indirect
-	github.com/xraph/keysmith v1.7.0 // indirect
-	github.com/xraph/ledger v1.7.0 // indirect
-	github.com/xraph/relay v1.7.2 // indirect
-	github.com/xraph/vessel v1.0.4 // indirect
+	github.com/xraph/grove/drivers/mongodriver v1.10.2 // indirect
+	github.com/xraph/grove/drivers/sqlitedriver v1.10.2 // indirect
+	github.com/xraph/keysmith v1.9.1 // indirect
+	github.com/xraph/ledger v1.9.2 // indirect
+	github.com/xraph/relay v1.8.2 // indirect
+	github.com/xraph/vessel v1.0.5 // indirect
 	github.com/youmark/pkcs8 v0.0.0-20240726163527-a2c0da244d78 // indirect
 	github.com/zeebo/blake3 v0.2.4 // indirect
 	go.jetify.com/typeid/v2 v2.0.0-alpha.3 // indirect
@@ -134,12 +136,15 @@ require (
 	go.opentelemetry.io/auto/sdk v1.2.1 // indirect
 	go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp v0.70.0 // indirect
 	go.opentelemetry.io/otel v1.47.0 // indirect
-	go.opentelemetry.io/otel/exporters/jaeger v1.17.0 // indirect
+	go.opentelemetry.io/otel/exporters/otlp/otlplog/otlploghttp v0.21.0 // indirect
+	go.opentelemetry.io/otel/exporters/otlp/otlpmetric/otlpmetrichttp v1.45.0 // indirect
 	go.opentelemetry.io/otel/exporters/otlp/otlptrace v1.46.0 // indirect
 	go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracehttp v1.46.0 // indirect
 	go.opentelemetry.io/otel/log v1.47.0 // indirect
 	go.opentelemetry.io/otel/metric v1.47.0 // indirect
 	go.opentelemetry.io/otel/sdk v1.47.0 // indirect
+	go.opentelemetry.io/otel/sdk/log v0.21.0 // indirect
+	go.opentelemetry.io/otel/sdk/metric v1.47.0 // indirect
 	go.opentelemetry.io/otel/trace v1.47.0 // indirect
 	go.opentelemetry.io/proto/otlp v1.11.0 // indirect
 	go.uber.org/atomic v1.11.0 // indirect
