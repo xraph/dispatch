@@ -837,7 +837,15 @@ func (p *Pool) runJob(a admitted) {
 	// token, and the resource lease — comes back through this one defer,
 	// so a handler that panics past a pool with no Recover middleware
 	// cannot leave capacity spoken for by a job that is no longer running.
-	defer p.finishJob(a)
+	var span trace.Span
+	defer func() {
+		// Export the attempt only after its active count and capacity are released.
+		// Keep span.End deferred so cleanup panics still close the span.
+		if span != nil {
+			defer span.End()
+		}
+		p.finishJob(a)
+	}()
 
 	j := a.job
 
@@ -847,7 +855,6 @@ func (p *Pool) runJob(a admitted) {
 	// p.cancelCtx descends from context.Background, so nothing inherited
 	// can parent it.
 	spanCtx, span := p.startAttemptSpan(j)
-	defer span.End()
 
 	if !j.RunAt.IsZero() {
 		p.tel.Jobs().QueueWait(p.tel.QueueLabel(j.Queue), time.Since(j.RunAt))

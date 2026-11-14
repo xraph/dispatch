@@ -3,12 +3,14 @@ package worker_test
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"sync"
 	"testing"
 	"time"
 
 	log "github.com/xraph/go-utils/log"
+	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/codes"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/trace"
@@ -430,5 +432,55 @@ func TestShutdownDuringTheTerminalWriteIsCancelledNotStoreError(t *testing.T) {
 		if span.Status().Code != codes.Unset {
 			t.Errorf("complete job status = %+v, want unset", span.Status())
 		}
+	}
+}
+
+// attemptEndProbe observes metrics synchronously when the span is exported.
+// Waiting in the test goroutine alone can hide an incorrect cleanup order.
+type attemptEndProbe struct {
+	metrics *metricstest.Factory
+	active  chan float64
+}
+
+func (*attemptEndProbe) OnStart(context.Context, sdktrace.ReadWriteSpan) {}
+func (p *attemptEndProbe) OnEnd(span sdktrace.ReadOnlySpan) {
+	if span.Name() == "process job" {
+		v, _ := p.metrics.GaugeValue(telemetry.MetricJobsActive)
+		p.active <- v
+	}
+}
+func (*attemptEndProbe) Shutdown(context.Context) error   { return nil }
+func (*attemptEndProbe) ForceFlush(context.Context) error { return nil }
+
+func TestAttemptSpanEndsAfterActiveJobCleanup(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		handler func(context.Context, struct{}) error
+	}{
+		{"completed", func(context.Context, struct{}) error { return nil }},
+		{"retry", func(context.Context, struct{}) error { return errors.New("retry") }},
+		{"dead letter", func(context.Context, struct{}) error { return dispatch.ErrPermanent }},
+		{"recovered panic", func(context.Context, struct{}) error { panic("handler panic") }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			oteltest.Record(t)
+			mem := memory.New()
+			tp := newTelemetryPool(t, mem, mem)
+			probe := &attemptEndProbe{metrics: tp.metrics, active: make(chan float64, 1)}
+			otel.GetTracerProvider().(*sdktrace.TracerProvider).RegisterSpanProcessor(probe)
+			job.RegisterDefinition(tp.reg, job.NewDefinition("attempt", tc.handler))
+			tp.enqueue(t, "attempt", struct{}{})
+			if err := tp.pool.Start(t.Context()); err != nil {
+				t.Fatal(err)
+			}
+			select {
+			case active := <-probe.active:
+				if active != 0 {
+					t.Fatalf("active jobs at span end = %v, want 0", active)
+				}
+			case <-time.After(waitSpan):
+				t.Fatal("attempt span did not end")
+			}
+		})
 	}
 }
