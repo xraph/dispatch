@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"os"
 	"os/exec"
@@ -16,6 +17,7 @@ import (
 
 	"github.com/xraph/dispatch/durable"
 	"github.com/xraph/dispatch/durable/delivery"
+	"github.com/xraph/dispatch/id"
 	"github.com/xraph/dispatch/qualification/internal/sinkhost"
 	pgstore "github.com/xraph/dispatch/store/postgres"
 )
@@ -35,13 +37,25 @@ func TestNativeAuditCleanupAfterRestartFailure(t *testing.T) {
 			t.Fatal(err)
 		}
 		tracked := &auditTrackingStore{Store: pgstore.New(database)}
-		c := newConfiguredCommandClient(t, tracked, &LifecycleOptions{InstanceID: "cleanup-after-restart", SkipSampleExecutions: true}, profiles.supervisor)
+		var fixtureStore Store = tracked
+		if os.Getenv("DISPATCH_AUDIT_CLEANUP_SLOW_WORKER") == "1" {
+			fixtureStore = &slowAuditCleanupStore{auditTrackingStore: tracked}
+		}
+		c := newConfiguredCommandClient(t, fixtureStore, &LifecycleOptions{InstanceID: "cleanup-after-restart", SkipSampleExecutions: true}, profiles.supervisor)
 		if err = c.host.StartChroniclePublisher(t.Context(), profiles.routes.Routes); err != nil {
 			t.Fatal(err)
 		}
 		sinks["audit"].kill(t)
 		denyAuditRead(t, c)
 		pending := readAuditSource(t, db["dispatch"], true)
+		// Keep worker quiescence outside the deliberately short publisher deadline.
+		// StopWorkers leaves the publisher and store live for the incomplete close.
+		quiesce, stopQuiesce := context.WithTimeout(t.Context(), 15*time.Second)
+		err = c.host.engine.StopWorkers(quiesce)
+		stopQuiesce()
+		if err != nil {
+			t.Fatal("failure fixture could not quiesce workers")
+		}
 		deadline, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
 		err = c.host.Close(deadline)
 		cancel()
@@ -89,28 +103,37 @@ func TestNativeAuditCleanupAfterRestartFailure(t *testing.T) {
 		})
 		t.Fatal("injected failure immediately after audit sink restart")
 	}
-	for _, injectFailure := range []bool{false, true} {
-		name := "recovered"
-		if injectFailure {
-			name = "cleanup_assertion_refused"
-		}
-		t.Run(name, func(t *testing.T) {
+	for _, scenario := range []struct {
+		name          string
+		injectFailure bool
+		slowWorker    bool
+	}{
+		{name: "recovered"},
+		{name: "cleanup_assertion_refused", injectFailure: true},
+		{name: "slow_worker_shutdown", slowWorker: true},
+		{name: "slow_worker_cleanup_assertion_refused", slowWorker: true, injectFailure: true},
+	} {
+		t.Run(scenario.name, func(t *testing.T) {
 			ctx, cancel := context.WithTimeout(t.Context(), 60*time.Second)
 			defer cancel()
 			child := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestNativeAuditCleanupAfterRestartFailure$", "-test.v", "-test.timeout=50s")
 			failureMode := "0"
-			if injectFailure {
+			if scenario.injectFailure {
 				failureMode = "1"
 			}
-			child.Env = append(os.Environ(), "DISPATCH_AUDIT_CLEANUP_CHILD=1", "DISPATCH_AUDIT_CLEANUP_ASSERTION_FAILURE="+failureMode)
+			slowWorker := "0"
+			if scenario.slowWorker {
+				slowWorker = "1"
+			}
+			child.Env = append(os.Environ(), "DISPATCH_AUDIT_CLEANUP_CHILD=1", "DISPATCH_AUDIT_CLEANUP_ASSERTION_FAILURE="+failureMode, "DISPATCH_AUDIT_CLEANUP_SLOW_WORKER="+slowWorker)
 			output, err := child.CombinedOutput()
 			if ctx.Err() != nil {
 				t.Fatal("cleanup regression child timed out")
 			}
 			classification := qualifyAuditCleanupExit(output, err)
-			if injectFailure {
+			if scenario.injectFailure {
 				if !errors.Is(classification, errAuditCleanupFailed) || bytes.Count(output, []byte("qualification_cleanup failure=")) != 1 || !bytes.Contains(output, []byte("qualification_cleanup failure=host_assertion")) || !bytes.Contains(output, []byte("qualification_cleanup result=failed failures=1\n")) {
-					t.Fatal("parent did not refuse the recovered child with an additional cleanup assertion failure")
+					t.Fatalf("parent did not refuse recovered child: classification=%v failures=%d host_assertion=%t final_result=%t fixture_failed=%t", classification, bytes.Count(output, []byte("qualification_cleanup failure=")), bytes.Contains(output, []byte("qualification_cleanup failure=host_assertion")), bytes.Contains(output, []byte("qualification_cleanup result=failed failures=1\n")), bytes.Contains(output, []byte("failure fixture did not retain storage")))
 				}
 				t.Log("qualification_cleanup negative_control=refused")
 				return
@@ -140,7 +163,7 @@ func qualifyAuditCleanupExit(output []byte, err error) error {
 	for _, stage := range stages {
 		offset := strings.Index(text[position:], stage)
 		if offset < 0 {
-			return errors.New("failure cleanup did not retain expected ordered evidence")
+			return fmt.Errorf("failure cleanup missing ordered stage %q", stage)
 		}
 		position += offset + len(stage)
 	}
@@ -176,4 +199,20 @@ func qualifyAuditCleanupExit(output []byte, err error) error {
 		}
 	}
 	return errors.New("cleanup result invalid")
+}
+
+// Worker shutdown can outlast the deliberately short publisher drain budget.
+type slowAuditCleanupStore struct {
+	*auditTrackingStore
+}
+
+func (s *slowAuditCleanupStore) DeregisterWorker(ctx context.Context, workerID id.WorkerID) error {
+	timer := time.NewTimer(300 * time.Millisecond)
+	defer timer.Stop()
+	select {
+	case <-timer.C:
+		return s.Store.DeregisterWorker(ctx, workerID)
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
