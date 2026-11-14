@@ -34,6 +34,9 @@ type admitted struct {
 // persisted row, shared with the store and serialized to it, and a live
 // lease is process-local state that must never be written down.
 type inflight struct {
+	leaseUntil time.Time
+	leaseTimer *time.Timer
+
 	cancel context.CancelCauseFunc
 	lease  resource.Lease
 

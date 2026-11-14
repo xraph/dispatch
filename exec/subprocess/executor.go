@@ -469,7 +469,7 @@ func (e *Executor) Run(ctx context.Context, req *exec.Request) (*exec.Result, er
 waitLoop:
 	for {
 		select {
-		case <-waitCh:
+		case <-waitCh: //nolint:errcheck // Exit status is classified from cmd.ProcessState below.
 			break waitLoop
 		case <-deadlineCh:
 			deadlineCh = nil // this case must not fire again once handled
@@ -487,7 +487,7 @@ waitLoop:
 			// leaving classify to guess from a frame and a signal after
 			// the fact.
 			select {
-			case <-waitCh:
+			case <-waitCh: //nolint:errcheck // Exit status is classified from cmd.ProcessState below.
 				break waitLoop
 			default:
 			}
@@ -496,7 +496,7 @@ waitLoop:
 		case <-ctxDoneCh:
 			ctxDoneCh = nil // ditto, so we do not spin once ctx is done
 			select {
-			case <-waitCh:
+			case <-waitCh: //nolint:errcheck // Exit status is classified from cmd.ProcessState below.
 				break waitLoop
 			default:
 			}

@@ -529,10 +529,28 @@ func (s *Scheduler) fireEntry(ctx context.Context, cronID id.CronID, due, now ti
 	if entry.Queue != "" {
 		enqOpts = append(enqOpts, job.WithQueue(entry.Queue))
 	}
+	_, atomicFire := s.cronStore.(job.CronOccurrenceStore)
+	var next time.Time
+	if atomicFire {
+		schedule, parseErr := s.getOrParseSchedule(entry.Schedule)
+		if parseErr != nil {
+			s.releaseCronLock(ctx, cronID)
+			return telemetry.CronError
+		}
+		next = schedule.Next(now)
+		enqOpts = append(enqOpts, job.WithCronOccurrence(job.CronOccurrence{
+			CronID: cronID, WorkerID: s.workerID, Due: *entry.NextRunAt, Next: next, FiredAt: now, Schedule: entry.Schedule,
+		}))
+	}
 	enqCtx, enqCancel := s.callCtxFrom(ctx)
 	jobID, enqErr := s.enqueue(enqCtx, entry.JobName, entry.Payload, enqOpts...)
 	enqCancel()
 	if enqErr != nil {
+		if errors.Is(enqErr, job.ErrCronOccurrenceLost) {
+			s.cronDirty.Store(true)
+			s.releaseCronLock(ctx, cronID)
+			return telemetry.CronSkipped
+		}
 		s.logger.Error("cron enqueue error",
 			log.String("cron_name", entry.Name),
 			log.String("job_name", entry.JobName),
@@ -542,6 +560,15 @@ func (s *Scheduler) fireEntry(ctx context.Context, cronID id.CronID, due, now ti
 		return telemetry.CronError
 	}
 	s.tel.Cron().Lag(time.Since(due))
+
+	if atomicFire {
+		s.nextRuns[cronID.String()] = next
+		s.releaseCronLock(ctx, cronID)
+		if s.emitter != nil {
+			s.emitter.EmitCronFired(ctx, entry.Name, jobID)
+		}
+		return telemetry.CronFired
+	}
 
 	// Record the fire with targeted writes only. A whole-row write here
 	// would put back whatever enabled was when the row was read.

@@ -84,6 +84,9 @@ const DefaultReclaimBatch = 100
 // fetcher that polls the store for jobs and executes them through the
 // Executor.
 type Pool struct {
+	pollErr error // guarded by mu
+	polled  bool  // guarded by mu
+
 	store        job.Store
 	executor     *Executor
 	extensions   *ext.Registry
@@ -596,6 +599,10 @@ func (p *Pool) fetchLoop() {
 		}
 		jobs, err := p.store.DequeueJobs(dqCtx, dqOpts)
 		dqCancel()
+		p.mu.Lock()
+		p.pollErr = err
+		p.polled = true
+		p.mu.Unlock()
 		if err != nil {
 			p.releaseSlots(held)
 			if p.cancelCtx.Err() != nil {
@@ -863,6 +870,9 @@ func (p *Pool) runJob(a admitted) {
 
 	ctx, cancel := context.WithCancelCause(spanCtx)
 	p.trackJob(j.ID.String(), cancel, a.lease, j.LeaseEpoch, p.leaseTTLFor(j), span)
+	if p.leaseStore != nil && j.LeaseExpiresAt != nil {
+		p.armLease(j.ID.String(), *j.LeaseExpiresAt)
+	}
 
 	// A fenced terminal write needs the store's lease capability, this
 	// pool's worker ID, and the epoch j.LeaseEpoch carries from the
@@ -966,11 +976,13 @@ func (p *Pool) sendHeartbeats() {
 		}
 
 		hbCtx, hbCancel := p.callCtx()
+		until := time.Now().UTC().Add(snap.leaseTTL)
 		renewErr := p.leaseStore.RenewLease(
-			hbCtx, parsedID, p.workerID, snap.leaseEpoch, time.Now().UTC().Add(snap.leaseTTL),
+			hbCtx, parsedID, p.workerID, snap.leaseEpoch, until,
 		)
 		hbCancel()
 		if renewErr == nil {
+			p.renewLocalLease(snap.jobID, snap.leaseEpoch, until)
 			p.tel.Jobs().Renewal(telemetry.RenewalOK)
 			continue
 		}
@@ -986,8 +998,8 @@ func (p *Pool) sendHeartbeats() {
 
 		p.tel.Jobs().Renewal(telemetry.RenewalError)
 
-		// A transient store blip must not cancel a healthy job; only a
-		// definitive ErrLeaseLost above does that.
+		// A transient store blip leaves the last confirmed lease intact.
+		// Its local deadline cancels the attempt if renewal keeps failing.
 		p.logger.Warn("lease renewal failed",
 			log.String("job_id", snap.jobID),
 			log.String("error", renewErr.Error()),
@@ -1169,6 +1181,9 @@ func (p *Pool) untrackJob(jobID string) *inflight {
 		return nil
 	}
 
+	if rec.leaseTimer != nil {
+		rec.leaseTimer.Stop()
+	}
 	delete(p.activeJobs, jobID)
 	p.tel.Jobs().Active(len(p.activeJobs))
 

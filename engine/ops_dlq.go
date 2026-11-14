@@ -24,6 +24,11 @@ func (eng *Engine) commitEnqueue(ctx context.Context, j *job.Job) error {
 		return err
 	}
 
+	eng.notifyEnqueue(ctx, j)
+	return nil
+}
+
+func (eng *Engine) notifyEnqueue(ctx context.Context, j *job.Job) {
 	eng.tel.Jobs().Enqueued(eng.tel.QueueLabel(j.Queue))
 	eng.tel.RememberEnqueue(j.ID.String(), trace.SpanContextFromContext(ctx))
 
@@ -32,8 +37,6 @@ func (eng *Engine) commitEnqueue(ctx context.Context, j *job.Job) error {
 	}
 
 	eng.extensions.EmitJobEnqueued(ctx, j)
-
-	return nil
 }
 
 // enqueuePrepared enqueues a job somebody else built, ID and all. It is

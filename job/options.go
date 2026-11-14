@@ -10,6 +10,8 @@ import (
 
 // Options configures per-job behavior such as retries, queue, and priority.
 type Options struct {
+	CronOccurrence *CronOccurrence
+
 	// MaxRetries is the maximum number of retry attempts before sending to DLQ.
 	MaxRetries int
 
@@ -209,4 +211,9 @@ func WithExecution(opts ...exec.PolicyOption) Option {
 		}
 		o.Execution = p
 	}
+}
+
+// WithCronOccurrence commits a scheduled enqueue and its next due time together.
+func WithCronOccurrence(fire CronOccurrence) Option {
+	return func(o *Options) { o.CronOccurrence = &fire }
 }

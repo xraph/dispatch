@@ -16,6 +16,7 @@ import (
 	"os"
 	"slices"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	log "github.com/xraph/go-utils/log"
@@ -78,6 +79,8 @@ func (a *extRunEmitter) EmitWorkflowFailed(ctx context.Context, run *workflow.Ru
 // Engine wraps a Dispatcher with typed subsystem access.
 // Use Build() to create one from a Dispatcher.
 type Engine struct {
+	accepting atomic.Bool
+
 	d          *dispatch.Dispatcher
 	extensions *ext.Registry
 	registry   *job.Registry
@@ -735,6 +738,19 @@ func (eng *Engine) EnqueueRaw(ctx context.Context, name string, payload []byte, 
 		return nil, err
 	}
 
+	if fire := jobOpts.CronOccurrence; fire != nil {
+		st, ok := eng.jobStore.(job.CronOccurrenceStore)
+		if !ok {
+			return nil, fmt.Errorf("cron occurrence transactions are unsupported by this store")
+		}
+		if err := st.EnqueueCronOccurrence(ctx, j, *fire); err != nil {
+			failEnqueue(span, err)
+			return nil, err
+		}
+		eng.notifyEnqueue(ctx, j)
+		return j, nil
+	}
+
 	if err := eng.commitEnqueue(ctx, j); err != nil {
 		failEnqueue(span, err)
 		return nil, err
@@ -810,6 +826,7 @@ func (eng *Engine) Start(ctx context.Context) (startErr error) {
 		}
 	}
 
+	eng.accepting.Store(true)
 	// Keep this worker's cluster row alive. See startHeartbeat.
 	eng.startHeartbeat(ctx)
 
@@ -827,6 +844,7 @@ func (eng *Engine) Stop(ctx context.Context) error {
 		eng.unlockLifecycle()
 		return err
 	}
+	eng.accepting.Store(false)
 	eng.stopping = true
 	// An explicit force-stop may escalate while ordinary Stop observes drain.
 	// Neither waiter owns the accepted operation deadline.
@@ -872,6 +890,7 @@ func (eng *Engine) StopWorkers(ctx context.Context) error {
 	return eng.quiesceErr
 }
 func (eng *Engine) stopWorkersLocked(ctx context.Context) error {
+	eng.accepting.Store(false)
 	eng.stopping = true
 	if eng.quiesced == nil {
 		eng.quiesced = make(chan struct{})

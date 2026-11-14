@@ -54,8 +54,7 @@ func run(ctx context.Context) error {
 		execution, readErr := s.GetExecution(workCtx, key)
 		if readErr != nil {
 			cancel()
-			<-done
-			return readErr
+			return errors.Join(readErr, <-done)
 		}
 		if execution.State != durable.StateRunning {
 			cancel()
@@ -80,8 +79,7 @@ func run(ctx context.Context) error {
 			return errors.New("worker stopped before timeout")
 		case <-workCtx.Done():
 			cancel()
-			<-done
-			return context.Cause(workCtx)
+			return errors.Join(context.Cause(workCtx), <-done)
 		case <-ticker.C:
 		}
 	}
