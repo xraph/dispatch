@@ -6,13 +6,13 @@
 
 Dispatch is an open-source durable execution library for Go. You import it, hand it a store, and register background jobs, multi-step workflows and cron schedules as plain Go functions. Retries with backoff, a dead letter queue, distributed workers with leader-elected cron, checkpointed workflows that resume after a crash, and a history-based durable workflow runtime with signals, queries and child workflows all run inside your own process, against PostgreSQL, SQLite, MongoDB, Redis or memory. There's no separate server to deploy. It runs standalone or as a [Forge](https://github.com/xraph/forge) extension with a REST admin API.
 
-[![Go 1.26+](https://img.shields.io/badge/Go-1.26%2B-00ADD8?logo=go&logoColor=white)](https://go.dev/dl/) [![CI](https://github.com/xraph/dispatch/actions/workflows/ci.yml/badge.svg)](https://github.com/xraph/dispatch/actions/workflows/ci.yml) [![Go Reference](https://pkg.go.dev/badge/github.com/xraph/dispatch.svg)](https://pkg.go.dev/github.com/xraph/dispatch) [![GitHub Stars](https://img.shields.io/github/stars/xraph/dispatch?style=flat)](https://github.com/xraph/dispatch/stargazers)
+[![Go 1.27+](https://img.shields.io/badge/Go-1.27%2B-00ADD8?logo=go&logoColor=white)](https://go.dev/dl/) [![CI](https://github.com/xraph/dispatch/actions/workflows/ci.yml/badge.svg)](https://github.com/xraph/dispatch/actions/workflows/ci.yml) [![Go Reference](https://pkg.go.dev/badge/github.com/xraph/dispatch.svg)](https://pkg.go.dev/github.com/xraph/dispatch) [![GitHub Stars](https://img.shields.io/github/stars/xraph/dispatch?style=flat)](https://github.com/xraph/dispatch/stargazers)
 
 [Documentation](https://www.xraph.com/docs/dispatch) · [Quick start](#quick-start) · [Features](#why-dispatch) · [Jobs](#background-jobs) · [Workflows](#workflows) · [Cron](#cron) · [Stores](#stores) · [Forge](#use-it-with-forge) · [Examples](#examples) · [FAQ](#faq)
 
 ## Quick start
 
-You need [Go 1.26 or later](https://go.dev/dl/). This uses the in-memory store, so there's nothing else to install:
+Use [Go 1.27.4 or later](https://go.dev/dl/), matching the patched toolchain used by CI and releases. This uses the in-memory store, so there's nothing else to install:
 
 ```bash
 mkdir hello-dispatch
