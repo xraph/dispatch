@@ -150,12 +150,13 @@ type Scheduler struct {
 	isLeader    bool
 	leaderUntil time.Time
 
-	// Cron entry cache, owned by the tickLoop goroutine. cronDirty is the
-	// cross-goroutine invalidation signal (set by InvalidateCronCache and
-	// on leadership changes).
-	cronDirty    atomic.Bool
-	cronCache    []*Entry
-	lastCronList time.Time
+	// Cron entry cache, owned by the tickLoop goroutine. cronGeneration is
+	// incremented by cross-goroutine invalidations; the tick loop records the
+	// generation represented by cronCache.
+	cronGeneration      atomic.Uint64
+	cronCacheGeneration uint64
+	cronCache           []*Entry
+	lastCronList        time.Time
 
 	// nextRuns holds the next fire time this scheduler wrote for each
 	// entry it fired since the cache was last listed, keyed by entry ID.
@@ -166,11 +167,12 @@ type Scheduler struct {
 	// emptied whenever the cache is re-listed.
 	nextRuns map[string]time.Time
 
-	stopCh     chan struct{}
-	cancelCtx  context.Context
-	cancelFunc context.CancelFunc
-	stopOnce   sync.Once
-	wg         sync.WaitGroup
+	stopCh      chan struct{}
+	cancelCtx   context.Context
+	cancelFunc  context.CancelFunc
+	lifecycleMu sync.Mutex
+	running     bool
+	wg          sync.WaitGroup
 }
 
 // NewScheduler creates a Scheduler.
@@ -203,7 +205,6 @@ func NewScheduler(
 		cronRefreshInterval: 30 * time.Second,
 		parsed:              make(map[string]cronlib.Schedule),
 		nextRuns:            make(map[string]time.Time),
-		stopCh:              make(chan struct{}),
 	}
 	for _, opt := range opts {
 		opt(s)
@@ -211,10 +212,18 @@ func NewScheduler(
 	return s
 }
 
-// Start launches the leader election and cron tick goroutines.
+// Start launches the leader election and cron tick goroutines. Calling it
+// again while running is a no-op.
 func (s *Scheduler) Start(_ context.Context) error {
+	s.lifecycleMu.Lock()
+	defer s.lifecycleMu.Unlock()
+	if s.running {
+		return nil
+	}
+	s.stopCh = make(chan struct{})
 	s.cancelCtx, s.cancelFunc = context.WithCancel(context.Background())
 	s.wg.Add(2)
+	s.running = true
 	go s.leaderLoop()
 	go s.tickLoop()
 	s.logger.Info("cron scheduler started",
@@ -225,18 +234,22 @@ func (s *Scheduler) Start(_ context.Context) error {
 }
 
 // Stop signals the scheduler to stop and waits for goroutines to finish.
-// It is safe to call Stop multiple times; only the first call closes the
-// stop channel and waits for goroutines.
+// It is safe to call Stop multiple times. A later Start begins a fresh run.
 func (s *Scheduler) Stop(_ context.Context) error {
-	s.stopOnce.Do(func() {
-		close(s.stopCh)
-		if s.cancelFunc != nil {
-			s.cancelFunc()
-		}
-		s.wg.Wait()
-		s.tel.Cron().Leader(false)
-		s.logger.Info("cron scheduler stopped")
-	})
+	s.lifecycleMu.Lock()
+	defer s.lifecycleMu.Unlock()
+	if !s.running {
+		return nil
+	}
+
+	close(s.stopCh)
+	s.cancelFunc()
+	s.wg.Wait()
+	s.running = false
+	s.cancelCtx = nil
+	s.cancelFunc = nil
+	s.tel.Cron().Leader(false)
+	s.logger.Info("cron scheduler stopped")
 	return nil
 }
 
@@ -303,7 +316,7 @@ func (s *Scheduler) setLeader(leading bool, until time.Time) {
 
 	if leading && !wasLeader {
 		// Fresh leadership: re-list entries before the first tick fires.
-		s.cronDirty.Store(true)
+		s.InvalidateCronCache()
 		s.logger.Info("acquired cron leadership", log.String("worker_id", s.workerID.String()))
 	}
 }
@@ -397,15 +410,16 @@ func (s *Scheduler) tickLoop() {
 // store on the next tick. Call it after registering, updating, or removing
 // entries so changes take effect before the next scheduled refresh.
 func (s *Scheduler) InvalidateCronCache() {
-	s.cronDirty.Store(true)
+	s.cronGeneration.Add(1)
 }
 
 // cronEntries returns the cached cron entries, re-listing from the store
 // when the cache is stale (cronRefreshInterval elapsed) or was invalidated.
 // Only the tickLoop goroutine touches the cache fields.
 func (s *Scheduler) cronEntries() []*Entry {
+	generation := s.cronGeneration.Load()
 	fresh := time.Since(s.lastCronList) < s.cronRefreshInterval
-	if fresh && !s.cronDirty.Load() {
+	if fresh && generation == s.cronCacheGeneration {
 		return s.cronCache
 	}
 
@@ -426,7 +440,7 @@ func (s *Scheduler) cronEntries() []*Entry {
 
 	s.cronCache = entries
 	s.lastCronList = time.Now()
-	s.cronDirty.Store(false)
+	s.cronCacheGeneration = generation
 	// The fresh list carries every next_run_at this scheduler wrote.
 	clear(s.nextRuns)
 	return entries
@@ -519,7 +533,7 @@ func (s *Scheduler) fireEntry(ctx context.Context, cronID id.CronID, due, now ti
 	if !entry.Enabled || entry.NextRunAt == nil || entry.NextRunAt.After(now) {
 		// Disabled, or fired or rescheduled since the cache was listed.
 		// Re-list on the next tick so the cache stops offering it.
-		s.cronDirty.Store(true)
+		s.InvalidateCronCache()
 		s.releaseCronLock(ctx, cronID)
 		return telemetry.CronSkipped
 	}
@@ -547,7 +561,7 @@ func (s *Scheduler) fireEntry(ctx context.Context, cronID id.CronID, due, now ti
 	enqCancel()
 	if enqErr != nil {
 		if errors.Is(enqErr, job.ErrCronOccurrenceLost) {
-			s.cronDirty.Store(true)
+			s.InvalidateCronCache()
 			s.releaseCronLock(ctx, cronID)
 			return telemetry.CronSkipped
 		}
@@ -639,7 +653,7 @@ func (s *Scheduler) releaseCronLock(ctx context.Context, cronID id.CronID) {
 // Anything else is an error.
 func (s *Scheduler) logCronErr(msg string, cronID id.CronID, err error) {
 	if errors.Is(err, dispatch.ErrCronNotFound) {
-		s.cronDirty.Store(true)
+		s.InvalidateCronCache()
 		s.logger.Debug("cron entry deleted while firing",
 			log.String("cron_id", cronID.String()),
 			log.String("step", msg),

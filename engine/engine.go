@@ -786,11 +786,17 @@ func (eng *Engine) Start(ctx context.Context) (startErr error) {
 	if err := eng.startDurable(ctx); err != nil {
 		return err
 	}
+	schedulerStarted := false
 	defer func() {
-		if startErr != nil && eng.durable != nil {
+		if startErr != nil {
 			cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
 			defer cancel()
-			startErr = errors.Join(startErr, eng.stopDurable(cleanupCtx))
+			if schedulerStarted {
+				startErr = errors.Join(startErr, eng.scheduler.Stop(cleanupCtx))
+			}
+			if eng.durable != nil {
+				startErr = errors.Join(startErr, eng.stopDurable(cleanupCtx))
+			}
 		}
 	}()
 	// Resume any interrupted workflow runs (best-effort, non-fatal).
@@ -804,6 +810,7 @@ func (eng *Engine) Start(ctx context.Context) (startErr error) {
 	if err := eng.scheduler.Start(ctx); err != nil {
 		return fmt.Errorf("start cron scheduler: %w", err)
 	}
+	schedulerStarted = true
 
 	if err := eng.d.Start(ctx); err != nil {
 		return err

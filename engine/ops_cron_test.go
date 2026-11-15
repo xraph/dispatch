@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -92,6 +93,53 @@ func startCronOpsEngine(t *testing.T, eng *engine.Engine) {
 		defer cancel()
 		_ = eng.Stop(ctx)
 	})
+}
+
+func TestEngine_StartFailureStopsCronScheduler(t *testing.T) {
+	s := &cronListCounter{Store: memory.New()}
+	d, err := dispatch.New(
+		dispatch.WithStore(s),
+		dispatch.WithCronTickInterval(10*time.Millisecond),
+	)
+	if err != nil {
+		t.Fatalf("dispatch.New: %v", err)
+	}
+	eng, err := engine.Build(d)
+	if err != nil {
+		t.Fatalf("engine.Build: %v", err)
+	}
+	d.SetPool(failingStartPool{})
+
+	if err := eng.Start(context.Background()); err == nil {
+		t.Fatal("expected Engine.Start to fail")
+	}
+	listsAtReturn := s.listCalls.Load()
+	if listsAtReturn == 0 {
+		t.Fatal("scheduler did not reach its cron tick before the pool start failed")
+	}
+	time.Sleep(50 * time.Millisecond)
+	if got := s.listCalls.Load(); got != listsAtReturn {
+		t.Fatalf("scheduler kept listing crons after startup failed: before=%d after=%d", listsAtReturn, got)
+	}
+}
+
+type failingStartPool struct{}
+
+func (failingStartPool) Start(context.Context) error {
+	time.Sleep(100 * time.Millisecond)
+	return errors.New("pool start failed")
+}
+
+func (failingStartPool) Stop(context.Context) error { return nil }
+
+type cronListCounter struct {
+	*memory.Store
+	listCalls atomic.Int32
+}
+
+func (s *cronListCounter) ListCrons(ctx context.Context) ([]*cron.Entry, error) {
+	s.listCalls.Add(1)
+	return s.Store.ListCrons(ctx)
 }
 
 // addCron stores an entry directly, so a test controls every field.

@@ -187,6 +187,138 @@ func TestScheduler_FiresOnSchedule(t *testing.T) {
 	}
 }
 
+// A repeated Start (e.g. an engine start retried after a partial failure)
+// must not spawn a second tickLoop; two loops race on nextRuns and crash
+// with "concurrent map writes". Run with -race.
+func TestScheduler_StartIsIdempotent(t *testing.T) {
+	sched, s, _, spy := newTestScheduler(t)
+	registerDueEntry(t, s, "every-second", "send-email")
+
+	for range 3 {
+		if err := sched.Start(context.Background()); err != nil {
+			t.Fatalf("Start: %v", err)
+		}
+	}
+	for i := 0; i < 20; i++ {
+		sched.InvalidateCronCache()
+		time.Sleep(20 * time.Millisecond)
+	}
+	if err := sched.Stop(context.Background()); err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+	if spy.Count() == 0 {
+		t.Fatal("expected the entry to fire")
+	}
+}
+
+func TestScheduler_CacheInvalidationDuringListIsRetained(t *testing.T) {
+	base := memory.New()
+	workerID := id.NewWorkerID()
+	if err := base.RegisterWorker(context.Background(), &cluster.Worker{
+		ID:        workerID,
+		Hostname:  "test-host",
+		State:     cluster.WorkerActive,
+		LastSeen:  time.Now().UTC(),
+		CreatedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("RegisterWorker: %v", err)
+	}
+	if ok, err := base.AcquireLeadership(context.Background(), workerID, 30*time.Second); err != nil || !ok {
+		t.Fatalf("AcquireLeadership: ok=%v err=%v", ok, err)
+	}
+
+	store := &blockingListStore{
+		Store:       base,
+		listStarted: make(chan struct{}),
+		releaseList: make(chan struct{}),
+	}
+	spy := &enqueueSpy{}
+	sched := cron.NewScheduler(
+		store, store, spy.Fn(), &stubEmitter{}, workerID, nil,
+		cron.WithTickInterval(10*time.Millisecond),
+		cron.WithLeaderTTL(10*time.Second),
+		cron.WithCronRefreshInterval(time.Hour),
+	)
+	if err := sched.Start(context.Background()); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	t.Cleanup(func() {
+		store.unblockList()
+		_ = sched.Stop(context.Background())
+	})
+
+	select {
+	case <-store.listStarted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("scheduler did not start listing crons")
+	}
+
+	registerDueEntry(t, base, "registered-during-list", "send-email")
+	sched.InvalidateCronCache()
+	store.unblockList()
+
+	deadline := time.After(2 * time.Second)
+	for spy.Count() == 0 {
+		select {
+		case <-deadline:
+			t.Fatal("cache invalidation during list was lost")
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+}
+
+func TestScheduler_StartStopAreSerializedAndRestartable(t *testing.T) {
+	sched, s, _, spy := newTestScheduler(t)
+	registerDueEntry(t, s, "first", "first-job")
+	if err := sched.Start(context.Background()); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	waitForCronFires(t, spy, 1)
+
+	var calls sync.WaitGroup
+	for range 20 {
+		calls.Add(2)
+		go func() {
+			defer calls.Done()
+			if err := sched.Start(context.Background()); err != nil {
+				t.Errorf("Start: %v", err)
+			}
+		}()
+		go func() {
+			defer calls.Done()
+			if err := sched.Stop(context.Background()); err != nil {
+				t.Errorf("Stop: %v", err)
+			}
+		}()
+	}
+	calls.Wait()
+	if err := sched.Stop(context.Background()); err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+
+	registerDueEntry(t, s, "second", "second-job")
+	sched.InvalidateCronCache()
+	if err := sched.Start(context.Background()); err != nil {
+		t.Fatalf("restart: %v", err)
+	}
+	waitForCronFires(t, spy, 2)
+	if err := sched.Stop(context.Background()); err != nil {
+		t.Fatalf("Stop after restart: %v", err)
+	}
+}
+
+func waitForCronFires(t *testing.T, spy *enqueueSpy, want int) {
+	t.Helper()
+	deadline := time.After(3 * time.Second)
+	for spy.Count() < want {
+		select {
+		case <-deadline:
+			t.Fatalf("timed out waiting for %d cron fires; got %d", want, spy.Count())
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+}
+
 func TestScheduler_SkipsDisabled(t *testing.T) {
 	sched, s, _, spy := newTestScheduler(t)
 
@@ -406,6 +538,27 @@ type countingStore struct {
 	renew     atomic.Int32
 	acquire   atomic.Int32
 	listCrons atomic.Int32
+}
+
+type blockingListStore struct {
+	*memory.Store
+	listStarted chan struct{}
+	releaseList chan struct{}
+	listOnce    sync.Once
+	releaseOnce sync.Once
+}
+
+func (s *blockingListStore) ListCrons(ctx context.Context) ([]*cron.Entry, error) {
+	entries, err := s.Store.ListCrons(ctx)
+	s.listOnce.Do(func() {
+		close(s.listStarted)
+		<-s.releaseList
+	})
+	return entries, err
+}
+
+func (s *blockingListStore) unblockList() {
+	s.releaseOnce.Do(func() { close(s.releaseList) })
 }
 
 func (c *countingStore) GetLeader(ctx context.Context) (*cluster.Worker, error) {
