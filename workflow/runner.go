@@ -227,11 +227,29 @@ func (r *Runner) StartChildRaw(ctx context.Context, parentRunID id.RunID, name s
 // SpawnChildRaw starts a child workflow asynchronously, returning immediately
 // after the run is persisted. The child executes in a background goroutine.
 // Implements ChildStarter.
+//
+// The child is a background run like a replay: Shutdown cancels it and
+// waits for it, and once Shutdown has begun SpawnChildRaw returns
+// ErrRunnerShutdown before creating the run. The child does not inherit
+// ctx's cancellation, so it outlives the parent step and the caller that
+// started the parent.
 func (r *Runner) SpawnChildRaw(ctx context.Context, parentRunID id.RunID, name string, input []byte) (*Run, error) {
 	runner, ok := r.registry.Get(name)
 	if !ok {
 		return nil, fmt.Errorf("no workflow registered for %q", name)
 	}
+
+	// Count the child before creating its run, so Shutdown either refuses
+	// it here, with nothing written, or waits for it.
+	if !r.track() {
+		return nil, fmt.Errorf("spawn child workflow %q: %w", name, ErrRunnerShutdown)
+	}
+	launched := false
+	defer func() {
+		if !launched {
+			r.inflight.Done()
+		}
+	}()
 
 	appID, orgID := scope.Capture(ctx)
 
@@ -255,10 +273,18 @@ func (r *Runner) SpawnChildRaw(ctx context.Context, parentRunID id.RunID, name s
 
 	r.emitter.EmitWorkflowStarted(ctx, run)
 
+	launched = true
 	// Execute in background goroutine. The parent step's span ends before
 	// the child does, so the child is its own trace, linked back to it.
-	bg, opts := detachedRun(ctx)
-	go r.executeRun(bg, run, runner, input, opts...)
+	detached, opts := detachedRun(context.WithoutCancel(ctx))
+	go func() {
+		defer r.inflight.Done()
+		bg, cancel := context.WithCancel(detached)
+		defer cancel()
+		stop := context.AfterFunc(r.life, cancel)
+		defer stop()
+		r.executeRun(bg, run, runner, input, opts...)
+	}()
 
 	return run, nil
 }
