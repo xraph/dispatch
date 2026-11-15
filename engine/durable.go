@@ -155,8 +155,10 @@ func (eng *Engine) startDurable(ctx context.Context) error {
 		return d.err
 	}
 	// The worker polls for the life of the engine; it must not keep the
-	// boot span Start's ctx carries. Each claimed task starts its own root.
-	workCtx, cancel := context.WithCancel(telemetry.Detach(ctx))
+	// boot span Start's ctx carries, nor its cancellation: Start's ctx can
+	// be a boot timeout, and stopDurable cancels the worker through d.cancel.
+	// Each claimed task starts its own root.
+	workCtx, cancel := context.WithCancel(telemetry.Detach(context.WithoutCancel(ctx)))
 	d.cancel, d.done = cancel, make(chan struct{})
 	go func() {
 		err := d.worker.Run(workCtx)

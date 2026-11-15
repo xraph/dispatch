@@ -384,8 +384,9 @@ func (s *Sweeper) Start(ctx context.Context) error {
 
 		// The loop runs for the life of the process. The span ctx carries
 		// (a Forge extension's boot span) does not: each pass is its own
-		// trace.
-		go s.loop(telemetry.Detach(ctx))
+		// trace. Nor its cancellation: Start's ctx can be a boot timeout, and
+		// Stop ends the loop through stopCh.
+		go s.loop(telemetry.Detach(context.WithoutCancel(ctx)))
 	})
 
 	return nil
