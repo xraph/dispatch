@@ -30,6 +30,12 @@ type Subscriber struct {
 
 	// closed prevents double-close of the channel.
 	closed atomic.Bool
+
+	// sendMu orders sends against Close: send holds it shared while it
+	// checks closed and writes ch, Close holds it exclusively while it
+	// closes ch. Without it a Close landing between the check and the
+	// write panics with "send on closed channel". It also guards filter.
+	sendMu sync.RWMutex
 }
 
 // NewSubscriber creates a subscriber with the given buffer size
@@ -62,7 +68,9 @@ func (s *Subscriber) Credits() int64 {
 
 // SetFilter sets an optional event filter predicate.
 func (s *Subscriber) SetFilter(fn func(*Event) bool) {
+	s.sendMu.Lock()
 	s.filter = fn
+	s.sendMu.Unlock()
 }
 
 // addTopic records that this subscriber is on the given topic.
@@ -93,6 +101,10 @@ func (s *Subscriber) Topics() []string {
 // send attempts to deliver an event to the subscriber.
 // Returns false if the event was dropped (no credits, filter mismatch, or full buffer).
 func (s *Subscriber) send(evt *Event) bool {
+	// The send below never blocks, so holding the read lock across it
+	// delays Close by at most one channel write.
+	s.sendMu.RLock()
+	defer s.sendMu.RUnlock()
 	if s.closed.Load() {
 		return false
 	}
@@ -126,6 +138,8 @@ func (s *Subscriber) send(evt *Event) bool {
 
 // Close closes the subscriber channel. Safe to call multiple times.
 func (s *Subscriber) Close() {
+	s.sendMu.Lock()
+	defer s.sendMu.Unlock()
 	if s.closed.CompareAndSwap(false, true) {
 		close(s.ch)
 	}
