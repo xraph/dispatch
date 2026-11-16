@@ -14,7 +14,7 @@
   "dependencies": {
     "@radix-ui/react-slot": "^1.2.4",
     "class-variance-authority": "^0.7.1",
-    "framer-motion": "^12.34.2",
+    "framer-motion": "^14.13.0",
     "fumadocs-core": "16.8.5",
     "fumadocs-mdx": "14.3.2",
     "fumadocs-ui": "16.8.5",
