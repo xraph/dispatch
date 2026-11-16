@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"math/rand"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -414,5 +415,39 @@ func TestSweeperStartStop(t *testing.T) {
 	// Stop must be idempotent so a double shutdown does not panic.
 	if err := s.Stop(stopCtx); err != nil {
 		t.Fatalf("second Stop: %v", err)
+	}
+}
+
+type atomicObserver struct{ swept atomic.Int64 }
+
+func (o *atomicObserver) ArtifactSwept(context.Context, *artifact.Artifact)  { o.swept.Add(1) }
+func (o *atomicObserver) ArtifactPurged(context.Context, *artifact.Artifact) {}
+
+// Start's ctx bounds the boot, not the loop: cancelling it must not stop
+// the sweeper.
+func TestSweeperOutlivesStartCtx(t *testing.T) {
+	r := newRig(t)
+	obs := &atomicObserver{}
+	s := sweeper.New(r.store, r.backend,
+		sweeper.WithInterval(10*time.Millisecond),
+		sweeper.WithRetention(0),
+		sweeper.WithPurgeGrace(0),
+		sweeper.WithObserver(obs))
+
+	bootCtx, cancelBoot := context.WithCancel(context.Background())
+	if err := s.Start(bootCtx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	t.Cleanup(func() { _ = s.Stop(context.Background()) })
+	cancelBoot()
+	time.Sleep(30 * time.Millisecond)
+
+	r.createEphemeral(t, newOwner(), "late.bin", 48*time.Hour)
+	deadline := time.Now().Add(2 * time.Second)
+	for obs.swept.Load() == 0 {
+		if time.Now().After(deadline) {
+			t.Fatal("sweeper stopped when Start's ctx was cancelled")
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 }

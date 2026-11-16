@@ -822,8 +822,9 @@ func (eng *Engine) Start(ctx context.Context) (startErr error) {
 	// backoff. Best-effort: polling remains the correctness mechanism.
 	if wn, ok := eng.jobStore.(store.WakeNotifier); ok {
 		// The listener outlives Start and reconnects on its own, so it
-		// must not keep the boot span Start's ctx carries.
-		stop, err := wn.StartWakeListener(telemetry.Detach(ctx), eng.pool.Wake)
+		// must not keep the boot span Start's ctx carries, nor its cancellation;
+		// Stop ends it through wakeStop.
+		stop, err := wn.StartWakeListener(telemetry.Detach(context.WithoutCancel(ctx)), eng.pool.Wake)
 		if err != nil {
 			eng.logger.Warn("wake listener unavailable; relying on polling",
 				log.String("error", err.Error()),
