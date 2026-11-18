@@ -24,10 +24,10 @@ require (
 	github.com/xraph/grove/drivers/sqlitedriver v1.10.3
 	github.com/xraph/grove/kv v1.10.3
 	github.com/xraph/grove/kv/drivers/redisdriver v1.10.2
-	github.com/xraph/relay v1.8.2
+	github.com/xraph/relay v1.8.3
 	github.com/xraph/trove v1.8.2
 	github.com/xraph/vessel v1.0.7
-	github.com/xraph/warden v1.8.3
+	github.com/xraph/warden v1.8.4
 	github.com/zeebo/blake3 v0.2.4
 	go.jetify.com/typeid/v2 v2.0.0-alpha.3
 	go.mongodb.org/mongo-driver/v2 v2.10.0
