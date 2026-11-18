@@ -44,7 +44,7 @@ func TestDurableLifecycleHTTPAuthorizesDecodedTarget(t *testing.T) {
 				t.Fatal(err)
 			}
 			response := httptest.NewRecorder()
-			handler.ServeHTTP(response, httptest.NewRequestWithContext(testContext(), http.MethodPost, "/api/dashboard/v1", bytes.NewReader(body)))
+			handler.ServeHTTP(response, dashboardPost(testContext(), bytes.NewReader(body)))
 			if response.Code != http.StatusForbidden {
 				t.Fatalf("outer scope authorized foreign payload: %d %s", response.Code, response.Body)
 			}
@@ -60,7 +60,7 @@ func TestDurableLifecycleHTTPAuthorizesDecodedTarget(t *testing.T) {
 		t.Fatal(err)
 	}
 	response := httptest.NewRecorder()
-	handler.ServeHTTP(response, httptest.NewRequestWithContext(testContext(), http.MethodPost, "/api/dashboard/v1", bytes.NewReader(body)))
+	handler.ServeHTTP(response, dashboardPost(testContext(), bytes.NewReader(body)))
 	var out fc.Response
 	if err = json.Unmarshal(response.Body.Bytes(), &out); err != nil || !out.OK || len(out.Meta.Invalidates) != 5 {
 		t.Fatalf("allowed lifecycle command %s %v", response.Body, err)

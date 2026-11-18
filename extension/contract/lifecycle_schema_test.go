@@ -107,7 +107,7 @@ func TestLifecycleHTTPPreservesDecimalIntegers(t *testing.T) {
 			t.Fatal(err)
 		}
 		response := httptest.NewRecorder()
-		handler.ServeHTTP(response, httptest.NewRequestWithContext(testContext(), http.MethodPost, "/api/dashboard/v1", bytes.NewReader(body)))
+		handler.ServeHTTP(response, dashboardPost(testContext(), bytes.NewReader(body)))
 		return response
 	}
 	response := call("durable.build", "query", map[string]any{"namespace": "allowed", "build_id": "historic"})

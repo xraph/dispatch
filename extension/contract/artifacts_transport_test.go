@@ -3,7 +3,6 @@ package contract
 import (
 	"bytes"
 	"encoding/json"
-	"net/http"
 	"net/http/httptest"
 	"testing"
 
@@ -40,7 +39,7 @@ func TestArtifactTransportQueriesAndUncachedDownloads(t *testing.T) {
 			t.Fatal(err)
 		}
 		response := httptest.NewRecorder()
-		handler.ServeHTTP(response, httptest.NewRequestWithContext(testContext(), http.MethodPost, "/api/dashboard/v1", bytes.NewReader(raw)))
+		handler.ServeHTTP(response, dashboardPost(testContext(), bytes.NewReader(raw)))
 		if response.Header().Get("Cache-Control") != "no-store" {
 			t.Fatalf("download response can be cached: %v", response.Header())
 		}

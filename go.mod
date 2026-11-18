@@ -15,9 +15,9 @@ require (
 	github.com/testcontainers/testcontainers-go/modules/redis v0.44.0
 	github.com/vmihailenco/msgpack/v5 v5.4.1
 	github.com/xraph/chronicle v1.11.0
-	github.com/xraph/forge v1.13.7
-	github.com/xraph/forge/extensions/auth v1.13.7
-	github.com/xraph/go-utils v1.5.0
+	github.com/xraph/forge v1.14.0
+	github.com/xraph/forge/extensions/auth v1.14.0
+	github.com/xraph/go-utils v1.5.1
 	github.com/xraph/grove v1.10.3
 	github.com/xraph/grove/drivers/mongodriver v1.10.3
 	github.com/xraph/grove/drivers/pgdriver v1.10.3
@@ -26,7 +26,7 @@ require (
 	github.com/xraph/grove/kv/drivers/redisdriver v1.10.2
 	github.com/xraph/relay v1.8.2
 	github.com/xraph/trove v1.8.2
-	github.com/xraph/vessel v1.0.5
+	github.com/xraph/vessel v1.0.7
 	github.com/xraph/warden v1.8.3
 	github.com/zeebo/blake3 v0.2.4
 	go.jetify.com/typeid/v2 v2.0.0-alpha.3

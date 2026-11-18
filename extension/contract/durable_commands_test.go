@@ -48,7 +48,7 @@ func TestDurableCommandHTTPDecodedTargetAndInvalidation(t *testing.T) {
 				target["namespace"] = scope
 				raw, _ := json.Marshal(map[string]any{"envelope": "v1", "kind": "command", "contributor": "dispatch", "intent": "durable." + intent, "intentVersion": 1, "csrf": "test", "idempotencyKey": intent, "params": map[string]any{"namespace": "allowed"}, "payload": input})
 				response := httptest.NewRecorder()
-				handler.ServeHTTP(response, httptest.NewRequestWithContext(testContext(), http.MethodPost, "/api/dashboard/v1", bytes.NewReader(raw)))
+				handler.ServeHTTP(response, dashboardPost(testContext(), bytes.NewReader(raw)))
 				return response
 			}
 			if response := send("foreign"); response.Code != http.StatusForbidden {

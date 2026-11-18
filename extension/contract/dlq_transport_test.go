@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"net/http"
 	"net/http/httptest"
 	"reflect"
 	"testing"
@@ -31,7 +30,7 @@ func callContract(t *testing.T, deps Deps, kind, intent string, payload any) fc.
 		t.Fatal(err)
 	}
 	recorder := httptest.NewRecorder()
-	req := httptest.NewRequestWithContext(testContext(), http.MethodPost, "/api/dashboard/v1", bytes.NewReader(body))
+	req := dashboardPost(testContext(), bytes.NewReader(body))
 	transport.NewHandler(reg, wreg, d, nil).ServeHTTP(recorder, req)
 	var response fc.Response
 	if decodeErr := json.Unmarshal(recorder.Body.Bytes(), &response); decodeErr != nil || !response.OK {

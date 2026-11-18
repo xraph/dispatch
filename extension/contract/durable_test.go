@@ -5,7 +5,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
@@ -101,7 +100,7 @@ func runDurableContract(t *testing.T, deps Deps) {
 			}
 			request, _ := json.Marshal(map[string]any{"envelope": "v1", "kind": "query", "contributor": "dispatch", "intent": "durable." + intent, "params": map[string]any{"namespace": "foreign"}, "payload": input})
 			rr := httptest.NewRecorder()
-			handler.ServeHTTP(rr, httptest.NewRequestWithContext(testContext(), http.MethodPost, "/api/dashboard/v1", bytes.NewReader(request)))
+			handler.ServeHTTP(rr, dashboardPost(testContext(), bytes.NewReader(request)))
 			var out fc.Response
 			if err := json.Unmarshal(rr.Body.Bytes(), &out); err != nil || !out.OK {
 				t.Fatalf("%s %v", rr.Body, err)
@@ -123,7 +122,7 @@ func runDurableContract(t *testing.T, deps Deps) {
 			}
 			request, _ := json.Marshal(map[string]any{"envelope": "v1", "kind": "query", "contributor": "dispatch", "intent": req.Intent, "params": req.Params, "payload": json.RawMessage(raw)})
 			rr := httptest.NewRecorder()
-			handler.ServeHTTP(rr, httptest.NewRequestWithContext(testContext(), http.MethodPost, "/api/dashboard/v1", bytes.NewReader(request)))
+			handler.ServeHTTP(rr, dashboardPost(testContext(), bytes.NewReader(request)))
 			var out fc.Response
 			if err := json.Unmarshal(rr.Body.Bytes(), &out); err != nil || out.OK {
 				t.Fatalf("denied target %s %v", rr.Body, err)
@@ -159,7 +158,7 @@ func TestDurablePayloadHTTPAuditAndAnonymous(t *testing.T) {
 			ctx = dashauth.WithUser(ctx, &dashauth.UserInfo{Subject: principal})
 		}
 		rr := httptest.NewRecorder()
-		handler.ServeHTTP(rr, httptest.NewRequestWithContext(ctx, http.MethodPost, "/api/dashboard/v1", bytes.NewReader(request)))
+		handler.ServeHTTP(rr, dashboardPost(ctx, bytes.NewReader(request)))
 		var out fc.Response
 		if err := json.Unmarshal(rr.Body.Bytes(), &out); err != nil {
 			t.Fatal(err)

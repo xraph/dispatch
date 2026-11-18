@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"net/http"
 	"net/http/httptest"
 	"reflect"
 	"strings"
@@ -114,7 +113,7 @@ func TestCommandInvalidatesReachTheClient(t *testing.T) {
 				t.Fatal(err)
 			}
 			payload := `{"envelope":"v1","kind":"command","contributor":"dispatch","intent":"` + intent + `","csrf":"test","idempotencyKey":"test-` + intent + `","payload":{"id":"` + j.ID.String() + `"}}`
-			req := httptest.NewRequestWithContext(testContext(), http.MethodPost, "/api/dashboard/v1", strings.NewReader(payload))
+			req := dashboardPost(testContext(), strings.NewReader(payload))
 			recorder := httptest.NewRecorder()
 			transport.NewHandler(reg, wreg, d, nil).ServeHTTP(recorder, req)
 			var response fc.Response

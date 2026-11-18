@@ -73,7 +73,7 @@ func TestQueryLifecyclePublicContracts(t *testing.T) {
 			t.Fatal(marshalErr)
 		}
 		response := httptest.NewRecorder()
-		handler.ServeHTTP(response, httptest.NewRequestWithContext(testContext(), http.MethodPost, "/api/dashboard/v1", bytes.NewReader(body)))
+		handler.ServeHTTP(response, dashboardPost(testContext(), bytes.NewReader(body)))
 		return response
 	}
 	for _, name := range []string{"durable.queryRuntime", "durable.queryRuntimeRegister", "durable.queryRuntimeVerify", "durable.queryRuntimeRemove", "durable.queryRuntimeRemovalCheck", "durable.queryRuntimeFinish", "durable.queryRuntimeAbort"} {
