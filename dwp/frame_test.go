@@ -2,6 +2,7 @@ package dwp
 
 import (
 	"encoding/json"
+	"sync"
 	"testing"
 	"time"
 )
@@ -106,6 +107,36 @@ func TestGenerateFrameID(t *testing.T) {
 	id2 := GenerateFrameID()
 	if id1 == id2 {
 		t.Error("two calls to GenerateFrameID should produce different IDs")
+	}
+}
+
+func TestGenerateFrameIDConcurrentUnique(t *testing.T) {
+	t.Parallel()
+
+	const (
+		workers = 16
+		perW    = 1000
+	)
+	ids := make(chan string, workers*perW)
+	var wg sync.WaitGroup
+	for range workers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for range perW {
+				ids <- GenerateFrameID()
+			}
+		}()
+	}
+	wg.Wait()
+	close(ids)
+
+	seen := make(map[string]struct{}, workers*perW)
+	for id := range ids {
+		if _, dup := seen[id]; dup {
+			t.Fatalf("duplicate frame ID %q", id)
+		}
+		seen[id] = struct{}{}
 	}
 }
 

@@ -6,6 +6,8 @@ package dwp
 
 import (
 	"encoding/json"
+	"strconv"
+	"sync/atomic"
 	"time"
 )
 
@@ -261,9 +263,18 @@ func NewEventFrame(channel string, data any) (*Frame, error) {
 
 // GenerateFrameID returns a new unique frame ID.
 // Uses a simple timestamp + counter approach for performance.
+//
+// The ID is a UTC timestamp followed by a process-wide sequence number.
+// The timestamp alone is not unique: clock resolution is often coarser
+// than a nanosecond, so concurrent callers could get the same ID and
+// cross their request/response correlation.
 func GenerateFrameID() string {
-	return time.Now().UTC().Format("20060102150405.000000000")
+	seq := frameIDSeq.Add(1)
+	return time.Now().UTC().Format("20060102150405.000000000") + "-" + strconv.FormatUint(seq, 36)
 }
+
+// frameIDSeq disambiguates frame IDs generated within one clock tick.
+var frameIDSeq atomic.Uint64
 
 // generateFrameID is an internal alias for backward compatibility.
 func generateFrameID() string { return GenerateFrameID() }
