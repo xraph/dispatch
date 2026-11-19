@@ -138,7 +138,9 @@ func (eng *Engine) RequestCancelDurableWorkflow(ctx context.Context, request dur
 	return worker.RequestCancelExecution(ctx, request)
 }
 
-func (eng *Engine) startDurable(ctx context.Context) error {
+// checkDurableStart reports why the durable worker cannot be launched. Start
+// calls it before any fallible step, so a refusal leaves nothing to undo.
+func (eng *Engine) checkDurableStart(ctx context.Context) error {
 	d := eng.durable
 	if d == nil {
 		return nil
@@ -148,11 +150,22 @@ func (eng *Engine) startDurable(ctx context.Context) error {
 	if d.stopped {
 		return durable.ErrClosed
 	}
-	if ctx.Err() != nil {
-		return ctx.Err()
+	return ctx.Err()
+}
+
+// launchDurable starts the worker's polling goroutine. It cannot fail, so
+// Start runs it only after every step that can: drt.Worker runs once and its
+// Stop is final, so a worker launched by a Start that then failed could never
+// poll again, and a retried Start would have no durable worker.
+func (eng *Engine) launchDurable(ctx context.Context) {
+	d := eng.durable
+	if d == nil {
+		return
 	}
-	if d.done != nil {
-		return d.err
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.stopped || d.done != nil {
+		return
 	}
 	// The worker polls for the life of the engine; it must not keep the
 	// boot span Start's ctx carries, nor its cancellation: Start's ctx can
@@ -170,7 +183,6 @@ func (eng *Engine) startDurable(ctx context.Context) error {
 		}
 		close(d.done)
 	}()
-	return nil
 }
 
 func (eng *Engine) stopDurable(ctx context.Context) error {

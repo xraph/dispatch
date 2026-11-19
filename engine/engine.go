@@ -95,6 +95,7 @@ type Engine struct {
 	// and retains its completion channel across timed-out Stop calls.
 	lifecycleOnce sync.Once
 	lifecycleGate chan struct{}
+	started       bool // a Start has succeeded; later Starts are no-ops
 	stopping      bool
 	quiesced      chan struct{}
 	quiesceErr    error
@@ -774,6 +775,12 @@ func (eng *Engine) Health(ctx context.Context) error {
 
 // Start begins job processing by starting the worker pool and cron scheduler.
 // It also resumes any workflow runs left in "running" state (crash recovery).
+//
+// Start is idempotent: once a Start has succeeded, later calls return nil
+// without doing anything, so runs already executing are not resumed twice.
+// A Start that fails can be retried: it launches the durable worker only
+// once every step that can fail has succeeded. Start after Stop or
+// StopWorkers returns durable.ErrClosed.
 func (eng *Engine) Start(ctx context.Context) (startErr error) {
 	if err := eng.lockLifecycle(ctx); err != nil {
 		return err
@@ -782,21 +789,19 @@ func (eng *Engine) Start(ctx context.Context) (startErr error) {
 	if eng.stopping {
 		return durable.ErrClosed
 	}
+	if eng.started {
+		return nil
+	}
 
-	if err := eng.startDurable(ctx); err != nil {
+	if err := eng.checkDurableStart(ctx); err != nil {
 		return err
 	}
 	schedulerStarted := false
 	defer func() {
-		if startErr != nil {
+		if startErr != nil && schedulerStarted {
 			cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
 			defer cancel()
-			if schedulerStarted {
-				startErr = errors.Join(startErr, eng.scheduler.Stop(cleanupCtx))
-			}
-			if eng.durable != nil {
-				startErr = errors.Join(startErr, eng.stopDurable(cleanupCtx))
-			}
+			startErr = errors.Join(startErr, eng.scheduler.Stop(cleanupCtx))
 		}
 	}()
 	// Resume any interrupted workflow runs (best-effort, non-fatal).
@@ -815,6 +820,10 @@ func (eng *Engine) Start(ctx context.Context) (startErr error) {
 	if err := eng.d.Start(ctx); err != nil {
 		return err
 	}
+
+	// Nothing below may fail: the durable worker cannot be restarted once
+	// launched, so it starts only after every fallible step has succeeded.
+	eng.launchDurable(ctx)
 
 	// Stores that support push notifications (store.WakeNotifier, e.g.
 	// Postgres LISTEN/NOTIFY) wake the worker pool on cross-instance
@@ -838,6 +847,7 @@ func (eng *Engine) Start(ctx context.Context) (startErr error) {
 	// Keep this worker's cluster row alive. See startHeartbeat.
 	eng.startHeartbeat(ctx)
 
+	eng.started = true
 	return nil
 }
 
