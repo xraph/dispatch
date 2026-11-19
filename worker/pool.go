@@ -146,17 +146,29 @@ type Pool struct {
 	// and starts spans on the global tracer provider.
 	tel *telemetry.Telemetry
 
+	// Per-run state. Start makes a fresh set of these for every run and
+	// Stop retires them, so a pool that is stopped and started again never
+	// hands its new goroutines a channel or context the old run closed.
+	// They are written only by Start, under lifecycleMu, before any loop
+	// goroutine of that run exists, and read by those goroutines, which
+	// Stop waits out before it releases lifecycleMu.
 	stopCh     chan struct{}
-	wakeCh     chan struct{}      // nudges the fetcher out of its idle backoff
 	jobCh      chan admitted      // hand-off from the fetcher to the workers
 	slots      chan struct{}      // free-worker tokens; capacity == concurrency
 	cancelCtx  context.Context    // Cancelled on Stop to interrupt in-flight store operations
 	cancelFunc context.CancelFunc // Cancels cancelCtx
-	wg         sync.WaitGroup
-	mu         sync.Mutex
-	running    bool
-	activeJobs map[string]*inflight
-	activeMu   sync.Mutex
+
+	wakeCh chan struct{} // nudges the fetcher out of its idle backoff
+
+	// lifecycleMu serializes Start and Stop. Stop holds it until every
+	// goroutine of the run has exited, so a concurrent Start waits for the
+	// old run to finish instead of racing it for the per-run fields above.
+	lifecycleMu sync.Mutex
+	wg          sync.WaitGroup
+	mu          sync.Mutex
+	running     bool // written under lifecycleMu and mu; read under either
+	activeJobs  map[string]*inflight
+	activeMu    sync.Mutex
 }
 
 // PoolOption configures a Pool.
@@ -344,7 +356,6 @@ func NewPool(
 		maxPollInterval: 30 * time.Second,
 		workerID:        id.NewWorkerID(),
 		logger:          logger,
-		stopCh:          make(chan struct{}),
 		wakeCh:          make(chan struct{}, 1),
 		activeJobs:      make(map[string]*inflight),
 	}
@@ -377,16 +388,36 @@ func (p *Pool) Wake() {
 // WorkerID returns the pool's unique worker identifier.
 func (p *Pool) WorkerID() id.WorkerID { return p.workerID }
 
-// Start launches the worker goroutines. It returns immediately.
+// Start launches the worker goroutines. It returns immediately. Calling it
+// while the pool is running is a no-op; calling it after Stop begins a
+// fresh run with its own stop channel, context and worker slots.
 func (p *Pool) Start(ctx context.Context) error {
-	p.mu.Lock()
+	p.lifecycleMu.Lock()
+	defer p.lifecycleMu.Unlock()
 
 	if p.running {
-		p.mu.Unlock()
 		return nil
 	}
-	p.running = true
+
+	// Fresh per-run state. The previous run, if any, closed its stop
+	// channel and cancelled its context, and every loop that saw them has
+	// exited: Stop waited for them before releasing lifecycleMu.
+	p.stopCh = make(chan struct{})
 	p.cancelCtx, p.cancelFunc = context.WithCancel(context.Background())
+
+	// A nudge left over from the previous run, or sent while stopped, is
+	// already satisfied: the new fetcher polls as soon as it starts.
+	select {
+	case <-p.wakeCh:
+	default:
+	}
+
+	// Readiness describes this run's polls, not the last run's.
+	p.mu.Lock()
+	p.running = true
+	p.polled = false
+	p.pollErr = nil
+	p.mu.Unlock()
 
 	p.logger.Info("worker pool starting",
 		log.String("worker_id", p.workerID.String()),
@@ -424,8 +455,6 @@ func (p *Pool) Start(ctx context.Context) error {
 		go p.reaperLoop()
 	}
 
-	p.mu.Unlock()
-
 	// Sweep sandboxes this worker left behind across a restart before it
 	// takes new work. In-process reclaim is a no-op; an out-of-process rung
 	// would otherwise keep orphaned children or pods alive indefinitely.
@@ -435,9 +464,8 @@ func (p *Pool) Start(ctx context.Context) error {
 	// Run in the background, tracked by p.wg like every other pool
 	// goroutine, so Start returns immediately as documented even when a
 	// rung's Reclaim does real (and potentially slow) process or
-	// filesystem I/O. Outside p.mu: nothing else needs the lock held for
-	// this, and holding it here would block Stop and every other pool
-	// method on a sweep that has no bound of its own.
+	// filesystem I/O. Running it inline would hold lifecycleMu, and so
+	// block Stop, on a sweep that has no bound of its own.
 	if p.executor != nil {
 		p.wg.Add(1)
 		go p.runReclaimSweep(ctx)
@@ -495,12 +523,18 @@ func mergeDone(a, b context.Context) (context.Context, context.CancelFunc) {
 
 // Stop signals all workers to stop and waits for them to finish.
 // If the context has a deadline, active jobs are cancelled when time runs out.
+// Calling it while the pool is not running is a no-op, so it is safe to call
+// more than once. A later Start begins a fresh run.
 func (p *Pool) Stop(ctx context.Context) error {
-	p.mu.Lock()
+	p.lifecycleMu.Lock()
+	defer p.lifecycleMu.Unlock()
+
 	if !p.running {
-		p.mu.Unlock()
 		return nil
 	}
+
+	// Ready reports stopped from here on, while the run drains.
+	p.mu.Lock()
 	p.running = false
 	p.mu.Unlock()
 
@@ -528,7 +562,32 @@ func (p *Pool) Stop(ctx context.Context) error {
 		p.wg.Wait()
 	}
 
+	// Every worker untracks its own job on the way out, so this is empty
+	// by now. Clear it anyway so a record can never outlive its run: its
+	// lease timer would otherwise fire into the next one.
+	p.dropActiveJobs()
+
 	return nil
+}
+
+// dropActiveJobs stops and discards any in-flight record still tracked
+// after a run's goroutines have exited.
+func (p *Pool) dropActiveJobs() {
+	p.activeMu.Lock()
+	defer p.activeMu.Unlock()
+
+	if len(p.activeJobs) == 0 {
+		return
+	}
+
+	for jobID, rec := range p.activeJobs {
+		if rec.leaseTimer != nil {
+			rec.leaseTimer.Stop()
+		}
+		rec.cancel(context.Canceled)
+		delete(p.activeJobs, jobID)
+	}
+	p.tel.Jobs().Active(0)
 }
 
 // callCtx wraps p.cancelCtx with the configured per-call timeout so a
