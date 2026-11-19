@@ -3,7 +3,9 @@ package dwp
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"maps"
 	"net"
 	"sync"
 	"sync/atomic"
@@ -41,10 +43,12 @@ type Peer struct {
 	// Token is the authentication token for the peer.
 	Token string
 
-	// State tracks the connection state.
+	// State tracks the connection state. On a *Peer returned by
+	// Federation.GetPeer or Federation.Peers it is a point-in-time copy.
 	State PeerState
 
-	// LastSeen is the timestamp of the last heartbeat.
+	// LastSeen is the timestamp of the last heartbeat. On a *Peer returned
+	// by Federation.GetPeer or Federation.Peers it is a point-in-time copy.
 	LastSeen time.Time
 
 	// Metadata carries arbitrary peer information.
@@ -53,12 +57,47 @@ type Peer struct {
 	// conn is the underlying WebSocket connection.
 	conn net.Conn
 
+	// reconnecting is set while a reconnect goroutine owns this peer, so a
+	// read error and a health-check timeout cannot both start one.
+	reconnecting bool
+
 	// pending tracks request-response correlation.
 	pending sync.Map // frameID → chan *Frame
 
-	// mu protects state updates.
+	// mu protects State, LastSeen, conn and reconnecting.
 	mu sync.RWMutex
+
+	// wmu serialises frame writes on conn. A WebSocket frame is written as
+	// a header and a payload, so concurrent writers would interleave them.
+	wmu sync.Mutex
 }
+
+// snapshot returns a copy of the peer's exported fields, taken under its
+// lock, that callers can read without synchronisation.
+func (p *Peer) snapshot() *Peer {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	return &Peer{
+		ID:       p.ID,
+		URL:      p.URL,
+		Token:    p.Token,
+		State:    p.State,
+		LastSeen: p.LastSeen,
+		Metadata: maps.Clone(p.Metadata),
+	}
+}
+
+// writeFrame writes one frame to conn, serialised with every other writer
+// on this peer.
+func (p *Peer) writeFrame(conn net.Conn, frame *Frame) error {
+	p.wmu.Lock()
+	defer p.wmu.Unlock()
+	return writeJSONFrame(conn, frame)
+}
+
+// ErrFederationStopped is returned by Start and AddPeer once Stop has been
+// called. A stopped Federation cannot be restarted; create a new one.
+var ErrFederationStopped = errors.New("dwp/federation: federation stopped")
 
 // ── Federation ─────────────────────────────────
 
@@ -90,9 +129,20 @@ type Federation struct {
 	jobsForwarded   atomic.Int64
 	eventsForwarded atomic.Int64
 
-	// Lifecycle.
-	cancel context.CancelFunc
-	wg     sync.WaitGroup
+	// handshakeTimeout bounds the dial-and-auth exchange with a peer.
+	handshakeTimeout time.Duration
+
+	// Lifecycle. mu guards started, stopped, stopLoops and every wg.Add,
+	// so no goroutine is added once Stop has begun waiting. ctx is the
+	// federation's own lifetime: it scopes peer read loops and reconnects
+	// and is cancelled by Stop.
+	mu        sync.Mutex
+	started   bool
+	stopped   bool
+	ctx       context.Context
+	cancel    context.CancelFunc
+	stopLoops context.CancelFunc
+	wg        sync.WaitGroup
 }
 
 // FederationOption configures a Federation.
@@ -133,16 +183,32 @@ func NewFederation(eng *engine.Engine, broker *stream.Broker, logger log.Logger,
 		heartbeatTimeout:  45 * time.Second,
 		reconnectBackoff:  2 * time.Second,
 		maxReconnect:      60 * time.Second,
+		handshakeTimeout:  30 * time.Second,
 	}
+	f.ctx, f.cancel = context.WithCancel(context.Background())
 	for _, opt := range opts {
 		opt(f)
 	}
 	return f
 }
 
-// Start begins heartbeat monitoring and peer health checks.
-func (f *Federation) Start(ctx context.Context) {
-	ctx, f.cancel = context.WithCancel(ctx)
+// Start begins heartbeat monitoring and peer health checks. The loops run
+// until ctx is cancelled or Stop is called. Calling Start again while the
+// federation is running is a no-op; calling it after Stop returns
+// ErrFederationStopped.
+func (f *Federation) Start(ctx context.Context) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	if f.stopped {
+		return ErrFederationStopped
+	}
+	if f.started {
+		return nil
+	}
+	f.started = true
+
+	ctx, f.stopLoops = context.WithCancel(ctx)
 
 	// Heartbeat sender.
 	f.wg.Add(1)
@@ -157,25 +223,61 @@ func (f *Federation) Start(ctx context.Context) {
 		defer f.wg.Done()
 		f.healthCheckLoop(ctx)
 	}()
+	return nil
 }
 
-// Stop gracefully shuts down all peer connections.
+// Stop shuts down the federation: it stops the heartbeat and health loops,
+// cancels pending reconnects, closes every peer connection and waits for
+// all federation goroutines to exit. Stop is final and safe to call more
+// than once.
 func (f *Federation) Stop() {
-	if f.cancel != nil {
+	f.mu.Lock()
+	if !f.stopped {
+		f.stopped = true
 		f.cancel()
+		if f.stopLoops != nil {
+			f.stopLoops()
+		}
 	}
-	f.wg.Wait()
+	f.mu.Unlock()
 
+	// Closing the connections unblocks the read loops. No connection can be
+	// installed after this point: connectPeer checks f.stopped under f.mu.
 	f.peers.Range(func(_, value any) bool {
 		peer := value.(*Peer) //nolint:errcheck // sync.Map always stores *Peer
 		f.disconnectPeer(peer)
 		return true
 	})
+
+	f.wg.Wait()
+}
+
+// goTracked runs fn in a goroutine tracked by f.wg, passing the federation
+// context. It reports false, without running fn, once Stop has been called.
+func (f *Federation) goTracked(fn func(ctx context.Context)) bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.stopped {
+		return false
+	}
+	f.wg.Add(1)
+	go func() {
+		defer f.wg.Done()
+		fn(f.ctx)
+	}()
+	return true
+}
+
+// isCurrent reports whether peer is still the registered peer for its ID.
+func (f *Federation) isCurrent(peer *Peer) bool {
+	val, ok := f.peers.Load(peer.ID)
+	return ok && val.(*Peer) == peer //nolint:errcheck // sync.Map always stores *Peer
 }
 
 // ── Peer Management ────────────────────────────
 
-// AddPeer registers and connects to a remote peer.
+// AddPeer registers and connects to a remote peer. A peer already
+// registered under peerID is disconnected and replaced.
 func (f *Federation) AddPeer(ctx context.Context, peerID, url, token string, metadata map[string]string) error {
 	peer := &Peer{
 		ID:       peerID,
@@ -184,34 +286,52 @@ func (f *Federation) AddPeer(ctx context.Context, peerID, url, token string, met
 		State:    PeerStateDisconnected,
 		Metadata: metadata,
 	}
-	f.peers.Store(peerID, peer)
+
+	f.mu.Lock()
+	if f.stopped {
+		f.mu.Unlock()
+		return ErrFederationStopped
+	}
+	old, replaced := f.peers.Swap(peerID, peer)
+	f.mu.Unlock()
+
+	if replaced {
+		f.disconnectPeer(old.(*Peer)) //nolint:errcheck // sync.Map always stores *Peer
+	}
 
 	return f.connectPeer(ctx, peer)
 }
 
 // RemovePeer disconnects and removes a peer.
 func (f *Federation) RemovePeer(peerID string) {
+	// Delete under f.mu so a concurrent connectPeer either installs its
+	// connection before the removal (and it is closed below) or sees the
+	// peer gone and discards the connection.
+	f.mu.Lock()
 	val, ok := f.peers.LoadAndDelete(peerID)
+	f.mu.Unlock()
 	if !ok {
 		return
 	}
 	f.disconnectPeer(val.(*Peer)) //nolint:errcheck // sync.Map always stores *Peer
 }
 
-// GetPeer returns a peer by ID.
+// GetPeer returns a snapshot of a peer by ID. The returned value is a copy
+// taken under the peer's lock; it does not track later state changes.
 func (f *Federation) GetPeer(peerID string) (*Peer, bool) {
 	val, ok := f.peers.Load(peerID)
 	if !ok {
 		return nil, false
 	}
-	return val.(*Peer), true //nolint:errcheck // sync.Map always stores *Peer
+	return val.(*Peer).snapshot(), true //nolint:errcheck // sync.Map always stores *Peer
 }
 
-// Peers returns a snapshot of all peers.
+// Peers returns a snapshot of all peers. Each element is a copy taken under
+// the peer's lock; it does not track later state changes.
 func (f *Federation) Peers() []*Peer {
 	var peers []*Peer
 	f.peers.Range(func(_, value any) bool {
-		peers = append(peers, value.(*Peer)) //nolint:errcheck // sync.Map always stores *Peer
+		peers = append(peers, value.(*Peer).snapshot()) //nolint:errcheck // sync.Map always stores *Peer
 		return true
 	})
 	return peers
@@ -372,13 +492,30 @@ func (f *Federation) connectPeer(ctx context.Context, peer *Peer) error {
 	peer.State = PeerStateConnecting
 	peer.mu.Unlock()
 
-	conn, _, _, err := ws.Dial(ctx, peer.URL)
-	if err != nil {
+	fail := func(conn net.Conn, err error) error {
+		if conn != nil {
+			_ = conn.Close()
+		}
 		peer.mu.Lock()
 		peer.State = PeerStateDisconnected
 		peer.mu.Unlock()
-		return fmt.Errorf("dwp/federation: dial %q: %w", peer.ID, err)
+		return err
 	}
+
+	// Stop must be able to interrupt a handshake in progress, so tie the
+	// exchange to the federation context as well as the caller's.
+	hctx, cancel := context.WithTimeout(ctx, f.handshakeTimeout)
+	defer cancel()
+	stopWithFed := context.AfterFunc(f.ctx, cancel)
+	defer stopWithFed()
+
+	conn, _, _, err := ws.Dial(hctx, peer.URL)
+	if err != nil {
+		return fail(nil, fmt.Errorf("dwp/federation: dial %q: %w", peer.ID, err))
+	}
+
+	// Closing the connection is the only way to unblock the auth read.
+	stopClose := context.AfterFunc(hctx, func() { _ = conn.Close() })
 
 	// Authenticate with the peer.
 	authFrame := &Frame{
@@ -389,56 +526,64 @@ func (f *Federation) connectPeer(ctx context.Context, peer *Peer) error {
 	}
 
 	if writeErr := writeJSONFrame(conn, authFrame); writeErr != nil {
-		_ = conn.Close()
-		peer.mu.Lock()
-		peer.State = PeerStateDisconnected
-		peer.mu.Unlock()
-		return fmt.Errorf("dwp/federation: auth write %q: %w", peer.ID, writeErr)
+		stopClose()
+		return fail(conn, fmt.Errorf("dwp/federation: auth write %q: %w", peer.ID, writeErr))
 	}
 
 	// Read auth response.
 	data, err := wsutil.ReadServerText(conn)
+	if !stopClose() {
+		// hctx fired: the connection was closed under the read, or is
+		// about to be, so the result cannot be used either way.
+		return fail(conn, fmt.Errorf("dwp/federation: auth read %q: %w", peer.ID, hctx.Err()))
+	}
 	if err != nil {
-		_ = conn.Close()
-		peer.mu.Lock()
-		peer.State = PeerStateDisconnected
-		peer.mu.Unlock()
-		return fmt.Errorf("dwp/federation: auth read %q: %w", peer.ID, err)
+		return fail(conn, fmt.Errorf("dwp/federation: auth read %q: %w", peer.ID, err))
 	}
 
 	var resp Frame
 	if err := json.Unmarshal(data, &resp); err != nil {
-		_ = conn.Close()
-		peer.mu.Lock()
-		peer.State = PeerStateDisconnected
-		peer.mu.Unlock()
-		return fmt.Errorf("dwp/federation: auth parse %q: %w", peer.ID, err)
+		return fail(conn, fmt.Errorf("dwp/federation: auth parse %q: %w", peer.ID, err))
 	}
 
 	if resp.Type == FrameErr {
-		_ = conn.Close()
-		peer.mu.Lock()
-		peer.State = PeerStateDisconnected
-		peer.mu.Unlock()
 		msg := "auth failed"
 		if resp.Error != nil {
 			msg = resp.Error.Message
 		}
-		return fmt.Errorf("dwp/federation: %s at %q", msg, peer.ID)
+		return fail(conn, fmt.Errorf("dwp/federation: %s at %q", msg, peer.ID))
+	}
+
+	// Install the connection and start its read loop atomically with
+	// respect to Stop and RemovePeer, which both hold f.mu while they
+	// retire the federation or the peer.
+	f.mu.Lock()
+	if f.stopped {
+		f.mu.Unlock()
+		return fail(conn, ErrFederationStopped)
+	}
+	if !f.isCurrent(peer) {
+		f.mu.Unlock()
+		return fail(conn, fmt.Errorf("dwp/federation: peer %q removed", peer.ID))
 	}
 
 	peer.mu.Lock()
+	if peer.conn != nil {
+		// Should not happen while reconnects are exclusive, but never
+		// orphan a live connection.
+		_ = peer.conn.Close()
+	}
 	peer.conn = conn
 	peer.State = PeerStateConnected
 	peer.LastSeen = time.Now().UTC()
 	peer.mu.Unlock()
 
-	// Start read loop for this peer.
 	f.wg.Add(1)
 	go func() {
 		defer f.wg.Done()
-		f.peerReadLoop(peer)
+		f.peerReadLoop(peer, conn)
 	}()
+	f.mu.Unlock()
 
 	f.logger.Info("federation peer connected",
 		log.String("peer_id", peer.ID),
@@ -458,33 +603,30 @@ func (f *Federation) disconnectPeer(peer *Peer) {
 	peer.State = PeerStateDisconnected
 }
 
-func (f *Federation) peerReadLoop(peer *Peer) {
+// peerReadLoop reads frames from conn until it fails. If conn is still the
+// peer's active connection at that point, the loop tears it down and asks
+// for a reconnect; if someone else already replaced or closed it (health
+// check, RemovePeer, Stop), they own what happens next.
+func (f *Federation) peerReadLoop(peer *Peer, conn net.Conn) {
 	for {
-		peer.mu.RLock()
-		conn := peer.conn
-		state := peer.State
-		peer.mu.RUnlock()
-
-		if conn == nil || state != PeerStateConnected {
-			return
-		}
-
 		data, err := wsutil.ReadServerText(conn)
 		if err != nil {
-			f.logger.Warn("federation peer read error",
-				log.String("peer_id", peer.ID),
-				log.String("error", err.Error()),
-			)
 			peer.mu.Lock()
-			peer.State = PeerStateDisconnected
+			owned := peer.conn == conn
+			if owned {
+				_ = conn.Close()
+				peer.conn = nil
+				peer.State = PeerStateDisconnected
+			}
 			peer.mu.Unlock()
 
-			// Attempt reconnect.
-			f.wg.Add(1)
-			go func() {
-				defer f.wg.Done()
-				f.reconnectPeer(peer)
-			}()
+			if owned {
+				f.logger.Warn("federation peer read error",
+					log.String("peer_id", peer.ID),
+					log.String("error", err.Error()),
+				)
+				f.startReconnect(peer)
+			}
 			return
 		}
 
@@ -511,30 +653,65 @@ func (f *Federation) peerReadLoop(peer *Peer) {
 	}
 }
 
-func (f *Federation) reconnectPeer(peer *Peer) {
+// startReconnect launches a reconnect for peer unless one is already
+// running, so at most one goroutine dials a given peer at a time.
+func (f *Federation) startReconnect(peer *Peer) {
+	peer.mu.Lock()
+	if peer.reconnecting {
+		peer.mu.Unlock()
+		return
+	}
+	peer.reconnecting = true
+	peer.mu.Unlock()
+
+	release := func() {
+		peer.mu.Lock()
+		peer.reconnecting = false
+		peer.mu.Unlock()
+	}
+
+	if !f.goTracked(func(ctx context.Context) {
+		defer release()
+		f.reconnectPeer(ctx, peer)
+	}) {
+		release()
+	}
+}
+
+// reconnectPeer redials peer with exponential backoff until it connects,
+// the peer is removed, or ctx (the federation context) is cancelled.
+func (f *Federation) reconnectPeer(ctx context.Context, peer *Peer) {
 	backoff := f.reconnectBackoff
 	for {
-		peer.mu.RLock()
-		state := peer.State
-		peer.mu.RUnlock()
-
-		// Don't reconnect if peer was removed.
-		if _, exists := f.peers.Load(peer.ID); !exists {
-			return
-		}
-
-		if state == PeerStateConnected {
-			return
-		}
-
 		f.logger.Info("federation reconnecting to peer",
 			log.String("peer_id", peer.ID),
 			log.Duration("backoff", backoff),
 		)
 
-		time.Sleep(backoff)
+		timer := time.NewTimer(backoff)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return
+		case <-timer.C:
+		}
 
-		if err := f.connectPeer(context.Background(), peer); err != nil {
+		// Don't reconnect if the peer was removed or replaced.
+		if !f.isCurrent(peer) {
+			return
+		}
+
+		peer.mu.RLock()
+		state := peer.State
+		peer.mu.RUnlock()
+		if state == PeerStateConnected {
+			return
+		}
+
+		if err := f.connectPeer(ctx, peer); err != nil {
+			if ctx.Err() != nil || errors.Is(err, ErrFederationStopped) {
+				return
+			}
 			backoff = min(backoff*2, f.maxReconnect)
 			continue
 		}
@@ -571,7 +748,7 @@ func (f *Federation) peerRequest(ctx context.Context, peer *Peer, method string,
 		return nil, fmt.Errorf("peer not connected")
 	}
 
-	if err := writeJSONFrame(conn, frame); err != nil {
+	if err := peer.writeFrame(conn, frame); err != nil {
 		return nil, err
 	}
 
@@ -621,7 +798,7 @@ func (f *Federation) sendHeartbeats() {
 			Data:      mustMarshalJSON(FederationHeartbeatRequest{PeerID: f.localID}),
 		}
 
-		if err := writeJSONFrame(conn, heartbeat); err != nil {
+		if err := peer.writeFrame(conn, heartbeat); err != nil {
 			f.logger.Warn("federation heartbeat failed",
 				log.String("peer_id", peer.ID),
 				log.String("error", err.Error()),
@@ -649,23 +826,28 @@ func (f *Federation) checkPeerHealth() {
 	now := time.Now().UTC()
 	f.peers.Range(func(_, value any) bool {
 		peer := value.(*Peer) //nolint:errcheck // sync.Map always stores *Peer
-		peer.mu.RLock()
-		state := peer.State
-		lastSeen := peer.LastSeen
-		peer.mu.RUnlock()
 
-		if state == PeerStateConnected && now.Sub(lastSeen) > f.heartbeatTimeout {
+		// Check and tear down in one critical section, so the read loop of
+		// the closed connection sees it is no longer current and leaves
+		// the reconnect to us.
+		peer.mu.Lock()
+		lastSeen := peer.LastSeen
+		timedOut := peer.State == PeerStateConnected && now.Sub(lastSeen) > f.heartbeatTimeout
+		if timedOut {
+			if peer.conn != nil {
+				_ = peer.conn.Close()
+				peer.conn = nil
+			}
+			peer.State = PeerStateDisconnected
+		}
+		peer.mu.Unlock()
+
+		if timedOut {
 			f.logger.Warn("federation peer timed out",
 				log.String("peer_id", peer.ID),
 				log.Duration("since_last_seen", now.Sub(lastSeen)),
 			)
-			f.disconnectPeer(peer)
-
-			f.wg.Add(1)
-			go func() {
-				defer f.wg.Done()
-				f.reconnectPeer(peer)
-			}()
+			f.startReconnect(peer)
 		}
 		return true
 	})
