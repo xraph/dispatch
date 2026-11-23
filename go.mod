@@ -14,23 +14,23 @@ require (
 	github.com/testcontainers/testcontainers-go/modules/postgres v0.45.0
 	github.com/testcontainers/testcontainers-go/modules/redis v0.45.0
 	github.com/vmihailenco/msgpack/v5 v5.4.1
-	github.com/xraph/chronicle v1.11.0
+	github.com/xraph/chronicle v1.11.2
 	github.com/xraph/forge v1.14.1
 	github.com/xraph/forge/extensions/auth v1.14.1
 	github.com/xraph/go-utils v1.5.1
-	github.com/xraph/grove v1.10.3
-	github.com/xraph/grove/drivers/mongodriver v1.10.3
-	github.com/xraph/grove/drivers/pgdriver v1.10.3
-	github.com/xraph/grove/drivers/sqlitedriver v1.10.3
-	github.com/xraph/grove/kv v1.10.3
-	github.com/xraph/grove/kv/drivers/redisdriver v1.10.3
+	github.com/xraph/grove v1.10.6
+	github.com/xraph/grove/drivers/mongodriver v1.10.6
+	github.com/xraph/grove/drivers/pgdriver v1.10.6
+	github.com/xraph/grove/drivers/sqlitedriver v1.10.6
+	github.com/xraph/grove/kv v1.10.6
+	github.com/xraph/grove/kv/drivers/redisdriver v1.10.6
 	github.com/xraph/relay v1.8.4
-	github.com/xraph/trove v1.8.2
+	github.com/xraph/trove v1.8.4
 	github.com/xraph/vessel v1.0.8
 	github.com/xraph/warden v1.8.5
 	github.com/zeebo/blake3 v0.2.4
 	go.jetify.com/typeid/v2 v2.0.0-alpha.3
-	go.mongodb.org/mongo-driver/v2 v2.10.0
+	go.mongodb.org/mongo-driver/v2 v2.10.1
 	go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp v0.72.0
 	go.opentelemetry.io/otel v1.47.0
 	go.opentelemetry.io/otel/sdk v1.47.0
